@@ -180,7 +180,13 @@ class AgentWebTests(unittest.TestCase):
         view = self.request('/api/agents')[1]
         self.assertFalse(view['discovery']['running'])
         self.assertTrue(view['discovery']['checked_at'])
+        self.assertEqual(view['discovery']['message'], '发现 1 个新 agent')
         self.assertIn('workbuddy', [a['id'] for a in view['suggested']])
+        self.request('/api/agents/scan', {})
+        self.server.agents_thread.join(3)
+        again = self.request('/api/agents')[1]
+        self.assertEqual(again['discovery']['message'], '没有更多新的 agent')
+        self.assertIn('workbuddy', [a['id'] for a in again['suggested']])
         self.assertEqual(self.fingerprint(), original)
         reopened = Dashboard({'home': str(self.home), 'deferred': True})
         self.addCleanup(reopened.server_close)
@@ -215,6 +221,18 @@ class AgentWebTests(unittest.TestCase):
         self.request('/api/agents/scan', {})
         self.server.agents_thread.join(3)
         self.assertEqual(self.request('/api/agents')[1]['discovery']['error'], '')
+
+    def test_scan_with_nothing_waiting_says_none_found(self):
+        status, plan = self.request('/api/agents/ignore/preview', {'agent': 'fifth'})
+        self.assertEqual(status, 200)
+        status, _written = self.request('/api/agents/ignore/apply', {
+            'agent': 'fifth', 'plan_id': plan['plan_id'], 'revision': plan['revision'], 'confirmed': True})
+        self.assertEqual(status, 200)
+        self.request('/api/agents/scan', {})
+        self.server.agents_thread.join(3)
+        view = self.request('/api/agents')[1]
+        self.assertEqual(view['suggested'], [])
+        self.assertEqual(view['discovery']['message'], '检查完成，没有发现新的 agent')
 
     def test_background_check_and_agent_view_do_not_scan_skill_contents(self):
         with patch('skill_pilot.scan.scan', side_effect=AssertionError('full scan')), \

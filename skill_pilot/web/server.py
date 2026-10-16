@@ -220,29 +220,37 @@ class Dashboard(ThreadingHTTPServer):
             if self.agents_progress['running']:
                 return self.agents_progress.copy()
             self.agents_progress.update(running=True, error='',
-                message='正在扫描 Agent…' if full else '正在检查新安装的 Agent…')
+                message='正在扫描 agent…' if full else '正在检查新安装的 agent…')
             self.agents_thread = threading.Thread(target=self.scan_agents, args=(full,), daemon=True)
             self.agents_thread.start()
             return self.agents_progress.copy()
 
     def scan_agents(self, full):
         try:
-            previous = self.agent_findings['candidates']
+            with self.agents_lock:
+                previous = self.agent_findings['candidates']
             findings = agent_discovery.find(self.home, full, previous)
             agent_discovery.save(self.home, findings)
             local = agent_management.profiles.state(self.home)
             unavailable = set(local['onboarded']) | set(local.get('ignored', []))
-            added = {p['id'] for p in findings['candidates']} - {p['id'] for p in previous} - unavailable
+            current = {p['id'] for p in findings['candidates']}
+            added = current - {p['id'] for p in previous} - unavailable
+            pending = current - unavailable
+            if added:
+                message = f'发现 {len(added)} 个新 agent'
+            elif pending:
+                message = '没有更多新的 agent'
+            else:
+                message = '检查完成，没有发现新的 agent'
             with self.agents_lock:
                 self.agent_findings = findings
                 self.agents_generation += 1
                 self.agents_cache = None
-                self.agents_progress.update(checked_at=findings['checked_at'],
-                    message=f'发现 {len(added)} 个新 Agent' if added else '检查完成，没有发现新的 Agent')
+                self.agents_progress.update(checked_at=findings['checked_at'], message=message)
         except (OSError, ValueError, KeyError, RuntimeError) as error:
             with self.agents_lock:
                 self.agents_progress.update(error=str(error) if isinstance(error, ValueError)
-                    else 'Agent 扫描没有完成，已保留上次名单，请重试。')
+                    else 'agent 扫描没有完成，已保留上次名单，请重试。')
         finally:
             with self.agents_lock:
                 self.agents_progress['running'] = False
