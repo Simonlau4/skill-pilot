@@ -400,11 +400,17 @@
           <div class="set-head">
             <div class="set-head-text">
               <h2 id="set-log-title">操作记录</h2>
-              <p class="set-lead">每次改动都记在这里，随时能撤销。</p>
+              <p class="set-lead">完整记录保存在本机，需要时可导出。</p>
             </div>
-            <button id="log-refresh" class="btn btn-small btn-quiet"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg><span>刷新</span></button>
+            <button id="log-export" class="btn btn-small btn-quiet"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg><span>导出全部记录</span></button>
           </div>
-          <ol id="log-list" class="timeline"></ol>
+          <details class="fold" id="log-box">
+            <summary>最近 10 次操作</summary>
+            <p class="row-wrap">
+              <button id="log-refresh" class="btn btn-small btn-quiet"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg><span>刷新</span></button>
+            </p>
+            <ol id="log-list" class="timeline"></ol>
+          </details>
         </section>
 
         <!-- ========== 记录与维护：诊断与备份（原来单独一页，四个折叠块默认收起） ========== -->

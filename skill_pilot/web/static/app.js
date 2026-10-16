@@ -296,7 +296,7 @@ const WRITE_LOCK_SELECTORS = [
   '#updates-check', '#updates-all',
   '#program-check', '#program-apply', '#program-refresh',
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
-  '#log-list button', '#log-refresh', '#detail-body button:not(.hint)', '#detail-body select',
+  '#log-list button', '#log-refresh', '#log-export', '#detail-body button:not(.hint)', '#detail-body select',
   '#new-absorb', '#new-toggle', '#install-dialog button:not(.hint)',
   '#agents-managed button:not(.hint)', '#agents-suggested button:not(.hint)', '#agents-ignored button:not(.hint)', '#agents-join-dialog input', '#agents-join-dialog button:not(.hint)',
   '#migration-preview', '#migration-apply', '#migration-back', '#migration-agents input',
@@ -3174,7 +3174,7 @@ $('withdrawn-list').addEventListener('click', async event => {
 
 function renderLog() {
   if (state.page !== 'settings') return;
-  $('log-list').innerHTML = state.logs.map(record => `<li class="${record.undone ? 'is-undone' : ''}">
+  $('log-list').innerHTML = state.logs.slice(0, 10).map(record => `<li class="${record.undone ? 'is-undone' : ''}">
     <span class="log-time">${escape(new Date(record.time).toLocaleString('zh-CN'))}</span>
     <div class="log-body">
       <p>${escape(pastTense(record.message))}</p>
@@ -3188,6 +3188,25 @@ function renderLog() {
 }
 
 $('log-refresh').addEventListener('click', event => withBusy(event.currentTarget, '正在刷新…', refreshLog));
+
+$('log-export').addEventListener('click', async () => {
+  try {
+    await withBusy($('log-export'), '正在导出…', async () => {
+      const records = await api('/api/log');
+      const url = URL.createObjectURL(new Blob([JSON.stringify(records, null, 2) + '\n'], {type: 'application/json'}));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'skill-pilot-operations.json';
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast({text: `已导出全部 ${records.length} 条操作记录。`});
+    });
+  } catch (error) {
+    toast({text: error.message, tone: 'error'});
+  }
+});
 
 $('log-list').addEventListener('click', async event => {
   const button = event.target.closest('[data-undo]');
