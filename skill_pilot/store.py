@@ -145,7 +145,7 @@ def preview(home=None, agent_ids=None):
         state[relative] = physical_state(root, include_times=True)
         inventory = scan_root(root, profiles.root_nested(relative, catalog), excluded=profiles.exclusions(root, home))
         if inventory["errors"]:
-            raise ValueError("有技能目录没能完整读取，暂时不能迁移。")
+            raise ValueError("有技能目录没能完整读取，暂时不能整理。")
         for skill in inventory["skills"]:
             if not skill["valid"]:
                 skipped.append({"path": skill["path"], "reason": skill.get("warning") or "技能不可用，保留原样"})
@@ -318,7 +318,7 @@ def _restore(home, backup_id, checked):
                 path = checked(home / member.name)
                 os.chmod(path, member.mode)
                 os.utime(path, (member.mtime, member.mtime))
-    return {"backup_id": backup_id, "restored": True, "message": "已还原到迁移前。"}
+    return {"backup_id": backup_id, "restored": True, "message": "已还原到整理前。"}
 
 
 def transaction(home):
@@ -349,7 +349,7 @@ def apply(plan_id, home=None, agent_ids=None, choices=None, sources=None):
         fcntl.flock(lock, fcntl.LOCK_EX)
         plan = preview(home, agent_ids)
         if plan["plan_id"] != plan_id:
-            raise ValueError("目录内容已经变了，请重新预览并核对后再迁移。")
+            raise ValueError("目录内容已经变了，请重新预览并核对后再整理。")
         choices, sources = choices or {}, sources or {}
         if not isinstance(choices, dict) or not isinstance(sources, dict):
             raise ValueError("核对结果的格式不对，请重新打开核对页。")
@@ -402,18 +402,18 @@ def apply(plan_id, home=None, agent_ids=None, choices=None, sources=None):
             after = visibility(home)
             for agent, original in plan["before"].items():
                 if any(after[agent][k] != original[k] for k in ("available", "automatic")):
-                    raise ValueError("迁移后有 agent 能看到的技能名单变了")
+                    raise ValueError("整理后有 agent 能看到的技能名单变了")
                 for name in original["available"]:
                     expected = ([registry['skills'][name]['base_digest']] if name in chosen and agent in plan["agents"]
                                 else original["versions"][name])
                     if after[agent]["versions"][name] != expected:
-                        raise ValueError("迁移后的内容与核对页选择不一致")
-            return {"backup_id": snapshot["backup_id"], "message": "迁移完成，各 agent 的技能名单已核对一致。",
+                        raise ValueError("整理后的内容与核对页选择不一致")
+            return {"backup_id": snapshot["backup_id"], "message": "整理完成，各 agent 的技能名单已核对一致。",
                     "changed_entries": len(changed), "after": after,
                     "normalization": {n: s['normalization'] for n, s in registry['skills'].items()}}
         except Exception as error:
             try:
                 _restore(home, snapshot["backup_id"], checked)
             except Exception as rollback:
-                raise ValueError(f"迁移没能完成，自动还原也未完成；请用备份 {snapshot['backup_id']} 还原。") from rollback
-            raise ValueError("迁移没能完成，已经自动恢复原样。") from error
+                raise ValueError(f"整理没能完成，自动还原也未完成；请用备份 {snapshot['backup_id']} 还原。") from rollback
+            raise ValueError("整理没能完成，已经自动恢复原样。") from error

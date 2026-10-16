@@ -80,7 +80,7 @@ def verify(home):
             failure = str(error)
         else:
             raise AssertionError("Injected failure did not fail")
-    assert failure == "迁移没能完成，已经自动恢复原样。"
+    assert failure == "整理没能完成，已经自动恢复原样。"
     assert baseline == fingerprints(), "Failure did not restore protected paths"
     assert not (home / ".skill-pilot/registry.json").exists()
     return {"home": str(home), "baseline": baseline, "rounds": results, "same_contents_on_second_migration": True,

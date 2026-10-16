@@ -1,4 +1,6 @@
 """还没整理过时打开清理页：不读清理名单，也不用旧说法报错。"""
+import ast
+import re
 import subprocess
 import tempfile
 import unittest
@@ -141,3 +143,22 @@ function fail(message) { console.error(message); process.exit(1); }
         ])
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_user_visible_wording_does_not_say_migration(self):
+        root = Path(__file__).resolve().parents[1]
+        offenders = []
+        for path in (root / 'skill_pilot').rglob('*.py'):
+            tree = ast.parse(path.read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) and '迁移' in node.value:
+                    offenders.append(f'{path.relative_to(root)}:{node.lineno}: {node.value}')
+        pages = {
+            'README.md': (root / 'README.md').read_text(),
+            'skill/skill-pilot/SKILL.md': (root / 'skill/skill-pilot/SKILL.md').read_text(),
+            'skill_pilot/web/static/index.html': re.sub(r'<!--.*?-->', '', (root / 'skill_pilot/web/static/index.html').read_text(), flags=re.S),
+            'skill_pilot/web/static/app.js': re.sub(r'/\*.*?\*/|//.*?$', '', (root / 'skill_pilot/web/static/app.js').read_text(), flags=re.S | re.M),
+        }
+        for name, text in pages.items():
+            if '迁移' in text:
+                offenders.append(name)
+        self.assertEqual(offenders, [])

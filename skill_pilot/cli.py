@@ -18,15 +18,15 @@ def main():
     inventory = commands.add_parser("scan", help="盘点本机 agent 和技能")
     inventory.add_argument("--json", action="store_true", help="输出完整机器可读结果")
     commands.add_parser("ui", help="打开中文看板").add_argument('--json', action='store_true')
-    migrate = commands.add_parser("migrate", help="预览迁移或在模拟目录确认执行")
+    migrate = commands.add_parser("migrate", help="预览整理或在模拟目录确认执行")
     mode = migrate.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--plan", action="store_true", help="只读生成迁移预览")
+    mode.add_argument("--plan", action="store_true", help="只读生成整理预览")
     mode.add_argument("--apply", action="store_true", help="确认执行已核对的预览")
     migrate.add_argument("--plan-id")
     migrate.add_argument("--agents", nargs="+", help="要接入的 agent，默认内置档案中的 agent")
     migrate.add_argument("--choices", help="核对结果文件：choices 与 sources 两个对象")
     migrate.add_argument("--json", action="store_true")
-    saved = commands.add_parser("backups", help="查看迁移前备份")
+    saved = commands.add_parser("backups", help="查看整理前备份")
     saved.add_argument("--json", action="store_true")
     cleanup_command = commands.add_parser('cleanup', help='手动挑选技能撤下，或查看已撤下的技能')
     cleanup_command.add_argument('skills', nargs='*', metavar='SKILL')
@@ -365,7 +365,7 @@ def main():
         try:
             if args.command == "migrate":
                 if args.apply and not args.plan_id:
-                    parser.error("执行迁移需要先预览，并提供 --plan-id。")
+                    parser.error("执行整理需要先预览，并提供 --plan-id。")
                 review = json.loads(open(args.choices).read()) if args.choices else {}
                 if not isinstance(review, dict):
                     raise ValueError("核对结果的格式不对，请使用含 choices 和 sources 的对象。")
@@ -378,7 +378,7 @@ def main():
             if args.json:
                 print(json.dumps(data, ensure_ascii=False, indent=2))
             elif args.command == "migrate" and args.plan:
-                print(f"迁移预览：{len(data['skills'])} 个技能，{len(data['conflicts'])} 组版本差异。")
+                print(f"整理预览：{len(data['skills'])} 个技能，{len(data['conflicts'])} 组版本差异。")
                 print("要接入的 agent：" + "、".join(data["agents"]))
                 for skill in data["conflicts"]:
                     option = next(o for o in skill["options"] if o["id"] == skill["default"])
@@ -388,9 +388,9 @@ def main():
                 print(f"预览编号：{data['plan_id']}。文件未改动；确认执行需带上这个编号。")
             elif args.command == "backups":
                 for item in data:
-                    print(item["backup_id"] + "：迁移前的备份")
+                    print(item["backup_id"] + "：整理前的备份")
                 if not data:
-                    print("还没有迁移备份。")
+                    print("还没有整理备份。")
             else:
                 print(data["message"])
         except (ValueError, OSError) as error:

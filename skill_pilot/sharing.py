@@ -15,7 +15,7 @@ FILENAME = 'skill-pilot-config.json'
 INSTRUCTIONS = [
     '也可以在 Skill Pilot 看板的「设置 → 分享技能配置」点击「导入配置」，选文件、核对后导入。',
     '把本文件交给已安装 Skill Pilot 的 agent，并说：请按这份配置安装和分配技能。',
-    '接收方需要支持 import-config 的新版 Skill Pilot，并已经完成首次迁移。',
+    '接收方需要支持 import-config 的新版 Skill Pilot，并已经完成首次整理。',
     '先运行 skill-pilot import-config <本文件> --json 查看可安装、已有和缺少的技能；预览不下载、不改动。',
     '默认对应本机已经接入的同名 agent；要全部给某个 agent，加 --agent <本机 agent 编号>，可以重复指定。',
     '用户已明确要求安装和分配时，在同一命令后加 --yes 批量执行；仅要求查看时不要执行。',
