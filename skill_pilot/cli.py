@@ -110,6 +110,13 @@ def main():
     def fail(error):
         print(json.dumps({'error': str(error)}, ensure_ascii=False) if args.json else str(error))
         raise SystemExit(1)
+
+    def attempt(work):
+        try:
+            result = work()
+            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            fail(error)
     if args.command == 'extra-sources':
         from .extra_sources import add, ensure, paths, remove
         home = target_home()
@@ -189,37 +196,28 @@ def main():
         except (ValueError,OSError,KeyError,TypeError) as error:
             fail(error)
     if args.command == 'update-local':
-        try:
-            result = operations.update_local(args.skill, args.folder, confirmed=args.yes)
-            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
-            return
-        except (ValueError, OSError, KeyError, TypeError) as error:
-            fail(error)
+        attempt(lambda: operations.update_local(args.skill, args.folder, confirmed=args.yes))
+        return
     if args.command == 'add-agent':
         from . import agents as agent_management
-        try:
+        def work():
             request = [{'name': args.name, 'skill_root': args.folder}]
             plan = agent_management.preview_join(request)
             if args.yes:
-                result = agent_management.join(request, plan['plan_id'])
-            else:
-                count = len(plan['skills'])
-                result = {'message': f'将接入「{args.name}」，会登记 {count} 个技能。请核对后加 --yes 执行。',
-                          'agents': plan['agents'], 'skills': [skill['name'] for skill in plan['skills']]}
-            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
-            return
-        except (ValueError, OSError, KeyError, TypeError) as error:
-            fail(error)
+                return agent_management.join(request, plan['plan_id'])
+            count = len(plan['skills'])
+            return {'message': f'将接入「{args.name}」，会登记 {count} 个技能。请核对后加 --yes 执行。',
+                    'agents': plan['agents'], 'skills': [skill['name'] for skill in plan['skills']]}
+        attempt(work)
+        return
     if args.command == 'watch-updates':
         from . import updates
-        try:
+        def work():
             if not args.yes:
                 raise ValueError('请先确认，再加 --yes 保存这个提醒方式。')
-            result = updates.set_watch(args.skill, args.mode, confirmed=True)
-            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
-            return
-        except (ValueError, OSError, KeyError, TypeError) as error:
-            fail(error)
+            return updates.set_watch(args.skill, args.mode, confirmed=True)
+        attempt(work)
+        return
     if args.command in {'check-updates', 'update'}:
         from . import updates
         review = None

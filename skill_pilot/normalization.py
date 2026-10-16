@@ -1,5 +1,4 @@
 """Keep nested example manifests out of recursive agent discovery."""
-import hashlib
 import os
 import re
 from pathlib import Path
@@ -61,14 +60,13 @@ def apply(root):
 
 def tree(root):
     """Git tree identity after standard processing, without writing source files."""
-    def obj(kind, data):
-        return hashlib.sha1(kind.encode() + b' ' + str(len(data)).encode() + b'\0' + data).digest()
+    from .store import git_object
     dirs = {}
     for name, (data, mode) in files(root).items():
         node = dirs
         for part in Path(name).parts[:-1]:
             node = node.setdefault(part, {})
-        node[Path(name).name] = str(oct(mode)[2:]), obj('blob', data)
+        node[Path(name).name] = str(oct(mode)[2:]), git_object('blob', data)
     # Preserve empty directories as the existing git_tree implementation does.
     for base, names, _ in os.walk(root, followlinks=False):
         names[:] = [n for n in names if n not in SKIP_CONTENT and not (Path(base) / n).is_symlink()]
@@ -81,5 +79,5 @@ def tree(root):
             directory = isinstance(value, dict)
             mode, sha = ('40000', encode(value)) if directory else value
             rows.append((os.fsencode(name + ('/' if directory else '')), mode.encode() + b' ' + os.fsencode(name) + b'\0' + sha))
-        return obj('tree', b''.join(v for _, v in sorted(rows)))
+        return git_object('tree', b''.join(v for _, v in sorted(rows)))
     return encode(dirs).hex()

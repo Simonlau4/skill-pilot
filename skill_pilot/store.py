@@ -76,23 +76,25 @@ def physical_state(path, include_times=False):
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()
 
 
+def git_object(kind, payload):
+    return hashlib.sha1(kind.encode() + b" " + str(len(payload)).encode() + b"\0" + payload).digest()
+
+
 def git_tree(path):
     """Compute git objects in memory; never create a repository in a source."""
-    def obj(kind, payload):
-        return hashlib.sha1(kind.encode() + b" " + str(len(payload)).encode() + b"\0" + payload).digest()
     entries = []
     for child in path.iterdir():
         if child.name in SKIP_CONTENT:
             continue
         if child.is_symlink():
-            mode, digest, suffix = "120000", obj("blob", os.fsencode(os.readlink(child))), ""
+            mode, digest, suffix = "120000", git_object("blob", os.fsencode(os.readlink(child))), ""
         elif child.is_dir():
             mode, digest, suffix = "40000", bytes.fromhex(git_tree(child)), "/"
         else:
             mode = "100755" if child.stat().st_mode & 0o111 else "100644"
-            digest, suffix = obj("blob", child.read_bytes()), ""
+            digest, suffix = git_object("blob", child.read_bytes()), ""
         entries.append((os.fsencode(child.name + suffix), mode.encode() + b" " + os.fsencode(child.name) + b"\0" + digest))
-    return obj("tree", b"".join(value for _, value in sorted(entries))).hex()
+    return git_object("tree", b"".join(value for _, value in sorted(entries))).hex()
 
 
 def attribution():

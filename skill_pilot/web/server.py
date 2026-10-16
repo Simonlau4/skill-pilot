@@ -502,8 +502,6 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/absorb':
                 result = operations.absorb(body.get('all', True), body.get('selected'), body['revision'], self.server.home)
             elif path == '/api/updates/watch':
-                if body.get('confirmed') is not True:
-                    raise ValueError('请先确认这个技能以后怎么提醒更新。')
                 result = updates.set_watch(body.get('name'), body.get('mode'), body.get('revision'), self.server.home, True)
             elif path == '/api/updates/apply':
                 with self.server.update_lock:

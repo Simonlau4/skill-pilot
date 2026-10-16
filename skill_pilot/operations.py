@@ -167,25 +167,33 @@ def _entry_key(raw, home):
         return None
 
 
+def _home_file(raw, home):
+    located = _user_path(raw, home)
+    try:
+        located.relative_to(home)
+    except ValueError:
+        return None
+    return located if located.is_file() else None
+
+
 def path_warnings(removed, home=None):
     # 只认当前用户主目录里真实存在的引用文件，不套用别人的目录。
     home = target_home() if home is None else Path(home).resolve()
     warnings = []
+
+    def add(located, impacted):
+        if impacted:
+            warnings.append({'file': '~/' + located.relative_to(home).as_posix(), 'entries': impacted})
+
     companion = PROJECT / 'work/path-references.json'
     if companion.is_file():
         records = json.loads(companion.read_text())['records']
         for row in records:
-            located = _user_path(row.get('file', ''), home)
-            try:
-                located.relative_to(home)
-            except ValueError:
-                continue
-            if not located.is_file():
+            located = _home_file(row.get('file', ''), home)
+            if located is None:
                 continue
             references = [key for key in (_entry_key(raw, home) for raw in row.get('references', [])) if key]
-            impacted = [e for e in removed if any(r == e or r.startswith(e + '/') for r in references)]
-            if impacted:
-                warnings.append({'file': '~/' + located.relative_to(home).as_posix(), 'entries': impacted})
+            add(located, [e for e in removed if any(r == e or r.startswith(e + '/') for r in references)])
     else:
         for line in (PROJECT / 'docs/path-references.md').read_text().splitlines():
             cells = line.split('|')
@@ -194,17 +202,11 @@ def path_warnings(removed, home=None):
             raw_file = cells[1].strip().strip('`')
             if not raw_file.startswith(('~/', '/')):
                 continue
-            located = _user_path(raw_file, home)
-            try:
-                located.relative_to(home)
-            except ValueError:
-                continue
-            if not located.is_file():
+            located = _home_file(raw_file, home)
+            if located is None:
                 continue
             names = re.findall(r'`([^`]+)`', cells[2])
-            impacted = [e for e in removed if Path(e).name in names]
-            if impacted:
-                warnings.append({'file': '~/' + located.relative_to(home).as_posix(), 'entries': impacted})
+            add(located, [e for e in removed if Path(e).name in names])
     return warnings
 
 
@@ -607,6 +609,13 @@ def undo(operation_id, expected=None, home=None):
         raise ValueError('这条记录不能再次撤销。')
     before_file = home / '.skill-pilot/backups' / record['backup_id'] / 'files.tar'
     import tarfile
+
+    def extract_prefix(relative):
+        with tarfile.open(before_file) as source:
+            for member in source.getmembers():
+                if member.name == relative or member.name.startswith(relative + '/'):
+                    source.extract(member, home, filter='data')
+
     with tarfile.open(before_file) as archive:
         before_bytes = archive.extractfile('.skill-pilot/registry.json').read()
         before = json.loads(before_bytes)
@@ -642,11 +651,7 @@ def undo(operation_id, expected=None, home=None):
                 directory = checked(home / '.skill-pilot/store' / name)
                 if directory.exists():
                     shutil.rmtree(directory)
-                relative = '.skill-pilot/store/' + name
-                with tarfile.open(before_file) as source:
-                    for member in source.getmembers():
-                        if member.name == relative or member.name.startswith(relative + '/'):
-                            source.extract(member, home, filter='data')
+                extract_prefix('.skill-pilot/store/' + name)
         if not later:
             # Exact root/config/base restoration, keeping the new reversal commit.
             snapshot = json.loads((home / '.skill-pilot/backups' / record['backup_id'] / 'manifest.json').read_text())
@@ -677,11 +682,7 @@ def undo(operation_id, expected=None, home=None):
                     base = checked(home / '.skill-pilot/bases' / name)
                     if base.exists():
                         shutil.rmtree(base)
-                    relative = '.skill-pilot/bases/' + name
-                    with tarfile.open(before_file) as source:
-                        for member in source.getmembers():
-                            if member.name == relative or member.name.startswith(relative + '/'):
-                                source.extract(member, home, filter='data')
+                    extract_prefix('.skill-pilot/bases/' + name)
                     old_entries = current['skills'][name].get('entries', [])
                     current['skills'][name] = copy.deepcopy(before['skills'][name])
                     current['skills'][name]['entries'] = sorted(set(old_entries) | set(current['skills'][name].get('entries', [])))

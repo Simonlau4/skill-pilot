@@ -214,18 +214,12 @@ for (const button of document.querySelectorAll('button.hint:empty')) {
 }
 
 /* 页头任务条：后台在做什么都显示在这里。
-   任务刚起的前 700 毫秒不画出来，太快完成的任务就不会闪一下；
    做完直接消失，不显示「完成」那一行（那一行会把下面的内容顶下去）。 */
 const tasks = new Map();
-const TASK_QUIET_MS = 700;
 
 function setTask(id, task) {
-  const startedAt = tasks.get(id)?.startedAt ?? Date.now();
-  tasks.set(id, {...task, startedAt});
+  tasks.set(id, {...task});
   renderTasks();
-  if (task.quietMs && Date.now() - startedAt < task.quietMs) {
-    setTimeout(renderTasks, task.quietMs - (Date.now() - startedAt) + 20);
-  }
 }
 
 function clearTask(id) {
@@ -235,9 +229,7 @@ function clearTask(id) {
 
 function renderTasks() {
   const bar = $('task-bar');
-  const now = Date.now();
-  const entries = [...tasks.entries()]
-    .filter(([, task]) => !task.quietMs || now - task.startedAt >= task.quietMs);
+  const entries = [...tasks.entries()];
   bar.hidden = !entries.length;
   bar.innerHTML = entries.map(([id, task]) => {
     const ratio = typeof task.ratio === 'number' ? task.ratio : null;
@@ -478,15 +470,11 @@ const state = {
   logs: [],
 };
 
-/* 编号翻名字：先看接口给的目录，再退回表里的名字，都查不到就直接显示编号。 */
+/* 编号翻名字：先看接口给的目录（操作记录、已撤下的技能不在当前表里，也从这里兜底），
+   再退回表里的名字，都查不到就直接显示编号。 */
 function nameOf(id) {
   const key = String(id ?? '');
   return state.catalog.get(key)?.name || state.agents.find(agent => agent.id === key)?.name || key;
-}
-
-/* 有些 agent 不在当前表里（操作记录、已撤下的技能），用 /api/agents 的名字兜底。 */
-function agentName(id) {
-  return nameOf(id);
 }
 
 function indexCatalog(view) {
@@ -719,6 +707,12 @@ function pendingNote(name, agentId) {
   return because ? `待应用：自动带上，因为「${titleOf(because)}」要用它` : '待应用：会加上';
 }
 
+function switchHtml(skill, agent, on, pending, locked) {
+  return `<button class="switch${pending ? ' is-pending' : ''}" role="switch" aria-checked="${on}" style="--c:${agentColor(agent.id)}"
+        data-skill="${escape(skill.name)}" data-agent="${escape(agent.id)}"
+        aria-label="${escape(agent.name + ' 使用 ' + titleOf(skill.name))}" ${locked ? 'disabled' : ''}></button>`;
+}
+
 function skillRowHtml(skill, agent) {
   const on = assignedAfter(skill.name, agent.id);
   const pending = on !== assignedNow(skill.name, agent.id);
@@ -746,9 +740,7 @@ function skillRowHtml(skill, agent) {
     <span class="row-end">
       ${updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有新版，点一下更新"
         aria-label="${escape('更新「' + titleOf(skill.name) + '」')}" ${writeBusy ? 'disabled' : ''}><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg></button>` : ''}
-      <button class="switch${pending ? ' is-pending' : ''}" role="switch" aria-checked="${on}" style="--c:${agentColor(agent.id)}"
-        data-skill="${escape(skill.name)}" data-agent="${escape(agent.id)}"
-        aria-label="${escape(agent.name + ' 使用 ' + titleOf(skill.name))}" ${locked ? 'disabled' : ''}></button>
+      ${switchHtml(skill, agent, on, pending, locked)}
     </span>
   </div>`;
 }
@@ -803,17 +795,21 @@ function filtersHtml({skills, inTab, withUpdate, scope, hasTag, inChip}) {
 
 /* 右边顶部：agent 名字、技能数和生效方式、占用条。
    “和谁共用一个技能文件夹”要等 /api/agents 回来才知道，所以单独成一个函数，回来后再画一次。 */
+function shareHtml(names, note) {
+  if (!names.length) return '';
+  return `<span class="agent-share">${icon('link')}和 ${escape(names.join('、'))} 共用${hint(note)}</span>`;
+}
+
 function renderAgentHead() {
   const agent = currentAgent();
   if (!state.table || !agent) { $('agent-head').innerHTML = ''; return; }
   const loads = Object.fromEntries(state.agents.map(item => [item.id, agentLoad(item.id)]));
   const load = loads[agent.id];
   const facts = [`${load.countNow} 个技能`, agent.activation_text || ''].filter(Boolean).join(' · ');
-  const shared = (state.catalog.get(agent.id)?.shared_with || []).map(agentName);
+  const shared = (state.catalog.get(agent.id)?.shared_with || []).map(nameOf);
   // 后台写好的说明（共用时哪些技能会自动停用）挑出提到这个 agent 的几句
   const notes = (state.table.notes || []).filter(note => note.includes(agent.name)).join('');
-  const sharing = shared.length
-    ? `<span class="agent-share">${icon('link')}和 ${escape(shared.join('、'))} 共用${hint(notes || `${agent.name} 和 ${shared.join('、')} 读的是同一个技能文件夹。`)}</span>` : '';
+  const sharing = shareHtml(shared, notes || `${agent.name} 和 ${shared.join('、')} 读的是同一个技能文件夹。`);
   $('agent-head').innerHTML = `<h2>${swatch(agent.id)}${escape(agent.name)}</h2>
     <p><span>${escape(facts)}</span>${sharing}</p>
     ${loadHtml(agent.id, load, loadMax(loads), true)}`;
@@ -1723,10 +1719,10 @@ function renderAgents() {
   const ignored = ignoredAgents(view);
   $('agents-empty').hidden = !view || managed.length > 0;
   $('agents-managed').innerHTML = managed.map(agent => {
-    const shared = (agent.shared_with || []).map(agentName);
+    const shared = (agent.shared_with || []).map(nameOf);
     const info = [
       escape(agent.activation_text || ''),
-      shared.length ? `<span class="agent-share">${icon('link')}和 ${escape(shared.join('、'))} 共用${hint(`${nameOf(agent.id)} 和 ${shared.join('、')} 读的是同一个技能文件夹。`)}</span>` : '',
+      shareHtml(shared, `${nameOf(agent.id)} 和 ${shared.join('、')} 读的是同一个技能文件夹。`),
     ].filter(Boolean).join(' · ');
     const leave = agent.can_leave
       ? `<button class="btn btn-small btn-quiet" data-agent-leave="${escape(agent.id)}">不再管理…</button>`
@@ -1816,6 +1812,19 @@ async function ignoreAgent(id) {
   });
 }
 
+let joinPlan = null;
+
+async function showJoinPreview(agents) {
+  try {
+    joinPlan = await api('/api/agents/join/preview', {agents});
+  } catch (error) {
+    toast({text: error.message, tone: 'error', sticky: true});
+    return;
+  }
+  renderJoin(joinPlan);
+  $('agents-join-dialog').showModal();
+}
+
 $('agent-add-submit').addEventListener('click', async () => {
   const name = $('agent-add-name').value.trim();
   const folder = $('agent-add-folder').value.trim();
@@ -1823,16 +1832,7 @@ $('agent-add-submit').addEventListener('click', async () => {
     toast({text: '请填写名字和技能文件夹。', tone: 'error', sticky: true});
     return;
   }
-  let plan;
-  try {
-    plan = await api('/api/agents/join/preview', {agents: [{name, skill_root: folder}]});
-  } catch (error) {
-    toast({text: error.message, tone: 'error', sticky: true});
-    return;
-  }
-  joinPlan = plan;
-  renderJoin(plan);
-  $('agents-join-dialog').showModal();
+  await showJoinPreview([{name, skill_root: folder}]);
 });
 
 $('agents-managed').addEventListener('click', event => {
@@ -1840,17 +1840,17 @@ $('agents-managed').addEventListener('click', event => {
   if (button) leaveAgent(button.dataset.agentLeave);
 });
 
-/* 新发现的（可接入、可忽略）和没在管理的（只能重新接入）两栏共用这一套按钮。 */
+/* 新发现的（可接入、可忽略）和没在管理的（只能重新接入）两栏共用这一套按钮。
+   接入时连同“必须一起选”的 agent 一起预览，然后打开核对框。 */
 for (const id of ['agents-suggested', 'agents-ignored']) {
   $(id).addEventListener('click', event => {
     const join = event.target.closest('[data-agent-join]');
     const ignore = event.target.closest('[data-agent-ignore]');
-    if (join) openJoin(join.dataset.agentJoin);
+    if (join) showJoinPreview(joinIds(join.dataset.agentJoin));
     else if (ignore) ignoreAgent(ignore.dataset.agentIgnore);
   });
 }
 
-/* 接入：连同“必须一起选”的 agent 一起预览，然后打开核对框。 */
 /* 每一类的解释放进说明图标，主行只留“这一类：几个”。 */
 const JOIN_ACTIONS = [
   ['linked', '已经在用统一仓库', '直接登记分配。'],
@@ -1859,21 +1859,6 @@ const JOIN_ACTIONS = [
   ['choose', '内容不同，需要你选', '每一条单独选，默认保留仓库里的版本。'],
   ['skipped', '原样留着', '这些内容不动。'],
 ];
-
-let joinPlan = null;
-
-async function openJoin(id) {
-  let plan;
-  try {
-    plan = await api('/api/agents/join/preview', {agents: joinIds(id)});
-  } catch (error) {
-    toast({text: error.message, tone: 'error', sticky: true});
-    return;
-  }
-  joinPlan = plan;
-  renderJoin(plan);
-  $('agents-join-dialog').showModal();
-}
 
 /* 同组共用一个目录的 agent 要一起接入。 */
 function joinIds(id) {
@@ -1911,7 +1896,7 @@ function renderJoin(plan) {
   const skipped = plan.skipped || [];
   $('join-skipped-box').hidden = !skipped.length;
   $('join-skipped').innerHTML = skipped.map(item => `<p class="mono">${pathLabel(item.path)} · ${escape(item.reason)}</p>`).join('');
-  $('join-message').textContent = `${(plan.skills || []).length} 个技能会登记给 ${(plan.agents || []).map(agentName).join('、')}。`;
+  $('join-message').textContent = `${(plan.skills || []).length} 个技能会登记给 ${(plan.agents || []).map(nameOf).join('、')}。`;
   $('join-apply').disabled = false;
 }
 
@@ -1984,9 +1969,7 @@ function renderDetail() {
     return `<div class="who-row${pending ? ' is-pending' : ''}">
       <span class="who-name">${swatch(agent.id)}${escape(agent.name)}</span>
       <p${pending ? ' class="is-pending"' : ''}>${escape(text)}</p>
-      <button class="switch${pending ? ' is-pending' : ''}" role="switch" aria-checked="${on}" style="--c:${agentColor(agent.id)}"
-        data-skill="${escape(skill.name)}" data-agent="${escape(agent.id)}"
-        aria-label="${escape(agent.name + ' 使用 ' + titleOf(skill.name))}" ${locked ? 'disabled' : ''}></button>
+      ${switchHtml(skill, agent, on, pending, locked)}
     </div>`;
   }).join('');
 
@@ -2001,10 +1984,10 @@ function renderDetail() {
     .map(s => `<option value="${escape(s.name)}">${escape(s.title ? `${s.title}（${s.name}）` : s.name)}</option>`).join('');
 
   const entries = entriesFor(skill.name).map(({root, skill: entry}) => {
-    const manual = (entry.manual_only_for || []).map(agentName);
+    const manual = (entry.manual_only_for || []).map(nameOf);
     const status = [
       entry.broken ? '链接已失效' : entry.kind === 'link' ? '链接到统一仓库' : '存放完整文件',
-      (root.readers || []).map(agentName).join(' / '),
+      (root.readers || []).map(nameOf).join(' / '),
       manual.length ? `${manual.join('、')} 只允许手动调用` : '',
       entry.model_invocable === false ? '只允许手动调用' : '',
       entry.name_mismatch ? '名称与文件夹名称不同' : '',
@@ -2322,7 +2305,7 @@ async function showIncomingConflicts(result, reviewId) {
 /* 完成提示：一个技能写名字，多个写数量；给谁用照 agent 的名字写。 */
 function installDoneText(skills, agents) {
   const what = skills.length === 1 ? `装好了 ${skills[0]}` : `装好了 ${skills.length} 个技能`;
-  return what + (agents.length ? `，给了 ${agents.map(agentName).join('、')}` : '，还没给 agent 用');
+  return what + (agents.length ? `，给了 ${agents.map(nameOf).join('、')}` : '，还没给 agent 用');
 }
 
 /* 只点一次安装：不再弹确认框，装完直接关窗、刷新列表，中文名在后台补。 */
@@ -2576,6 +2559,17 @@ async function chooseUpdate(select) {
   }
 }
 
+async function withDetailWork(button, label, work) {
+  await withBusy(button, label, async () => {
+    try {
+      await work();
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+    renderDetail();
+  });
+}
+
 /* 详情里“有新版”区的按钮。处理了返回 true。 */
 async function handleUpdateButton(button) {
   const {updateDiff, updateExplain, updateMerge, updateAccept, updateOne} = button.dataset;
@@ -2585,24 +2579,14 @@ async function handleUpdateButton(button) {
   } else if (updateOne) {
     await applyUpdates([updateOne], button);
   } else if (updateExplain) {
-    await withBusy(button, '正在解释…', async () => {
-      try {
-        updateState.explanations.set(updateExplain, (await api('/api/updates/explain', {review_id: updateState.review.id, name: updateExplain})).explanation);
-      } catch (error) {
-        toast({text: error.message, tone: 'error', sticky: true});
-      }
-      renderDetail();
+    await withDetailWork(button, '正在解释…', async () => {
+      updateState.explanations.set(updateExplain, (await api('/api/updates/explain', {review_id: updateState.review.id, name: updateExplain})).explanation);
     });
   } else if (updateMerge) {
-    await withBusy(button, '正在合并…', async () => {
-      try {
-        const result = await api('/api/updates/merge', {review_id: updateState.review.id, name: updateMerge});
-        updateState.merges.set(updateMerge, {id: result.merge_id, accepted: false, explanation: result.explanation,
-          script_files: result.script_files, comparison: result.comparison});
-      } catch (error) {
-        toast({text: error.message, tone: 'error', sticky: true});
-      }
-      renderDetail();
+    await withDetailWork(button, '正在合并…', async () => {
+      const result = await api('/api/updates/merge', {review_id: updateState.review.id, name: updateMerge});
+      updateState.merges.set(updateMerge, {id: result.merge_id, accepted: false, explanation: result.explanation,
+        script_files: result.script_files, comparison: result.comparison});
     });
   } else if (updateAccept) {
     updateState.merges.get(updateAccept).accepted = true;
@@ -2713,13 +2697,13 @@ function renderCleanup() {
       <td class="col-check"><label class="check-hit"><input type="checkbox" data-cleanup="${escape(skill.name)}"
         aria-label="${escape('撤下 ' + titleOf(skill.name))}" ${state.cleanupSelected.has(skill.name) ? 'checked' : ''} ${locked ? 'disabled' : ''}></label></td>
       <td><strong>${nameHtml(skill.name)}</strong>${skill.summary ? `<p class="skill-desc">${escape(skill.summary)}</p>` : ''}</td>
-      <td>${(state.saved[skill.name] || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(agentName(id))}</span>`).join('')}</td>
+      <td>${(state.saved[skill.name] || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('')}</td>
       <td class="col-num">${tokenText(skill.description_tokens)}</td>
     </tr>`).join('') || `<tr><td class="empty" colspan="4">${searching ? emptyInner('search', '没找到，换个词试试') : emptyInner('check-circle', '没有可撤下的技能')}</td></tr>`;
 
   // 已撤下的：原来给了谁用颜色块和名字，和上面“现在给了谁”一个样子
   const view = state.cleanup;
-  const was = row => (row.previous_agents || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(agentName(id))}</span>`).join('') || '没有记录';
+  const was = row => (row.previous_agents || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('') || '没有记录';
   $('withdrawn-list').innerHTML = !view ? '<p class="item-note">正在读取…</p>' : view.withdrawn.map(row => `<div class="item-row">
     <div>
       <div class="item-title">${nameHtml(row.name)}</div>
@@ -2743,7 +2727,7 @@ function renderCleanupActionBar() {
   showActionBar({
     text: `选了 ${names.length} 个，还没撤下`,
     note: [savings.join('、'), '撤下只是不给 agent 用，文件还留着，随时能恢复'].filter(Boolean).join('。'),
-    items: names.map(name => `<li><p>「${escape(titleOf(name))}」<small>${escape((state.saved[name] || []).map(agentName).join('、'))}</small></p>
+    items: names.map(name => `<li><p>「${escape(titleOf(name))}」<small>${escape((state.saved[name] || []).map(nameOf).join('、'))}</small></p>
       <button class="btn btn-quiet btn-small" data-cleanup-unpick="${escape(name)}">不撤这个</button></li>`).join(''),
     buttons: [
       {label: '全部不选', kind: 'btn btn-quiet', action: () => { state.cleanupSelected.clear(); renderCleanup(); }},
@@ -2819,7 +2803,7 @@ $('withdrawn-list').addEventListener('click', async event => {
   const name = button?.dataset.restoreWithdrawn;
   if (!name) return;
   const row = state.cleanup.withdrawn.find(item => item.name === name);
-  const back = (row?.previous_agents || []).map(agentName).join('、') || '原来的 agent';
+  const back = (row?.previous_agents || []).map(nameOf).join('、') || '原来的 agent';
   const ok = await confirmDialog({
     title: '恢复这个技能',
     lines: [`会把它重新给 ${back} 用。`],
@@ -2877,14 +2861,14 @@ const CATEGORIES = {user: '用户技能', builtin: '软件内置', plugin: '插�
 
 /* 扫描条目里的 agent 编号翻成名字，再写成一句给人看的话。 */
 function manualOnlyText(skill) {
-  const names = (skill.manual_only_for || []).map(agentName);
+  const names = (skill.manual_only_for || []).map(nameOf);
   return names.length ? `<p class="item-note">${escape(names.join('、') + ' 只允许手动调用')}</p>` : '';
 }
 
 function disabledText(skill, data = state.inventory) {
   const names = Object.entries(data?.disabled || {})
     .filter(([, value]) => (value?.names || []).includes(skill.name))
-    .map(([id]) => agentName(id));
+    .map(([id]) => nameOf(id));
   return names.length ? `<p class="item-note">${escape(names.join('、') + ' 已停用')}</p>` : '';
 }
 
@@ -2920,7 +2904,7 @@ function renderDiagnostics() {
     <td><div class="skill-line"><strong>${escape(skill.name)}</strong>${skill.name_mismatch ? '<span class="tag tag-quiet">名称与文件夹名称不同</span>' : ''}</div>
       <p class="skill-desc" title="${escape(skill.description)}">${escape(skill.description)}</p></td>
     <td><p class="mono">${pathLabel(skill.path)}</p>${skill.link_target ? `<p class="item-note">指向 ${pathLabel(skill.link_target)}</p>` : ''}
-      <p class="item-note">${escape((root.readers || []).map(agentName).join(' / '))} · ${escape(CATEGORIES[root.category] || root.category)}</p></td>
+      <p class="item-note">${escape((root.readers || []).map(nameOf).join(' / '))} · ${escape(CATEGORIES[root.category] || root.category)}</p></td>
     <td>${escape(skill.broken ? '链接已失效' : skill.kind === 'link' ? '链接到另一位置' : '存放完整文件')}
       ${manualOnlyText(skill)}${disabledText(skill, data)}
       ${skill.model_invocable === false ? '<p class="item-note">只允许手动调用</p>' : ''}
@@ -2986,7 +2970,7 @@ function renderMigrationChoices() {
     .map(item => `<label class="check"><input type="checkbox" data-migration-agent="${escape(item.id)}" checked> ${escape(item.name)}</label>`).join('');
   const groups = state.agentsView?.must_select_together || [];
   $('migration-groups').textContent = groups.map(group => {
-    const names = group.map(agentName);
+    const names = group.map(nameOf);
     return names.length > 1 ? `${names.join(' 和 ')} 共用一个技能目录，要一起接入。` : '';
   }).filter(Boolean).join(' ');
 }
@@ -3049,7 +3033,7 @@ function renderMigrationReview(plan) {
     const before = plan.before[id];
     const after = plan.after[id];
     if (!before || !after) return '';
-    return `<details class="fold fold-inner"><summary>${escape(agentName(id))}：可调用 ${before.available.length} → ${after.available.length} 个；自动可用 ${before.automatic.length} → ${after.automatic.length} 个</summary>
+    return `<details class="fold fold-inner"><summary>${escape(nameOf(id))}：可调用 ${before.available.length} → ${after.available.length} 个；自动可用 ${before.automatic.length} → ${after.automatic.length} 个</summary>
       <p class="item-note">迁移前：${escape(before.available.join('、'))}</p>
       <p class="item-note">迁移后：${escape(after.available.join('、'))}</p></details>`;
   }).join('') || '<p class="item-note">没有需要核对的 agent。</p>';
@@ -3083,6 +3067,15 @@ $('migration-versions').addEventListener('click', async event => {
 
 $('migration-back').addEventListener('click', () => migrationStep('select'));
 
+async function finishMigration(title, result) {
+  $('migration-result').textContent = title;
+  $('migration-result-detail').textContent = result.message;
+  migrationStep('complete');
+  await refreshEverything();
+  await refreshMigrationStatus();
+  return result;
+}
+
 $('migration-apply').addEventListener('click', async event => {
   const button = event.currentTarget;
   if (!migrationPlan?.write_allowed) return;
@@ -3100,12 +3093,7 @@ $('migration-apply').addEventListener('click', async event => {
       const choices = Object.fromEntries([...document.querySelectorAll('[data-choice]:checked')].map(input => [input.dataset.choice, input.value]));
       const result = await api('/api/migration/apply', {confirmed: true, agents: migrationPlan.agents, plan_id: migrationPlan.plan_id, choices});
       backupId = result.backup_id;
-      $('migration-result').textContent = '迁移完成';
-      $('migration-result-detail').textContent = result.message;
-      migrationStep('complete');
-      await refreshEverything();
-      await refreshMigrationStatus();
-      return result;
+      return finishMigration('迁移完成', result);
     },
     success: () => ({text: '迁移完成，可以一键还原'}),
   });
@@ -3124,12 +3112,7 @@ async function restoreBackup(id, button = null) {
     onError: migrationError,
     work: async () => {
       const result = await api('/api/restore', {confirmed: true, backup_id: id});
-      $('migration-result').textContent = '已还原到迁移前';
-      $('migration-result-detail').textContent = result.message;
-      migrationStep('complete');
-      await refreshEverything();
-      await refreshMigrationStatus();
-      return result;
+      return finishMigration('已还原到迁移前', result);
     },
     success: () => ({text: '已经还原到备份时的状态'}),
   });
