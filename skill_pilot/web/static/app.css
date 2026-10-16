@@ -674,6 +674,27 @@ input[type="checkbox"]:disabled { cursor: default; }
 .rail-note-row { display: flex; align-items: center; gap: var(--sp-1); }
 .rail-note-row .btn { margin-left: auto; }
 
+/* 左栏安装：一行高的粘贴框，下面按状态出一张卡片（正在读取 / 概要 / 没读成），读取时不挡住页面。 */
+.install-rail { display: grid; gap: var(--sp-3); }
+.install-box {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding-right: var(--sp-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  transition: border-color var(--speed) var(--ease);
+}
+.install-box:focus-within { border-color: var(--ink); box-shadow: var(--shadow-1), 0 0 0 2px var(--panel-deep); }
+.install-box .input { flex: 1; min-width: 0; padding: 0 var(--sp-3); background: none; border: 0; }
+.install-box .input:hover, .install-box .input:focus { border: 0; outline: none; }
+.install-actions { display: grid; gap: 6px; margin-top: var(--sp-1); }
+.install-actions .btn-primary { width: 100%; height: auto; min-height: 34px; padding: 5px 10px; white-space: normal; line-height: 1.35; }
+.install-actions-row { display: flex; align-items: center; gap: var(--sp-1); }
+.install-actions-row .btn-iconic { margin-left: auto; }
+
 /* 签名元素：每个 agent 每次新对话占用的 Token，按分组分段；改了没应用时，变长的部分是黄色斜纹，变短的部分是空心斜纹。 */
 .load { display: grid; gap: 4px; min-width: 0; }
 .load-track { position: relative; display: flex; height: 8px; border-radius: 4px; background: var(--panel-deep); overflow: hidden; }
@@ -1352,6 +1373,7 @@ pre {
   .rail { position: static; }
   .rail-list { grid-auto-flow: column; grid-auto-columns: minmax(190px, 1fr); overflow-x: auto; }
   #rail-notes { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .install-rail { grid-template-columns: minmax(0, 340px); }
   .col-name { min-width: 220px; }
   /* 设置页的目录折到内容上面（只按桌面窗口验收，这里只是别挤坏）。 */
   .settings-split { grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }

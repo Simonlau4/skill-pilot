@@ -290,13 +290,14 @@ $('task-bar').addEventListener('click', event => {
      任务条转成错误样式（写入不给「重试」，让用户看清原因自己决定）。
    返回 work() 的结果；失败返回 null，不往外抛。 */
 const WRITE_LOCK_SELECTORS = [
-  '#skills-list button[data-skill]', '#skills-list button[data-update-up]', '#action-bar button', '#skills-refresh', '#skills-install',
+  '#skills-list button[data-skill]', '#skills-list button[data-update-up]', '#action-bar button', '#skills-refresh',
+  '#install-url', '#install-rail button:not(.hint)',
   '#cleanup-rows input[data-cleanup]', '#withdrawn-list button', '#withdrawn-refresh',
   '#updates-check', '#updates-all',
   '#program-check', '#program-apply', '#program-refresh',
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
   '#log-list button', '#log-refresh', '#detail-body button:not(.hint)', '#detail-body select',
-  '#new-absorb', '#new-toggle', '#install-dialog input', '#install-dialog button:not(.hint)',
+  '#new-absorb', '#new-toggle', '#install-dialog button:not(.hint)',
   '#agents-managed button:not(.hint)', '#agents-suggested button:not(.hint)', '#agents-ignored button:not(.hint)', '#agents-join-dialog input', '#agents-join-dialog button:not(.hint)',
   '#migration-preview', '#migration-apply', '#migration-back', '#migration-agents input',
   '#migration-versions input', '#migration-backups', '#migration-restore', '#migration-backup-list button',
@@ -324,6 +325,7 @@ function renderBusyAreas() {
   renderCleanupActionBar();
   renderUpdateBar();
   renderLog();
+  renderInstallRail();
   if (state.detail) renderDetail();
 }
 
@@ -791,6 +793,7 @@ function pickAgent(id) {
   rememberPlace();
   renderAgentSummary();
   renderSkillTable();
+  renderInstallRail();   // 「全部装给」按钮上的 agent 名跟着换
 }
 
 /* 左栏下面的提醒：发现新 agent。只给一个去处，不在这里直接改东西。 */
@@ -1404,7 +1407,7 @@ async function refreshTable(preserveDraft = false) {
   renderConfigExport();
   // 只有只读预览才显示标记；能改的时候右边什么都不放，导航仍是居中的。
   $('mode-badge').hidden = table.write_allowed;
-  $('skills-install').disabled = !table.write_allowed;
+  renderInstallRail();
   renderNewSkills();
   renderRailNotes();
   renderAgentSummary();
@@ -2381,24 +2384,96 @@ async function decideDependency(skill, requires, confirmed, button) {
   });
 }
 
-/* ==================== 安装技能：对话框 ==================== */
+/* ==================== 安装技能：左栏粘贴框 + 概要卡片，详细挑选再开窗口 ==================== */
 
-let installReview = null;
+let railReview = null;            // 左栏卡片记着的这次读取结果
+let dialogReview = null;          // 安装窗口这次显示的结果，点「安装」时用它
+let installReadError = '';        // 读取失败的原因；卡片上带「重试」
 let installInspectSequence = 0;   // 读取的先后顺序：后发的记更大的号，旧结果回来时丢掉
 let installInspectedUrl = '';     // 已经读过（或正在读）的链接，同一个链接不重复读
 let installReadingUrl = '';       // 正在读的链接，避免同一个链接同时读两次
 let installInspectTimer = null;   // 输入停下来之后再读
 const INSTALL_URL_PATTERN = /^https:\/\/github\.com\/\S+\/\S+/;
 
-function openInstall() {
-  installReview = null;
+/* 能直接装的：不在同名名单里的。已经装过和要先对比的都不算。 */
+function installReadyNames(review) {
+  const conflicts = new Set((review.conflicts || []).map(item => item.name));
+  return (review.skills || []).filter(skill => !conflicts.has(skill.name)).map(skill => skill.name);
+}
+
+/* 概要：读到几个技能，几个能直接装、几个已经装过、几个同名要先对比。 */
+function installSummary(review) {
+  const skills = review.skills || [];
+  const conflicts = review.conflicts || [];
+  const installed = conflicts.filter(item => item.same_content).length;
+  const compare = conflicts.length - installed;
+  const ready = installReadyNames(review).length;
+  if (!skills.length) return {title: '这个链接里没找到技能', notes: []};
+  const notes = [];
+  if (ready) notes.push(`${ready} 个可以直接装`);
+  if (installed) notes.push(`${installed} 个已经装过`);
+  if (compare) notes.push(`${compare} 个同名，要先对比`);
+  return {title: `读到 ${skills.length} 个技能`, notes};
+}
+
+const installDismissButton = () =>
+  `<button class="btn btn-quiet btn-iconic" data-install-dismiss aria-label="关闭这张卡片" title="关闭">${icon('close')}</button>`;
+
+/* 左栏安装区：粘贴框下面按状态显示一张卡片（正在读取 / 概要 / 没读成），读取不挡住页面。 */
+function renderInstallRail() {
+  const card = $('install-card');
+  const writable = Boolean(state.table?.write_allowed) && !writeBusy;
+  $('install-url').disabled = !writable;
+  if (installReadingUrl) {
+    card.hidden = false;
+    card.innerHTML = `<p class="rail-note-title"><strong>正在读取…</strong></p>
+      <p class="item-note">页面照常能用，读完这里显示概要。</p>`;
+    return;
+  }
+  if (installReadError) {
+    card.hidden = false;
+    card.innerHTML = `<p class="rail-note-title">${icon('warning')}<strong>没读成</strong></p>
+      <p class="item-note">${escape(installReadError)}</p>
+      <div class="install-actions-row">
+        <button class="btn btn-small" data-install-retry${writable ? '' : ' disabled'}>重试</button>
+        ${installDismissButton()}
+      </div>`;
+    return;
+  }
+  if (!railReview) {
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
+  const summary = installSummary(railReview);
+  const ready = installReadyNames(railReview);
+  const agent = currentAgent();
+  const pickable = ready.length + (railReview.conflicts || []).filter(item => !item.same_content).length > 0;
+  card.hidden = false;
+  card.innerHTML = `<p class="rail-note-title">${icon('plus')}<strong>${escape(summary.title)}</strong></p>
+    ${summary.notes.length ? `<p class="item-note">${escape(summary.notes.join('，'))}。</p>` : ''}
+    <div class="install-actions">
+      ${ready.length && agent ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>全部装给 ${escape(agent.name)}</button>` : ''}
+      <div class="install-actions-row">
+        ${pickable ? '<button class="btn btn-small" data-install-pick>挑一挑</button>' : ''}
+        ${installDismissButton()}
+      </div>
+    </div>`;
+}
+
+/* 收起卡片。装好了连粘贴框一起清空；用户点关闭只收卡片，链接留着还能再按回车重读。 */
+function clearInstallRail(clearUrl = false) {
+  railReview = null;
+  installReadError = '';
   installInspectedUrl = '';
-  installReadingUrl = '';
-  installInspectSequence += 1;    // 还在路上的那次读取作废
-  clearTimeout(installInspectTimer);
-  $('install-url').value = '';
+  if (clearUrl) $('install-url').value = '';
+  renderInstallRail();
+}
+
+/* 打开安装窗口：挑一挑时带上左栏刚读到的结果；收编遇到同名时不带，只看差别。 */
+function openInstall(review = null) {
+  dialogReview = review;
   $('install-message').textContent = '';
-  $('install-retry').hidden = true;
   $('install-skills').innerHTML = '';
   $('incoming-conflicts').hidden = true;
   $('incoming-comparisons').innerHTML = '';
@@ -2408,40 +2483,92 @@ function openInstall() {
   $('install-agents').innerHTML = state.agents
     .map(a => `<label class="check"><input type="checkbox" data-install-agent="${escape(a.id)}"${a.id === agent?.id ? ' checked' : ''}> ${swatch(a.id)}${escape(a.name)}</label>`).join('');
   $('install-dialog').showModal();
+  if (review) renderInstallSkills(review);
 }
-
-$('skills-install').addEventListener('click', openInstall);
 
 /* 读取链接：粘贴、按回车，或输入停下来约 0.6 秒且内容像完整的 GitHub 链接时自动进行。
    同一个链接读过就不再读；读取中换了链接，旧的结果回来直接丢掉。 */
 async function inspectInstall(force = false) {
   const url = $('install-url').value.trim();
-  if (!url || url === installReadingUrl) return;   // 空链接什么都不做（收编遇到同名时只是打开这个对话框看差别）
+  if (!url || url === installReadingUrl) return;
   if (!force && (url === installInspectedUrl || !INSTALL_URL_PATTERN.test(url))) return;
   installInspectedUrl = url;
   installReadingUrl = url;
   const sequence = ++installInspectSequence;
-  $('install-message').textContent = '正在读取…';
-  $('install-retry').hidden = true;
-  $('install-skills').innerHTML = '';
-  $('install-apply').disabled = true;
-  $('incoming-conflicts').hidden = true;
-  $('incoming-comparisons').innerHTML = '';
+  railReview = null;
+  installReadError = '';
+  renderInstallRail();
   try {
     const review = await api('/api/install/inspect', {url});
     if (sequence !== installInspectSequence) return;
-    installReview = review;
-    renderInstallSkills(review);
+    railReview = review;
+    installReadingUrl = '';
+    renderInstallRail();
   } catch (error) {
     if (sequence !== installInspectSequence) return;
-    installReview = null;
+    railReview = null;
     installInspectedUrl = '';   // 没读成，再粘贴同一个链接还要能重读（不只是靠「重试」）
-    $('install-message').textContent = error.message;
-    $('install-retry').hidden = false;
-  } finally {
-    if (sequence === installInspectSequence) installReadingUrl = '';
+    installReadingUrl = '';
+    installReadError = error.message;
+    renderInstallRail();
   }
 }
+
+/* 「全部装给 X」：只装能直接装的，点了直接装，不弹确认框，完成提示带撤销。 */
+async function installAllForCurrent(button) {
+  const review = railReview;
+  const agent = currentAgent();
+  const skills = review && agent ? installReadyNames(review) : [];
+  if (!skills.length) return;
+  const result = await runWrite({
+    button,
+    busyText: '正在安装…',
+    work: async () => {
+      const written = await api('/api/install/apply', {review_id: review.id, skills, agents: [agent.id], revision: state.table.revision, confirmed: true});
+      if (written.conflicts?.length) return written;
+      clearInstallRail(true);
+      await refreshEverything();
+      // 装完不用刷新：配了 AI 服务就让后台接着补中文名，正在整理的那批做完就轮到新技能。
+      if (state.table.llm_configured) startLabels('missing');
+      return written;
+    },
+    success: written => (written.conflicts?.length ? null : {
+      text: installDoneText(skills, [agent.id]),
+      undo: undoButton => undoOperation(written.id, {skills, message: written.message, button: undoButton}),
+    }),
+  });
+  if (result?.conflicts?.length) {
+    // 能直接装的都不在同名名单里，正常不会走到这里；真遇到就打开窗口让用户对比。
+    openInstall(review);
+    $('install-message').textContent = '有同名技能需要先对比，请看下面的差别。';
+    await showIncomingConflicts(result, review.id);
+  }
+}
+
+$('install-url').addEventListener('input', () => {
+  clearTimeout(installInspectTimer);
+  installInspectTimer = setTimeout(() => inspectInstall(), 600);
+});
+$('install-url').addEventListener('paste', () => {
+  clearTimeout(installInspectTimer);
+  setTimeout(() => inspectInstall(), 0);
+});
+$('install-url').addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();   // 回车＝明确要读，链接不完全像也读一次，读不成由后台说明原因
+  clearTimeout(installInspectTimer);
+  inspectInstall(true);
+});
+
+/* 卡片上的按钮：重试、全部装给、挑一挑、关闭。 */
+$('install-rail').addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (!button) return;
+  if (button.dataset.installRetry !== undefined) { clearTimeout(installInspectTimer); inspectInstall(true); }
+  else if (button.dataset.installAll !== undefined) installAllForCurrent(button);
+  else if (button.dataset.installPick !== undefined) openInstall(railReview);
+  else if (button.dataset.installDismiss !== undefined) clearInstallRail();
+});
 
 /* 找到的技能默认全勾；已经装过的显示“已经装过”且不能勾，同名但内容不同的默认不勾。 */
 function renderInstallSkills(review) {
@@ -2466,30 +2593,17 @@ function renderInstallSkills(review) {
     : allInstalled ? '这些技能都已经装过了'
     : `找到 ${skills.length} 个技能。`;
   renderInstallApply();
-  // 焦点落到「安装」上，接着按一下回车就能装；全装过时按钮点不动，焦点留在链接框。
+  // 焦点落到「安装」上，接着按一下回车就能装；全装过时按钮点不动，焦点留在原来的位置。
   if (!$('install-apply').disabled) $('install-apply').focus();
 }
 
-/* 至少勾了一个技能才能点「安装」。 */
+/* 至少勾了一个技能、而且当前能改也没在写入，才能点「安装」。 */
 function renderInstallApply() {
-  $('install-apply').disabled = !installReview || !document.querySelector('[data-install-skill]:checked');
+  $('install-apply').disabled = !dialogReview || Boolean(writeBusy) || !state.table?.write_allowed
+    || !document.querySelector('[data-install-skill]:checked');
 }
 
 $('install-skills').addEventListener('change', renderInstallApply);
-$('install-retry').addEventListener('click', () => inspectInstall(true));
-$('install-url').addEventListener('input', () => {
-  clearTimeout(installInspectTimer);
-  installInspectTimer = setTimeout(() => inspectInstall(), 600);
-});
-$('install-url').addEventListener('paste', () => {
-  clearTimeout(installInspectTimer);
-  setTimeout(() => inspectInstall(), 0);
-});
-$('install-dialog').querySelector('form').addEventListener('submit', event => {
-  event.preventDefault();
-  clearTimeout(installInspectTimer);
-  inspectInstall(true);   // 回车＝明确要读，链接不完全像也读一次，读不成由后台说明原因
-});
 $('install-close').addEventListener('click', () => $('install-dialog').close());
 
 async function showIncomingConflicts(result, reviewId) {
@@ -2523,7 +2637,7 @@ function installDoneText(skills, agents) {
 /* 只点一次安装：不再弹确认框，装完直接关窗、刷新列表，中文名在后台补。 */
 $('install-apply').addEventListener('click', async event => {
   const button = event.currentTarget;
-  if (!installReview) return;
+  if (!dialogReview) return;
   const skills = [...document.querySelectorAll('[data-install-skill]:checked')].map(input => input.dataset.installSkill);
   const agents = [...document.querySelectorAll('[data-install-agent]:checked')].map(input => input.dataset.installAgent);
   if (!skills.length) { $('install-message').textContent = '请至少勾选一个技能。'; return; }
@@ -2532,9 +2646,10 @@ $('install-apply').addEventListener('click', async event => {
     busyText: '正在安装…',
     onError: error => { $('install-message').textContent = error.message; },
     work: async () => {
-      const written = await api('/api/install/apply', {review_id: installReview.id, skills, agents, revision: state.table.revision, confirmed: true});
+      const written = await api('/api/install/apply', {review_id: dialogReview.id, skills, agents, revision: state.table.revision, confirmed: true});
       if (written.conflicts?.length) return written;
       $('install-dialog').close();
+      clearInstallRail(true);
       await refreshEverything();
       // 装完不用刷新：配了 AI 服务就让后台接着补中文名，正在整理的那批做完就轮到新技能。
       if (state.table.llm_configured) startLabels('missing');
@@ -2547,7 +2662,7 @@ $('install-apply').addEventListener('click', async event => {
   });
   if (result?.conflicts?.length) {
     $('install-message').textContent = '有同名技能需要先对比，请看下面的差别。';
-    await showIncomingConflicts(result, installReview.id);
+    await showIncomingConflicts(result, dialogReview.id);
   }
 });
 
