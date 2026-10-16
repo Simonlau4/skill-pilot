@@ -165,6 +165,12 @@ def run_installer(project, home):
     result = subprocess.run([sys.executable, '-B', str(project / 'scripts/install.py')],
                             cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
     if result.returncode:
+        reason = result.stderr.decode('utf-8', 'replace').strip()
+        if reason.startswith('安装没有完成：'):
+            reason = reason.removeprefix('安装没有完成：').strip()
+        reason = next((line.strip() for line in reversed(reason.splitlines()) if line.strip()), '')
+        if reason:
+            raise ValueError('新版的启动入口没能安装完成。' + reason[:200])
         raise ValueError('新版的启动入口没能安装完成。')
 
 
