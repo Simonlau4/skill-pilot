@@ -34,7 +34,7 @@ def preview(names, home=None):
                            for dependency in sorted(set(skill.get('requires', [])) & set(selected))]
     removed = sorted({entry for name in selected for entry in registry['skills'][name]['entries']})
     return {'skills': selected, 'message': f'从所有 agent 撤下 {len(selected)} 个技能',
-            'dependency_warnings': dependency_warnings, 'path_warnings': operations.path_warnings(removed),
+            'dependency_warnings': dependency_warnings, 'path_warnings': operations.path_warnings(removed, home),
             'revision': operations.revision(home, agents)}
 
 

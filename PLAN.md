@@ -56,7 +56,7 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
 
 **版本已经分叉**：Antigravity 的 25 个 `lark-*` 中有 22 个和 `~/.agents/skills/` 内容不同（如 lark-base 1.2.0 vs 1.2.23）；`ui-ux-pro-max` 在 Codex 与 Antigravity 内容不同。
 
-**来源记录**：`~/.agents/.skill-lock.json`（`npx skills` 生成，version 3）记有 65 个技能：飞书官方 28 个（`sourceType: well-known`，`wellKnownDigest`）；GitHub 来源 37 个（`sourceType: github`，含 `sourceUrl`、`skillPath`、`skillFolderHash` 即上游该目录的 git tree sha）。`~/.codex/skills/` 的 54 个没有任何来源记录，也不是 git 仓库。可用于推断来源的线索：`~/.codex/config.toml` 中形如 `projects."/Users/j/Documents/Codex/2026-06-04/skill-https-github-com-zarazhangrui-beautiful"` 的项目目录名、`AI-Workbench/docs/外部Skills候选池.md`、`AI-Workbench/docs/skills-active-reference清单.md`、SKILL.md 正文里的仓库链接。
+**来源记录**：`~/.agents/.skill-lock.json`（`npx skills` 生成，version 3）记有 65 个技能：飞书官方 28 个（`sourceType: well-known`，`wellKnownDigest`）；GitHub 来源 37 个（`sourceType: github`，含 `sourceUrl`、`skillPath`、`skillFolderHash` 即上游该目录的 git tree sha）。`~/.codex/skills/` 的 54 个没有任何来源记录，也不是 git 仓库。可用于推断来源的线索：`~/.codex/config.toml` 中形如 `projects."~/Documents/Codex/2026-06-04/skill-https-github-com-zarazhangrui-beautiful"` 的项目目录名、`AI-Workbench/docs/外部Skills候选池.md`、`AI-Workbench/docs/skills-active-reference清单.md`、SKILL.md 正文里的仓库链接。
 
 **飞书技能**：版本跟 lark-cli 绑定。`lark-cli update --check --json` 只检查不安装；`lark-cli update` 会升级 CLI 本身（npm 全局安装），带 `--skills-layout separate|suite` 参数，具体把技能写到哪些目录未知（S4）。
 

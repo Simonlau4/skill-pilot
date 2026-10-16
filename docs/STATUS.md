@@ -87,7 +87,6 @@ SP 优化点（2026-10-14，Claude 拆分、Sonnet 子代理执行，Claude 审�
 
 1. **新 agent 的剩余部分**：接入和管理已完成（见上）。未做：“让 Codex 查一下”调研按钮（2026-10-13 用户同意改为直接接入、调研只作可选）；手动填目录添加 agent。是否在真实环境接入 Trae、Zcode 由用户在看板上自己决定。
 2. 小问题：
-   - 历史路径引用提醒仍带维护者的目录假设；后续调整这项提醒时，需改为核实当前用户自己的引用资料；
    - `follow-builders` 的上游每天更新资讯数据，检查更新几乎每次都会列出它；
    - 这一轮代码净增约 1,000 行（主要是接入/不再管理和设置页 agent 一栏），可找时间做一次精简；
    - `interview-skills` 的来源更正（`jennifer88huang/interview-skills` 根目录）尚未写入真实登记表；它已撤下，不急，需要时运行 `skill-pilot set-source interview-skills --repo jennifer88huang/interview-skills --path . --yes`。

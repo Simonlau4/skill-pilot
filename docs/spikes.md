@@ -119,7 +119,7 @@ v3/v4 中观察到相同 session 的历史调用重复，不能把 35 当作去�
 
 ## S4 lark-cli 更新写入范围
 
-当前 canonical `/Users/j/.local/bin/lark-cli` 对应 `@larksuite/cli` 1.0.97。本轮只运行 `update --check --json`：exit=0、already_up_to_date、CLI current/latest=1.0.97、skills current/target=1.0.97、in_sync=true、layout=separate、official=28。真实目录前后指纹未变。
+当前 canonical `~/.local/bin/lark-cli` 对应 `@larksuite/cli` 1.0.97。本轮只运行 `update --check --json`：exit=0、already_up_to_date、CLI current/latest=1.0.97、skills current/target=1.0.97、in_sync=true、layout=separate、official=28。真实目录前后指纹未变。
 
 源码依据固定到安装版本：[update.go](https://github.com/larksuite/cli/blob/v1.0.97/cmd/update/update.go)、[updater.go](https://github.com/larksuite/cli/blob/v1.0.97/internal/selfupdate/updater.go)、[sync.go](https://github.com/larksuite/cli/blob/v1.0.97/internal/skillscheck/sync.go)、[layout.go](https://github.com/larksuite/cli/blob/v1.0.97/internal/skillscheck/layout.go)。
 

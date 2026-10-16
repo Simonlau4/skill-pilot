@@ -149,14 +149,14 @@ python3 scripts/verify-m5-usage.py
 1. **interview-skills 来源补登记**（先做，消除旧来源位置导致的检查错误）
 
 ```bash
-cd /Users/j/Developer/skill-pilot
+cd ~/Developer/skill-pilot
 ./skill-pilot set-source interview-skills --repo jennifer88huang/interview-skills --path . --yes --json
 ```
 
 2. **huashu-nuwa 按用户已同意的上游更新**
 
 ```bash
-cd /Users/j/Developer/skill-pilot
+cd ~/Developer/skill-pilot
 ./skill-pilot update huashu-nuwa --choice upstream --yes --json
 ```
 

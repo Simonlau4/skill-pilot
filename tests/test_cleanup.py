@@ -64,7 +64,7 @@ class CleanupTests(unittest.TestCase):
         before = self.fingerprint()
         with patch.object(operations, 'path_warnings', return_value=expected) as warnings:
             result = cleanup.apply(['candidate'], home=self.home)
-        warnings.assert_called_once_with(['.codex/skills/candidate'])
+        warnings.assert_called_once_with(['.codex/skills/candidate'], self.home)
         self.assertTrue(result['needs_confirmation'])
         self.assertEqual(result['path_warnings'], expected)
         self.assertEqual(self.fingerprint(), before)

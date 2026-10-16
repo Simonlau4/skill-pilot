@@ -1,6 +1,6 @@
 # 重做看板前端 · 交付报告
 
-> 2026-10-11，DSH，工作区 `/Users/j/Developer/skill-pilot-frontend`（分支 `frontend-redesign`）。
+> 2026-10-11，DSH，工作区 `~/Developer/skill-pilot-frontend`（分支 `frontend-redesign`）。
 > 依据：`docs/handoff-frontend-redesign.md`。改动全部留在工作区，没有提交、没有切分支。
 
 前端从「单个 HTML 内嵌压缩 CSS + 515 行 app.js」改成三个文件：`index.html`（骨架）、`app.css`（样式）、`app.js`（逻辑）。顶部 11 个标签收成 4 个主页面 + 1 个低调的「诊断与备份」。所有写入仍然走确认框、备份和撤销，仍然是本机地址加口令，文案仍然是大白话中文。
@@ -287,7 +287,7 @@ $ git diff --numstat
 ### 5.1 全量测试
 
 ```
-$ PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
+$ PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
 ----------------------------------------------------------------------
 Ran 149 tests in 48.346s
 
@@ -299,7 +299,7 @@ OK
 ### 5.2 前端语法
 
 ```
-$ /Users/j/.nvm/versions/node/v24.21.0/bin/node --check skill_pilot/web/static/app.js
+$ ~/.nvm/versions/node/v24.21.0/bin/node --check skill_pilot/web/static/app.js
 （无输出即通过）
 ```
 
@@ -330,7 +330,7 @@ app.js 里 $() 引用的 id 数量: 83 | 缺失: 无
 ### 5.4 冒烟（模拟 home）
 
 ```sh
-$ PY=/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
+$ PY=~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
 $ FAKE=$($PY -c "import tempfile,pathlib;print(pathlib.Path(tempfile.mkdtemp(prefix='sp-dsh-final-')).resolve())")
 $ PYTHONDONTWRITEBYTECODE=1 $PY scripts/make-fake-home.py "$FAKE"
 $ SKILL_PILOT_HOME="$FAKE" BROWSER=true PYTHONDONTWRITEBYTECODE=1 $PY -m skill_pilot ui --json   # 后台
@@ -555,7 +555,7 @@ grill-me（你改过）:                     看完整对比 / 让 Codex 解释 
 ### 8.1 全量测试
 
 ```
-$ PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
+$ PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
 ----------------------------------------------------------------------
 Ran 149 tests in 33.316s
 
@@ -565,7 +565,7 @@ OK
 ### 8.2 前端语法
 
 ```
-$ /Users/j/.nvm/versions/node/v24.21.0/bin/node --check skill_pilot/web/static/app.js
+$ ~/.nvm/versions/node/v24.21.0/bin/node --check skill_pilot/web/static/app.js
 （无输出即通过）
 ```
 

@@ -1,6 +1,6 @@
 // A separate browser with an empty temporary profile. Never attach to the user's browser.
 const fs = require('node:fs');
-const {chromium} = require('/Users/j/.npm/_npx/31e32ef8478fbf80/node_modules/playwright');
+const {chromium} = require(require('path').join(process.env.HOME, '.npm/_npx/31e32ef8478fbf80/node_modules/playwright'));
 (async () => {
  const browser = await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
  const page = await browser.newPage({viewport:{width:1280,height:720}});

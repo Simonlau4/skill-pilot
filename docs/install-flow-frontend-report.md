@@ -1,6 +1,6 @@
 # 报告：安装技能少点几下（前端）
 
-> 2026-10-14 由 DSH 执行，对应交接文件 [handoff-install-flow-frontend.md](handoff-install-flow-frontend.md)。工作区 `/Users/j/Developer/skill-pilot-install-frontend`，只改了 `skill_pilot/web/static/app.js` 和 `skill_pilot/web/static/index.html` 两个文件加本报告；没有动 Python、测试和别的文档，没有 `git add`、没有提交，改动保持未暂存。
+> 2026-10-14 由 DSH 执行，对应交接文件 [handoff-install-flow-frontend.md](handoff-install-flow-frontend.md)。工作区 `~/Developer/skill-pilot-install-frontend`，只改了 `skill_pilot/web/static/app.js` 和 `skill_pilot/web/static/index.html` 两个文件加本报告；没有动 Python、测试和别的文档，没有 `git add`、没有提交，改动保持未暂存。
 
 ## 1. 结果一览
 

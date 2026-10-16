@@ -22,6 +22,7 @@ env['PWTEST_SOCKETS_DIR'] = socket_file.read_text()
 args = sys.argv[1:]
 if args == ['open']:
     args = ['open',json.loads(Path('work/m4-ui-runtime.json').read_text())['url'],'--browser','chrome']
-command = ['node','/Users/j/.npm/_npx/31e32ef8478fbf80/node_modules/@playwright/cli/playwright-cli.js','-s=skill-pilot-m4',*args]
+playwright = Path.home() / '.npm/_npx/31e32ef8478fbf80/node_modules/@playwright/cli/playwright-cli.js'
+command = ['node', str(playwright), '-s=skill-pilot-m4', *args]
 result = subprocess.run(command,cwd=root,env=env,stdin=subprocess.DEVNULL)
 raise SystemExit(result.returncode)

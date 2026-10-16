@@ -92,6 +92,32 @@ class OperationsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '刷新'):
             self.assign('other', 'claude', expected=view['revision'])
 
+    def test_path_warnings_check_this_users_files_not_a_fixed_directory(self):
+        removed = ['.codex/skills/alpha', '.codex/skills/beta', '.agents/skills/follow-builders']
+        self.assertEqual(operations.path_warnings(removed, self.home), [])
+        own = self.home / 'notes/own.md'
+        own.parent.mkdir()
+        own.write_text('引用')
+        listed = self.home / 'Documents/AI-Workbench/docs/AI-Builders-Digest迁移到Grok-Bot.md'
+        listed.parent.mkdir(parents=True)
+        listed.write_text('引用')
+        project = self.home / 'reference project'
+        companion = project / 'work/path-references.json'
+        companion.parent.mkdir(parents=True)
+        companion.write_text(json.dumps({'records': [
+            {'file': '~/notes/own.md', 'references': ['~/.codex/skills/beta']},
+            {'file': '~/notes/own.md', 'references': ['/Users/' + 'j/.codex/skills/alpha']},
+            {'file': '~/notes/missing.md', 'references': ['~/.codex/skills/beta']},
+        ]}, ensure_ascii=False))
+        with patch.object(operations, 'PROJECT', project):
+            warnings = operations.path_warnings(removed, self.home)
+        self.assertEqual(warnings, [{'file': '~/notes/own.md', 'entries': ['.codex/skills/beta']}])
+        companion.unlink()
+        warnings = operations.path_warnings(removed, self.home)
+        self.assertEqual(warnings, [{
+            'file': '~/Documents/AI-Workbench/docs/AI-Builders-Digest迁移到Grok-Bot.md',
+            'entries': ['.agents/skills/follow-builders']}])
+
     def repository(self, name='installed', body='新安装'):
         path = self.home / 'repository'
         path.mkdir(exist_ok=True)

@@ -143,25 +143,67 @@ def history(home=None):
     return [{**r, 'undone': r['id'] in undone} for r in sorted(records, key=lambda r: r['time'], reverse=True)]
 
 
-def path_warnings(removed):
-    # S7's machine-readable companion retains the exact referenced entry paths.
-    path = PROJECT / 'work/path-references.json'
+def _user_path(raw, home):
+    text = str(raw).strip()
+    if text.startswith('~/'):
+        return (home / text[2:]).resolve()
+    path = Path(text)
+    if not path.is_absolute():
+        path = home / path
+    return path.resolve()
+
+
+def _entry_key(raw, home):
+    text = str(raw).strip()
+    if text.startswith('~/'):
+        return text[2:]
+    path = Path(text)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.resolve().relative_to(home).as_posix()
+    except ValueError:
+        return None
+
+
+def path_warnings(removed, home=None):
+    # 只认当前用户主目录里真实存在的引用文件，不套用别人的目录。
+    home = target_home() if home is None else Path(home).resolve()
     warnings = []
-    if path.is_file():
-        records = json.loads(path.read_text())['records']
+    companion = PROJECT / 'work/path-references.json'
+    if companion.is_file():
+        records = json.loads(companion.read_text())['records']
         for row in records:
-            references = [r.removeprefix('~/').removeprefix('/Users/j/') for r in row['references']]
+            located = _user_path(row.get('file', ''), home)
+            try:
+                located.relative_to(home)
+            except ValueError:
+                continue
+            if not located.is_file():
+                continue
+            references = [key for key in (_entry_key(raw, home) for raw in row.get('references', [])) if key]
             impacted = [e for e in removed if any(r == e or r.startswith(e + '/') for r in references)]
             if impacted:
-                warnings.append({'file': row['file'], 'entries': impacted})
+                warnings.append({'file': '~/' + located.relative_to(home).as_posix(), 'entries': impacted})
     else:
         for line in (PROJECT / 'docs/path-references.md').read_text().splitlines():
             cells = line.split('|')
-            if len(cells) >= 5:
-                names = re.findall(r'`([^`]+)`', cells[2])
-                impacted = [e for e in removed if Path(e).name in names]
-                if impacted:
-                    warnings.append({'file': cells[1].strip().strip('`'), 'entries': impacted})
+            if len(cells) < 5:
+                continue
+            raw_file = cells[1].strip().strip('`')
+            if not raw_file.startswith(('~/', '/')):
+                continue
+            located = _user_path(raw_file, home)
+            try:
+                located.relative_to(home)
+            except ValueError:
+                continue
+            if not located.is_file():
+                continue
+            names = re.findall(r'`([^`]+)`', cells[2])
+            impacted = [e for e in removed if Path(e).name in names]
+            if impacted:
+                warnings.append({'file': '~/' + located.relative_to(home).as_posix(), 'entries': impacted})
     return warnings
 
 
@@ -220,7 +262,7 @@ def assignment_plan(registry, agents, changes, home=None):
         if withdrawn:
             summary.append(f'从 {catalog[agent]["name"]} 撤下 {len(withdrawn)} 个')
     return {'registry': result, 'changed': sorted(changed), 'reasons': reasons, 'auto_added': auto_added,
-            'dependency_warnings': dependency_warnings, 'path_warnings': path_warnings(removed),
+            'dependency_warnings': dependency_warnings, 'path_warnings': path_warnings(removed, home),
             'message': '、'.join(summary) or '分配没有变化'}
 
 

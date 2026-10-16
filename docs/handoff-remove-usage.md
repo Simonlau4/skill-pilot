@@ -47,7 +47,7 @@
 
 ## 验收
 
-1. 全量测试通过：`PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`。
+1. 全量测试通过：`PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`。
 2. `grep -rn "usage" skill_pilot --include='*.py'` 和 `catalog.json` 里不再有用量相关的引用（无关的英文单词除外，报告里说明）。
 3. 在 `scripts/make-fake-home.py` 建的模拟 home 上，用脚本把这几个接口各走一遍并记录结果：`/api/table`、`/api/agents`、`GET /api/cleanup`、`/api/cleanup/preview`（含一个有依赖警告的例子）、`/api/cleanup/apply`、`/api/undo` 撤销这次撤下、`/api/withdrawn/restore`。请求需要带 `X-Skill-Pilot-Token` 和 `Origin`（见 `docs/generic-agents-frontend-report.md` 里的做法）。启动看板时设 `BROWSER=/usr/bin/true`，免得打开用户的浏览器；用完结束你自己起的进程。
 4. 写报告 `docs/remove-usage-report.md`：删了哪些文件、实际的接口字段（逐字段）、命令行用法、测试结果、代码行数变化、没做或有疑问的地方。

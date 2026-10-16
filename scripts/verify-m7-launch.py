@@ -16,11 +16,12 @@ from skill_pilot.web.server import lock_path
 
 with tempfile.TemporaryDirectory(prefix='skill-pilot-m7-launch-') as directory:
     runtime=Path(directory).resolve()
-    command=['/usr/bin/open','-a','/Users/j/Applications/Skill Pilot.app',
+    home=Path.home()
+    command=['/usr/bin/open','-a',str(home/'Applications'/'Skill Pilot.app'),
              '--env','SKILL_PILOT_READ_ONLY=1','--env','PATH=/usr/bin:/bin',
              '--env','M7_BROWSER_RUNTIME='+str(runtime),
              '--env','BROWSER='+str(PROJECT/'scripts/m7-launch-browser.sh')+' %s']
-    env={'HOME':'/Users/j','PATH':'/usr/bin:/bin'}
+    env={'HOME':str(home),'PATH':'/usr/bin:/bin'}
     def wait(predicate,timeout=25):
         deadline=time.monotonic()+timeout
         while time.monotonic()<deadline:

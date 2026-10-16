@@ -1,6 +1,6 @@
 # 报告：勾选不锁页面 + 页面通用化（前端）
 
-> 2026-10-13/14 由 DSH 执行，对应交接文件 [handoff-generic-agents-frontend.md](handoff-generic-agents-frontend.md) 的任务 A、任务 B 与第 5 节验收。工作区 `/Users/j/Developer/skill-pilot-generic-agents`（分支 `generic-agents`），只改了 `skill_pilot/web/static/` 下的三个文件和本报告，没有动 Python，没有做任何 git 写操作。
+> 2026-10-13/14 由 DSH 执行，对应交接文件 [handoff-generic-agents-frontend.md](handoff-generic-agents-frontend.md) 的任务 A、任务 B 与第 5 节验收。工作区 `~/Developer/skill-pilot-generic-agents`（分支 `generic-agents`），只改了 `skill_pilot/web/static/` 下的三个文件和本报告，没有动 Python，没有做任何 git 写操作。
 
 ## 1. 结果一览
 

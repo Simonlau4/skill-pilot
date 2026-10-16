@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {chromium} = require('/Users/j/.npm/_npx/31e32ef8478fbf80/node_modules/playwright');
+const {chromium} = require(require('path').join(process.env.HOME, '.npm/_npx/31e32ef8478fbf80/node_modules/playwright'));
 (async () => {
  const runtime=JSON.parse(fs.readFileSync('work/fix-update-check-ui-runtime.json','utf8'));
  const temporary=fs.mkdtempSync(path.join(os.tmpdir(),'skill-pilot-update-browser-'));
