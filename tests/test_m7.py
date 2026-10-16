@@ -101,6 +101,7 @@ class M7Tests(unittest.TestCase):
         with patch.dict(os.environ, {'SKILL_PILOT_HOME': str(self.home)}), \
                 patch.object(server, 'lock_path', return_value=self.home / 'dashboard-test.lock'), \
                 patch.object(server, 'HEARTBEAT_TIMEOUT', .05), \
+                patch.object(server.self_update, 'check', side_effect=ValueError('测试不读取远端')), \
                 patch.object(server.webbrowser, 'open', return_value=True), \
                 contextlib.redirect_stdout(output):
             server.run(json_output=True)
