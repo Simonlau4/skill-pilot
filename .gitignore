@@ -7,3 +7,5 @@ work/
 .env.*
 .skill-pilot/
 settings.json
+.skill-pilot-install.json
+.skill-pilot-install.tmp

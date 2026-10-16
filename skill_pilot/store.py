@@ -40,7 +40,9 @@ def guard(path, home):
     path = Path(path).absolute()
     if not write_allowed(home):
         raise ValueError("当前处于只读模式或目录不受管理，文件没有改动。")
-    if not path.is_relative_to(home) or not path.resolve().is_relative_to(home):
+    # 先换成真实路径再比较。macOS 临时目录的 /var 指向 /private/var，
+    # 未展开时会和已经展开的主目录对不上，被误判成只读或越界。
+    if not path.resolve().is_relative_to(home):
         raise ValueError("这个位置指向主目录之外，已停止操作，文件没有改动。")
     return path
 

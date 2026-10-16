@@ -42,7 +42,7 @@ def replace(server, lock):
     if server.closing:
         return
     state = {name: getattr(server, name) for name in
-             ('token', 'inventory', 'install_reviews', 'update_reviews', 'labels_progress')}
+             ('token', 'inventory', 'install_reviews', 'update_reviews', 'labels_progress', 'program_review', 'program_progress')}
     state.update(pages=sorted(server.pages), socket_fd=server.socket.fileno(), lock_fd=lock.fileno())
     # Session data stays in an unlinked temporary file. The listener and
     # singleton lock survive the replacement alongside it.

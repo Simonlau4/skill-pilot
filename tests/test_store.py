@@ -152,6 +152,34 @@ class MigrationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.guard(real / "../outside", real)
 
+    def test_unresolved_temp_symlink_home_with_spaces_is_writable(self):
+        # macOS 的临时目录常以 /var 指向 /private/var。安全检查要先换成真实路径，
+        # 否则这种模拟 home 会被当成只读，真实主目录的保护不能因此放宽。
+        from skill_pilot.web.server import preview_allowed
+        fresh = tempfile.TemporaryDirectory(prefix="skill pilot ")
+        self.addCleanup(fresh.cleanup)
+        root = Path(fresh.name)
+        (root / "private" / "agent home").mkdir(parents=True)
+        (root / "var").symlink_to(root / "private", target_is_directory=True)
+        home = root / "var" / "agent home"
+        self.assertIn(" ", str(home))
+        self.assertNotEqual(home.absolute(), home.resolve())
+        self.assertTrue(store.write_allowed(home))
+        self.assertTrue(preview_allowed(home))
+        target = store.guard(home / ".skill-pilot" / "registry.json", home)
+        target.parent.mkdir()
+        target.write_text("{}\n")
+        self.assertEqual((home.resolve() / ".skill-pilot" / "registry.json").read_text(), "{}\n")
+        outside = root / "outside"
+        outside.mkdir()
+        (home / "escape").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "之外"):
+            store.guard(home / "escape" / "file", home)
+        with patch.dict(os.environ, {"SKILL_PILOT_READ_ONLY": "1"}):
+            self.assertFalse(store.write_allowed(home))
+            with self.assertRaisesRegex(ValueError, "只读"):
+                store.guard(home / ".skill-pilot", home)
+
     def test_guard_denies_parent_and_internal_symlink_escape(self):
         with tempfile.TemporaryDirectory() as outside:
             target = Path(outside)

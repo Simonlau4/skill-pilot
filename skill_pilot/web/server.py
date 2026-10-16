@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import SKIP_CONTENT, apply, backups, guard, preview, restore, target_home
-from .. import operations, updates, cleanup, labels, sharing
+from .. import operations, updates, cleanup, labels, sharing, self_update
 from .. import agents as agent_management
 from ..sources import github
 from . import runtime
@@ -46,6 +46,12 @@ class Dashboard(ThreadingHTTPServer):
         self.labels_lock = threading.Lock()
         self.labels_thread = None
         self.labels_progress = session.get('labels_progress', {'running': False, 'done': 0, 'total': 0, 'message': '', 'error': ''})
+        self.program_review = session.get('program_review')
+        self.program_progress = session.get('program_progress', {'running': False, 'phase': 'idle',
+            'message': '从 GitHub 官方项目获取新版', 'error': '', 'available': False, 'current': '', 'latest': ''})
+        if self.program_progress['phase'] == 'ready':
+            self.program_progress.update(phase='latest', message='SP 已升级到最新版')
+        self.program_thread = None
         self.last_heartbeat = time.monotonic()
         self.pages = set(session.get('pages', []))
         self.code_version = runtime.version()
@@ -73,11 +79,60 @@ class Dashboard(ThreadingHTTPServer):
         super().server_close()
         if self.update_thread: self.update_thread.join()
         if self.labels_thread: self.labels_thread.join()
+        if self.program_thread: self.program_thread.join()
         if self.reload_thread: self.reload_thread.join()
+        if self.program_review:
+            shutil.rmtree(self.program_review['temporary'], ignore_errors=True)
 
     def background_busy(self):
-        return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread)) or
+        return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread, self.program_thread)) or
                 self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
+
+    def start_program(self, action, target=None):
+        with self.runtime_lock:
+            if self.program_progress['running']:
+                return self.program_progress.copy()
+            if action == 'apply' and (not self.program_review or target != self.program_review['target'] or
+                                      not self.program_review['available']):
+                raise ValueError('请先检查 SP 更新，再升级。')
+            self.program_progress.update(running=True, phase=action, error='',
+                message='正在下载并检查新版…' if action == 'check' else '正在升级，等当前操作完成…')
+            self.program_thread = threading.Thread(target=self.program_work, args=(action,), daemon=True)
+            self.program_thread.start()
+            return self.program_progress.copy()
+
+    def program_work(self, action):
+        try:
+            if action == 'check':
+                if self.program_review:
+                    shutil.rmtree(self.program_review['temporary'], ignore_errors=True)
+                self.program_review = None
+                self.program_review = self_update.check(self.home)
+                review = self.program_review
+                self.program_progress.update(phase='available' if review['available'] else 'latest',
+                    target=review['target'], available=review['available'], current=review['current'], latest=review['latest'],
+                    message='有新版，可以一键升级' if review['available'] else 'SP 已是最新版本')
+            else:
+                while not self.closing:
+                    with self.runtime_lock:
+                        idle = not self.active_requests and not (
+                            any(t and t.is_alive() for t in (self.update_thread, self.labels_thread)) or
+                            self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
+                    if idle:
+                        break
+                    time.sleep(.05)
+                if self.closing:
+                    return
+                self.program_progress['message'] = '正在安装 SP 新版…'
+                result = self_update.apply(self.program_review, self.home)
+                self.program_review['available'] = False
+                self.program_progress.update(result, phase='ready', message='新版已装好，刷新后生效')
+        except Exception as error:
+            self.program_progress.update(phase='error', available=False,
+                error=str(error) if isinstance(error, ValueError) else 'SP 更新没有完成，请检查网络和文件夹权限后重试。',
+                message='SP 更新没有完成')
+        finally:
+            self.program_progress['running'] = False
 
     def request_reload(self):
         changed = runtime.version() != self.code_version
@@ -85,6 +140,8 @@ class Dashboard(ThreadingHTTPServer):
             if not changed:
                 self.reload_pending = False
                 self.reload_error = ''
+                if self.program_progress['phase'] == 'ready':
+                    self.program_progress.update(phase='latest', message='SP 已升级到最新版')
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
                 self.reload_error = ''
@@ -194,6 +251,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, labels.public_settings(self.server.home))
         elif path == '/api/labels/progress':
             self.reply(200, self.server.labels_progress.copy())
+        elif path == '/api/program/progress':
+            self.reply(200, {**self.server.program_progress, 'write_allowed': preview_allowed(self.server.home)})
         elif path == '/api/config/export':
             try:
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -269,6 +328,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.server.reload_pending:
             self.reply(503, {'error': '正在应用新版，请稍候再操作。'})
             return
+        if self.server.program_progress['running'] and self.server.program_progress['phase'] == 'apply':
+            self.reply(503, {'error': '正在升级 SP，请完成后刷新页面再操作。'})
+            return
         read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview'}
@@ -276,7 +338,8 @@ class Handler(BaseHTTPRequestHandler):
                         '/api/updates/apply','/api/cleanup/apply','/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply'}
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run'}
-        if path not in {"/api/migration/apply", "/api/restore"} | read_routes | write_routes | settings_routes:
+        program_routes = {'/api/program/check', '/api/program/apply'}
+        if path not in {"/api/migration/apply", "/api/restore"} | read_routes | write_routes | settings_routes | program_routes:
             self.reply(405, {"error": "当前阶段没有这个操作。"})
             return
         try:
@@ -286,6 +349,17 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError('请求内容格式不正确。')
+            if path in program_routes:
+                if path.endswith('apply'):
+                    if body.get('confirmed') is not True:
+                        self.reply(400, {'error': '请点击“一键升级”确认这次升级。'})
+                        return
+                    if not preview_allowed(self.server.home):
+                        self.reply(403, {'error': '当前处于只读模式，程序没有改动。'})
+                        return
+                result = self.server.start_program(path.rsplit('/', 1)[1], body.get('target'))
+                self.reply(200, result)
+                return
             if path in settings_routes:
                 if not preview_allowed(self.server.home):
                     self.reply(403, {'error': '当前处于只读模式，文件没有改动。'})

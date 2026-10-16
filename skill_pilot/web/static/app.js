@@ -282,6 +282,7 @@ const WRITE_LOCK_SELECTORS = [
   '#skills-list button[data-skill]', '#skills-list button[data-update-up]', '#action-bar button', '#skills-refresh', '#skills-install',
   '#cleanup-rows input[data-cleanup]', '#withdrawn-list button', '#withdrawn-refresh',
   '#updates-check', '#updates-all',
+  '#program-check', '#program-apply', '#program-refresh',
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
   '#log-list button', '#log-refresh', '#detail-body button:not(.hint)', '#detail-body select',
   '#new-absorb', '#new-toggle', '#install-dialog input', '#install-dialog button:not(.hint)',
@@ -304,6 +305,7 @@ function lockControls(selectors) {
 
 /* 正在写入时把各区重画一遍，让新画出来的控件也是禁用的。 */
 function renderBusyAreas() {
+  renderProgram();
   renderConfigExport();
   renderSkillTable();
   renderSkillsActionBar();
@@ -573,7 +575,7 @@ function showPage(page) {
   if (page === 'cleanup') { renderCleanup(); loadCleanup(); }
   if (page === 'log') { renderLog(); refreshLog(); }
   if (page === 'diagnostics') renderDiagnostics();
-  if (page === 'settings') { renderConfigExport(); renderAgents(); refreshSettings(); }
+  if (page === 'settings') { renderConfigExport(); renderAgents(); refreshSettings(); refreshProgramUpdate(); }
   renderActionBar();
   window.scrollTo({top: 0, behavior: 'auto'});
 }
@@ -1218,6 +1220,80 @@ async function refreshAgents() {
 }
 
 /* ==================== 设置与中文名：只改变显示，不锁技能操作 ==================== */
+
+let programUpdate = {running: false, phase: 'idle', available: false, write_allowed: false};
+let programActionRunning = false;
+
+function renderProgram() {
+  const progress = programUpdate;
+  const date = value => value ? new Date(value).toLocaleString('zh-CN') : '首次安装版本';
+  $('program-version').hidden = !progress.current && !progress.latest;
+  $('program-version').textContent = `已安装：${date(progress.current)}`
+    + (progress.available ? ` · 新版：${date(progress.latest)}` : '');
+  $('program-message').textContent = progress.message || '从 GitHub 官方项目获取新版';
+  $('program-error').textContent = progress.error || '';
+  $('program-error').hidden = !progress.error;
+  $('program-check').disabled = progress.running || Boolean(writeBusy);
+  $('program-check').setAttribute('aria-busy', String(progress.running && progress.phase === 'check'));
+  $('program-check').querySelector('span').textContent = progress.running && progress.phase === 'check'
+    ? '正在检查…' : progress.phase === 'error' ? '重新检查' : '检查更新';
+  $('program-apply').hidden = !progress.available && progress.phase !== 'apply';
+  $('program-apply').disabled = progress.running || Boolean(writeBusy) || !progress.write_allowed;
+  $('program-apply').setAttribute('aria-busy', String(progress.running && progress.phase === 'apply'));
+  $('program-apply').textContent = progress.phase === 'apply' ? '正在升级…' : '一键升级';
+  $('program-refresh').hidden = progress.phase !== 'ready';
+  $('program-refresh').disabled = Boolean(writeBusy);
+  if (progress.running && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: progress.message});
+  else clearTask('self-update');
+}
+
+async function refreshProgramUpdate() {
+  try {
+    programUpdate = await api('/api/program/progress');
+    renderProgram();
+  } catch (error) {
+    $('program-error').textContent = error.message;
+    $('program-error').hidden = false;
+  }
+}
+
+async function programAction(action) {
+  if (programUpdate.running || writeBusy) return;
+  programUpdate = {...programUpdate, running: true, phase: action, error: '',
+    message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等当前操作完成…'};
+  programActionRunning = true;
+  renderProgram();
+  const fail = error => {
+    programUpdate = {...programUpdate, running: false, phase: 'error', available: false, error: error.message};
+  };
+  const work = async () => {
+    const result = await api('/api/program/' + action,
+      action === 'apply' ? {target: programUpdate.target, confirmed: true} : {});
+    programUpdate = {...programUpdate, ...result};
+    while (programUpdate.running) {
+      await new Promise(resolve => setTimeout(resolve, 800));
+      programUpdate = await api('/api/program/progress');
+      renderProgram();
+    }
+    if (programUpdate.error) throw new Error(programUpdate.error);
+    return programUpdate;
+  };
+  try {
+    if (action === 'apply') {
+      await runWrite({button: $('program-apply'), busyText: '正在升级 SP…', work, onError: fail});
+    } else await work();
+  } catch (error) {
+    fail(error);
+  } finally {
+    programActionRunning = false;
+    renderProgram();
+  }
+}
+
+$('program-check').addEventListener('click', () => programAction('check'));
+$('program-apply').addEventListener('click', () => programAction('apply'));
+$('program-refresh').addEventListener('click', () => location.reload());
+setInterval(() => { if (programUpdate.running && !programActionRunning) refreshProgramUpdate(); }, 1500);
 
 const LLM_DEFAULTS = {
   deepseek: ['https://api.deepseek.com', 'deepseek-chat'],

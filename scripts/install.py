@@ -10,6 +10,7 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 from skill_pilot.environment import tool_environment
+from skill_pilot.self_update import record_installation
 
 
 def install():
@@ -59,6 +60,7 @@ exit 0
                       'CFBundlePackageType': 'APPL', 'LSUIElement': True}, stream)
     cli.chmod(0o755)
     launcher.chmod(0o755)
+    record_installation(PROJECT)
     print('已安装 Skill Pilot 应用和命令行入口。双击应用即可打开看板。')
     if not all(shutil.which(name, path=env['PATH']) for name in ('node', 'npm')):
         print('飞书技能更新还需要 Node.js 和 npm，请按安装说明补齐。')
