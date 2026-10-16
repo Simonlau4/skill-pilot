@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "skills-prototype",
-      "runtimeExecutable": "/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11",
+      "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "work/skills-prototype"],
       "port": 8765
     }

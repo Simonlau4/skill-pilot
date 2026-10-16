@@ -1,6 +1,6 @@
 # 技能中文名与 AI 设置验收报告
 
-2026-10-12，工作区 `/Users/j/Developer/skill-pilot-llm-labels`。
+2026-10-12，工作区 `~/Developer/skill-pilot-llm-labels`。
 
 ## 完成的改动
 
@@ -26,7 +26,7 @@
 全量测试使用指定解释器和临时模拟目录：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
+PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
 ```
 
 原始输出：

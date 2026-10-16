@@ -58,7 +58,7 @@
 全量命令：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
+PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
 ```
 
 全量结果包含 `tests/test_operations.py`、`tests/test_m5_fixes.py`、`tests/test_update_check.py` 中既有的安装及更新相关用例。

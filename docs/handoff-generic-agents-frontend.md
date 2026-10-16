@@ -4,7 +4,7 @@
 
 ## 0. 工作位置与边界
 
-- 你在 git worktree `/Users/j/Developer/skill-pilot-generic-agents`（分支 `generic-agents`）里工作，沙箱只允许写这个目录和系统临时目录。用户双击打开的真实看板跑的是 `/Users/j/Developer/skill-pilot`（main），不要去碰。
+- 你在 git worktree `~/Developer/skill-pilot-generic-agents`（分支 `generic-agents`）里工作，沙箱只允许写这个目录和系统临时目录。用户双击打开的真实看板跑的是 `~/Developer/skill-pilot`（main），不要去碰。
 - 工作区里**已暂存（staged）的改动是上一轮后台的成果**，在它上面继续。**不要 `git add`、`commit`、`reset`、`checkout`、`stash`，不切分支、不改 git 配置**；你的改动留在未暂存状态，主控审阅。
 - **只改 `skill_pilot/web/static/` 下的 `index.html`、`app.js`、`app.css`**，外加你写的报告。后台（Python）有问题或缺字段，不要自己改，写进报告，主控转给 Codex。
 - 不对真实 home 运行本工具，不读写 `~/.skill-pilot/`，不运行 `scripts/build-app.sh`、`skill-pilot` 命令行。需要后台数据时用 `scripts/make-fake-home.py` 生成的模拟 home（§6）。
@@ -94,7 +94,7 @@
 ## 6. 模拟 home
 
 ```sh
-PY=/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
+PY=~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
 FAKE=$(mktemp -d)/home
 PYTHONDONTWRITEBYTECODE=1 $PY scripts/make-fake-home.py "$FAKE"
 FULL=$(cd "$FAKE" && pwd -P)    # 必须用 /private/var/... 形式，否则会被判成只读

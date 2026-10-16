@@ -6,7 +6,7 @@
 
 ## 1. 交付范围和运行边界
 
-- 工作目录保持 `/Users/j/Developer/skill-pilot-generic-agents`，分支保持 `generic-agents`。
+- 工作目录保持 `~/Developer/skill-pilot-generic-agents`，分支保持 `generic-agents`。
 - 没有暂存、提交或切换本项目分支；原已暂存的交接文件保持原样。
 - 没有改 `skill_pilot/web/static/`，没有重建启动器，没有运行真实 home 的看板或命令行。
 - 手测目录由 `scripts/make-fake-home.py` 生成；对照 main 从本工作区导出到系统临时目录运行。比较和计时均设置 `SKILL_PILOT_READ_ONLY=1`。
@@ -230,7 +230,7 @@
 
 ## 5. 验收方法与原始输出
 
-固定解释器：`/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`。新增测试覆盖 16 种分配组合、第五助手两种冲突选择、接入/撤销/退出/重新接入、共用目录与停用、忽略建议、过期与失败恢复、只读与 HTTP 确认、预览不调用耗时函数、既有助手重新接入提示句准确性、空目录助手的接入/退出/撤销，以及全为引用入口的新助手发现与接入。
+固定解释器：`~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`。新增测试覆盖 16 种分配组合、第五助手两种冲突选择、接入/撤销/退出/重新接入、共用目录与停用、忽略建议、过期与失败恢复、只读与 HTTP 确认、预览不调用耗时函数、既有助手重新接入提示句准确性、空目录助手的接入/退出/撤销，以及全为引用入口的新助手发现与接入。
 
 ### 5.1 全量测试
 
@@ -269,7 +269,7 @@ main 的原始计时输出：
 新代码的原始计时输出及比对结果：
 
 ```text
-{"code": "/Users/j/Developer/skill-pilot-generic-agents", "registered": 130, "agents": ["codex", "claude", "antigravity", "dsh"], "disabled": {"codex": ["context-pack", "nas-knowledge-base"]}, "preview_assign_ms": [18.929, 17.376, 18.152, 18.084, 17.623, 18.098, 18.603], "max_ms": 18.929}
+{"code": "~/Developer/skill-pilot-generic-agents", "registered": 130, "agents": ["codex", "claude", "antigravity", "dsh"], "disabled": {"codex": ["context-pack", "nas-knowledge-base"]}, "preview_assign_ms": [18.929, 17.376, 18.152, 18.084, 17.623, 18.098, 18.603], "max_ms": 18.929}
 ```
 
 ```text
@@ -302,9 +302,9 @@ make-fake-home: {
     ".dsh/skills",
     ".gemini/config/skills",
     "Developer/vendor/stop-that-shit-local/skills/stss",
-    "Documents/AI-Workbench/skills/simon-neat",
-    "Documents/AI-Workbench/skills/agency-router",
-    "Documents/AI-Workbench/skills/marketing-router",
+    "Documents/Example-Notes/samples/simon-neat",
+    "Documents/Example-Notes/samples/agency-router",
+    "Documents/Example-Notes/samples/marketing-router",
     ".agents/.skill-lock.json"
   ],
   "link_dependencies": [],
@@ -365,7 +365,7 @@ Ran 3 tests in 1.502s
 OK
 ```
 
-全量命令：`PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`。原始输出保存于 `work/generic-agents/indirect-links-tests.txt`：
+全量命令：`PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`。原始输出保存于 `work/generic-agents/indirect-links-tests.txt`：
 
 ```text
 ----------------------------------------------------------------------
@@ -405,7 +405,7 @@ preview_assign < 100 ms: True
 
 2026-10-13，按用户确认，将 8 个后端 Python 文件中 41 处面向看板或命令行的报错、提示、确认说明和档案说明文字里的“助手”统一替换为 `agent`，与相邻中文之间保留一个半角空格。同步更新 `tests/test_cleanup.py`、`tests/test_generic_agents.py` 的相关断言和“新 agent 版本”样本。已核对 `skill_pilot/profiles/catalog.json`，其中原本没有“助手”，无需修改；`labels.py` 中仅发给 AI 服务的内部提示不属于用户输出，保留原样。
 
-逐项对照已暂存基础，确认本次后端及测试改动只涉及字符串用词和对应空格，接口字段及程序结构保持不变；中文与 `agent` 直接粘连的检查通过。全量测试命令为 `PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`，结果：
+逐项对照已暂存基础，确认本次后端及测试改动只涉及字符串用词和对应空格，接口字段及程序结构保持不变；中文与 `agent` 直接粘连的检查通过。全量测试命令为 `PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`，结果：
 
 ```text
 ----------------------------------------------------------------------
@@ -465,7 +465,7 @@ OK
 
 新增及扩展断言覆盖退出管理后不在建议列表、忽略对象完整字段、有效技能计数、忽略及退出后按编号重新接入、接入时移出忽略名单、撤销时恢复原忽略名单及完整指纹、无档案/无目录/普通文件过滤、空目录接入，以及供设置页、确认框、操作记录使用的返回字段和用量覆盖信息的新文案。HTTP 用例实际走过退出管理 → 忽略列表 → 重新接入 → 逐次撤销，也保留了确认、版本过期和只读写入保护的原有检查。
 
-全量命令：`PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`。原始输出保存于 `work/generic-agents/b1-b2-tests.txt`：
+全量命令：`PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`。原始输出保存于 `work/generic-agents/b1-b2-tests.txt`：
 
 ```text
 ----------------------------------------------------------------------

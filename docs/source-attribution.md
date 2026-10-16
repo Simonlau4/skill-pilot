@@ -5,7 +5,7 @@
 | 技能名称 / 安装目录 | 来源 | 来源内路径或本机位置 | 置信度 | 依据 |
 | --- | --- | --- | --- | --- |
 | `ads-google-account-diagnostic` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
-| `agency-router` | 本机源码 | `~/Documents/AI-Workbench/skills/agency-router` | 高 | PLAN §1/§2 source-synced 记录；源码目录存在，但与安装副本内容不同 |
+| `agency-router` | 本机源码 | `~/Documents/Example-Notes/samples/agency-router` | 高 | PLAN §1/§2 source-synced 记录；源码目录存在，但与安装副本内容不同 |
 | `ascentiz-blog-editor` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
 | `ascentiz-blog-publishing` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
 | `ascentiz-blog-writer` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
@@ -37,7 +37,7 @@
 | `liu-run-writing-lens` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
 | `market-segmentation-analysis` | 本机文档生成 | `Market Segmentation Analysis，Dolnicar/Grun/Leisch，2018` | 高 | SKILL.md 标注来源、作者、Generated 2026-07-09；active 清单记录从用户 PDF 生成 |
 | `marketing-management-15e` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
-| `marketing-router` | 本机源码 | `~/Documents/AI-Workbench/skills/marketing-router` | 高 | PLAN source-synced 记录；源码与 Codex、Antigravity 副本分成三种内容 |
+| `marketing-router` | 本机源码 | `~/Documents/Example-Notes/samples/marketing-router` | 高 | PLAN source-synced 记录；源码与 Codex、Antigravity 副本分成三种内容 |
 | `nas-knowledge-base` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
 | `natural-text-writing` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
 | `new400-cleaning-prompt` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
@@ -53,7 +53,7 @@
 | `rumelt-strategy` | 本机文档生成 | `Richard Rumelt 书籍语料；chapters/` | 高 | SKILL.md 标注 707 页、38 个章节参考、Generated 2026-09-04 |
 | `seedance-video-generation` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
 | `simon-knowledge-base` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
-| `simon-neat` | 本机源码 | `~/Documents/AI-Workbench/skills/simon-neat` | 高 | PLAN §1/§2 source-synced 记录；源码目录存在，但与安装副本内容不同 |
+| `simon-neat` | 本机源码 | `~/Documents/Example-Notes/samples/simon-neat` | 高 | PLAN §1/§2 source-synced 记录；源码目录存在，但与安装副本内容不同 |
 | `super-build` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
 | `text-polish-router` | 自制 | `本机维护` | 高 | GitHub 代码搜索未找到同名同内容技能（2026-10-10）；用户确认自制技能不检查更新 |
 | `ui-ux-pro-max` | [nextlevelbuilder/ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) | `.claude/skills/ui-ux-pro-max/SKILL.md` | 高 | 2026-10-10 内容比对：与上游 2026-01-19 版本 5fe9624cb8 相似度 0.963（本地有少量改动）；上游最新提交 2026-08-13 |

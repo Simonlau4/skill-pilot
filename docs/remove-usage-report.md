@@ -186,7 +186,7 @@ skill-pilot restore-withdrawn SKILL [SKILL ...] [--json]
 全量测试命令：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
+PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q
 ```
 
 实际结果 `Ran 176 tests in 51.029s`、`OK`。覆盖重复名称、整批非法选择、已撤下、未分配、中文依赖提示、依赖循环、同时撤下依赖方、文件引用提示、严格确认、过期状态、只读拒绝、批量撤下、撤销、恢复及失败回滚。旧数据库测试禁止打开模拟旧数据库，并核对其内容和修改时间不变。
@@ -194,7 +194,7 @@ PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aar
 独立接口验收命令：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 scripts/verify-remove-usage.py --output /tmp/skill-pilot-remove-usage-acceptance.json
+PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 scripts/verify-remove-usage.py --output /tmp/skill-pilot-remove-usage-acceptance.json
 ```
 
 脚本在系统临时目录创建纯模拟数据源，再调用 `scripts/make-fake-home.py` 建模拟 home；没有从真实 home 复制数据。以 `BROWSER=/usr/bin/true` 启动自己的看板进程，用带两项认证请求头的请求验证，共 19 次请求全部符合预期：

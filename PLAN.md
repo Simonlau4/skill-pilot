@@ -33,7 +33,7 @@
 | 留下的技能 | 视为"今天用过一次"，60 天后仍没被用才再次出现在名单里 |
 | 看板 | 网页看板，需要时才启动（双击图标或让 agent 打开），关掉页面程序退出。中文界面，显示每个 agent 的技能数和描述占用字数 |
 | agent 入口 | 四个 agent 都装 `skill-pilot` 技能：在对话里能查看、分发、撤下、打开看板；更新和清理要用户在对话里明确同意才执行 |
-| 自写技能 | 以后在统一仓库里改。AI-Workbench 里 simon-neat、agency-router、marketing-router 三份源码，迁完后**经用户同意**移到废纸篓；`skills-management.md` 的手工清单改成指向看板 |
+| 自写技能 | 以后在统一仓库里改。Example-Notes 里 simon-neat、agency-router、marketing-router 三份源码，迁完后**经用户同意**移到废纸篓；`sample-list.md` 的手工清单改成指向看板 |
 
 v1 不做：定时检查或自动更新、项目目录内的技能、插件技能的分配与更新、技能内容质量评估、多台电脑同步、远程访问看板。
 
@@ -56,7 +56,7 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
 
 **版本已经分叉**：Antigravity 的 25 个 `lark-*` 中有 22 个和 `~/.agents/skills/` 内容不同（如 lark-base 1.2.0 vs 1.2.23）；`ui-ux-pro-max` 在 Codex 与 Antigravity 内容不同。
 
-**来源记录**：`~/.agents/.skill-lock.json`（`npx skills` 生成，version 3）记有 65 个技能：飞书官方 28 个（`sourceType: well-known`，`wellKnownDigest`）；GitHub 来源 37 个（`sourceType: github`，含 `sourceUrl`、`skillPath`、`skillFolderHash` 即上游该目录的 git tree sha）。`~/.codex/skills/` 的 54 个没有任何来源记录，也不是 git 仓库。可用于推断来源的线索：`~/.codex/config.toml` 中形如 `projects."/Users/j/Documents/Codex/2026-06-04/skill-https-github-com-zarazhangrui-beautiful"` 的项目目录名、`AI-Workbench/docs/外部Skills候选池.md`、`AI-Workbench/docs/skills-active-reference清单.md`、SKILL.md 正文里的仓库链接。
+**来源记录**：`~/.agents/.skill-lock.json`（`npx skills` 生成，version 3）记有 65 个技能：飞书官方 28 个（`sourceType: well-known`，`wellKnownDigest`）；GitHub 来源 37 个（`sourceType: github`，含 `sourceUrl`、`skillPath`、`skillFolderHash` 即上游该目录的 git tree sha）。`~/.codex/skills/` 的 54 个没有任何来源记录，也不是 git 仓库。可用于推断来源的线索：`~/.codex/config.toml` 中形如 `projects."~/Documents/Codex/2026-06-04/skill-https-github-com-zarazhangrui-beautiful"` 的项目目录名、`Example-Notes/notes/sample-pool.md`、`Example-Notes/notes/sample-reference.md`、SKILL.md 正文里的仓库链接。
 
 **飞书技能**：版本跟 lark-cli 绑定。`lark-cli update --check --json` 只检查不安装；`lark-cli update` 会升级 CLI 本身（npm 全局安装），带 `--skills-layout separate|suite` 参数，具体把技能写到哪些目录未知（S4）。
 
@@ -71,9 +71,9 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
 
 **技能间依赖的实例**：`grill-me` 正文只有"调用 grilling"；`ascentiz-blog-writer` 依赖 `natural-text-writing`、`unslop`、`stss`、`ascentiz-blog-editor`。
 
-**写死的技能路径**：Vault、AI-Workbench（docs/tools/scripts）、各技能目录、`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md` 中，含 `/.codex/skills/` 的文件 47 个、`/.agents/skills/` 16 个、`/.claude/skills/` 29 个（粗查，含技能用绝对路径调用自己脚本的情况）。
+**写死的技能路径**：Example-Vault、Example-Notes（notes/samples/extras）、各技能目录、`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md` 中，含 `/.codex/skills/` 的文件 47 个、`/.agents/skills/` 16 个、`/.claude/skills/` 29 个（粗查，含技能用绝对路径调用自己脚本的情况）。
 
-**现有手工管理**：`AI-Workbench/docs/skills-management.md`（清单快照停在 2026-08-09）；source-synced 三个技能的源码在 `AI-Workbench/skills/{simon-neat,agency-router,marketing-router}/`，靠 `ditto` 复制到 `~/.codex/skills/`。
+**现有手工管理**：`Example-Notes/notes/sample-list.md`（清单快照停在 2026-08-09）；source-synced 三个技能的源码在 `Example-Notes/samples/{simon-neat,agency-router,marketing-router}/`，靠 `ditto` 复制到 `~/.codex/skills/`。
 
 ## 3. 技术方案
 
@@ -132,7 +132,7 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
 
 1. 用内置档案识别已安装的 agent。再扫描 `~` 下的点目录和 `~/Library/Application Support`（深度上限约 7，跳过 `node_modules`、`.git`、缓存、`references/`），找出所有包含 `*/SKILL.md` 的目录。不属于任何档案的，按规则归类为"疑似新 agent / 内置 / 插件或市场缓存 / 备份或临时目录（默认隐藏）"。
 2. 看板列出：已接入、已发现未接入、已忽略。首次运行时用户勾选要接入的 agent（默认勾四个主力）。
-3. **核对版本页**：把选中 agent 的所有用户技能目录，加上 AI-Workbench 中三份 source-synced 源码，按技能名分组。内容完全相同的直接合并；不同的列为一组，并给出默认选择：
+3. **核对版本页**：把选中 agent 的所有用户技能目录，加上 Example-Notes 中三份 source-synced 源码，按技能名分组。内容完全相同的直接合并；不同的列为一组，并给出默认选择：
    - 内容与来源记录一致的那份（GitHub：目录 tree sha 等于 `skillFolderHash`；飞书：版本号与已装 lark-cli 配套的那份）；
    - 否则选最近修改的那份。
    每组用一句话说明差在哪里，例如"Antigravity 里是 1.2.0 旧版，共享目录里是 1.2.23"；完整对比默认折叠。用户改选后确认一次。
@@ -235,10 +235,10 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
    - 四个 agent 新会话里能看到 `skill-pilot` 技能，并能用它答出"Claude 现在有哪些技能"。
 9. **M8 文档与收尾**：
    - 写 `README.md`：功能、目录、还原方法、已知限制；
-   - `AI-Workbench/docs/skills-management.md` 的手工清单改为指向看板，保留规则部分；
-   - 更新 S7 中受影响、且由用户维护的文档路径（AI-Workbench docs、Codex记忆、Claude 记忆 `agent-ecosystem-claude-role.md` 里的技能位置说明）；
-   - 在 `AI-Workbench/docs/AI工具能力地图.md` 和 `Simon's Vault/Simon/Systems/AI工作台索引.md` 登记入口，只写路径和一句用途；
-   - **经用户同意后**，把 AI-Workbench 中三份 source-synced 源码移到废纸篓。
+   - `Example-Notes/notes/sample-list.md` 的手工清单改为指向看板，保留规则部分；
+   - 更新 S7 中受影响、且由用户维护的文档路径（Example-Notes/notes、memory、Claude 记忆 `agent-ecosystem-claude-role.md` 里的技能位置说明）；
+   - 在 `Example-Notes/notes/sample-map.md` 和 `Example-Vault/folder/area/sample-index.md` 登记入口，只写路径和一句用途；
+   - **经用户同意后**，把 Example-Notes 中三份 source-synced 源码移到废纸篓。
 
 ## 8. 安全与边界
 

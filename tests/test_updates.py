@@ -266,7 +266,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_real_home_update_rejected_without_subprocess(self):
         review = self.check()
-        with patch.object(updates.operations, 'load', return_value=(Path('/Users/j'), {}, [])), \
+        with patch.object(updates.operations, 'load', return_value=(Path('/Users/example'), {}, [])), \
                 patch('skill_pilot.store.write_allowed', return_value=False), \
                 patch.object(lark, 'install_cli') as install:
             with self.assertRaisesRegex(ValueError, '只读'):

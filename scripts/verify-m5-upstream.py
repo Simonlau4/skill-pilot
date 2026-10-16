@@ -18,7 +18,7 @@ from skill_pilot.scan import content_digest
 home=Path(tempfile.mkdtemp(prefix='skill-pilot-m5-upstream-home-')).resolve()
 for name,alias in [('huashu-nuwa','nuwa-skill'),('interview-skills','interview-skills')]:
  path=home/'.codex/skills'/alias;path.parent.mkdir(parents=True,exist_ok=True)
- shutil.copytree(Path('/Users/j/.skill-pilot/store')/name,path,symlinks=True)
+ shutil.copytree(Path.home()/'.skill-pilot'/'store'/name,path,symlinks=True)
 (home/'.codex/config.toml').write_text('[skills]\nconfig=[{name="interview-skills",enabled=false},{name="plugin:original",enabled=false}]\n')
 store.apply(store.preview(home)['plan_id'],home)
 registry=operations.load(home)[1]

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import profiles
+from .extra_sources import paths as extra_source_paths
 
 CATEGORIES = {
     "user": "用户技能", "builtin": "软件内置", "plugin": "插件技能",
@@ -348,10 +349,11 @@ def scan(home=None, applications=None):
         errors.extend(root["errors"])
         if root["category"] == "user":
             all_user_skills.extend({**s, "root": root["path"], "agents": root["readers"]} for s in root["skills"])
-    source_root = home / "Documents/AI-Workbench/skills"
     source_copies = []
-    for name in ["simon-neat", "agency-router", "marketing-router"]:
-        source_copies.extend(scan_root(source_root / name, True, cache)["skills"])
+    for relative in extra_source_paths(home):
+        folder = home / relative
+        if folder.is_dir():
+            source_copies.extend(scan_root(folder, True, cache)["skills"])
     candidates = []
     linked_roots = set()
     for path in discover(home, {Path(p) for p in roots}, errors, linked_roots):

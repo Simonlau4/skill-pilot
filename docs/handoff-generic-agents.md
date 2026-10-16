@@ -5,10 +5,10 @@
 
 ## 0. 工作位置与边界
 
-- 你在 git worktree `/Users/j/Developer/skill-pilot-generic-agents`（分支 `generic-agents`）里工作，沙箱只允许写这个目录和系统临时目录。用户双击打开的真实看板跑的是 `/Users/j/Developer/skill-pilot`（main），不要去碰。
+- 你在 git worktree `~/Developer/skill-pilot-generic-agents`（分支 `generic-agents`）里工作，沙箱只允许写这个目录和系统临时目录。用户双击打开的真实看板跑的是 `~/Developer/skill-pilot`（main），不要去碰。
 - 工作区里已暂存（staged）的只有本交接文件。**不要 `git add`、`commit`、`reset`、`checkout`、`stash`，不切分支、不改 git 配置**；你的改动留在未暂存状态，主控用 `git diff` 审阅。
 - 不对真实 home 运行本工具，不写 `~/.skill-pilot/`，不运行 `scripts/build-app.sh`、`skill-pilot` 命令行、`lark-cli update`、`npx skills`，不执行任何技能目录里的脚本。手测只用 `scripts/make-fake-home.py` 生成的模拟 home（§7）。不调用真实 AI 服务，不调用 Codex 或 DSH。
-- 只用标准库。解释器：`/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`。
+- 只用标准库。解释器：`~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`。
 - 遵守 `AGENTS.md` 的“做减法”：不加本文件没要求的功能、配置项、抽象层。
 
 ## 1. 背景与用户确认的方案
@@ -155,7 +155,7 @@ grep -rnE "'(codex|claude|dsh|antigravity)'|\"(codex|claude|dsh|antigravity)\"|\
 ## 7. 模拟 home 与计时
 
 ```sh
-PY=/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
+PY=~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
 FAKE=$(mktemp -d)/home
 PYTHONDONTWRITEBYTECODE=1 $PY scripts/make-fake-home.py "$FAKE"
 FULL=$(cd "$FAKE" && pwd -P)    # 必须用 /private/var/... 形式，否则 store.guard() 会判成只读
@@ -173,4 +173,4 @@ EOF
 SKILL_PILOT_HOME="$FULL" BROWSER=true PYTHONDONTWRITEBYTECODE=1 $PY -m skill_pilot ui --json
 ```
 
-比对 main 的输出时，把 main 的代码导出到临时目录再运行（`git archive main | tar -x -C "$(mktemp -d)"`），用同一个解释器、同一个 `$FULL`、`SKILL_PILOT_READ_ONLY=1` 只读运行；不要在 `/Users/j/Developer/skill-pilot` 目录里运行或写任何文件。
+比对 main 的输出时，把 main 的代码导出到临时目录再运行（`git archive main | tar -x -C "$(mktemp -d)"`），用同一个解释器、同一个 `$FULL`、`SKILL_PILOT_READ_ONLY=1` 只读运行；不要在 `~/Developer/skill-pilot` 目录里运行或写任何文件。

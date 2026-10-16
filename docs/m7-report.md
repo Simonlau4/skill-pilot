@@ -16,7 +16,7 @@
 
 ## 用户第一次正常双击
 
-启动器使用固定的 `/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`，本机版本 3.11.15；不依赖终端里的 Python。解释器缺失时会弹出中文提示。启动器补齐工具路径，包括本机 Node，方便 DSH 用量解析。
+启动器使用固定的 `~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`，本机版本 3.11.15；不依赖终端里的 Python。解释器缺失时会弹出中文提示。启动器补齐工具路径，包括本机 Node，方便 DSH 用量解析。
 
 普通双击会打开默认浏览器，自动将项目中 `skill/skill-pilot/` 的管理技能复制入统一仓库，分配给 Codex、Claude、Antigravity、DSH，先备份、校验并记一条安装记录。当前真实登记表有 129 个技能且没有它，首次正常启动后应增加这一行。Codex 与 DSH 共用 `.agents/skills` 入口，另有 Claude、Antigravity 的入口，符合 PLAN 的共享目录规则。
 
@@ -69,7 +69,7 @@ find skill_pilot -name "*.py" -o -name "*.js" -o -name "*.html" | xargs wc -l
 ## 验证结果
 
 ```text
-/Users/j/.local/bin/python3.11 -m unittest discover -q
+~/.local/bin/python3.11 -m unittest discover -q
 Ran 124 tests in 36.757s — OK
 
 node --check skill_pilot/web/static/app.js
@@ -120,7 +120,7 @@ plutil -lint ~/Applications/Skill\ Pilot.app/Contents/Info.plist
 1. **明确的执行范围违规**：在读取 UI/UX 指引时，执行过一次下面的技能检索脚本。交接卡禁止“执行技能里的脚本”，这一步不应执行。此后没有再调用技能脚本，也没有请求持久化设计文件。
 
    ```text
-   /Users/j/.local/bin/python3.11 /Users/j/.codex/skills/ui-ux-pro-max/scripts/search.py "confirmation destructive action" --domain ux -n 2
+   ~/.local/bin/python3.11 ~/.codex/skills/ui-ux-pro-max/scripts/search.py "confirmation destructive action" --domain ux -n 2
    ```
 
    首份指纹在这次调用之后、00:18:47（洛杉矶时间）采集，所以不能把上述 8 项一致当作整个任务开始前后不变的证明。当前环境禁用 Python 字节码写入，该技能脚本目录未发现缓存文件，但这不能替代任务前证据。请主控用自己的原始指纹核对；本轮没有擅自删除真实目录文件来消除痕迹。[违规及验证限制记录](../work/m7-scope-deviation.json)。

@@ -6,7 +6,7 @@
 
 真实迁移已于 2026-10-10 21:14 完成：真实 home 现在有 `~/.skill-pilot/{store,bases,registry.json,agents.json,backups}`，四个技能根基本都是指向 `~/.skill-pilot/store/<name>` 的绝对链接。M2 的 `scripts/make-fake-home.py` 是按迁移前的布局写的，本轮要先改成能复制**迁移后**的布局：一并复制 `~/.skill-pilot/`（不含 `backups/`），并把所有指向真实 `~/.skill-pilot/` 的绝对链接改写到模拟 home 里，复制后的越界断言保持不变。
 
-M2 之后 Claude 改过的代码（保留，不要回退）：`store.preview` 不再优先选 AI-Workbench 源码；`store.write_allowed`/`guard` 要求真实 home 显式设置 `SKILL_PILOT_ALLOW_REAL_HOME=1`；`docs/source-attribution.md` 已按内容比对补全来源，“自制”表示不检查更新。
+M2 之后 Claude 改过的代码（保留，不要回退）：`store.preview` 不再优先选 Example-Notes 源码；`store.write_allowed`/`guard` 要求真实 home 显式设置 `SKILL_PILOT_ALLOW_REAL_HOME=1`；`docs/source-attribution.md` 已按内容比对补全来源，“自制”表示不检查更新。
 
 ## 目标
 

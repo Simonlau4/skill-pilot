@@ -69,13 +69,14 @@ git pull --ff-only
 | 已撤下 / 操作记录 | 恢复撤下的技能；任何一次改动都能撤销 |
 | 设置 → SP 自身更新 | 从官方 GitHub 项目检查并升级 SP，更新启动入口，刷新后生效 |
 | 设置 → 分享技能配置 | 导出在用技能、来源和分配；收到配置后先预览，再批量导入，可整批撤销 |
+| 设置 → 额外技能源 | 记下主目录里另外放着技能的文件夹；不填就不额外查看 |
 
 分享给另一位 Skill Pilot 用户的方法见 [分享技能配置](docs/sharing-config.md)。配置不包含技能正文和账号密钥；自制或修改过的技能会列为待补齐。
 
 ## 数据放在哪
 
 - 技能正本：`~/.skill-pilot/store/<技能名>/`（git 仓库）。各 agent 技能目录里只是指向它的链接，改技能直接改正本。
-- 登记表、基准、操作记录、备份及显示设置：当前用户 `~/.skill-pilot/` 下的 `registry.json`、`bases/`、`logs/`、`backups/`、`labels.json`。账号设置和密钥只保存在用户自己的 `settings.json` 中，不随项目或分享配置导出。
+- 登记表、基准、操作记录、备份及显示设置：当前用户 `~/.skill-pilot/` 下的 `registry.json`、`bases/`、`logs/`、`backups/`、`labels.json`。额外技能源记在同一目录的 `extra-sources.json`。账号设置和密钥只保存在用户自己的 `settings.json` 中，不随项目或分享配置导出。
 - 管理规则（给所有 agent 看）：[AGENTS.md](AGENTS.md)。
 
 ## 开发

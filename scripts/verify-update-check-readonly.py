@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from skill_pilot import store, updates
 
 project = Path(__file__).resolve().parents[1]
-home = Path('/Users/j')
+home = Path.home()
 paths = ['.skill-pilot', '.skill-pilot/store', '.skill-pilot/bases', '.skill-pilot/registry.json', '.skill-pilot/agents.json',
          '.skill-pilot/logs', '.codex/skills', '.agents/skills', '.claude/skills', '.gemini/config/skills',
          '.dsh/skills', '.codex/config.toml', '.agents/.skill-lock.json']

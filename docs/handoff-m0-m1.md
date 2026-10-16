@@ -18,7 +18,7 @@
 ## 可读 / 可写范围
 
 - **可写**：只有 `~/Developer/skill-pilot/`（可以 `git init`，**不要 commit，不要 push**），以及系统临时目录。
-- **只读**：`~/.codex/`、`~/.agents/`、`~/.claude/`、`~/.gemini/`、`~/Library/Application Support/` 下各 agent 的数据、`/Applications/*.app`、`~/Documents/AI-Workbench/docs/`、Vault。
+- **只读**：`~/.codex/`、`~/.agents/`、`~/.claude/`、`~/.gemini/`、`~/Library/Application Support/` 下各 agent 的数据、`/Applications/*.app`、`~/Documents/Example-Notes/notes/`、Example-Vault。
 - **禁止**：在任何 agent 的技能目录里建、删、改文件或链接；修改 `~/.codex/config.toml`、`~/.agents/.skill-lock.json`；创建 `~/.skill-pilot/`；安装到 `~/.local/bin` 或 `~/Applications`；运行 `lark-cli update`（`--check --json` 可以）；运行 `npx skills` 的任何写操作。
 - 网络：只允许只读请求（`gh api` 的 GET、`git ls-remote`、浅克隆到临时目录、查官方文档）。
 
@@ -35,7 +35,7 @@ S2 中“DSH 能看到哪些目录”这一项依赖 S1，同样处理；S2 中�
 
 ## 规则与技能
 
-- 遵守 `~/.codex/AGENTS.md`，以及 `~/Documents/AI-Workbench/AGENTS.md` 的落盘规则。
+- 遵守 `~/.codex/AGENTS.md`，以及 `~/Documents/Example-Notes/sample-rules.md` 的落盘规则。
 - 用户不是程序员：看板和 report 写大白话；代码、spikes.md 写技术细节。
 - PLAN.md §1 的结论不要重新讨论。
 

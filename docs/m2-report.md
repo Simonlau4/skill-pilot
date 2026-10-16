@@ -29,7 +29,7 @@
 
 | 技能 | 默认保留的内容位置 | 理由 |
 | --- | --- | --- |
-| agency-router | `~/Documents/AI-Workbench/skills/agency-router` | 与已登记的工作台源码一致 |
+| agency-router | `~/Documents/Example-Notes/samples/agency-router` | 与已登记的工作台源码一致 |
 | lark-approval | `~/.agents/skills/lark-approval` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
 | lark-base | `~/.agents/skills/lark-base` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
 | lark-calendar | `~/.agents/skills/lark-calendar` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
@@ -52,8 +52,8 @@
 | lark-wiki | `~/.agents/skills/lark-wiki` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
 | lark-workflow-meeting-summary | `~/.agents/skills/lark-workflow-meeting-summary` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
 | lark-workflow-standup-report | `~/.agents/skills/lark-workflow-standup-report` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
-| marketing-router | `~/Documents/AI-Workbench/skills/marketing-router` | 与已登记的工作台源码一致 |
-| simon-neat | `~/Documents/AI-Workbench/skills/simon-neat` | 与已登记的工作台源码一致 |
+| marketing-router | `~/Documents/Example-Notes/samples/marketing-router` | 与已登记的工作台源码一致 |
+| simon-neat | `~/Documents/Example-Notes/samples/simon-neat` | 与已登记的工作台源码一致 |
 | ui-ux-pro-max | `~/.codex/skills/ui-ux-pro-max` | 未能离线证明与来源记录一致，默认选最近修改的那份 |
 
 飞书默认选择依据 S4 已核实的配套版本以及 M1 当时记录的内容。本轮只读核对当前工具包版本、来源记录和内容；三者相符才使用该证据，没有联网检查或升级。摘要保存在 [lark-paired-snapshot.json](lark-paired-snapshot.json)。
@@ -77,7 +77,7 @@
 | `~/.cursor/skills-cursor` | 未接入的助手，保留原样 |
 | `~/.trae/builtin` | 未接入的助手，保留原样 |
 
-AI-Workbench 三份源码仅参与版本核对，不移动或删除；Codex 停用设置和现有安装来源记录只读取。`nuwa-skill` 的实际名称为 `huashu-nuwa`，统一仓库使用实际名称，原文件夹入口保留；核对页会列出这个差异。
+Example-Notes 三份源码仅参与版本核对，不移动或删除；Codex 停用设置和现有安装来源记录只读取。`nuwa-skill` 的实际名称为 `huashu-nuwa`，统一仓库使用实际名称，原文件夹入口保留；核对页会列出这个差异。
 
 ## 产出文件
 
@@ -131,7 +131,7 @@ HOME=<模拟目录> CODEX_HOME=<模拟目录>/.codex XDG_CONFIG_HOME=<模拟目�
 
 看板在 Chrome 原生界面实际完成：选择四个助手 → 将 agency-router 从默认工作台源码改选为原 Codex 副本 → 确认迁移 → 看到完成页 → 一键还原并确认 → 看到“已还原到迁移前”。实际内容与改选一致，备份为 `20261010T170918666953`；还原后指纹完全一致。证据见 [m2-ui-acceptance.json](../work/m2-ui-acceptance.json)。测试标签页已关闭，本机服务已退出。
 
-模拟复制额外只读带入一份技能内部链接所需的 `AI-Workbench/docs/飞书 CLI 能力地图.md`；同时记录工具包版本号用于离线来源核对，没有复制认证配置、会话记录或其他软件设置。复制后所有链接都留在模拟目录内。模拟目录与备份保留在系统临时目录供主控复核，当前位置见 [m2-fake-home.json](../work/m2-fake-home.json)。
+模拟复制额外只读带入一份技能内部链接所需的 `Example-Notes/notes/sample-cli-map.md`；同时记录工具包版本号用于离线来源核对，没有复制认证配置、会话记录或其他软件设置。复制后所有链接都留在模拟目录内。模拟目录与备份保留在系统临时目录供主控复核，当前位置见 [m2-fake-home.json](../work/m2-fake-home.json)。
 
 真实目录前后对照：`unchanged=true`；`~/.skill-pilot/` 仍不存在。覆盖四个技能根、Codex 设置和安装来源记录，完整对照见 [m2-real-fingerprints.json](../work/m2-real-fingerprints.json)。本项目没有提交或推送，PLAN.md 和 spikes.md 未改动。
 
@@ -154,4 +154,4 @@ HOME=<模拟目录> CODEX_HOME=<模拟目录>/.codex XDG_CONFIG_HOME=<模拟目�
 - `~/.codex/config.toml`、`~/.agents/.skill-lock.json` 与迁移前备份逐字节一致。
 - 可见名单：用迁移前备份重建的模拟 home 扫描，对比迁移后真实扫描，Codex 95、DSH 91 完全一致；Claude 43、Antigravity 38 一致（重建时 stss 指向 Developer/vendor 的链接不在备份范围，属重建假象）。
 - 新会话实测：Codex `debug prompt-input` 列出 lark-base、simon-neat、reverse-engineer-anything、agency-router；Antigravity 报告 lark-base 为 1.2.23（迁移前其副本为 1.2.0）、能看到 stss；DSH 能看到 reverse-engineer-anything、lark-base、simon-neat；Claude 能看到 natural-text-writing、stss、simon-neat。
-- 迁移前 Claude 修正：AI-Workbench 源码不再优先（agency-router、marketing-router 默认改选 9/16 的较新安装副本）；真实目录写入需 `SKILL_PILOT_ALLOW_REAL_HOME=1`；48 个来源按用户要求自动比对登记（见 `docs/source-attribution.md`）。
+- 迁移前 Claude 修正：Example-Notes 源码不再优先（agency-router、marketing-router 默认改选 9/16 的较新安装副本）；真实目录写入需 `SKILL_PILOT_ALLOW_REAL_HOME=1`；48 个来源按用户要求自动比对登记（见 `docs/source-attribution.md`）。

@@ -93,7 +93,7 @@ python3 scripts/verify-m3.py /private/var/folders/ms/q91q3xp96t397xghv571lx24000
 - `~/.claude/skills/ascentiz-blog-writer/SKILL.md`
 - `~/.codex/skills/ascentiz-blog-writer/SKILL.md`
 - `~/.gemini/config/skills/ascentiz-blog-writer/SKILL.md`
-- `~/Documents/Simon's Vault/Codex记忆/agent/skill-candidates/ascentiz-blog-writer-示范案例需通过本文判据.md`
+- `~/Documents/Example-Vault/memory/draft/samples/sample-note.md`
 
 公开安装的独立模拟目录：
 

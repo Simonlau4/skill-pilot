@@ -32,8 +32,8 @@
 
 ## 运行与测试
 
-- 当前维护环境的开发验收解释器固定为 `/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`（`python3` 指向 Codex 运行时，可能变化；系统 3.9 没有 `tomllib`）。这只是本机测试入口，不得作为产品安装、启动或更新的固定前提；其他用户按公开的 Python 版本要求选择可用解释器。只用标准库。
-- 全量测试：`PYTHONDONTWRITEBYTECODE=1 <上面的解释器> -m unittest discover -q`（约 40 秒）。前端改动后另跑 `node --check skill_pilot/web/static/app.js`。
+- 开发验收使用 Python 3.11.4 以上（系统自带的旧版本可能没有 `tomllib`）。不得把某一台电脑上的解释器位置写死；其他用户按这个版本要求选择可用解释器。只用标准库。
+- 全量测试：`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -q`（约 40 秒）。前端改动后另跑 `node --check skill_pilot/web/static/app.js`。
 - 启动器与命令行入口：`sh scripts/build-app.sh` 生成 `~/Applications/Skill Pilot.app` 和 `~/.local/bin/skill-pilot`。
 - 代码量检查：`find skill_pilot -name "*.py" -o -name "*.js" -o -name "*.html" | xargs wc -l`。
 
@@ -52,6 +52,13 @@
 | `docs/dependency-decisions.json` | 技能依赖判定表（依赖只来自这里和看板手动加减） |
 | `docs/source-attribution.md` | 来源归属表（“自制”不检查更新） |
 
-## Git
+## Git 与 PR 流程
 
-本仓库连接 GitHub 公开仓库 [Simonlau4/skill-pilot](https://github.com/Simonlau4/skill-pilot)。只在用户要求时提交或推送，只暂存本次相关文件；本机技能库、设置和密钥不上传。
+本仓库连接 GitHub 公开仓库 [Simonlau4/skill-pilot](https://github.com/Simonlau4/skill-pilot)。2026-10-16 用户确认：**所有改动都走 PR，任何 agent 不直接推送 main。**
+
+- **一个 issue 一个分支**：本机的 Codex、DSH、Claude 和云端 agent 都在自己的分支上工作，分支名为 `负责人/issue-编号-简述`，如 `cloud/issue-4-favicon`、`codex/issue-8-local-update`。没有对应 issue 的改动先开 issue。
+- **先认领再动手**：以 issue 上的 `owner:` 标签为准。同一块文件区域（如 `web/server.py`、`web/static/`、`updates.py`）同一时间只交给一个 agent；要改别人正在做的区域，先在 issue 里说明并等对方合并。issue 里写明先后顺序的，按顺序做。
+- **开 PR 前先跟上 main**：基于最新的 main 变基，跑全量测试（前端改动另跑页面脚本检查），再开 PR。PR 说明用中文大白话写改了什么、怎么验收，并写 `Closes #编号`。
+- **审查与合并**：PR 由“SP 测试与审查”审查；只有用户本人批准后才能合并。agent 不自行合并，也不改写已推送的历史。
+- **不泄露本机信息**：提交使用 GitHub 隐私邮箱（`用户名@users.noreply.github.com` 形式），不用本机用户名或电脑名；代码、文档、PR 说明里不写本机绝对路径、个人目录或用户名。本机技能库、设置和密钥不上传。
+- 推送自己的分支和开 PR 可按 issue 进行；合并仍须用户批准。只暂存本次相关文件。

@@ -44,7 +44,7 @@ Claude 查到的原因：
 
 ## 验收
 
-1. 全量测试通过：`PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`。
+1. 全量测试通过：`PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`。
 2. 写报告 `docs/install-flow-report.md`：改了什么、lemo-opuscar 前后读取秒数、新增测试、代码行数变化、没做或有疑问的地方。
 
 ## 边界

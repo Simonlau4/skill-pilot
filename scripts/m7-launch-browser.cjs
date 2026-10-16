@@ -1,6 +1,6 @@
 // Controlled browser used only for the launcher acceptance; its profile is disposable.
 const fs=require('node:fs');
-const {chromium}=require('/Users/j/.npm/_npx/31e32ef8478fbf80/node_modules/playwright');
+const {chromium}=require(require('path').join(process.env.HOME,'.npm/_npx/31e32ef8478fbf80/node_modules/playwright'));
 (async()=>{
  const root=process.env.M7_BROWSER_RUNTIME;
  if(!root || !root.startsWith('/private/var/folders/')) throw new Error('需要系统临时目录');

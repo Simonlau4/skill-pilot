@@ -119,7 +119,7 @@ v3/v4 中观察到相同 session 的历史调用重复，不能把 35 当作去�
 
 ## S4 lark-cli 更新写入范围
 
-当前 canonical `/Users/j/.local/bin/lark-cli` 对应 `@larksuite/cli` 1.0.97。本轮只运行 `update --check --json`：exit=0、already_up_to_date、CLI current/latest=1.0.97、skills current/target=1.0.97、in_sync=true、layout=separate、official=28。真实目录前后指纹未变。
+当前 canonical `~/.local/bin/lark-cli` 对应 `@larksuite/cli` 1.0.97。本轮只运行 `update --check --json`：exit=0、already_up_to_date、CLI current/latest=1.0.97、skills current/target=1.0.97、in_sync=true、layout=separate、official=28。真实目录前后指纹未变。
 
 源码依据固定到安装版本：[update.go](https://github.com/larksuite/cli/blob/v1.0.97/cmd/update/update.go)、[updater.go](https://github.com/larksuite/cli/blob/v1.0.97/internal/selfupdate/updater.go)、[sync.go](https://github.com/larksuite/cli/blob/v1.0.97/internal/skillscheck/sync.go)、[layout.go](https://github.com/larksuite/cli/blob/v1.0.97/internal/skillscheck/layout.go)。
 
@@ -155,7 +155,7 @@ gzh-design 不同文件为 SKILL.md、assets/preview-template.html、5 个主题
 
 ## S7 绝对路径引用
 
-清单见 [path-references.md](path-references.md)。扫描技能目录（跟随兼容链接）、Vault、AI-Workbench 的 docs/tools/scripts，以及 Codex AGENTS.md、Claude CLAUDE.md；排除依赖、版本库和会话 JSONL。仅输出文件路径与被引用技能名，不保存私人正文。
+清单见 [path-references.md](path-references.md)。扫描技能目录（跟随兼容链接）、Example-Vault、Example-Notes 的 notes/samples/extras，以及 Codex AGENTS.md、Claude CLAUDE.md；排除依赖、版本库和会话 JSONL。仅输出文件路径与被引用技能名，不保存私人正文。
 
 命中 87 个文件；按路径族为 `.codex/skills` 55、`.agents/skills` 21、`.claude/skills` 37，三个集合相互重叠。与 PLAN 粗查 47/16/29 的差异来自跟随链接后覆盖各逻辑入口，以及当前完整目录范围；不是 113 个独立文件。唯一扫描警告是已知 doc 断链。
 

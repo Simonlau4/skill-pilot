@@ -69,6 +69,10 @@ def main():
     watching.add_argument('--mode', choices=['all', 'description', 'off'], required=True)
     watching.add_argument('--yes', action='store_true')
     watching.add_argument('--json', action='store_true')
+    extras = commands.add_parser('extra-sources', help='查看或记下主目录里另外放着技能的文件夹')
+    extras.add_argument('folder', nargs='?')
+    extras.add_argument('--remove', action='store_true', help='不再额外查看这个文件夹')
+    extras.add_argument('--json', action='store_true')
     checking = commands.add_parser('check-updates', help='只读检查技能更新')
     checking.add_argument('--json', action='store_true')
     updating = commands.add_parser('update', help='核对并更新选中的技能')
@@ -106,6 +110,30 @@ def main():
     def fail(error):
         print(json.dumps({'error': str(error)}, ensure_ascii=False) if args.json else str(error))
         raise SystemExit(1)
+
+    def attempt(work):
+        try:
+            result = work()
+            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            fail(error)
+    if args.command == 'extra-sources':
+        from .extra_sources import add, ensure, paths, remove
+        home = target_home()
+        try:
+            ensure(home)
+            if args.remove and not args.folder:
+                raise ValueError('请填写要不再查看的文件夹。')
+            if args.folder:
+                message = remove(home, args.folder) if args.remove else add(home, args.folder)
+            else:
+                listed = paths(home)
+                message = '还没有额外的技能源。' if not listed else '额外查看这些文件夹：\n' + '\n'.join(listed)
+            result = {'message': message, 'paths': paths(home)}
+            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
+        except (ValueError, OSError) as error:
+            fail(error)
+        return
     if args.command in {'export-config', 'import-config'}:
         from . import sharing
         try:
@@ -168,37 +196,28 @@ def main():
         except (ValueError,OSError,KeyError,TypeError) as error:
             fail(error)
     if args.command == 'update-local':
-        try:
-            result = operations.update_local(args.skill, args.folder, confirmed=args.yes)
-            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
-            return
-        except (ValueError, OSError, KeyError, TypeError) as error:
-            fail(error)
+        attempt(lambda: operations.update_local(args.skill, args.folder, confirmed=args.yes))
+        return
     if args.command == 'add-agent':
         from . import agents as agent_management
-        try:
+        def work():
             request = [{'name': args.name, 'skill_root': args.folder}]
             plan = agent_management.preview_join(request)
             if args.yes:
-                result = agent_management.join(request, plan['plan_id'])
-            else:
-                count = len(plan['skills'])
-                result = {'message': f'将接入「{args.name}」，会登记 {count} 个技能。请核对后加 --yes 执行。',
-                          'agents': plan['agents'], 'skills': [skill['name'] for skill in plan['skills']]}
-            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
-            return
-        except (ValueError, OSError, KeyError, TypeError) as error:
-            fail(error)
+                return agent_management.join(request, plan['plan_id'])
+            count = len(plan['skills'])
+            return {'message': f'将接入「{args.name}」，会登记 {count} 个技能。请核对后加 --yes 执行。',
+                    'agents': plan['agents'], 'skills': [skill['name'] for skill in plan['skills']]}
+        attempt(work)
+        return
     if args.command == 'watch-updates':
         from . import updates
-        try:
+        def work():
             if not args.yes:
                 raise ValueError('请先确认，再加 --yes 保存这个提醒方式。')
-            result = updates.set_watch(args.skill, args.mode, confirmed=True)
-            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else result['message'])
-            return
-        except (ValueError, OSError, KeyError, TypeError) as error:
-            fail(error)
+            return updates.set_watch(args.skill, args.mode, confirmed=True)
+        attempt(work)
+        return
     if args.command in {'check-updates', 'update'}:
         from . import updates
         review = None

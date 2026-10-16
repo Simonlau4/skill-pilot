@@ -47,6 +47,6 @@ class SourceTests(unittest.TestCase):
     def test_external_link_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             path=Path(temporary)
-            (path/'outside').symlink_to('/Users/j/.codex/config.toml')
+            (path/'outside').symlink_to('/etc/hosts')
             with self.assertRaisesRegex(ValueError,'文件夹外'):
                 github.safe_skill(path)

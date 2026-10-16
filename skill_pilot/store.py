@@ -19,8 +19,6 @@ from .scan import SKIP_CONTENT, content_digest, scan_root
 from .sync import reconcile, visibility
 
 PROJECT = Path(__file__).resolve().parents[1]
-EXTRA_SOURCES = ["Documents/AI-Workbench/skills/" + n for n in
-                 ("simon-neat", "agency-router", "marketing-router")]
 
 
 def target_home():
@@ -78,23 +76,25 @@ def physical_state(path, include_times=False):
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()
 
 
+def git_object(kind, payload):
+    return hashlib.sha1(kind.encode() + b" " + str(len(payload)).encode() + b"\0" + payload).digest()
+
+
 def git_tree(path):
     """Compute git objects in memory; never create a repository in a source."""
-    def obj(kind, payload):
-        return hashlib.sha1(kind.encode() + b" " + str(len(payload)).encode() + b"\0" + payload).digest()
     entries = []
     for child in path.iterdir():
         if child.name in SKIP_CONTENT:
             continue
         if child.is_symlink():
-            mode, digest, suffix = "120000", obj("blob", os.fsencode(os.readlink(child))), ""
+            mode, digest, suffix = "120000", git_object("blob", os.fsencode(os.readlink(child))), ""
         elif child.is_dir():
             mode, digest, suffix = "40000", bytes.fromhex(git_tree(child)), "/"
         else:
             mode = "100755" if child.stat().st_mode & 0o111 else "100644"
-            digest, suffix = obj("blob", child.read_bytes()), ""
+            digest, suffix = git_object("blob", child.read_bytes()), ""
         entries.append((os.fsencode(child.name + suffix), mode.encode() + b" " + os.fsencode(child.name) + b"\0" + digest))
-    return obj("tree", b"".join(value for _, value in sorted(entries))).hex()
+    return git_object("tree", b"".join(value for _, value in sorted(entries))).hex()
 
 
 def attribution():
@@ -155,9 +155,13 @@ def preview(home=None, agent_ids=None):
                 raise ValueError("有技能名称不能安全用作文件夹名称，请先核对。")
             grouped[name].append(skill)
             entries[name].append(str(Path(skill["path"]).relative_to(home)))
-    for relative in EXTRA_SOURCES:
-        state[relative] = physical_state(home / relative)
-        for skill in scan_root(home / relative)["skills"]:
+    from .extra_sources import paths as extra_source_paths
+    for relative in extra_source_paths(home):
+        folder = home / relative
+        if not folder.is_dir():
+            continue
+        state[relative] = physical_state(folder)
+        for skill in scan_root(folder)["skills"]:
             if skill["valid"] and skill["name"] in grouped:
                 grouped[skill["name"]].append(skill)
     state['configs'] = {r: physical_state(home / r) for r in profiles.config_paths(home, selected)}

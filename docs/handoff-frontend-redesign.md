@@ -4,7 +4,7 @@
 
 ## 0. 工作位置与边界
 
-- 你在 git worktree `/Users/j/Developer/skill-pilot-frontend`（分支 `frontend-redesign`）里工作，沙箱只允许写这个目录和系统临时目录。用户双击打开的真实看板跑的是 `/Users/j/Developer/skill-pilot`（main），不要去碰。
+- 你在 git worktree `~/Developer/skill-pilot-frontend`（分支 `frontend-redesign`）里工作，沙箱只允许写这个目录和系统临时目录。用户双击打开的真实看板跑的是 `~/Developer/skill-pilot`（main），不要去碰。
 - **不提交、不切分支、不改 git 配置**。改动留在工作区，主控会审阅后决定合并。
 - 不运行 `scripts/build-app.sh`、`skill-pilot` 命令行、`lark-cli update`、`npx skills`，不执行任何技能目录里的脚本。
 - 不对真实 home 运行本工具。需要看页面时，按 §6 用模拟 home。
@@ -97,8 +97,8 @@
 
 参考两份本机技能，**直接读文件，不要通过技能管理改分配**：
 
-- `/Users/j/.skill-pilot/store/redesign-existing-projects/SKILL.md`：按它的“扫描 → 诊断 → 修复”顺序做，先对现有页面列出问题清单（写进报告），再改。重点用它的 Typography、Interactivity and States、Content、Code Quality 几节和 Fix Priority。
-- `/Users/j/.skill-pilot/store/minimalist-ui/SKILL.md`：用它的色板和组件规则（暖白底、1px 浅边框、灰阶文字、单一深色主按钮、低饱和状态色、几乎不用阴影、不用渐变和表情符号）。
+- `~/.skill-pilot/store/redesign-existing-projects/SKILL.md`：按它的“扫描 → 诊断 → 修复”顺序做，先对现有页面列出问题清单（写进报告），再改。重点用它的 Typography、Interactivity and States、Content、Code Quality 几节和 Fix Priority。
+- `~/.skill-pilot/store/minimalist-ui/SKILL.md`：用它的色板和组件规则（暖白底、1px 浅边框、灰阶文字、单一深色主按钮、低饱和状态色、几乎不用阴影、不用渐变和表情符号）。
 
 这两份是给营销网站写的，下面这些**不要照做**：外部字体（Geist、Newsreader 等）、图标库（Phosphor、Lucide 等）、picsum 之类的占位图、背景图片、噪点纹理、玻璃效果、滚动入场动画、错位叠放布局、衬线大标题。这是本机工具，要克制。
 
@@ -116,12 +116,12 @@
 
 ## 6. 验证（全部做完再交）
 
-1. 全量测试：`PYTHONDONTWRITEBYTECODE=1 /Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`，必须全过。bash 工具单次 60 秒超时，全量约 40 秒；如超时，用后台任务跑，或按模块分批跑。
-2. `/Users/j/.nvm/versions/node/v24.21.0/bin/node --check skill_pilot/web/static/app.js`。
+1. 全量测试：`PYTHONDONTWRITEBYTECODE=1 ~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11 -m unittest discover -q`，必须全过。bash 工具单次 60 秒超时，全量约 40 秒；如超时，用后台任务跑，或按模块分批跑。
+2. `~/.nvm/versions/node/v24.21.0/bin/node --check skill_pilot/web/static/app.js`。
 3. 静态检查（用 grep 自证，结果写进报告）：`app.js` 无 `confirm(`、`alert(`、`prompt(`；三个静态文件无 `http://`、`https://` 外部地址；`index.html` 无 `<style` 和 `style=`。
 4. 冒烟：用模拟 home 启动看板并请求页面：
    ```sh
-   PY=/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
+   PY=~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11
    FAKE=$($PY -c "import tempfile;print(tempfile.mkdtemp(prefix='sp-dsh-'))")
    PYTHONDONTWRITEBYTECODE=1 $PY scripts/make-fake-home.py "$FAKE"
    SKILL_PILOT_HOME="$FAKE" BROWSER=true PYTHONDONTWRITEBYTECODE=1 $PY -m skill_pilot ui --json   # 放后台

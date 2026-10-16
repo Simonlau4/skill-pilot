@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
-from skill_pilot.store import EXTRA_SOURCES, apply, check_links, guard, physical_state, preview
+from skill_pilot.extra_sources import paths as extra_source_paths
+from skill_pilot.store import apply, check_links, guard, physical_state, preview
 from skill_pilot.sync import reconcile, visibility
 
 
@@ -22,7 +23,7 @@ def verify(home):
            "CODEX_HOME": str(home / ".codex"), "XDG_CONFIG_HOME": str(home / ".config"),
            "XDG_CACHE_HOME": str(home / ".cache"), "XDG_STATE_HOME": str(home / ".state")}
     roots = [".codex/skills", ".agents/skills", ".claude/skills", ".gemini/config/skills", ".dsh/skills",
-             ".codex/config.toml", ".agents/.skill-lock.json", *EXTRA_SOURCES,
+             ".codex/config.toml", ".agents/.skill-lock.json", *extra_source_paths(home),
              "Developer/vendor/stop-that-shit-local/skills/stss", ".skill-pilot-fixture.json"]
     def fingerprints():
         return {r: physical_state(home / r) for r in roots}

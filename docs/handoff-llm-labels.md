@@ -4,11 +4,11 @@
 
 ## 0. 工作位置与边界
 
-- 你在 git worktree `/Users/j/Developer/skill-pilot-llm-labels`（分支 `llm-labels`）里工作，沙箱只允许写这个目录和系统临时目录。用户双击打开的真实看板跑的是 `/Users/j/Developer/skill-pilot`（main），不要去碰。
+- 你在 git worktree `~/Developer/skill-pilot-llm-labels`（分支 `llm-labels`）里工作，沙箱只允许写这个目录和系统临时目录。用户双击打开的真实看板跑的是 `~/Developer/skill-pilot`（main），不要去碰。
 - 工作区里**已暂存（staged）的改动是主控做好的基础**（技能页分组、中文名显示、`docs/skill-labels.json`），在它上面继续改。**不要 `git add`、`commit`、`reset`、`checkout`、`stash`，不切分支、不改 git 配置**；你的改动留在未暂存状态，主控用 `git diff` 审阅。
 - 不对真实 home 运行本工具，不读写 `~/.skill-pilot/`，不运行 `scripts/build-app.sh`、`skill-pilot` 命令行、`lark-cli update`、`npx skills`，不执行任何技能目录里的脚本。手测只用 `scripts/make-fake-home.py` 生成的模拟 home（见 §6）。
 - 不调用任何真实的 AI 服务（没有 key，也不该有）。测试和手测用本机 127.0.0.1 上的假服务。
-- 只用标准库。解释器：`/Users/j/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`。
+- 只用标准库。解释器：`~/.local/share/uv/python/cpython-3.11-macos-aarch64-none/bin/python3.11`。
 
 ## 1. 背景与目标
 

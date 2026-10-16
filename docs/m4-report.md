@@ -90,7 +90,7 @@
 | Python 语法与空白 | 逐文件 AST 解析、`git diff --no-index --check /dev/null <文件>` | 通过；零空白问题，未遗漏未跟踪文件 |
 | 真实 Codex 样例 | `PYTHONDONTWRITEBYTECODE=1 python3 scripts/verify-m4-codex.py` | 解释一次、合并一次；双方改动都保留，确认前无写入，撤销精确恢复 |
 | 真实只读检查 | `PYTHONDONTWRITEBYTECODE=1 python3 -m skill_pilot check-updates --json > work/real-update-check.json` | 17 个更新；退出 1 是因为 interview-skills 的来源位置未确认，完整结果已产出 |
-| 飞书当前版本 | `/Users/j/.local/bin/lark-cli update --check --json` | `already_up_to_date`，工具 `1.0.97`，28 个技能与工具一致 |
+| 飞书当前版本 | `~/.local/bin/lark-cli update --check --json` | `already_up_to_date`，工具 `1.0.97`，28 个技能与工具一致 |
 | 项目状态 | `git status --short` | 项目仍为原来的未提交状态，没有提交或推送 |
 
 ### 逐项验收
