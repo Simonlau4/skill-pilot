@@ -231,6 +231,11 @@
 
   <!-- ========== 清理页 ========== -->
   <section id="page-cleanup" class="page-section" hidden>
+    <div id="cleanup-pending" hidden>
+      <p class="muted">还没整理过，整理后这里会列出可以清理的技能。</p>
+      <button id="cleanup-organize" class="link-btn" type="button">去技能页做首次整理</button>
+    </div>
+    <div id="cleanup-ready">
     <div class="toolbar">
       <input id="cleanup-search" type="search" class="input input-search" placeholder="搜技能的名字或用途" aria-label="搜索要撤下的技能" autocomplete="off" spellcheck="false">
       <span class="page-note">
@@ -258,6 +263,7 @@
       <button id="withdrawn-refresh" class="btn btn-small btn-quiet"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg><span>刷新</span></button>
     </div>
     <div id="withdrawn-list" class="list"></div>
+    </div>
   </section>
 
   <!-- ========== 设置页：左边目录固定，右边六块按顺序排下来；点目录滚过去，滚动时高亮跟着走 ========== -->

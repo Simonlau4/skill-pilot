@@ -38,7 +38,7 @@ def load(home=None):
     home = target_home() if home is None else Path(home).resolve()
     path = home / '.skill-pilot/registry.json'
     if not path.is_file():
-        raise ValueError('请先完成首次迁移，再管理技能分配。')
+        raise ValueError('请先完成首次整理，再管理技能分配。')
     registry = json.loads(path.read_text())
     catalog = profiles.by_id(home)
     agents = [p['id'] for p in profiles.managed(home)]

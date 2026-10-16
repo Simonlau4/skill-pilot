@@ -2898,6 +2898,14 @@ function cleanupRows() {
 
 function renderCleanup() {
   if (state.page !== 'cleanup') return;
+  // 还没整理过就没有可清理的名单。先说明，不去读，免得报错后两个列表一直停在“正在读取…”。
+  const pending = awaitingFirstOrganization();
+  $('cleanup-pending').hidden = !pending;
+  $('cleanup-ready').hidden = pending;
+  if (pending) {
+    hideActionBar();
+    return;
+  }
   const locked = Boolean(writeBusy) || !state.table?.write_allowed;
   // 已经不再分给任何 agent 的（比如刚在技能页撤掉了）不算选中。
   for (const name of [...state.cleanupSelected]) {
@@ -2949,6 +2957,14 @@ function renderCleanupActionBar() {
 }
 
 async function loadCleanup() {
+  if (!state.agentsView) {
+    try { await refreshAgents(); } catch { /* 没读到 agent 状态时，下面仍按清理名单的结果说明原因。 */ }
+  }
+  if (awaitingFirstOrganization()) {
+    state.cleanup = null;
+    renderCleanup();
+    return;
+  }
   try {
     state.cleanup = await api('/api/cleanup');
   } catch (error) {
@@ -3009,6 +3025,7 @@ $('cleanup-rows').addEventListener('click', event => {
 });
 
 $('withdrawn-refresh').addEventListener('click', event => withBusy(event.currentTarget, '正在刷新…', loadCleanup));
+$('cleanup-organize').addEventListener('click', () => showPage('skills'));
 
 $('withdrawn-list').addEventListener('click', async event => {
   const button = event.target.closest('button');
@@ -3227,8 +3244,12 @@ function migrationStep(step) {
 
 /* 还没整理过：技能页主区域显示首次整理，技能列表先收起来。
    整理过：引导不再出现，设置里的整理与还原留一句说明和已有备份。 */
+function awaitingFirstOrganization() {
+  return Boolean(state.agentsView) && !(state.agentsView.managed || []).length;
+}
+
 function renderFirstRun() {
-  const fresh = Boolean(state.agentsView) && !(state.agentsView.managed || []).length;
+  const fresh = awaitingFirstOrganization();
   $('first-run').hidden = !fresh;
   $('skills-split').hidden = fresh;
   return fresh;
@@ -3310,7 +3331,7 @@ $('migration-back').addEventListener('click', () => migrationStep('select'));
 
 /* 整理完：引导里的结果写一句，再刷新各区块，最后把引导收起来（技能页照常显示）。 */
 /* 整理完、或者还原到整理前：先刷新 agent 状态，按「有没有在管理的 agent」决定要不要读技能表。
-   还原以后还没有技能表，这里不能去读（否则会报「请先完成首次迁移」），技能页要回到首次整理。 */
+   还原以后还没有技能表，这里不能去读（否则会报「请先完成首次整理」），技能页要回到首次整理。 */
 async function finishMigration(title, result) {
   $('migration-result').textContent = title;
   $('migration-result-detail').textContent = result.message;
