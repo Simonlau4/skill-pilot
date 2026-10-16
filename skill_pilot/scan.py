@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import tomllib
 import unicodedata
 from collections import defaultdict
@@ -284,18 +283,13 @@ def discover(home, known_roots, errors, linked_roots=None):
 
 def scan(home=None, applications=None):
     home = Path(os.environ.get("SKILL_PILOT_HOME", Path.home())) if home is None else Path(home)
-    applications = [Path("/Applications"), home / "Applications"] if applications is None else applications
-    catalog = profiles.all_profiles(home)
+    catalog = profiles.all_profiles(home, applications)
     disabled = profiles.disabled(home)
     roots, agents, all_user_skills, errors = {}, [], [], []
     cache = {}
     for profile in catalog:
         detect = profile['detect']
-        evidence = [str(home / p) for p in detect["config_dirs"] if (home / p).exists()]
-        evidence += [str(base / app) for base in applications for app in detect["apps"] if (base / app).exists()]
-        cli = shutil.which(detect["cli"]) if home == Path.home() and detect['cli'] else None
-        if cli:
-            evidence.append(cli)
+        evidence = profiles.evidence(profile, home, applications)
         if not evidence:
             continue
         ids, readonly, visible, available, manual_only, excluded = [], [], {}, {}, set(), []
@@ -388,10 +382,12 @@ def suggestions(home, inventory=None):
     catalog = profiles.all_profiles(home)
     found = []
     for p in catalog:
-        if p['id'] not in unavailable and any((home / r).exists() for r in p['skill_roots']):
+        detected = any(a['id'] == p['id'] and a['status'] == 'profile_available' for a in inventory['agents'])
+        if (p['id'] not in unavailable and (detected or any((home / r).is_dir() for r in p['skill_roots']))
+                and all(not (home / r).exists() or (home / r).is_dir() for r in p['skill_roots'])):
             found.append({'id': p['id'], 'name': p['name'], 'skill_roots': p['skill_roots'],
                           'skill_count': sum(scan_root(home / r, p['nested'], excluded=profiles.exclusions(home / r, home))['valid_count'] for r in p['skill_roots']),
-                          'reason': '已知 agent 的技能目录已存在。'})
+                          'reason': '已识别到这个 agent，可以接入；还没有用户技能也能使用。'})
     known = {r for p in catalog for r in p['skill_roots']}
     candidates = list(inventory['candidates'])
     for path in inventory.get('discovered_skill_roots', []):

@@ -1,6 +1,6 @@
 # Skill Pilot · 本机技能管理
 
-统一管理本机多个 agent 的技能：每个技能只存一份，决定哪个 agent 能用哪些，按需检查上游更新，撤下不需要的。内置 Codex、Claude、Antigravity、DSH 的接入规则，也可在看板接入发现的其他 agent。
+统一管理本机多个 agent 的技能：每个技能只存一份，决定哪个 agent 能用哪些，按需检查上游更新，撤下不需要的。内置 Codex、Claude、Antigravity、DSH、Cursor、豆包工作和 WorkBuddy 的接入规则，也可在看板接入发现的其他 agent。
 
 ## 安装
 
@@ -17,6 +17,8 @@ sh scripts/build-app.sh
 也可下载并解压 GitHub 的源码 ZIP，在解压出的项目文件夹运行最后一条命令。安装器会识别当前用户可用的 Python 和工具位置，生成应用与命令行入口；用户名、项目位置和路径中的空格均可不同。若有多个 Python，可用 `SKILL_PILOT_PYTHON="/你的路径/python3" sh scripts/build-app.sh` 指定一个符合要求的版本。
 
 双击当前用户 `Applications` 文件夹里的 **Skill Pilot.app** 打开看板，按页面提示选择要接入的 agent、核对首次整理结果。项目文件夹需要保留；移动后在新位置重新运行安装命令。命令行可用 `~/.local/bin/skill-pilot`，或把 `~/.local/bin` 加入自己的命令搜索路径后用 `skill-pilot`。
+
+Cursor、豆包工作和 WorkBuddy 会按已安装应用或各自的应用数据识别，还没装过用户技能也会显示。首次使用在首页选择；已经整理过的用户到「设置 → agent」接入。应用放在系统或当前用户的 `Applications` 文件夹时可直接识别；放在其他位置时，先正常打开一次该应用，让它建立应用数据，再打开或刷新 SP。内置技能、市场、插件和连接器只查看；豆包工作使用桌面应用数据中的用户技能目录。目录依据与验证范围见 [agent 识别说明](docs/agent-discovery-report.md)。
 
 已有飞书工具会自动识别。新用户先按官方说明安装并用自己的账号授权；若要将工具装在当前用户目录，可执行：
 

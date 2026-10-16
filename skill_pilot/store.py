@@ -128,11 +128,12 @@ def preview(home=None, agent_ids=None):
         from .agents import preview_join
         return preview_join(agent_ids or [], home)
     catalog = profiles.all_profiles(home)
-    selected = sorted(p["id"] for p in profiles.PROFILES) if agent_ids is None else sorted(set(agent_ids))
+    selected = (sorted(p['id'] for p in catalog if p in profiles.PROFILES or profiles.evidence(p, home))
+                if agent_ids is None else sorted(set(agent_ids)))
     known = {p["id"] for p in catalog}
     if not selected or not set(selected) <= known:
         raise ValueError("请至少选择一个有接入档案的 agent。")
-    profiles.require_shared(selected, catalog)
+    profiles.require_shared(selected, catalog, home=home)
     before = visibility(home)
     lock_path = home / ".agents/.skill-lock.json"
     lock = json.loads(lock_path.read_text()).get("skills", {}) if lock_path.exists() else {}
@@ -224,7 +225,7 @@ def preview(home=None, agent_ids=None):
             "conflicts": [s for s in skills if len(s["options"]) > 1], "before": before, "after": after,
             "roots": roots, "skipped": skipped, "read_only": True,
             "write_allowed": write_allowed(home), 'agent_catalog': catalog,
-            'must_select_together': profiles.shared_groups(catalog)}
+            'must_select_together': profiles.shared_groups(catalog, home)}
 
 
 def remove(path, checked):
@@ -394,10 +395,11 @@ def apply(plan_id, home=None, agent_ids=None, choices=None, sources=None):
             write_json(home / ".skill-pilot/agents.json", {**profiles.state(home), 'onboarded': plan['agents']}, checked)
             changed = reconcile(registry, home, checked)
             store = checked(home / ".skill-pilot/store")
+            store.mkdir(parents=True, exist_ok=True)
             env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
             env.update(HOME=str(home), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
             for arguments in (["init", "-q"], ["add", "."],
-                              ["-c", "user.name=Skill Pilot", "-c", "user.email=local@skill-pilot.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "首次收进统一仓库"]):
+                              ["-c", "user.name=Skill Pilot", "-c", "user.email=local@skill-pilot.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "首次收进统一仓库"]):
                 subprocess.run(["git", "-C", str(store), *arguments], env=env, check=True, capture_output=True)
             after = visibility(home)
             for agent, original in plan["before"].items():

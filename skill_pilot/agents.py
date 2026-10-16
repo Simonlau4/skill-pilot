@@ -22,14 +22,15 @@ def overview(home=None):
                 'skill_count': sum(scan_root(home / r, p['nested'], excluded=profiles.exclusions(home / r, home))['valid_count'] for r in p['skill_roots']),
                 'reason': '你之前选了忽略或不再管理。'} for p in catalog
                if p['id'] in local.get('ignored', []) and p['id'] not in local['onboarded'] and
-               any((home / r).is_dir() for r in p['skill_roots'])]
+               (profiles.evidence(p, home) or any((home / r).is_dir() for r in p['skill_roots'])) and
+               all(not (home / r).exists() or (home / r).is_dir() for r in p['skill_roots'])]
     return {'revision': operations.revision(home, local['onboarded']) if (home / '.skill-pilot/registry.json').is_file() else None,
             'managed': [{'id': p['id'], 'name': p['name'], 'skill_roots': p['skill_roots'],
                          'activation_text': profiles.activation_text(p),
                          'shared_with': [q['id'] for q in managed if q != p and set(q['skill_roots']) & set(p['skill_roots'])],
                          'can_leave': len(managed) > 1} for p in managed],
             'suggested': suggestions(home), 'ignored': ignored,
-            'must_select_together': profiles.shared_groups(catalog)}
+            'must_select_together': profiles.shared_groups(catalog, home)}
 
 
 def _root(value, home):
@@ -86,7 +87,7 @@ def _selection(requests, home):
         if p['id'] not in known:
             catalog.append(p)
             known[p['id']] = p
-    profiles.require_shared([p['id'] for p in selected], catalog, local['onboarded'])
+    profiles.require_shared([p['id'] for p in selected], catalog, local['onboarded'], home)
     return selected, catalog
 
 
@@ -135,7 +136,7 @@ def preview_join(requests, home=None):
     return {'plan_id': hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(), 'revision': rev,
             'agents': ids, 'profiles': selected, 'skills': skills, 'conflicts': [s for s in skills if len(s['options']) > 1],
             'skipped': skipped, 'roots': roots, 'before': before,
-            'must_select_together': profiles.shared_groups(catalog), 'read_only': True}
+            'must_select_together': profiles.shared_groups(catalog, home), 'read_only': True}
 
 
 def join(requests, plan_id, expected=None, choices=None, home=None):
@@ -160,7 +161,7 @@ def join(requests, plan_id, expected=None, choices=None, home=None):
     def mutate(current_registry, checked):
         local = profiles.state(home)
         custom = list(local.get('custom', []))
-        builtin = {p['id'] for p in profiles.PROFILES}
+        builtin = {p['id'] for p in profiles.PROFILES + profiles.ADDITIONAL_PROFILES}
         for p in plan['profiles']:
             if p['id'] not in builtin | {q['id'] for q in custom}:
                 custom.append(p)

@@ -149,6 +149,70 @@
       "activation_note": "目录改变后会动态刷新"
     }
   ],
+  "additional_profiles": [
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "skill_roots": [".cursor/skills", ".agents/skills"],
+      "readonly_roots": [[".cursor/skills-cursor", "builtin"], [".cursor/plugins", "plugin"]],
+      "visibility_note": "盘点用户技能和共享目录；内置与插件另列，软件内的独立开关未核验。",
+      "detect": {
+        "config_dirs": [".cursor", "Library/Application Support/Cursor"],
+        "apps": ["Cursor.app"],
+        "cli": "cursor"
+      },
+      "link_root": ".cursor/skills",
+      "nested": true,
+      "manual_only": ["disable-model-invocation"],
+      "disable": null,
+      "disable_note": "软件内的独立开关未核验",
+      "activation": "new_session",
+      "activation_note": "新会话生效"
+    },
+    {
+      "id": "doubaowork",
+      "name": "豆包工作",
+      "skill_roots": ["Library/Application Support/DoubaoWork/Default/.doubaowork/agent_mode/workspace/.user_skills"],
+      "readonly_roots": [["Library/Application Support/DoubaoWork/Default/.doubaowork/agent_mode/workspace/.skills", "builtin"]],
+      "visibility_note": "盘点桌面应用的用户技能目录；预装技能只读，独立开关未核验。",
+      "detect": {
+        "config_dirs": ["Library/Application Support/DoubaoWork"],
+        "apps": ["DoubaoWork.app", "豆包工作.app"],
+        "cli": null
+      },
+      "link_root": "Library/Application Support/DoubaoWork/Default/.doubaowork/agent_mode/workspace/.user_skills",
+      "nested": false,
+      "manual_only": [],
+      "disable": null,
+      "disable_note": "没有已核验的独立停用设置",
+      "activation": "new_session",
+      "activation_note": "新会话生效"
+    },
+    {
+      "id": "workbuddy",
+      "name": "WorkBuddy",
+      "skill_roots": [".workbuddy/skills"],
+      "readonly_roots": [
+        [".workbuddy/skills-marketplace", "plugin_cache"],
+        [".workbuddy/plugins", "plugin"],
+        [".workbuddy/connectors-marketplace", "plugin_cache"],
+        [".workbuddy/connectors", "plugin"]
+      ],
+      "visibility_note": "盘点用户技能目录；市场、插件和连接器只读，软件内的独立开关未核验。",
+      "detect": {
+        "config_dirs": [".workbuddy", "Library/Application Support/WorkBuddy"],
+        "apps": ["WorkBuddy.app"],
+        "cli": null
+      },
+      "link_root": ".workbuddy/skills",
+      "nested": false,
+      "manual_only": ["disable-model-invocation"],
+      "disable": null,
+      "disable_note": "软件内的独立开关未核验",
+      "activation": "new_session",
+      "activation_note": "新会话生效"
+    }
+  ],
   "default_ignored": [
     "kimi"
   ],

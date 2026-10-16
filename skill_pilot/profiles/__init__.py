@@ -1,11 +1,30 @@
 """Assistant behavior comes from the catalog and backward-compatible local data."""
 import importlib
 import json
+import os
+import pwd
 import re
+import shutil
 from pathlib import Path
 
 CATALOG = json.loads(Path(__file__).with_name('catalog.json').read_text())
 PROFILES = CATALOG['profiles']
+ADDITIONAL_PROFILES = CATALOG['additional_profiles']
+
+
+def evidence(profile, home, applications=None):
+    home = Path(home).resolve()
+    real_user = home == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    if applications is None:
+        applications = ([Path('/Applications')] if real_user else []) + [home / 'Applications']
+    detect = profile['detect']
+    found = [str(home / r) for r in detect['config_dirs'] if (home / r).is_dir()]
+    found += [str(Path(base) / app) for base in applications for app in detect['apps']
+              if (Path(base) / app).is_dir()]
+    cli = shutil.which(detect['cli']) if real_user and detect['cli'] else None
+    if cli:
+        found.append(cli)
+    return found
 
 
 def state(home):
@@ -24,7 +43,7 @@ def validate(profile):
     paths += profile.get('detect', {}).get('config_dirs', [])
     if any(not r or Path(r).is_absolute() or '..' in Path(r).parts for r in paths):
         raise ValueError('agent 目录必须位于主目录内。')
-    protected = [r for p in PROFILES for r, _ in p['readonly_roots']]
+    protected = [r for p in PROFILES + ADDITIONAL_PROFILES for r, _ in p['readonly_roots']]
     protected += [r for r, category in CATALOG['classified_roots'] if category != 'ignored']
     if any(Path(r) == Path('.') or Path(r).is_relative_to('.skill-pilot') or
            any(Path(r).is_relative_to(p) for p in protected) for r in roots):
@@ -39,9 +58,15 @@ def validate(profile):
     return profile
 
 
-def all_profiles(home=None):
-    profiles = list(PROFILES)
-    for profile in state(home).get('custom', []) if home is not None else []:
+def all_profiles(home=None, applications=None):
+    local = state(home) if home is not None else {}
+    custom = local.get('custom', [])
+    # A previously enrolled agent keeps its saved roots and behavior.
+    saved = set(local.get('onboarded', [])) | set(local.get('ignored', []))
+    profiles = list(PROFILES) + [p for p in ADDITIONAL_PROFILES
+                                if p['id'] not in {c['id'] for c in custom} and
+                                (home is None or p['id'] in saved or evidence(p, home, applications))]
+    for profile in custom:
         validate(profile)
         if profile['id'] in {p['id'] for p in profiles}:
             raise ValueError('agent 编号重复，请核对档案。')
@@ -115,7 +140,10 @@ def manual_only(skill, profile):
     return bool(set(skill.get('manual_markers', [])) & set(profile['manual_only']))
 
 
-def shared_groups(profiles):
+def shared_groups(profiles, home=None):
+    if home is not None:
+        onboarded = state(home)['onboarded']
+        profiles = [p for p in profiles if p['id'] in onboarded or evidence(p, home)]
     groups = []
     for root in sorted({r for p in profiles for r in p['skill_roots']}):
         ids = [p['id'] for p in profiles if root in p['skill_roots']]
@@ -124,7 +152,9 @@ def shared_groups(profiles):
     return groups
 
 
-def require_shared(selected, profiles, already=()):
+def require_shared(selected, profiles, already=(), home=None):
+    if home is not None:
+        profiles = [p for p in profiles if p['id'] in set(selected) | set(already) or evidence(p, home)]
     for group in shared_groups(profiles):
         if set(group) & set(selected) and not set(group) <= set(selected) | set(already):
             names = ' 和 '.join(p['name'] for p in profiles if p['id'] in group)
