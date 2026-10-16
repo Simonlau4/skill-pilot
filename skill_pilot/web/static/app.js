@@ -294,7 +294,7 @@ const WRITE_LOCK_SELECTORS = [
   '#install-url', '#install-rail button:not(.hint)',
   '#cleanup-rows input[data-cleanup]', '#withdrawn-list button', '#withdrawn-refresh',
   '#updates-check', '#updates-all',
-  '#program-check', '#program-apply', '#program-refresh',
+  '#program-check', '#program-apply', '#program-refresh', '#rail-notes button',
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
   '#log-list button', '#log-refresh', '#detail-body button:not(.hint)', '#detail-body select',
   '#new-absorb', '#new-toggle', '#install-dialog button:not(.hint)',
@@ -796,18 +796,59 @@ function pickAgent(id) {
   renderInstallRail();   // 「全部装给」按钮上的 agent 名跟着换
 }
 
-/* 左栏下面的提醒：发现新 agent。只给一个去处，不在这里直接改东西。 */
+/* 左栏的 SP 新版提醒：和「设置 → 版本」共用同一份 programUpdate，
+   在哪边升级两边都跟着变。已是最新、还没查到、正在检查、只读预览时都不出这张卡片。 */
+function railUpdateNote() {
+  const progress = programUpdate;
+  if (!progress.write_allowed) return '';
+  const lock = writeBusy ? ' disabled' : '';
+  const button = (action, label) => `<button class="btn btn-small btn-primary" data-program-rail="${action}"${lock}>${label}</button>`;
+  if (progress.phase === 'ready') {
+    return `<div class="rail-note">
+      <p class="rail-note-title">${icon('check-circle')}<strong>升级好了</strong></p>
+      <div class="rail-note-row"><small>刷新页面就能用新版</small>${button('refresh', '刷新生效')}</div>
+    </div>`;
+  }
+  if (progress.running && progress.phase === 'apply') {
+    return `<div class="rail-note">
+      <p class="rail-note-title">${icon('update-up')}<strong>正在升级…</strong></p>
+      <div class="rail-note-row"><small>等当前操作完成后自动继续</small><button class="btn btn-small" disabled>升级</button></div>
+    </div>`;
+  }
+  if (progress.available) {
+    const latest = progress.latest ? new Date(progress.latest).toLocaleDateString('zh-CN') : '';
+    return `<div class="rail-note">
+      <p class="rail-note-title">${icon('update-up')}<strong>SP 有新版</strong></p>
+      <div class="rail-note-row">${latest ? `<small>新版 ${escape(latest)}</small>` : ''}${button('apply', '升级')}</div>
+    </div>`;
+  }
+  if (progress.phase === 'error' && programFailedAction === 'apply') {
+    return `<div class="rail-note">
+      <p class="rail-note-title">${icon('warning')}<strong>升级没完成</strong></p>
+      <div class="rail-note-row"><small>${escape(progress.error || '稍后再试一次')}</small>${button('apply', '升级')}</div>
+    </div>`;
+  }
+  return '';
+}
+
+/* 左栏下面的提醒：SP 有新版在最上面，然后是发现新 agent。只给去处，不在这里直接改技能。 */
+let railNotesHtml = null;
+
 function renderRailNotes() {
   const ignored = new Set((state.agentsView?.ignored || []).map(item => (item && typeof item === 'object') ? item.id : item));
   const suggested = (state.agentsView?.suggested || []).filter(item => !ignored.has(item.id));
-  const notes = suggested.map(item => `<div class="rail-note">
+  const notes = [railUpdateNote(), ...suggested.map(item => `<div class="rail-note">
       <p class="rail-note-title">${icon('plus')}<strong>发现新 agent：${escape(item.name)}</strong></p>
       <div class="rail-note-row">
         ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后，就能在这里和其他 agent 一起管它的技能。')}
         <button class="btn btn-small" data-goto="settings/agents">去接入…</button>
       </div>
-    </div>`);
-  $('rail-notes').innerHTML = notes.join('');
+    </div>`)];
+  const html = notes.filter(Boolean).join('');
+  // 内容没变就不重画：自动检查在跑时每 1.5 秒读一次，别把正在点的按钮换掉。
+  if (html === railNotesHtml) return;
+  railNotesHtml = html;
+  $('rail-notes').innerHTML = html;
 }
 
 /* 这个格子的说明：有草稿看预览给的 cell_notes，没草稿看表里带的。 */
@@ -1434,6 +1475,7 @@ async function refreshAgents() {
 
 let programUpdate = {running: false, phase: 'idle', available: false, write_allowed: false};
 let programActionRunning = false;
+let programFailedAction = '';   // 本次打开页面里哪一步没成；左栏据此决定要不要留「升级」让用户再试
 
 function renderProgram() {
   const progress = programUpdate;
@@ -1454,8 +1496,11 @@ function renderProgram() {
   $('program-apply').textContent = progress.phase === 'apply' ? '正在升级…' : '一键升级';
   $('program-refresh').hidden = progress.phase !== 'ready';
   $('program-refresh').disabled = Boolean(writeBusy);
-  if (progress.running && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: progress.message});
+  // 打开看板时的自动检查不占页头任务条（左栏照常提醒）；手动检查和升级照旧显示。
+  const quiet = progress.phase === 'check' && progress.automatic && !programActionRunning;
+  if (progress.running && !quiet && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: progress.message});
   else clearTask('self-update');
+  renderRailNotes();
 }
 
 async function refreshProgramUpdate() {
@@ -1470,11 +1515,13 @@ async function refreshProgramUpdate() {
 
 async function programAction(action) {
   if (programUpdate.running || writeBusy) return;
+  programFailedAction = '';
   programUpdate = {...programUpdate, running: true, phase: action, error: '',
     message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等当前操作完成…'};
   programActionRunning = true;
   renderProgram();
   const fail = error => {
+    programFailedAction = action;
     programUpdate = {...programUpdate, running: false, phase: 'error', available: false, error: error.message};
   };
   const work = async () => {
@@ -1504,6 +1551,13 @@ async function programAction(action) {
 $('program-check').addEventListener('click', () => programAction('check'));
 $('program-apply').addEventListener('click', () => programAction('apply'));
 $('program-refresh').addEventListener('click', () => location.reload());
+// 技能页左栏那张卡片上的按钮：升级走同一套流程，装好后刷新页面生效。
+$('rail-notes').addEventListener('click', event => {
+  const button = event.target.closest('[data-program-rail]');
+  if (!button) return;
+  if (button.dataset.programRail === 'refresh') location.reload();
+  else programAction('apply');
+});
 setInterval(() => { if (programUpdate.running && !programActionRunning) refreshProgramUpdate(); }, 1500);
 
 const LLM_DEFAULTS = {
@@ -3604,6 +3658,8 @@ async function start() {
   renderAgentSummary();
   renderSkillTable();
   renderTasks();
+  // 打开页面就读一次 SP 更新进度：有新版时左栏直接提醒，不用进设置里点。
+  refreshProgramUpdate();
   await refreshInventory();
   // 先问 /api/agents：还没整理过时，技能页要显示首次整理，不去读还没有的技能表。
   await refreshAgents().catch(() => {});
