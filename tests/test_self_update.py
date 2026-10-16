@@ -423,7 +423,10 @@ class SelfUpdateProcessTests(unittest.TestCase):
             self.fail('update process did not reach the expected state')
         initial = request('/api/status')
         until('/api/program/progress', lambda p: not p['running'])
-        before = store.physical_state(self.home / '.skill-pilot')
+        def saved_configuration():
+            return {p.name: store.physical_state(p) for p in (self.home / '.skill-pilot').iterdir()
+                    if p.name != 'agent-discovery.json' and not p.name.startswith('.agent-discovery-')}
+        before = saved_configuration()
         target = publish(self)
         request('/api/program/check', {})
         progress = until('/api/program/progress', lambda p: not p['running'])
@@ -439,7 +442,7 @@ class SelfUpdateProcessTests(unittest.TestCase):
         self.assertNotEqual(current['version'], initial['version'])
         self.assertEqual(request('/api/program/progress')['phase'], 'latest')
         self.assertEqual(request('/api/table')['home'], str(self.home))
-        self.assertEqual(before, store.physical_state(self.home / '.skill-pilot'))
+        self.assertEqual(before, saved_configuration())
         self.assertFalse(request('/api/runtime/refresh', {})['changed'])
         request('/api/program/check', {})
         self.assertFalse(until('/api/program/progress', lambda p: not p['running'])['available'])

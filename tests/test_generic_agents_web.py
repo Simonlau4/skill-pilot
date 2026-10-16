@@ -7,7 +7,7 @@ import urllib.request
 from unittest.mock import patch
 
 from tests import test_operations
-from skill_pilot import store
+from skill_pilot import store, agent_discovery
 from skill_pilot.web.server import Dashboard
 
 
@@ -36,6 +36,7 @@ class AgentWebTests(unittest.TestCase):
         test_operations.OperationsTests.setUp(self)
         self.skill('.fifth/skills/extra', 'extra')
         self.server = Dashboard({'home': str(self.home)})
+        self.server.agent_findings = agent_discovery.find(self.home)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .01})
         self.thread.start()
         self.addCleanup(self.close)
@@ -94,7 +95,7 @@ class AgentWebTests(unittest.TestCase):
         view = self.request('/api/agents')[1]
         self.assertNotIn('fifth', [a['id'] for a in view['suggested']])
         self.assertEqual(view['ignored'], [{'id': 'fifth', 'name': 'Fifth', 'skill_roots': ['.fifth/skills'],
-                                           'skill_count': 1, 'reason': '你之前选了忽略或不再管理。'}])
+                                           'reason': '你之前选了忽略或不再管理。'}])
         status, plan = self.request('/api/agents/join/preview', {'agents': ['fifth']})
         self.assertEqual(status, 200)
         status, rejoined = self.request('/api/agents/join/apply', {'agents': ['fifth'], 'plan_id': plan['plan_id'],
@@ -102,10 +103,11 @@ class AgentWebTests(unittest.TestCase):
         self.assertEqual(status, 200)
         view = self.request('/api/agents')[1]
         self.assertEqual(view['ignored'], [])
-        self.assertEqual(self.request('/api/undo', {'id': rejoined['id'], 'revision': view['revision'], 'confirmed': True})[0], 200)
+        revision = self.request('/api/table')[1]['revision']
+        self.assertEqual(self.request('/api/undo', {'id': rejoined['id'], 'revision': revision, 'confirmed': True})[0], 200)
         view = self.request('/api/agents')[1]
         self.assertEqual([a['id'] for a in view['ignored']], ['fifth'])
-        revision = view['revision']
+        revision = self.request('/api/table')[1]['revision']
         self.assertEqual(self.request('/api/undo', {'id': left['id'], 'revision': revision, 'confirmed': True})[0], 200)
         self.assertEqual(self.request('/api/agents')[1]['ignored'], [])
         revision = self.request('/api/table')[1]['revision']
@@ -117,10 +119,10 @@ class AgentWebTests(unittest.TestCase):
         calls = []
         real = web.agent_management.overview
 
-        def slow(home):
+        def slow(home, **options):
             calls.append(home)
             time.sleep(0.25)
-            return real(home)
+            return real(home, **options)
 
         with patch.object(web.agent_management, 'overview', side_effect=slow):
             status, first = self.request('/api/agents')
@@ -151,7 +153,7 @@ class AgentWebTests(unittest.TestCase):
         self.assertEqual(status, 200)
         view = self.request('/api/agents')[1]
         self.assertEqual(view['ignored'], [{'id': 'fifth', 'name': 'Fifth', 'skill_roots': ['.fifth/skills'],
-                                           'skill_count': 1, 'reason': '你之前选了忽略或不再管理。'}])
+                                           'reason': '你之前选了忽略或不再管理。'}])
         self.assertNotIn('fifth', [a['id'] for a in view['suggested']])
         status, plan = self.request('/api/agents/join/preview', {'agents': ['fifth']})
         self.assertEqual(status, 200)
@@ -166,3 +168,68 @@ class AgentWebTests(unittest.TestCase):
             for skill in root['skills']:
                 self.assertIn('manual_only_for', skill)
                 self.assertNotIn('codex_implicit_invocation', skill)
+
+    def test_rescan_finds_a_new_agent_without_restarting_or_touching_allocations(self):
+        self.request('/api/agents')
+        original = self.fingerprint()
+        (self.home / 'Applications/WorkBuddy.app').mkdir(parents=True)
+        self.assertNotIn('workbuddy', [a['id'] for a in self.request('/api/agents')[1]['suggested']])
+        status, progress = self.request('/api/agents/scan', {})
+        self.assertEqual(status, 200)
+        self.server.agents_thread.join(3)
+        view = self.request('/api/agents')[1]
+        self.assertFalse(view['discovery']['running'])
+        self.assertTrue(view['discovery']['checked_at'])
+        self.assertIn('workbuddy', [a['id'] for a in view['suggested']])
+        self.assertEqual(self.fingerprint(), original)
+        reopened = Dashboard({'home': str(self.home), 'deferred': True})
+        self.addCleanup(reopened.server_close)
+        with patch.object(agent_discovery, 'find', side_effect=AssertionError('must use saved findings')):
+            self.assertIn('workbuddy', [a['id'] for a in reopened.agents_view()['suggested']])
+
+    def test_duplicate_scans_share_one_worker_and_errors_can_retry(self):
+        entered, release = threading.Event(), threading.Event()
+        real = agent_discovery.find
+        def slow(*args):
+            entered.set()
+            release.wait(3)
+            return real(*args)
+        with patch.object(agent_discovery, 'find', side_effect=slow) as find:
+            self.request('/api/agents/scan', {})
+            self.assertTrue(entered.wait(2))
+            self.assertTrue(self.request('/api/agents/scan', {})[1]['running'])
+            self.assertTrue(self.request('/api/agents')[1]['discovery']['running'])
+            self.assertEqual(find.call_count, 1)
+            release.set()
+            self.server.agents_thread.join(3)
+        saved = (self.home / agent_discovery.CACHE).read_bytes()
+        original = self.request('/api/agents')[1]['suggested']
+        with patch.object(agent_discovery, 'find', side_effect=PermissionError('unreadable')):
+            self.request('/api/agents/scan', {})
+            self.server.agents_thread.join(3)
+        failed = self.request('/api/agents')[1]
+        self.assertFalse(failed['discovery']['running'])
+        self.assertIn('请重试', failed['discovery']['error'])
+        self.assertEqual(failed['suggested'], original)
+        self.assertEqual((self.home / agent_discovery.CACHE).read_bytes(), saved)
+        self.request('/api/agents/scan', {})
+        self.server.agents_thread.join(3)
+        self.assertEqual(self.request('/api/agents')[1]['discovery']['error'], '')
+
+    def test_background_check_and_agent_view_do_not_scan_skill_contents(self):
+        with patch('skill_pilot.scan.scan', side_effect=AssertionError('full scan')), \
+                patch('skill_pilot.agents.scan_root', side_effect=AssertionError('skill read')), \
+                patch('skill_pilot.operations.revision', side_effect=AssertionError('allocation read')):
+            self.server.start_agents_scan()
+            self.server.agents_thread.join(3)
+            self.assertEqual(self.request('/api/agents')[0], 200)
+
+    def test_deferred_skill_inventory_is_loaded_only_when_requested(self):
+        self.server.inventory = {'home': str(self.home), 'deferred': True}
+        from skill_pilot.web import server as web
+        with patch.object(web, 'scan', return_value={'generated_at': 'now', 'agents': []}) as scan:
+            self.request('/api/agents')
+            scan.assert_not_called()
+            self.assertEqual(self.request('/api/scan')[1]['generated_at'], 'now')
+            self.request('/api/scan')
+            scan.assert_called_once_with(self.home)

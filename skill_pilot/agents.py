@@ -13,23 +13,32 @@ from .store import check_links, guard, physical_state, remove, target_home, writ
 from .sync import visibility, reconcile_disabled
 
 
-def overview(home=None):
+def overview(home=None, discovered=None):
     home = target_home() if home is None else Path(home).resolve()
     local = profiles.state(home)
     catalog = profiles.all_profiles(home)
     managed = profiles.managed(home, local['onboarded'])
     ignored = [{'id': p['id'], 'name': p['name'], 'skill_roots': p['skill_roots'],
-                'skill_count': sum(scan_root(home / r, p['nested'], excluded=profiles.exclusions(home / r, home))['valid_count'] for r in p['skill_roots']),
+                **({'skill_count': sum(scan_root(home / r, p['nested'], excluded=profiles.exclusions(home / r, home))['valid_count'] for r in p['skill_roots'])}
+                   if discovered is None else {}),
                 'reason': '你之前选了忽略或不再管理。'} for p in catalog
                if p['id'] in local.get('ignored', []) and p['id'] not in local['onboarded'] and
                (profiles.evidence(p, home) or any((home / r).is_dir() for r in p['skill_roots'])) and
                all(not (home / r).exists() or (home / r).is_dir() for r in p['skill_roots'])]
-    return {'revision': operations.revision(home, local['onboarded']) if (home / '.skill-pilot/registry.json').is_file() else None,
+    unavailable = set(local['onboarded']) | set(local.get('ignored', []))
+    known = {p['id']: p for p in catalog}
+    suggested = suggestions(home) if discovered is None else [
+        {**item, **{key: known[item['id']][key] for key in ('name', 'skill_roots')
+                   if item['id'] in known}}
+        for item in discovered if item['id'] not in unavailable
+    ]
+    return {'revision': operations.revision(home, local['onboarded'])
+            if discovered is None and (home / '.skill-pilot/registry.json').is_file() else None,
             'managed': [{'id': p['id'], 'name': p['name'], 'skill_roots': p['skill_roots'],
                          'activation_text': profiles.activation_text(p),
                          'shared_with': [q['id'] for q in managed if q != p and set(q['skill_roots']) & set(p['skill_roots'])],
                          'can_leave': len(managed) > 1} for p in managed],
-            'suggested': suggestions(home), 'ignored': ignored,
+            'suggested': suggested, 'ignored': ignored,
             'must_select_together': profiles.shared_groups(catalog, home)}
 
 

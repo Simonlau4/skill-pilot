@@ -20,7 +20,7 @@ from pathlib import Path
 from ..scan import scan
 from ..store import SKIP_CONTENT, apply, backups, guard, preview, restore, target_home
 from .. import operations, updates, cleanup, labels, sharing, self_update, extra_sources
-from .. import agents as agent_management
+from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from . import runtime
 
@@ -72,6 +72,11 @@ class Dashboard(ThreadingHTTPServer):
         self.agents_generation = 0
         self.agents_cache = None
         self.agents_lock = threading.Lock()
+        self.agent_findings = agent_discovery.read(self.home)
+        self.agents_progress = {'running': False, 'checked_at': self.agent_findings['checked_at'],
+                                'message': '', 'error': ''}
+        self.agents_thread = None
+        self.inventory_lock = threading.Lock()
         super().__init__(("127.0.0.1", 0), Handler, bind_and_activate=not bool(resume))
         if resume:
             self.socket.close()
@@ -86,6 +91,7 @@ class Dashboard(ThreadingHTTPServer):
         super().server_close()
         if self.update_thread: self.update_thread.join()
         if self.labels_thread: self.labels_thread.join()
+        if self.agents_thread: self.agents_thread.join()
         if self._program_thread_blocks_exit():
             self.program_thread.join()
         if self.reload_thread: self.reload_thread.join()
@@ -98,7 +104,7 @@ class Dashboard(ThreadingHTTPServer):
         return bool(thread and thread.is_alive() and not self.program_progress.get('automatic'))
 
     def background_busy(self):
-        return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread)) or
+        return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread, self.agents_thread)) or
                 self._program_thread_blocks_exit() or
                 self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
 
@@ -191,18 +197,55 @@ class Dashboard(ThreadingHTTPServer):
         with self.agents_lock:
             generation = self.agents_generation
             cached = self.agents_cache
+            findings = self.agent_findings['candidates']
         if cached is not None and cached[0] == generation:
-            return cached[1]
-        result = agent_management.overview(self.home)
+            result = cached[1]
+        else:
+            result = agent_management.overview(self.home, discovered=findings)
+            with self.agents_lock:
+                if self.agents_generation == generation:
+                    self.agents_cache = (generation, result)
         with self.agents_lock:
-            if self.agents_generation == generation:
-                self.agents_cache = (generation, result)
-        return result
+            changed = self.agents_generation != generation
+            progress = self.agents_progress.copy()
+        return self.agents_view() if changed else {**result, 'discovery': progress}
 
     def invalidate_agents(self):
         with self.agents_lock:
             self.agents_generation += 1
             self.agents_cache = None
+
+    def start_agents_scan(self, full=False):
+        with self.agents_lock:
+            if self.agents_progress['running']:
+                return self.agents_progress.copy()
+            self.agents_progress.update(running=True, error='',
+                message='正在扫描 Agent…' if full else '正在检查新安装的 Agent…')
+            self.agents_thread = threading.Thread(target=self.scan_agents, args=(full,), daemon=True)
+            self.agents_thread.start()
+            return self.agents_progress.copy()
+
+    def scan_agents(self, full):
+        try:
+            previous = self.agent_findings['candidates']
+            findings = agent_discovery.find(self.home, full, previous)
+            agent_discovery.save(self.home, findings)
+            local = agent_management.profiles.state(self.home)
+            unavailable = set(local['onboarded']) | set(local.get('ignored', []))
+            added = {p['id'] for p in findings['candidates']} - {p['id'] for p in previous} - unavailable
+            with self.agents_lock:
+                self.agent_findings = findings
+                self.agents_generation += 1
+                self.agents_cache = None
+                self.agents_progress.update(checked_at=findings['checked_at'],
+                    message=f'发现 {len(added)} 个新 Agent' if added else '检查完成，没有发现新的 Agent')
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
+            with self.agents_lock:
+                self.agents_progress.update(error=str(error) if isinstance(error, ValueError)
+                    else 'Agent 扫描没有完成，已保留上次名单，请重试。')
+        finally:
+            with self.agents_lock:
+                self.agents_progress['running'] = False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -263,6 +306,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(403, {"error": "此页面只允许本机本次打开的浏览器访问。"})
             return
         if path == "/api/scan":
+            with self.server.inventory_lock:
+                if self.server.inventory.get('deferred'):
+                    self.server.inventory = scan(self.server.home)
             self.reply(200, self.server.inventory)
         elif path == '/api/settings':
             self.reply(200, {**labels.public_settings(self.server.home),
@@ -351,7 +397,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
-                       '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview'}
+                       '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
+                       '/api/agents/scan'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply','/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply'}
@@ -368,6 +415,9 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError('请求内容格式不正确。')
+            if path == '/api/agents/scan':
+                self.reply(200, self.server.start_agents_scan(full=True))
+                return
             if path in program_routes:
                 if path.endswith('apply'):
                     if body.get('confirmed') is not True:
@@ -608,8 +658,9 @@ def run(json_output=False):
                     return
                 raise SystemExit("已有看板正在启动或退出，请稍后再打开。")
             operations.bootstrap(target_home())
-        server = Dashboard(resume['inventory'] if resume else scan(), resume)
+        server = Dashboard(resume['inventory'] if resume else {'home': str(target_home()), 'deferred': True}, resume)
         server.reload_callback = lambda: runtime.replace(server, lock)
+        server.start_agents_scan()
         if not resume:
             lock.seek(0)
             lock.truncate()
