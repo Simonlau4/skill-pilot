@@ -86,6 +86,7 @@ ol, ul { margin: 0; padding: 0; list-style: none; }
 dl, dd, dt { margin: 0; }
 
 .muted { color: var(--muted); }
+.program-error { color: var(--danger-ink); }
 .mono { font-family: var(--font-mono); font-size: var(--fs-small); }
 [hidden] { display: none !important; }
 

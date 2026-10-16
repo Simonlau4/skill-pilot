@@ -308,6 +308,19 @@
     </details>
   </section>
   <section id="page-settings" class="page-section" hidden>
+    <h2 class="section-title">SP 自身更新</h2>
+    <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
+      <span>只更新 SP 程序，技能、分配和个人设置保留。</span>
+    </p>
+    <p id="program-version" class="note-line" hidden></p>
+    <p id="program-message" class="note-line" role="status" aria-live="polite">从 GitHub 官方项目获取新版</p>
+    <p id="program-error" class="program-error" role="alert" hidden></p>
+    <p class="row-wrap">
+      <button id="program-check" class="btn"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-updates"/></svg><span>检查更新</span></button>
+      <button id="program-apply" class="btn btn-primary" hidden>一键升级</button>
+      <button id="program-refresh" class="btn btn-primary" hidden>刷新生效</button>
+    </p>
+
     <h2 class="section-title">分享技能配置</h2>
     <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg>
       <span>导出分享给对方，或导入收到的清单，一次安装和分配。</span>
