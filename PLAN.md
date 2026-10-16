@@ -56,7 +56,7 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
 
 **版本已经分叉**：Antigravity 的 25 个 `lark-*` 中有 22 个和 `~/.agents/skills/` 内容不同（如 lark-base 1.2.0 vs 1.2.23）；`ui-ux-pro-max` 在 Codex 与 Antigravity 内容不同。
 
-**来源记录**：`~/.agents/.skill-lock.json`（`npx skills` 生成，version 3）记有 65 个技能：飞书官方 28 个（`sourceType: well-known`，`wellKnownDigest`）；GitHub 来源 37 个（`sourceType: github`，含 `sourceUrl`、`skillPath`、`skillFolderHash` 即上游该目录的 git tree sha）。`~/.codex/skills/` 的 54 个没有任何来源记录，也不是 git 仓库。可用于推断来源的线索：`~/.codex/config.toml` 中形如 `projects."~/Documents/Codex/2026-06-04/skill-https-github-com-zarazhangrui-beautiful"` 的项目目录名、`Example-Notes/docs/外部Skills候选池.md`、`Example-Notes/docs/skills-active-reference清单.md`、SKILL.md 正文里的仓库链接。
+**来源记录**：`~/.agents/.skill-lock.json`（`npx skills` 生成，version 3）记有 65 个技能：飞书官方 28 个（`sourceType: well-known`，`wellKnownDigest`）；GitHub 来源 37 个（`sourceType: github`，含 `sourceUrl`、`skillPath`、`skillFolderHash` 即上游该目录的 git tree sha）。`~/.codex/skills/` 的 54 个没有任何来源记录，也不是 git 仓库。可用于推断来源的线索：`~/.codex/config.toml` 中形如 `projects."~/Documents/Codex/2026-06-04/skill-https-github-com-zarazhangrui-beautiful"` 的项目目录名、`Example-Notes/notes/sample-pool.md`、`Example-Notes/notes/sample-reference.md`、SKILL.md 正文里的仓库链接。
 
 **飞书技能**：版本跟 lark-cli 绑定。`lark-cli update --check --json` 只检查不安装；`lark-cli update` 会升级 CLI 本身（npm 全局安装），带 `--skills-layout separate|suite` 参数，具体把技能写到哪些目录未知（S4）。
 
@@ -71,9 +71,9 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
 
 **技能间依赖的实例**：`grill-me` 正文只有"调用 grilling"；`ascentiz-blog-writer` 依赖 `natural-text-writing`、`unslop`、`stss`、`ascentiz-blog-editor`。
 
-**写死的技能路径**：Example-Vault、Example-Notes（docs/tools/scripts）、各技能目录、`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md` 中，含 `/.codex/skills/` 的文件 47 个、`/.agents/skills/` 16 个、`/.claude/skills/` 29 个（粗查，含技能用绝对路径调用自己脚本的情况）。
+**写死的技能路径**：Example-Vault、Example-Notes（notes/samples/extras）、各技能目录、`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md` 中，含 `/.codex/skills/` 的文件 47 个、`/.agents/skills/` 16 个、`/.claude/skills/` 29 个（粗查，含技能用绝对路径调用自己脚本的情况）。
 
-**现有手工管理**：`Example-Notes/docs/skills-management.md`（清单快照停在 2026-08-09）；source-synced 三个技能的源码在 `Example-Notes/skills/{simon-neat,agency-router,marketing-router}/`，靠 `ditto` 复制到 `~/.codex/skills/`。
+**现有手工管理**：`Example-Notes/notes/sample-list.md`（清单快照停在 2026-08-09）；source-synced 三个技能的源码在 `Example-Notes/samples/{simon-neat,agency-router,marketing-router}/`，靠 `ditto` 复制到 `~/.codex/skills/`。
 
 ## 3. 技术方案
 
@@ -235,9 +235,9 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
    - 四个 agent 新会话里能看到 `skill-pilot` 技能，并能用它答出"Claude 现在有哪些技能"。
 9. **M8 文档与收尾**：
    - 写 `README.md`：功能、目录、还原方法、已知限制；
-   - `Example-Notes/docs/skills-management.md` 的手工清单改为指向看板，保留规则部分；
-   - 更新 S7 中受影响、且由用户维护的文档路径（Example-Notes docs、Codex记忆、Claude 记忆 `agent-ecosystem-claude-role.md` 里的技能位置说明）；
-   - 在 `Example-Notes/docs/AI工具能力地图.md` 和 `Example-Vault/Notes/Systems/AI工作台索引.md` 登记入口，只写路径和一句用途；
+   - `Example-Notes/notes/sample-list.md` 的手工清单改为指向看板，保留规则部分；
+   - 更新 S7 中受影响、且由用户维护的文档路径（Example-Notes/notes、memory、Claude 记忆 `agent-ecosystem-claude-role.md` 里的技能位置说明）；
+   - 在 `Example-Notes/notes/sample-map.md` 和 `Example-Vault/folder/area/sample-index.md` 登记入口，只写路径和一句用途；
    - **经用户同意后**，把 Example-Notes 中三份 source-synced 源码移到废纸篓。
 
 ## 8. 安全与边界

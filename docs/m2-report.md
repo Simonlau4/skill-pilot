@@ -29,7 +29,7 @@
 
 | 技能 | 默认保留的内容位置 | 理由 |
 | --- | --- | --- |
-| agency-router | `~/Documents/Example-Notes/skills/agency-router` | 与已登记的工作台源码一致 |
+| agency-router | `~/Documents/Example-Notes/samples/agency-router` | 与已登记的工作台源码一致 |
 | lark-approval | `~/.agents/skills/lark-approval` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
 | lark-base | `~/.agents/skills/lark-base` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
 | lark-calendar | `~/.agents/skills/lark-calendar` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
@@ -52,8 +52,8 @@
 | lark-wiki | `~/.agents/skills/lark-wiki` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
 | lark-workflow-meeting-summary | `~/.agents/skills/lark-workflow-meeting-summary` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
 | lark-workflow-standup-report | `~/.agents/skills/lark-workflow-standup-report` | 与已核实配套的飞书工具版本一致，内容也与当时记录一致 |
-| marketing-router | `~/Documents/Example-Notes/skills/marketing-router` | 与已登记的工作台源码一致 |
-| simon-neat | `~/Documents/Example-Notes/skills/simon-neat` | 与已登记的工作台源码一致 |
+| marketing-router | `~/Documents/Example-Notes/samples/marketing-router` | 与已登记的工作台源码一致 |
+| simon-neat | `~/Documents/Example-Notes/samples/simon-neat` | 与已登记的工作台源码一致 |
 | ui-ux-pro-max | `~/.codex/skills/ui-ux-pro-max` | 未能离线证明与来源记录一致，默认选最近修改的那份 |
 
 飞书默认选择依据 S4 已核实的配套版本以及 M1 当时记录的内容。本轮只读核对当前工具包版本、来源记录和内容；三者相符才使用该证据，没有联网检查或升级。摘要保存在 [lark-paired-snapshot.json](lark-paired-snapshot.json)。
@@ -131,7 +131,7 @@ HOME=<模拟目录> CODEX_HOME=<模拟目录>/.codex XDG_CONFIG_HOME=<模拟目�
 
 看板在 Chrome 原生界面实际完成：选择四个助手 → 将 agency-router 从默认工作台源码改选为原 Codex 副本 → 确认迁移 → 看到完成页 → 一键还原并确认 → 看到“已还原到迁移前”。实际内容与改选一致，备份为 `20261010T170918666953`；还原后指纹完全一致。证据见 [m2-ui-acceptance.json](../work/m2-ui-acceptance.json)。测试标签页已关闭，本机服务已退出。
 
-模拟复制额外只读带入一份技能内部链接所需的 `Example-Notes/docs/飞书 CLI 能力地图.md`；同时记录工具包版本号用于离线来源核对，没有复制认证配置、会话记录或其他软件设置。复制后所有链接都留在模拟目录内。模拟目录与备份保留在系统临时目录供主控复核，当前位置见 [m2-fake-home.json](../work/m2-fake-home.json)。
+模拟复制额外只读带入一份技能内部链接所需的 `Example-Notes/notes/sample-cli-map.md`；同时记录工具包版本号用于离线来源核对，没有复制认证配置、会话记录或其他软件设置。复制后所有链接都留在模拟目录内。模拟目录与备份保留在系统临时目录供主控复核，当前位置见 [m2-fake-home.json](../work/m2-fake-home.json)。
 
 真实目录前后对照：`unchanged=true`；`~/.skill-pilot/` 仍不存在。覆盖四个技能根、Codex 设置和安装来源记录，完整对照见 [m2-real-fingerprints.json](../work/m2-real-fingerprints.json)。本项目没有提交或推送，PLAN.md 和 spikes.md 未改动。
 

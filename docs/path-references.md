@@ -4,5 +4,5 @@
 
 | 文件 | 涉及技能 | 迁移后 | 撤下后 |
 | --- | --- | --- | --- |
-| `~/Documents/Example-Notes/docs/sample-note.md` | `sample-skill` | 文件还在则引用有效 | 入口撤下后需要改这段说明 |
+| `~/Documents/Example-Notes/notes/sample-note.md` | `sample-skill` | 文件还在则引用有效 | 入口撤下后需要改这段说明 |
 | `~/notes/other-example.md` | `other-skill` | 文件还在则引用有效 | 入口撤下后需要改这段说明 |

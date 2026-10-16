@@ -98,7 +98,7 @@ class OperationsTests(unittest.TestCase):
         own = self.home / 'notes/own.md'
         own.parent.mkdir()
         own.write_text('引用')
-        listed = self.home / 'Documents/Example-Notes/docs/sample-note.md'
+        listed = self.home / 'Documents/Example-Notes/notes/sample-note.md'
         listed.parent.mkdir(parents=True)
         listed.write_text('引用')
         project = self.home / 'reference project'
@@ -115,7 +115,7 @@ class OperationsTests(unittest.TestCase):
         companion.unlink()
         warnings = operations.path_warnings(removed, self.home)
         self.assertEqual(warnings, [{
-            'file': '~/Documents/Example-Notes/docs/sample-note.md',
+            'file': '~/Documents/Example-Notes/notes/sample-note.md',
             'entries': ['.agents/skills/sample-skill']}])
 
     def repository(self, name='installed', body='新安装'):

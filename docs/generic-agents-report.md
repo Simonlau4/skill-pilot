@@ -302,9 +302,9 @@ make-fake-home: {
     ".dsh/skills",
     ".gemini/config/skills",
     "Developer/vendor/stop-that-shit-local/skills/stss",
-    "Documents/Example-Notes/skills/simon-neat",
-    "Documents/Example-Notes/skills/agency-router",
-    "Documents/Example-Notes/skills/marketing-router",
+    "Documents/Example-Notes/samples/simon-neat",
+    "Documents/Example-Notes/samples/agency-router",
+    "Documents/Example-Notes/samples/marketing-router",
     ".agents/.skill-lock.json"
   ],
   "link_dependencies": [],
