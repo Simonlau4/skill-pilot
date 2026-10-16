@@ -1,5 +1,5 @@
 /* Skill Pilot 看板样式（2026-10-13 重做：深色页头、浅冷灰底、每个 agent 一种颜色）。
-   顺序：变量与基础 → 页头 → 通用控件 → 技能页 → 表格 → 技能详情 → 各页面 → 底部托盘与提示 → 对话框 → 窄屏。 */
+   顺序：变量与基础 → 页头 → 通用控件 → 技能页 → 表格 → 技能详情 → 操作记录 → 首次整理 → 设置页 → 底部托盘与提示 → 对话框 → 窄屏。 */
 
 :root {
   color-scheme: light;
@@ -103,14 +103,6 @@ dl, dd, dt { margin: 0; }
 
 .page-section { display: block; }
 
-.section-title {
-  font-size: var(--fs-section);
-  margin: var(--sp-8) 0 var(--sp-2);
-  padding-top: var(--sp-6);
-  border-top: 1px solid var(--line);
-}
-.page-section > .section-title:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
-
 .sub-title { font-size: var(--fs-body); margin: var(--sp-6) 0 var(--sp-2); }
 .sub-title .ico { margin-right: 6px; vertical-align: -3px; }
 
@@ -201,8 +193,12 @@ dl, dd, dt { margin: 0; }
 
 .topbar { background: var(--ground); }
 
+/* 页头左右留白是对称的，所以「左边一栏 + 中间自动 + 右边一栏」的中间那一列
+   就是整个窗口的正中间：技能、清理、设置三项排在这里，SP 标志放左边那一栏。
+   只读预览的标记放右边那一栏，出现时导航也不会被挤歪。 */
 .topbar-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: var(--sp-6);
   min-height: 60px;
@@ -249,10 +245,9 @@ dl, dd, dt { margin: 0; }
 }
 .nav-item:hover { background: var(--shell-2); color: var(--shell-ink); }
 .nav-item[aria-current="page"] { background: var(--shell-2); color: var(--shell-ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--shell-ink); }
-.nav-quiet { font-size: var(--fs-small); }
 .topbar-row :focus-visible { outline-color: var(--shell-ink); }
 
-#mode-badge { flex: none; background: transparent; color: var(--shell-ink-2); box-shadow: inset 0 0 0 1px #4A5468; }
+#mode-badge { justify-self: end; background: transparent; color: var(--shell-ink-2); box-shadow: inset 0 0 0 1px #4A5468; }
 
 .task-bar {
   padding: var(--sp-2) max(var(--sp-6), calc((100% - 1440px) / 2 + var(--sp-6)));
@@ -1120,6 +1115,90 @@ pre {
 .timeline .log-end { display: flex; gap: var(--sp-2); align-items: center; }
 .timeline li.is-undone .log-body > p:first-child { color: var(--muted); text-decoration: line-through; }
 
+/* ---------- 首次整理：还没用过 SP 时，技能页主区域显示这一块 ---------- */
+
+/* 还没整理过时，技能页主区域就这一张卡片：在内容区里水平居中，别贴着左边。 */
+.first-run {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--sp-6);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+.first-run h2 { font-size: var(--fs-title); }
+.first-run .note-line { margin-top: var(--sp-3); }
+.first-run .sub-title { margin-top: var(--sp-6); }
+.first-run .fold { margin: var(--sp-3) 0; }
+
+/* ---------- 设置页：左边一列小目录，右边六块按顺序排下来（B 版） ---------- */
+
+.settings-split {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: var(--sp-8);
+  align-items: start;
+}
+
+/* 目录沿用技能页左栏的白面板和圆角，每一项沿用 rail-item（选中给一层浅底）。 */
+.settings-nav {
+  position: sticky;
+  top: var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.set-nav-group { display: grid; gap: 2px; }
+.set-nav-title {
+  margin: var(--sp-2) 0 2px;
+  padding: 0 var(--sp-2);
+  color: var(--muted);
+  font-size: var(--fs-small);
+  font-weight: 500;
+}
+.set-nav-item { font-weight: 500; white-space: nowrap; }
+.set-nav-item[aria-current="true"] { font-weight: 600; }
+
+.settings-main { display: grid; gap: var(--sp-5); min-width: 0; }
+.set-group-title { padding: 0 var(--sp-1); font-size: var(--fs-section); }
+.settings-main > .set-group-title:not(:first-child) { margin-top: var(--sp-4); }
+
+/* 一块内容：白面板 + 标题 + 一句说明，和技能页的左栏、折叠块是同一套面板样式。 */
+.set-block {
+  min-width: 0;
+  padding: var(--sp-6);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  scroll-margin-top: var(--sp-4);
+}
+.set-head { display: flex; align-items: flex-start; gap: var(--sp-4); margin-bottom: var(--sp-4); }
+.set-head-text { flex: 1; min-width: 0; }
+.set-head h2 { font-size: var(--fs-section); }
+.set-head .btn { flex: none; }
+.set-lead { margin: 2px 0 0; color: var(--ink-2); font-size: var(--fs-small); line-height: 1.5; }
+.set-divider { border: 0; border-top: 1px solid var(--line); margin: var(--sp-5) 0; }
+
+/* 面板里的间距比整页排版收一点，别让一块内容太长。 */
+.set-block .fold { margin: var(--sp-3) 0; }
+.set-block .fold:first-of-type { margin-top: 0; }
+.set-block .sub-title { margin-top: var(--sp-5); }
+.set-block .toolbar { margin: var(--sp-3) 0; }
+.set-block .settings-form > .note-line { margin: var(--sp-2) 0 0; }
+.set-block .note-line + .row-wrap { margin-top: var(--sp-3); }
+/* 诊断里的技术表格走进两栏后窄了一截：短列保持完整，两列文字按比例分剩下的宽度，
+   放不下就在面板里横向滚动，别把「文件状态」这类短列挤成竖排。 */
+.set-block table.grid th:not(:first-child), .set-block table.grid td:not(:first-child) { white-space: nowrap; }
+.set-block table.grid th:first-child, .set-block table.grid td:first-child { width: 45%; min-width: 240px; }
+.set-block table.grid th:nth-child(2), .set-block table.grid td:nth-child(2) { width: 35%; min-width: 200px; white-space: normal; overflow-wrap: anywhere; }
+
+/* 「agent 与目录」那一行工具条：搜索框别一路撑到边上，放不下的控件折到下一行，文字不被截。 */
+#diag-inventory-box .toolbar { row-gap: var(--sp-2); }
+#diag-inventory-box .toolbar .input-search { flex: 0 1 320px; }
+#diag-inventory-box .toolbar .check, #diag-inventory-box .toolbar select { flex: none; max-width: 100%; }
+
 /* ---------- 底部托盘：改了还没生效的事 ---------- */
 
 .action-bar {
@@ -1274,6 +1353,11 @@ pre {
   .rail-list { grid-auto-flow: column; grid-auto-columns: minmax(190px, 1fr); overflow-x: auto; }
   #rail-notes { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
   .col-name { min-width: 220px; }
+  /* 设置页的目录折到内容上面（只按桌面窗口验收，这里只是别挤坏）。 */
+  .settings-split { grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }
+  .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; }
+  .set-nav-group { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+  .set-nav-title { margin: 0 var(--sp-1) 0 var(--sp-2); }
 }
 
 @media (max-width: 720px) {

@@ -482,6 +482,7 @@ const state = {
   detail: null,
   agent: null,
   tab: 'on',
+  settingsBlock: 'ai',   // 设置页当前看到的块；地址里记成 settings/<块名>
   chip: '',   // 分组筛选：'' 是全部，UPDATES_CHIP 是“有新版”，其余是分组名
   tag: '',    // 标签筛选，'' 是不筛
   filtersCollapsed: false,
@@ -565,9 +566,11 @@ function friendlyDate(value) {
   return date.getFullYear() === new Date().getFullYear() ? text : `${date.getFullYear()} 年 ${text}`;
 }
 
-/* 地址里记着在哪一页、技能页选的哪个 agent，刷新后回到原处。 */
+/* 地址里记着在哪一页、技能页选的哪个 agent、设置页看的哪一块，刷新后回到原处。 */
 function rememberPlace() {
-  const place = state.page === 'skills' && state.agent ? `skills/${state.agent}` : state.page;
+  const place = state.page === 'skills' && state.agent ? `skills/${state.agent}`
+    : state.page === 'settings' ? `settings/${state.settingsBlock}`
+    : state.page;
   history.replaceState(null, '', location.pathname + location.search + '#' + place);
 }
 
@@ -582,13 +585,106 @@ function showPage(page) {
     else button.removeAttribute('aria-current');
   }
   if (page === 'cleanup') { renderCleanup(); loadCleanup(); }
-  if (page === 'log') { renderLog(); refreshLog(); }
-  if (page === 'diagnostics') renderDiagnostics();
-  if (page === 'settings') { renderConfigExport(); renderAgents(); refreshSettings(); refreshProgramUpdate(); }
+  if (page === 'settings') renderSettings();
   renderActionBar();
   window.scrollTo({top: 0, behavior: 'auto'});
   if (page === 'skills') fitFilterRail();
 }
+
+/* 跳到某一页；设置页还可以点名去哪一块（data-goto="settings/agents"）。 */
+function gotoPlace(place) {
+  const [page, block] = String(place).split('/');
+  if (page === 'settings') {
+    showPage('settings');
+    showSettingsBlock(SETTINGS_BLOCKS.includes(block) ? block : state.settingsBlock);
+    return;
+  }
+  showPage(page);
+}
+
+/* ==================== 设置页：左边一列目录，右边六块连在一起（用户选的 B 版） ==================== */
+
+const SETTINGS_BLOCKS = ['ai', 'agents', 'share', 'log', 'diagnostics', 'version'];
+const prefersReducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function highlightSettingsBlock(name) {
+  for (const button of document.querySelectorAll('#settings-nav [data-block]')) {
+    if (button.dataset.block === name) button.setAttribute('aria-current', 'true');
+    else button.removeAttribute('aria-current');
+  }
+}
+
+/* 当前看到的块：标题线（约 140px）以上、离它最近的那一块。
+   滚到页面底部时，最后一块还没到标题线，但已经全在眼前了，所以直接算最后一块。 */
+function currentSettingsBlock() {
+  const blocks = [...document.querySelectorAll('.settings-main > .set-block')];
+  const doc = document.documentElement;
+  if (innerHeight + scrollY >= Math.max(doc.scrollHeight, document.body.scrollHeight) - 4) return blocks[blocks.length - 1].dataset.block;
+  let found = blocks[0].dataset.block;
+  for (const block of blocks) if (block.getBoundingClientRect().top <= 140) found = block.dataset.block;
+  return found;
+}
+
+let settingsScrollTarget = null;
+let settingsSettleTimer = null;
+let settingsSpyQueued = false;
+
+/* 点目录滚过去以后，等滚动完全停下来再按真实位置定一次高亮；
+   这一段路途中先不跟，免得高亮在中间那几块之间闪来闪去。 */
+function armSettingsSettle() {
+  clearTimeout(settingsSettleTimer);
+  settingsSettleTimer = setTimeout(() => {
+    settingsScrollTarget = null;
+    trackSettingsBlock();
+  }, 200);
+}
+
+function trackSettingsBlock() {
+  if (state.page !== 'settings') return;
+  if (settingsScrollTarget) { armSettingsSettle(); return; }
+  const name = currentSettingsBlock();
+  if (name === state.settingsBlock) return;
+  state.settingsBlock = name;
+  highlightSettingsBlock(name);
+  rememberPlace();
+}
+
+function showSettingsBlock(name, {scroll = true} = {}) {
+  if (!SETTINGS_BLOCKS.includes(name)) return;
+  state.settingsBlock = name;
+  highlightSettingsBlock(name);
+  if (state.page === 'settings') rememberPlace();
+  if (!scroll) return;
+  const block = document.querySelector(`.settings-main > .set-block[data-block="${name}"]`);
+  if (!block) return;
+  settingsScrollTarget = name;
+  block.scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start'});
+  armSettingsSettle();
+}
+
+/* 进设置页：六块内容一次都刷成最新的（B 版全都在页面上，不按块懒加载）。 */
+function renderSettings() {
+  renderConfigExport();
+  renderAgents();
+  refreshSettings();
+  refreshProgramUpdate();
+  refreshLog();
+  renderDiagnostics();
+  renderMigrationStatus();
+  highlightSettingsBlock(state.settingsBlock);
+}
+
+$('settings-nav').addEventListener('click', event => {
+  const button = event.target.closest('[data-block]');
+  if (button) showSettingsBlock(button.dataset.block);
+});
+
+addEventListener('scroll', () => {
+  if (settingsSpyQueued) return;
+  settingsSpyQueued = true;
+  requestAnimationFrame(() => { settingsSpyQueued = false; trackSettingsBlock(); });
+}, {passive: true});
+addEventListener('resize', trackSettingsBlock);
 
 document.querySelector('.nav').addEventListener('click', event => {
   const button = event.target.closest('.nav-item');
@@ -705,7 +801,7 @@ function renderRailNotes() {
       <p class="rail-note-title">${icon('plus')}<strong>发现新 agent：${escape(item.name)}</strong></p>
       <div class="rail-note-row">
         ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后，就能在这里和其他 agent 一起管它的技能。')}
-        <button class="btn btn-small" data-goto="settings">去接入…</button>
+        <button class="btn btn-small" data-goto="settings/agents">去接入…</button>
       </div>
     </div>`);
   $('rail-notes').innerHTML = notes.join('');
@@ -1216,7 +1312,7 @@ $('skills-tabs').addEventListener('click', event => {
 
 $('page-skills').addEventListener('click', event => {
   const target = event.target.closest('[data-goto]');
-  if (target) showPage(target.dataset.goto);
+  if (target) gotoPlace(target.dataset.goto);
 });
 
 $('action-list').addEventListener('click', event => {
@@ -1306,7 +1402,8 @@ async function refreshTable(preserveDraft = false) {
   if (keepDraft) { state.draft = draft; state.pending = pending; }
   state.agents = table.agents || [];
   renderConfigExport();
-  $('mode-badge').textContent = table.write_allowed ? '可以管理技能' : '只读预览';
+  // 只有只读预览才显示标记；能改的时候右边什么都不放，导航仍是居中的。
+  $('mode-badge').hidden = table.write_allowed;
   $('skills-install').disabled = !table.write_allowed;
   renderNewSkills();
   renderRailNotes();
@@ -1696,7 +1793,7 @@ $('llm-provider').addEventListener('change', () => {
   [$('llm-base-url').value, $('llm-model').value] = LLM_DEFAULTS[$('llm-provider').value];
 });
 
-$('labels-settings').addEventListener('click', () => showPage('settings'));
+$('labels-settings').addEventListener('click', () => gotoPlace('settings/ai'));
 
 /* 保存并试一下：连得上就接着整理还没整理完的技能。 */
 $('llm-form').addEventListener('submit', event => {
@@ -1872,7 +1969,8 @@ function renderAgents() {
   $('agents-ignored').innerHTML = ignored.map(agent => row({...agent, ignored: true}, joinButton(agent))).join('');
 }
 
-$('agents-migration-link').addEventListener('click', () => showPage('diagnostics'));
+/* 还没整理过时，agent 一栏指回技能页的首次整理。 */
+$('agents-migration-link').addEventListener('click', () => showPage('skills'));
 
 /* 不再管理：先预览，确认框里说明会失去哪些技能，再写入。 */
 async function leaveAgent(id) {
@@ -2943,7 +3041,7 @@ $('withdrawn-list').addEventListener('click', async event => {
 /* ==================== 操作记录页 ==================== */
 
 function renderLog() {
-  if (state.page !== 'log') return;
+  if (state.page !== 'settings') return;
   $('log-list').innerHTML = state.logs.map(record => `<li class="${record.undone ? 'is-undone' : ''}">
     <span class="log-time">${escape(new Date(record.time).toLocaleString('zh-CN'))}</span>
     <div class="log-body">
@@ -2987,7 +3085,7 @@ function disabledText(skill, data = state.inventory) {
 }
 
 function renderDiagnostics() {
-  if (state.page !== 'diagnostics' || !state.inventory) return;
+  if (state.page !== 'settings' || !state.inventory) return;
   const data = state.inventory;
   renderMigrationStatus();
 
@@ -3068,14 +3166,20 @@ $('root-filter').addEventListener('change', () => {
   renderDiagnostics();
 });
 
-/* 迁移与还原：内容照旧，入口改到诊断页。
-   已经迁移过就只留“已有备份”；还没迁移时，可选 agent 从 /api/agents 的建议来。 */
+/* 整理与还原：还没整理过时，技能页主区域直接显示首次整理（选 agent → 核对保留哪份 → 完成）；
+   整理过以后技能页照常列技能，「还原到整理前」和「已有备份」留在设置 → 诊断与备份 → 整理与还原。 */
 let migrationPlan = null;
 let backupId = null;
 
+/* 首次整理能选的 agent：只列有盘点档案的（后台接得了的）。
+   只是「发现的新 agent」要等整理完，在设置 → agent 里按文件夹接入。 */
 function migrationChoices() {
   const suggested = state.agentsView?.suggested;
-  if (suggested?.length) return suggested.map(item => ({id: item.id, name: item.name}));
+  if (suggested?.length) {
+    const ready = new Set((state.inventory?.agents || []).filter(agent => agent.status === 'profile_available').map(agent => agent.id));
+    const known = ready.size ? suggested.filter(item => ready.has(item.id)) : [];
+    return (known.length ? known : suggested).map(item => ({id: item.id, name: item.name}));
+  }
   return (migrationPlan?.agent_catalog || []).map(item => ({id: item.id, name: item.name}));
 }
 
@@ -3085,7 +3189,7 @@ function renderMigrationChoices() {
   const groups = state.agentsView?.must_select_together || [];
   $('migration-groups').textContent = groups.map(group => {
     const names = group.map(nameOf);
-    return names.length > 1 ? `${names.join(' 和 ')} 共用一个技能目录，要一起接入。` : '';
+    return names.length > 1 ? `${names.join(' 和 ')} 共用一个技能文件夹，要一起整理。` : '';
   }).filter(Boolean).join(' ');
 }
 
@@ -3102,28 +3206,47 @@ $('migration-agents').addEventListener('change', event => {
   }
 });
 
+/* 出错时写在看得见的那一块：技能页的引导，或者设置里的整理与还原。 */
 function migrationError(error) {
-  $('migration-error').hidden = false;
-  $('migration-error').textContent = error.message;
+  const box = $(state.page === 'settings' ? 'migration-error-settings' : 'migration-error');
+  box.textContent = error.message;
+  box.hidden = false;
+}
+
+function clearMigrationError() {
+  for (const id of ['migration-error', 'migration-error-settings']) {
+    $(id).hidden = true;
+    $(id).textContent = '';
+  }
 }
 
 function migrationStep(step) {
   for (const id of ['select', 'review', 'complete']) $('migration-' + id).hidden = id !== step;
-  $('migration-error').hidden = true;
+  clearMigrationError();
 }
 
-/* 已经完成首次迁移后，第 1、2 步收起，只留一句说明和“已有备份”。 */
+/* 还没整理过：技能页主区域显示首次整理，技能列表先收起来。
+   整理过：引导不再出现，设置里的整理与还原留一句说明和已有备份。 */
+function renderFirstRun() {
+  const fresh = Boolean(state.agentsView) && !(state.agentsView.managed || []).length;
+  $('first-run').hidden = !fresh;
+  $('skills-split').hidden = fresh;
+  return fresh;
+}
+
 function renderMigrationStatus() {
-  const managed = state.agentsView?.managed || [];
-  const migrated = managed.length > 0;
+  const migrated = !renderFirstRun();
   $('migration-done').hidden = !migrated;
+  $('migration-pointer').hidden = migrated;
   if (migrated) {
     for (const id of ['select', 'review', 'complete']) $('migration-' + id).hidden = true;
-    $('migration-done-text').innerHTML = `${icon('check-circle')}<span>已经完成首次迁移</span>${hint('以后接入新 agent，请到设置里的 agent 一栏。')}`;
+    $('migration-restore').hidden = !backupId;
+    $('migration-done-text').innerHTML = `${icon('check-circle')}<span>已经整理好了</span>${hint('以后接入新 agent，请到设置里的 agent 一栏。')}`;
   } else {
     renderMigrationChoices();
     migrationStep('select');
   }
+  return migrated;
 }
 
 $('migration-preview').addEventListener('click', event => withBusy(event.currentTarget, '正在核对…', async () => {
@@ -3138,18 +3261,22 @@ $('migration-preview').addEventListener('click', event => withBusy(event.current
   }
 }));
 
+/* 引导开头已经写了「整理前会先备份，完成后能还原」，这一行只在只读模式下出现。 */
+function renderMigrationMode(writeAllowed) {
+  $('migration-mode').hidden = writeAllowed;
+  $('migration-mode').textContent = writeAllowed ? '' : '只读模式下可以预览，不能整理。';
+}
+
 function renderMigrationReview(plan) {
-  $('migration-mode').textContent = plan.write_allowed
-    ? '当前操作模拟目录。迁移前会完整备份，完成后可以一键还原。'
-    : '只读模式下可以预览，不能迁移。';
+  renderMigrationMode(plan.write_allowed);
   $('migration-summary').textContent = `共 ${plan.skills.length} 个技能，${plan.conflicts.length} 组内容需要核对。相同内容会直接合并，原来的技能入口会保留。`;
   $('migration-counts').innerHTML = (plan.agents || []).map(id => {
     const before = plan.before[id];
     const after = plan.after[id];
     if (!before || !after) return '';
     return `<details class="fold fold-inner"><summary>${escape(nameOf(id))}：可调用 ${before.available.length} → ${after.available.length} 个；自动可用 ${before.automatic.length} → ${after.automatic.length} 个</summary>
-      <p class="item-note">迁移前：${escape(before.available.join('、'))}</p>
-      <p class="item-note">迁移后：${escape(after.available.join('、'))}</p></details>`;
+      <p class="item-note">整理前：${escape(before.available.join('、'))}</p>
+      <p class="item-note">整理后：${escape(after.available.join('、'))}</p></details>`;
   }).join('') || '<p class="item-note">没有需要核对的 agent。</p>';
   $('migration-versions').innerHTML = plan.conflicts.map(skill => `<details class="fold fold-inner" open>
     <summary>${escape(skill.name)}<span class="tag tag-quiet">${escape(skill.reason)}</span></summary>
@@ -3181,11 +3308,26 @@ $('migration-versions').addEventListener('click', async event => {
 
 $('migration-back').addEventListener('click', () => migrationStep('select'));
 
+/* 整理完：引导里的结果写一句，再刷新各区块，最后把引导收起来（技能页照常显示）。 */
+/* 整理完、或者还原到整理前：先刷新 agent 状态，按「有没有在管理的 agent」决定要不要读技能表。
+   还原以后还没有技能表，这里不能去读（否则会报「请先完成首次迁移」），技能页要回到首次整理。 */
 async function finishMigration(title, result) {
   $('migration-result').textContent = title;
   $('migration-result-detail').textContent = result.message;
   migrationStep('complete');
-  await refreshEverything();
+  await refreshInventory();
+  await refreshAgents().catch(() => {});
+  if (renderMigrationStatus()) {
+    try {
+      await refreshTable();
+    } catch (error) {
+      toast({text: '技能清单没能读出来：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
+    }
+    await loadCleanup();
+  } else {
+    state.table = null;
+  }
+  await refreshLog();
   await refreshMigrationStatus();
   return result;
 }
@@ -3194,42 +3336,44 @@ $('migration-apply').addEventListener('click', async event => {
   const button = event.currentTarget;
   if (!migrationPlan?.write_allowed) return;
   const ok = await confirmDialog({
-    title: '开始迁移',
-    lines: ['会先备份，再把选中的内容收进统一仓库。每个 agent 原来能调用的技能名单会保留。'],
-    note: '完成后可以一键还原。', okText: '迁移',
+    title: '开始整理',
+    lines: ['会先备份，再把各 agent 现在用的技能收进一份技能库。每个 agent 原来能用的技能名单会保留。'],
+    note: '完成后可以还原成现在这样。', okText: '开始整理',
   });
   if (!ok) return;
   await runWrite({
     button,
-    busyText: '正在迁移…',
+    busyText: '正在整理…',
     onError: migrationError,
     work: async () => {
       const choices = Object.fromEntries([...document.querySelectorAll('[data-choice]:checked')].map(input => [input.dataset.choice, input.value]));
       const result = await api('/api/migration/apply', {confirmed: true, agents: migrationPlan.agents, plan_id: migrationPlan.plan_id, choices});
       backupId = result.backup_id;
-      return finishMigration('迁移完成', result);
+      return finishMigration('整理好了', result);
     },
-    success: () => ({text: '迁移完成，可以一键还原'}),
+    // 完成提示里带“撤销”：撤销就是回到整理前，用的还是同一份备份。
+    success: result => ({text: '整理好了', undo: button => restoreBackup(result.backup_id, button)}),
   });
 });
 
 async function restoreBackup(id, button = null) {
   const ok = await confirmDialog({
-    title: '还原到这份备份',
-    lines: ['会把这些 agent 的技能目录和统一仓库恢复到备份时的状态。'],
+    title: '还原到整理前？',
+    lines: ['会把各 agent 的技能恢复成整理前的样子。'],
     note: '还原本身也会记在操作记录里。', okText: '还原',
   });
-  if (!ok) return;
+  if (!ok) return false;
   await runWrite({
     button,
     busyText: '正在还原…',
     onError: migrationError,
     work: async () => {
       const result = await api('/api/restore', {confirmed: true, backup_id: id});
-      return finishMigration('已还原到迁移前', result);
+      return finishMigration('已还原到整理前', result);
     },
-    success: () => ({text: '已经还原到备份时的状态'}),
+    success: () => ({text: '已经还原到整理前的样子'}),
   });
+  return true;
 }
 
 $('migration-restore').addEventListener('click', event => restoreBackup(backupId, event.currentTarget));
@@ -3240,7 +3384,7 @@ $('migration-backups').addEventListener('click', event => withBusy(event.current
     $('migration-backup-list').innerHTML = saved.map(backup => `<div class="item-row">
       <span class="mono">${escape(backup.backup_id)}</span>
       <span class="item-end"><button class="btn btn-small" data-restore-backup="${escape(backup.backup_id)}" ${state.writeAllowed ? '' : 'disabled'}>还原这份备份</button></span>
-    </div>`).join('') || '<p class="item-note">还没有迁移备份。</p>';
+    </div>`).join('') || '<p class="item-note">还没有整理备份。</p>';
   } catch (error) {
     migrationError(error);
   }
@@ -3251,12 +3395,12 @@ $('migration-backup-list').addEventListener('click', event => {
   if (button) restoreBackup(button.dataset.restoreBackup, button);
 });
 
-/* 迁移与还原的按钮状态看 /api/status；右上角模式标记只认 /api/table 的 write_allowed。 */
+/* 整理与还原的按钮状态看 /api/status；右上角模式标记只认 /api/table 的 write_allowed。 */
 async function refreshMigrationStatus() {
   try {
     const status = await api('/api/status');
     state.writeAllowed = !status.read_only;
-    $('migration-mode').textContent = state.writeAllowed ? '迁移前会备份，迁移完成后可以一键还原。' : '只读模式下可以预览，不能迁移。';
+    renderMigrationMode(state.writeAllowed);
     $('migration-apply').disabled = !state.writeAllowed;
   } catch (error) {
     migrationError(error);
@@ -3292,9 +3436,21 @@ async function refreshProgram() {
   }
 }
 
+/* 地址里记着在哪一页、技能页看哪个 agent、设置页看哪一块。
+   旧地址 #log、#diagnostics 也认，换成设置页对应的那一块。 */
+function placeFromHash() {
+  const [page, arg] = location.hash.slice(1).split('/');
+  if (page === 'settings') return {page: 'settings', block: SETTINGS_BLOCKS.includes(arg) ? arg : 'ai'};
+  if (page === 'log' || page === 'diagnostics') return {page: 'settings', block: page};
+  if (page === 'cleanup') return {page: 'cleanup'};
+  if (page === 'skills' && arg) return {page: 'skills', agent: decodeURIComponent(arg)};
+  return {page: 'skills'};
+}
+
 async function start() {
-  const [startPage, startAgent] = location.hash.slice(1).split('/');
-  if (startAgent) state.agent = decodeURIComponent(startAgent);
+  const startPlace = placeFromHash();
+  if (startPlace.agent) state.agent = startPlace.agent;
+  if (startPlace.block) state.settingsBlock = startPlace.block;
   heartbeat();
   setInterval(heartbeat, 10000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
@@ -3310,18 +3466,21 @@ async function start() {
   renderAgentSummary();
   renderSkillTable();
   renderTasks();
+  await refreshInventory();
+  // 先问 /api/agents：还没整理过时，技能页要显示首次整理，不去读还没有的技能表。
+  await refreshAgents().catch(() => {});
+  renderFooter();
   try {
-    await Promise.all([refreshInventory(), refreshTable()]);
-    renderFooter();
+    if (renderMigrationStatus()) await refreshTable();
   } catch (error) {
     toast({text: '技能清单没能读出来：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
   }
   await refreshLog();
-  await refreshAgents().catch(() => {});
-  renderMigrationStatus();
   refreshMigrationStatus();
   refreshUpdates();
-  showPage(startPage && $('page-' + startPage) ? startPage : 'skills');
+  showPage(startPlace.page);
+  // 地址点名了设置页的哪一块，等内容都画完再滚过去。
+  if (startPlace.page === 'settings') setTimeout(() => showSettingsBlock(state.settingsBlock), 300);
 }
 
 start();
