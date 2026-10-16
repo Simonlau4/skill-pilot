@@ -422,6 +422,7 @@ class SelfUpdateProcessTests(unittest.TestCase):
                 time.sleep(.03)
             self.fail('update process did not reach the expected state')
         initial = request('/api/status')
+        until('/api/program/progress', lambda p: not p['running'])
         before = store.physical_state(self.home / '.skill-pilot')
         target = publish(self)
         request('/api/program/check', {})

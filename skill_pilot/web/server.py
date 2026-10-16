@@ -50,6 +50,7 @@ class Dashboard(ThreadingHTTPServer):
         self.program_review = session.get('program_review')
         self.program_progress = session.get('program_progress', {'running': False, 'phase': 'idle',
             'message': '从 GitHub 官方项目获取新版', 'error': '', 'available': False, 'current': '', 'latest': ''})
+        self.program_progress.setdefault('automatic', False)
         if self.program_progress['phase'] == 'ready':
             self.program_progress.update(phase='latest', message='SP 已升级到最新版')
         self.program_thread = None
@@ -89,20 +90,20 @@ class Dashboard(ThreadingHTTPServer):
         return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread, self.program_thread)) or
                 self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
 
-    def start_program(self, action, target=None):
+    def start_program(self, action, target=None, automatic=False):
         with self.runtime_lock:
             if self.program_progress['running']:
                 return self.program_progress.copy()
             if action == 'apply' and (not self.program_review or target != self.program_review['target'] or
                                       not self.program_review['available']):
                 raise ValueError('请先检查 SP 更新，再升级。')
-            self.program_progress.update(running=True, phase=action, error='',
+            self.program_progress.update(running=True, phase=action, error='', automatic=automatic,
                 message='正在下载并检查新版…' if action == 'check' else '正在升级，等当前操作完成…')
-            self.program_thread = threading.Thread(target=self.program_work, args=(action,), daemon=True)
+            self.program_thread = threading.Thread(target=self.program_work, args=(action, automatic), daemon=True)
             self.program_thread.start()
             return self.program_progress.copy()
 
-    def program_work(self, action):
+    def program_work(self, action, automatic=False):
         try:
             if action == 'check':
                 if self.program_review:
@@ -129,9 +130,12 @@ class Dashboard(ThreadingHTTPServer):
                 self.program_review['available'] = False
                 self.program_progress.update(result, phase='ready', message='新版已装好，刷新后生效')
         except Exception as error:
-            self.program_progress.update(phase='error', available=False,
-                error=str(error) if isinstance(error, ValueError) else 'SP 更新没有完成，请检查网络和文件夹权限后重试。',
-                message='SP 更新没有完成')
+            if automatic:
+                self.program_progress.update(phase='idle', available=False, error='', message='还没查到新版信息')
+            else:
+                self.program_progress.update(phase='error', available=False,
+                    error=str(error) if isinstance(error, ValueError) else 'SP 更新没有完成，请检查网络和文件夹权限后重试。',
+                    message='SP 更新没有完成')
         finally:
             self.program_progress['running'] = False
 
@@ -599,6 +603,8 @@ def run(json_output=False):
             lock.truncate()
             json.dump({"pid": os.getpid(), "url": server.url}, lock)
             lock.flush()
+            if preview_allowed(server.home):
+                server.start_program('check', automatic=True)
         server.last_heartbeat = time.monotonic()
         threading.Thread(target=server.watch, daemon=True).start()
         if not resume:
