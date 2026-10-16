@@ -19,7 +19,7 @@ REAL_CURATED = operations.curated_dependencies
 
 class OperationsTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='skill-pilot-m3-test-')
+        self.temp = tempfile.TemporaryDirectory(prefix='skill pilot m3 test ')
         self.addCleanup(self.temp.cleanup)
         # 手动确认流程的用例不受 docs/dependency-decisions.json 影响；判定表本身另有用例覆盖。
         curated=patch.object(operations,'curated_dependencies',return_value=({},{}))
