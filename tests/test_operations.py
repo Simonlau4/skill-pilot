@@ -93,12 +93,12 @@ class OperationsTests(unittest.TestCase):
             self.assign('other', 'claude', expected=view['revision'])
 
     def test_path_warnings_check_this_users_files_not_a_fixed_directory(self):
-        removed = ['.codex/skills/alpha', '.codex/skills/beta', '.agents/skills/follow-builders']
+        removed = ['.codex/skills/alpha', '.codex/skills/beta', '.agents/skills/sample-skill']
         self.assertEqual(operations.path_warnings(removed, self.home), [])
         own = self.home / 'notes/own.md'
         own.parent.mkdir()
         own.write_text('引用')
-        listed = self.home / 'Documents/Example-Notes/docs/AI-Builders-Digest迁移到Grok-Bot.md'
+        listed = self.home / 'Documents/Example-Notes/docs/sample-note.md'
         listed.parent.mkdir(parents=True)
         listed.write_text('引用')
         project = self.home / 'reference project'
@@ -115,8 +115,8 @@ class OperationsTests(unittest.TestCase):
         companion.unlink()
         warnings = operations.path_warnings(removed, self.home)
         self.assertEqual(warnings, [{
-            'file': '~/Documents/Example-Notes/docs/AI-Builders-Digest迁移到Grok-Bot.md',
-            'entries': ['.agents/skills/follow-builders']}])
+            'file': '~/Documents/Example-Notes/docs/sample-note.md',
+            'entries': ['.agents/skills/sample-skill']}])
 
     def repository(self, name='installed', body='新安装'):
         path = self.home / 'repository'

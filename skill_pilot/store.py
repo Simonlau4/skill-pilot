@@ -19,7 +19,7 @@ from .scan import SKIP_CONTENT, content_digest, scan_root
 from .sync import reconcile, visibility
 
 PROJECT = Path(__file__).resolve().parents[1]
-EXTRA_SOURCES = ["Documents/Example-Notes/skills/" + n for n in
+EXTRA_SOURCES = ["Documents/AI-Workbench/skills/" + n for n in
                  ("simon-neat", "agency-router", "marketing-router")]
 
 

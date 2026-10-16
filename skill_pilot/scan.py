@@ -348,7 +348,7 @@ def scan(home=None, applications=None):
         errors.extend(root["errors"])
         if root["category"] == "user":
             all_user_skills.extend({**s, "root": root["path"], "agents": root["readers"]} for s in root["skills"])
-    source_root = home / "Documents/Example-Notes/skills"
+    source_root = home / "Documents/AI-Workbench/skills"
     source_copies = []
     for name in ["simon-neat", "agency-router", "marketing-router"]:
         source_copies.extend(scan_root(source_root / name, True, cache)["skills"])
