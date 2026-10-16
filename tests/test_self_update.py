@@ -71,6 +71,36 @@ def publish(case):
     return git(case.upstream, 'rev-parse', 'HEAD')
 
 
+class InstallerFailureReasonTests(unittest.TestCase):
+    def make_project(self, script):
+        temporary = tempfile.TemporaryDirectory(prefix='skill pilot installer ')
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        set_up_home(self, root / 'Users/Another Person')
+        self.home.mkdir(parents=True)
+        project = root / 'Downloads/Skill Pilot'
+        path = project / 'scripts/install.py'
+        path.parent.mkdir(parents=True)
+        path.write_text(script)
+        return project
+
+    def test_installer_failure_includes_the_reason(self):
+        project = self.make_project(
+            'import sys\n'
+            'print("安装没有完成：当前安装器支持 macOS 桌面。", file=sys.stderr)\n'
+            'sys.exit(1)\n')
+        with self.assertRaises(ValueError) as caught:
+            self_update.run_installer(project, self.home)
+        self.assertEqual(str(caught.exception), '新版的启动入口没能安装完成。当前安装器支持 macOS 桌面。')
+
+    def test_installer_failure_without_a_reason_stays_short(self):
+        project = self.make_project('import sys\nsys.exit(1)\n')
+        with self.assertRaises(ValueError) as caught:
+            self_update.run_installer(project, self.home)
+        self.assertEqual(str(caught.exception), '新版的启动入口没能安装完成。')
+
+
+@unittest.skipUnless(sys.platform == 'darwin', '一键升级只支持 macOS')
 class SelfUpdateTests(unittest.TestCase):
     def setUp(self):
         make_fixture(self)
@@ -196,6 +226,7 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertEqual(before, store.physical_state(self.code))
 
 
+@unittest.skipUnless(sys.platform == 'darwin', '一键升级只支持 macOS')
 class CheckoutSelfUpdateTests(unittest.TestCase):
     def setUp(self):
         make_fixture(self, checkout=True)
@@ -254,6 +285,7 @@ class CheckoutSelfUpdateTests(unittest.TestCase):
         self.assertEqual((self.code / 'README.md').read_text(), 'my edit while upgrade was preparing')
 
 
+@unittest.skipUnless(sys.platform == 'darwin', '一键升级只支持 macOS')
 class SelfUpdateWebTests(unittest.TestCase):
     def setUp(self):
         make_fixture(self)
@@ -334,6 +366,7 @@ class SelfUpdateWebTests(unittest.TestCase):
         self.assertEqual(self.finished()['phase'], 'ready')
 
 
+@unittest.skipUnless(sys.platform == 'darwin', '一键升级只支持 macOS')
 class SelfUpdateProcessTests(unittest.TestCase):
     def run_flow(self, checkout):
         make_fixture(self, checkout)

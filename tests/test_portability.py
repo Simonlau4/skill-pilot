@@ -56,8 +56,13 @@ class ToolDiscoveryTests(unittest.TestCase):
         entry.write_text('#!/usr/bin/env node\nconsole.log(JSON.stringify({ok:true, action:"already_up_to_date",'
                          'current_version:"1.0.98", latest_version:"1.0.98"}));\n')
         entry.chmod(0o755)
-        # Only the custom prefix and OS tools are visible, as in a desktop launch.
-        with patch.dict(os.environ, {'PATH': str(entry.parent) + ':/usr/bin:/bin'}):
+        # 桌面启动只能看见自定义目录和系统目录。系统目录用临时替身，只放 env，不放 node，
+        # 这样系统自带的 node 不会排在用户自己的 node 前面。
+        system = self.home.parent / 'system bin'
+        system.mkdir()
+        env_tool = shutil.which('env') or '/usr/bin/env'
+        (system / 'env').symlink_to(env_tool)
+        with patch.dict(os.environ, {'PATH': os.pathsep.join((str(entry.parent), str(system)))}):
             env = tool_environment(self.home)
             self.assertEqual(shutil.which('node', path=env['PATH']), str(node_bin / 'node'))
             self.assertFalse(lark.check(home=self.home)['available'])
