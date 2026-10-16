@@ -62,3 +62,21 @@
 - **审查与合并**：PR 由“SP 测试与审查”审查；只有用户本人批准后才能合并。agent 不自行合并，也不改写已推送的历史。
 - **不泄露本机信息**：提交使用 GitHub 隐私邮箱（`用户名@users.noreply.github.com` 形式），不用本机用户名或电脑名；代码、文档、PR 说明里不写本机绝对路径、个人目录或用户名。本机技能库、设置和密钥不上传。
 - 推送自己的分支和开 PR 可按 issue 进行；合并仍须用户批准。只暂存本次相关文件。
+
+### 项目文件夹与副本
+
+用户的看板从项目文件夹运行，刷新时自动换成这里的程序；看板的“SP 自身更新”也要求这里停在最新 `main`、没有改动才能升级。所以本机 agent 都在自己的副本里干活，项目文件夹只放正式版。
+
+- **项目文件夹只停在 `main`**：不在里面改文件、切分支、提交。唯一例外是 PR 合并后跟上正式版：确认当前在 `main` 且没有改动，再 `git pull --ff-only`；不满足就停下告诉用户，不自行处理。用户在看板“设置 → SP 自身更新”点一键升级效果相同。
+- **开副本**：每个 issue 一份副本，从最新正式版开出。在项目文件夹里先 `git fetch origin`，再 `git worktree add -b 负责人/issue-编号-简述 .worktrees/负责人-issue-编号-简述 origin/main`（`.worktrees/` 已在忽略清单里）。Claude 桌面 app 自动开在 `.claude/worktrees/` 的副本也可以用，开 PR 前把分支改成规范名并跟上 `origin/main`。副本不要放在主目录下的隐藏文件夹里（如 `~/.codex/`），看板会把副本里的 `skill-pilot` 技能当成另外找到的技能。
+- **在副本里看效果**：命令都在副本里运行。默认用模拟 home，再用 agent 自己的浏览器打开输出的地址：
+
+  ```sh
+  FAKE="$(mktemp -d)/home"
+  python3 scripts/make-fake-home.py "$FAKE"
+  SKILL_PILOT_HOME="$FAKE" BROWSER=/usr/bin/true python3 -m skill_pilot ui --json
+  ```
+
+  需要对照真实技能库时只能只读打开：`SKILL_PILOT_READ_ONLY=1 TMPDIR="$(mktemp -d)" BROWSER=/usr/bin/true python3 -m skill_pilot ui --json`。单独的临时目录避开用户看板的启动锁，`BROWSER` 防止弹开用户的浏览器。看完结束自己开的这个看板。不在副本里运行 `scripts/build-app.sh`，它会把用户的启动器改成指向副本。
+- **清理**：PR 合并或关闭后，开副本的 agent 删掉副本和本地分支（`git worktree remove`、`git branch -D`；仓库用压缩合并，先用 `gh pr view` 确认状态）。每次开工前顺手清掉自己名下已合并的副本。
+- 云端 agent 不接触本机文件夹，照旧用 `cloud/` 分支前缀，不推 `main`，不合并。
