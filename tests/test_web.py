@@ -15,7 +15,7 @@ from skill_pilot.store import physical_state
 
 class WebTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="skill-pilot-web-")
+        self.temp = tempfile.TemporaryDirectory(prefix="skill pilot web ")
         self.addCleanup(self.temp.cleanup)
         set_up_home(self, self.temp.name)
         self.server = Dashboard({"read_only": True, "home": str(self.home)})
