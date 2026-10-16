@@ -33,7 +33,7 @@
 | 留下的技能 | 视为"今天用过一次"，60 天后仍没被用才再次出现在名单里 |
 | 看板 | 网页看板，需要时才启动（双击图标或让 agent 打开），关掉页面程序退出。中文界面，显示每个 agent 的技能数和描述占用字数 |
 | agent 入口 | 四个 agent 都装 `skill-pilot` 技能：在对话里能查看、分发、撤下、打开看板；更新和清理要用户在对话里明确同意才执行 |
-| 自写技能 | 以后在统一仓库里改。Example-Notes 里 simon-neat、agency-router、marketing-router 三份源码，迁完后**经用户同意**移到废纸篓；`skills-management.md` 的手工清单改成指向看板 |
+| 自写技能 | 以后在统一仓库里改。Example-Notes 里 simon-neat、agency-router、marketing-router 三份源码，迁完后**经用户同意**移到废纸篓；`sample-list.md` 的手工清单改成指向看板 |
 
 v1 不做：定时检查或自动更新、项目目录内的技能、插件技能的分配与更新、技能内容质量评估、多台电脑同步、远程访问看板。
 
