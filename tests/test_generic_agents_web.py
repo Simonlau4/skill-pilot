@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -93,6 +94,37 @@ class AgentWebTests(unittest.TestCase):
         revision = self.request('/api/table')[1]['revision']
         self.assertEqual(self.request('/api/undo', {'id': joined['id'], 'revision': revision, 'confirmed': True})[0], 200)
         self.assertEqual(self.fingerprint(), point)
+
+    def test_agent_list_is_cached_until_a_write(self):
+        from skill_pilot.web import server as web
+        calls = []
+        real = web.agent_management.overview
+
+        def slow(home):
+            calls.append(home)
+            time.sleep(0.25)
+            return real(home)
+
+        with patch.object(web.agent_management, 'overview', side_effect=slow):
+            status, first = self.request('/api/agents')
+            self.assertEqual(status, 200)
+            started = time.perf_counter()
+            status, second = self.request('/api/agents')
+            elapsed = time.perf_counter() - started
+            self.assertEqual(status, 200)
+            self.assertEqual(second, first)
+            self.assertLess(elapsed, 0.2)
+            self.assertEqual(len(calls), 1)
+            status, plan = self.request('/api/agents/ignore/preview', {'agent': 'fifth'})
+            self.assertEqual(status, 200)
+            self.assertEqual(len(calls), 1)
+            status, _written = self.request('/api/agents/ignore/apply', {
+                'agent': 'fifth', 'plan_id': plan['plan_id'], 'revision': plan['revision'], 'confirmed': True})
+            self.assertEqual(status, 200)
+            status, after = self.request('/api/agents')
+            self.assertEqual(status, 200)
+            self.assertEqual([item['id'] for item in after['ignored']], ['fifth'])
+            self.assertEqual(len(calls), 2)
 
     def test_ignore_endpoints_and_generic_scan_fields(self):
         status, plan = self.request('/api/agents/ignore/preview', {'agent': 'fifth'})

@@ -86,7 +86,6 @@ SP 优化点（2026-10-14，Claude 拆分、Sonnet 子代理执行，Claude 审�
    - 历史路径引用提醒仍带维护者的目录假设；后续调整这项提醒时，需改为核实当前用户自己的引用资料；
    - 后端 `store.guard()` 对未解析的 `/var/...` 模拟 home 会判成只读（真实 home 不受影响）；手测模拟 home 时用 `cd "$FAKE" && pwd -P` 得到的 `/private/var/...` 路径启动；
    - `follow-builders` 的上游每天更新资讯数据，检查更新几乎每次都会列出它；
-   - `/api/agents` 在用户数据上约 1～3 秒（每次重算版本号和发现目录），页面已不阻塞写入完成提示；以后频繁刷新可考虑缓存；
    - 这一轮代码净增约 1,000 行（主要是接入/不再管理和设置页 agent 一栏），可找时间做一次精简；
    - `interview-skills` 的来源更正（`jennifer88huang/interview-skills` 根目录）尚未写入真实登记表；它已撤下，不急，需要时运行 `skill-pilot set-source interview-skills --repo jennifer88huang/interview-skills --path . --yes`。
 

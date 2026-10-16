@@ -56,6 +56,9 @@ class Dashboard(ThreadingHTTPServer):
         self.reload_error = ''
         self.reload_thread = None
         self.closing = False
+        self.agents_generation = 0
+        self.agents_cache = None
+        self.agents_lock = threading.Lock()
         super().__init__(("127.0.0.1", 0), Handler, bind_and_activate=not bool(resume))
         if resume:
             self.socket.close()
@@ -109,6 +112,23 @@ class Dashboard(ThreadingHTTPServer):
         while time.monotonic() - self.last_heartbeat < (OPEN_PAGE_TIMEOUT if self.pages else HEARTBEAT_TIMEOUT) or self.background_busy() or self.reload_pending:
             time.sleep(0.1)
         self.shutdown()
+
+    def agents_view(self):
+        with self.agents_lock:
+            generation = self.agents_generation
+            cached = self.agents_cache
+        if cached is not None and cached[0] == generation:
+            return cached[1]
+        result = agent_management.overview(self.home)
+        with self.agents_lock:
+            if self.agents_generation == generation:
+                self.agents_cache = (generation, result)
+        return result
+
+    def invalidate_agents(self):
+        with self.agents_lock:
+            self.agents_generation += 1
+            self.agents_cache = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -187,7 +207,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ('/api/table', '/api/log', '/api/agents', '/api/cleanup'):
             try:
                 result = (operations.table(self.server.home) if path == '/api/table' else
-                          agent_management.overview(self.server.home) if path == '/api/agents' else
+                          self.server.agents_view() if path == '/api/agents' else
                           cleanup.list_withdrawn(self.server.home) if path == '/api/cleanup' else operations.history(self.server.home))
                 self.reply(200, result)
             except (ValueError, OSError, KeyError) as error:
@@ -271,7 +291,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(403, {'error': '当前处于只读模式，文件没有改动。'})
                     return
                 if path == '/api/settings/llm':
-                    self.reply(200, labels.save_settings(self.server.home, body))
+                    saved = labels.save_settings(self.server.home, body)
+                    self.server.invalidate_agents()
+                    self.reply(200, saved)
                 elif path == '/api/settings/llm/test':
                     self.reply(200, labels.test(self.server.home))
                 else:
@@ -284,8 +306,13 @@ class Handler(BaseHTTPRequestHandler):
                         if not labels.settings(self.server.home).get('api_key'):
                             raise ValueError('请先到设置里填好 AI 服务的 key。')
                         self.server.labels_progress.update(running=True, done=0, total=0, message='正在准备技能名单…', error='')
-                        self.server.labels_thread = threading.Thread(target=labels.run,
-                            args=(self.server.home, mode, self.server.labels_progress), daemon=True)
+                        def run_labels():
+                            try:
+                                labels.run(self.server.home, mode, self.server.labels_progress)
+                            finally:
+                                self.server.invalidate_agents()
+                        self.server.labels_thread = threading.Thread(target=run_labels, daemon=True)
+                        self.server.invalidate_agents()
                         self.server.labels_thread.start()
                         self.reply(200, self.server.labels_progress.copy())
                 return
@@ -400,6 +427,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = cleanup.restore(body['skills'],self.server.home,body['revision'])
             else:
                 result = operations.undo(body['id'], body['revision'], self.server.home)
+            self.server.invalidate_agents()
             self.server.inventory = scan(self.server.home)
             self.reply(200, result)
         except (ValueError, OSError, KeyError, TypeError, StopIteration) as error:
