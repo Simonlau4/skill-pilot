@@ -98,7 +98,7 @@ class OperationsTests(unittest.TestCase):
         own = self.home / 'notes/own.md'
         own.parent.mkdir()
         own.write_text('引用')
-        listed = self.home / 'Documents/AI-Workbench/docs/AI-Builders-Digest迁移到Grok-Bot.md'
+        listed = self.home / 'Documents/Example-Notes/docs/AI-Builders-Digest迁移到Grok-Bot.md'
         listed.parent.mkdir(parents=True)
         listed.write_text('引用')
         project = self.home / 'reference project'
@@ -106,7 +106,7 @@ class OperationsTests(unittest.TestCase):
         companion.parent.mkdir(parents=True)
         companion.write_text(json.dumps({'records': [
             {'file': '~/notes/own.md', 'references': ['~/.codex/skills/beta']},
-            {'file': '~/notes/own.md', 'references': ['/Users/' + 'j/.codex/skills/alpha']},
+            {'file': '~/notes/own.md', 'references': ['/Users/example/.codex/skills/alpha']},
             {'file': '~/notes/missing.md', 'references': ['~/.codex/skills/beta']},
         ]}, ensure_ascii=False))
         with patch.object(operations, 'PROJECT', project):
@@ -115,7 +115,7 @@ class OperationsTests(unittest.TestCase):
         companion.unlink()
         warnings = operations.path_warnings(removed, self.home)
         self.assertEqual(warnings, [{
-            'file': '~/Documents/AI-Workbench/docs/AI-Builders-Digest迁移到Grok-Bot.md',
+            'file': '~/Documents/Example-Notes/docs/AI-Builders-Digest迁移到Grok-Bot.md',
             'entries': ['.agents/skills/follow-builders']}])
 
     def repository(self, name='installed', body='新安装'):

@@ -20,7 +20,7 @@
 ## 已定规则（来自 PLAN 与实测，不要重新讨论）
 
 - 仓库位置 `~/.skill-pilot/store/`（git 仓库）、`bases/`、`registry.json`、`agents.json`、`backups/`；只存在于目标 home。
-- 默认选择：内容与来源记录一致的那份 → 否则最近修改的那份；内容相同的直接合并。AI-Workbench 中 `skills/{simon-neat,agency-router,marketing-router}` 三份源码作为额外候选参与核对（只读，不移动不删除）。
+- 默认选择：内容与来源记录一致的那份 → 否则最近修改的那份；内容相同的直接合并。Example-Notes 中 `skills/{simon-neat,agency-router,marketing-router}` 三份源码作为额外候选参与核对（只读，不移动不删除）。
 - 来源：用 `docs/source-attribution.md` 的归属；高置信度直接记录，中低置信度在核对页列出，用户可以改或标“来源不明”（不确认即视为来源不明，不检查更新）。
 - 每个 agent 的初始分配 = 迁移前**实际可见**的集合（目录里有、没被停用）。迁移不新增也不删除 `~/.codex/config.toml` 的停用条目，不改 `~/.agents/.skill-lock.json`。
 - 共享根 `~/.agents/skills` 的读者只有 Codex 和 DSH；Claude 只读 `~/.claude/skills`，Antigravity 只读 `~/.gemini/config/skills`。Codex 两个根都链接同一目标时只列一次。链接一律是指向 `~/.skill-pilot/store/<name>` 的绝对路径。
@@ -32,7 +32,7 @@
 
 ## 模拟 home 规则（安全关键）
 
-- 复制：四个技能根、`~/.claude/skills` 链接指向的目标、stss 指向的 `~/Developer/vendor/stop-that-shit-local/skills/stss`、AI-Workbench 三份源码、`~/.agents/.skill-lock.json`、`~/.codex/config.toml` 中只保留 `[skills]` 段（不复制认证和其他配置）。
+- 复制：四个技能根、`~/.claude/skills` 链接指向的目标、stss 指向的 `~/Developer/vendor/stop-that-shit-local/skills/stss`、Example-Notes 三份源码、`~/.agents/.skill-lock.json`、`~/.codex/config.toml` 中只保留 `[skills]` 段（不复制认证和其他配置）。
 - 复制后，把所有指向真实 home 的绝对链接改写成模拟 home 里对应的位置；相对链接保持不变。
 - 建好后断言：模拟 home 内任何链接解析后都不能落在模拟 home 之外，否则中止。
 - 代码层面加保护：任何写操作在执行前对目标做 `realpath`，落在当前目标 home 之外就拒绝。单测要覆盖这一条。
@@ -41,7 +41,7 @@
 ## 可读 / 可写范围
 
 - **可写**：`~/Developer/skill-pilot/`（不要 commit、push）、系统临时目录（模拟 home 放这里）。
-- **只读**：真实 home 的一切，包括四个技能根、`~/.codex/config.toml`、`~/.agents/.skill-lock.json`、`~/.claude/skills/synced/`、AI-Workbench。
+- **只读**：真实 home 的一切，包括四个技能根、`~/.codex/config.toml`、`~/.agents/.skill-lock.json`、`~/.claude/skills/synced/`、Example-Notes。
 - **禁止**：在真实 home 运行 `migrate --apply`、`restore`，或在真实 home 创建 `~/.skill-pilot/`；在看板里对真实 home 按下任何写操作按钮；安装到 `~/.local/bin` 或 `~/Applications`；运行 `lark-cli update`、`npx skills`。
 - 网络：本轮不需要。
 

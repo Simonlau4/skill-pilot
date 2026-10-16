@@ -155,7 +155,7 @@ gzh-design 不同文件为 SKILL.md、assets/preview-template.html、5 个主题
 
 ## S7 绝对路径引用
 
-清单见 [path-references.md](path-references.md)。扫描技能目录（跟随兼容链接）、Vault、AI-Workbench 的 docs/tools/scripts，以及 Codex AGENTS.md、Claude CLAUDE.md；排除依赖、版本库和会话 JSONL。仅输出文件路径与被引用技能名，不保存私人正文。
+清单见 [path-references.md](path-references.md)。扫描技能目录（跟随兼容链接）、Example-Vault、Example-Notes 的 docs/tools/scripts，以及 Codex AGENTS.md、Claude CLAUDE.md；排除依赖、版本库和会话 JSONL。仅输出文件路径与被引用技能名，不保存私人正文。
 
 命中 87 个文件；按路径族为 `.codex/skills` 55、`.agents/skills` 21、`.claude/skills` 37，三个集合相互重叠。与 PLAN 粗查 47/16/29 的差异来自跟随链接后覆盖各逻辑入口，以及当前完整目录范围；不是 113 个独立文件。唯一扫描警告是已知 doc 断链。
 
