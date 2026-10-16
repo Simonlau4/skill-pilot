@@ -53,6 +53,11 @@ class Dashboard(ThreadingHTTPServer):
         self.program_progress.setdefault('automatic', False)
         if self.program_progress['phase'] == 'ready':
             self.program_progress.update(phase='latest', message='SP 已升级到最新版')
+        # 换进程时没有还在跑的线程。自动检查被关掉或刷新打断时，按还没查到处理，避免一直显示正在检查。
+        if (resume and self.program_progress.get('automatic') and self.program_progress.get('running')
+                and self.program_progress.get('phase') == 'check'):
+            self.program_progress.update(running=False, phase='idle', available=False, error='',
+                                         message='还没查到新版信息')
         self.program_thread = None
         self.last_heartbeat = time.monotonic()
         self.pages = set(session.get('pages', []))
@@ -81,13 +86,20 @@ class Dashboard(ThreadingHTTPServer):
         super().server_close()
         if self.update_thread: self.update_thread.join()
         if self.labels_thread: self.labels_thread.join()
-        if self.program_thread: self.program_thread.join()
+        if self._program_thread_blocks_exit():
+            self.program_thread.join()
         if self.reload_thread: self.reload_thread.join()
         if self.program_review:
             shutil.rmtree(self.program_review['temporary'], ignore_errors=True)
 
+    def _program_thread_blocks_exit(self):
+        # 打开看板时的自动检查不挡住关看板和刷新应用新版；手动检查和升级仍要等。
+        thread = self.program_thread
+        return bool(thread and thread.is_alive() and not self.program_progress.get('automatic'))
+
     def background_busy(self):
-        return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread, self.program_thread)) or
+        return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread)) or
+                self._program_thread_blocks_exit() or
                 self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
 
     def start_program(self, action, target=None, automatic=False):

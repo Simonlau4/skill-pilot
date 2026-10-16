@@ -193,3 +193,125 @@ class AutoUpdateCheckTests(unittest.TestCase):
             self.check.assert_not_called()
         finally:
             dashboard.server_close()
+
+
+class CloseDuringAutomaticCheckTests(unittest.TestCase):
+    """关看板和刷新应用新版不应等启动时那次自动检查。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='skill pilot close check ')
+        self.addCleanup(temporary.cleanup)
+        set_up_home(self, Path(temporary.name) / 'Another User')
+        self.home.mkdir()
+        self.release = threading.Event()
+        self.entered = threading.Event()
+        self.boards = []
+        self.addCleanup(self.stop)
+        self.review = {'temporary': '', 'target': 'latest-version', 'current': 'old',
+                       'latest': 'new', 'available': False}
+
+        def blocked(home):
+            self.entered.set()
+            self.release.wait()
+            return self.review
+
+        self.check = self.enterContext(patch.object(self_update, 'check', side_effect=blocked))
+
+    def stop(self):
+        self.release.set()
+        for dashboard, serving in self.boards:
+            if serving:
+                dashboard.shutdown()
+                serving.join(3)
+            closer = getattr(dashboard, '_closer', None)
+            if closer:
+                closer.join(3)
+            if not dashboard.closing:
+                dashboard.server_close()
+
+    def board(self, serve=False):
+        dashboard = server.Dashboard({'home': str(self.home)})
+        serving = None
+        if serve:
+            serving = threading.Thread(target=dashboard.serve_forever, kwargs={'poll_interval': 0.01})
+            serving.start()
+        self.boards.append((dashboard, serving))
+        return dashboard
+
+    def start_check(self, dashboard, automatic):
+        dashboard.start_program('check', automatic=automatic)
+        self.assertTrue(self.entered.wait(2), '检查没有开始')
+
+    def test_close_does_not_wait_for_automatic_check(self):
+        dashboard = self.board()
+        self.start_check(dashboard, automatic=True)
+        closer = threading.Thread(target=dashboard.server_close)
+        dashboard._closer = closer
+        closer.start()
+        closer.join(1)
+        self.assertFalse(closer.is_alive(), '关看板仍在等自动检查')
+        self.assertTrue(dashboard.program_thread.is_alive(), '自动检查不应被关掉这件事打断')
+
+    def test_watch_shuts_down_while_automatic_check_is_stuck(self):
+        dashboard = self.board(serve=True)
+        serving = self.boards[-1][1]
+        self.start_check(dashboard, automatic=True)
+        dashboard.last_heartbeat = time.monotonic() - server.HEARTBEAT_TIMEOUT - 1
+        watcher = threading.Thread(target=dashboard.watch, daemon=True)
+        watcher.start()
+        serving.join(1)
+        self.assertFalse(serving.is_alive(), '关掉页面后看板仍在等自动检查')
+        watcher.join(1)
+
+    def test_reload_does_not_wait_for_automatic_check(self):
+        dashboard = self.board()
+        applied = threading.Event()
+        dashboard.reload_callback = applied.set
+        self.start_check(dashboard, automatic=True)
+        with patch.object(runtime, 'version', return_value='new-program'):
+            dashboard.request_reload()
+            self.assertTrue(applied.wait(1), '刷新应用新版仍在等自动检查')
+
+    def test_close_still_waits_for_manual_check(self):
+        dashboard = self.board()
+        self.start_check(dashboard, automatic=False)
+        closer = threading.Thread(target=dashboard.server_close)
+        dashboard._closer = closer
+        closer.start()
+        self.assertTrue(closer.is_alive(), '手动检查进行中时关看板不应马上返回')
+        time.sleep(0.3)
+        self.assertTrue(closer.is_alive(), '手动检查进行中时关看板不应马上返回')
+        self.release.set()
+        closer.join(2)
+        self.assertFalse(closer.is_alive(), '手动检查结束后关看板应返回')
+
+    def test_reload_still_waits_for_manual_check(self):
+        dashboard = self.board()
+        applied = threading.Event()
+        dashboard.reload_callback = applied.set
+        self.start_check(dashboard, automatic=False)
+        with patch.object(runtime, 'version', return_value='new-program'):
+            dashboard.request_reload()
+            self.assertFalse(applied.wait(0.3), '手动检查进行时不应立刻刷新应用新版')
+            self.release.set()
+            self.assertTrue(applied.wait(2), '手动检查结束后应能刷新应用新版')
+
+    def test_resumed_interrupted_automatic_check_is_idle(self):
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        saved = {'running': True, 'phase': 'check', 'automatic': True,
+                 'message': '正在下载并检查新版…', 'available': False, 'error': '',
+                 'current': '', 'latest': ''}
+        dashboard = server.Dashboard({'home': str(self.home)}, resume={
+            'inventory': {'home': str(self.home)},
+            'socket_fd': os.dup(listener.fileno()),
+            'program_progress': saved.copy(),
+        })
+        self.addCleanup(dashboard.server_close)
+        self.assertFalse(dashboard.program_progress['running'])
+        self.assertEqual(dashboard.program_progress['phase'], 'idle')
+        self.assertEqual(dashboard.program_progress['error'], '')
+        self.assertEqual(dashboard.program_progress['message'], '还没查到新版信息')
+        self.check.assert_not_called()
