@@ -3395,11 +3395,13 @@ $('migration-backup-list').addEventListener('click', event => {
   if (button) restoreBackup(button.dataset.restoreBackup, button);
 });
 
-/* 整理与还原的按钮状态看 /api/status；右上角模式标记只认 /api/table 的 write_allowed。 */
+/* 整理与还原的按钮状态看 /api/status。
+   还没整理过时不会读技能表，右上角「只读预览」也要跟着只读状态走。已经有技能表时，标记仍由技能表决定。 */
 async function refreshMigrationStatus() {
   try {
     const status = await api('/api/status');
     state.writeAllowed = !status.read_only;
+    if (!state.table) $('mode-badge').hidden = state.writeAllowed;
     renderMigrationMode(state.writeAllowed);
     $('migration-apply').disabled = !state.writeAllowed;
   } catch (error) {
