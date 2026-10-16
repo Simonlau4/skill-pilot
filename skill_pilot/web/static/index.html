@@ -88,6 +88,9 @@
       <circle cx="11" cy="11" r="7"/>
       <path d="m20 20-4-4"/>
     </symbol>
+    <symbol id="sp-chevron-left" viewBox="0 0 24 24">
+      <path d="m14 6-6 6 6 6"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -138,7 +141,7 @@
         <div id="rail-notes"></div>
       </aside>
 
-      <div>
+      <div class="skills-main">
         <div id="agent-head" class="agent-head"></div>
 
         <div class="toolbar">
@@ -154,8 +157,6 @@
         </div>
 
         <div id="updates-failed" class="failed-list" role="region" aria-label="更新未完成的技能和原因" tabindex="0" hidden></div>
-        <div id="skills-filters" class="filters"></div>
-
         <p id="labels-hint" class="note-line" hidden>
           <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-sparkle"/></svg>
           <span>还没设置 AI 服务</span>
@@ -163,7 +164,26 @@
           <button type="button" class="hint" data-hint="设置好以后，技能会自动有中文名、中文说明、分组和标签。"></button>
         </p>
 
-        <div id="skills-list" class="skills-list"></div>
+        <div id="skills-browser" class="skills-browser without-filters">
+          <div id="skills-filter-slot" class="filter-slot" hidden>
+            <aside id="skills-filter-rail" class="filter-rail" aria-label="分组和标签筛选" hidden>
+              <div class="filter-rail-head">
+                <h3>分组</h3>
+                <button id="filters-hide" class="btn btn-quiet btn-iconic" aria-label="收起分组和标签" title="收起分组和标签" aria-expanded="true" aria-controls="skills-filter-rail"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-chevron-left"/></svg></button>
+              </div>
+              <div id="skills-filters" class="filters"></div>
+            </aside>
+          </div>
+          <div class="skills-results">
+            <div class="skills-results-head">
+              <button id="filters-show" class="btn btn-quiet btn-small" aria-expanded="false" aria-controls="skills-filter-rail" hidden><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-chevron-left"/></svg>展开筛选</button>
+              <h3 id="skills-result-title">全部技能</h3>
+              <button id="skills-clear-filters" class="link-btn" hidden>清除筛选</button>
+              <span id="skills-result-count" role="status" aria-atomic="true"></span>
+            </div>
+            <div id="skills-list" class="skills-list"></div>
+          </div>
+        </div>
       </div>
     </div>
   </section>

@@ -12,6 +12,25 @@ const $ = id => document.getElementById(id);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clone = value => JSON.parse(JSON.stringify(value));
 
+/* 更新同一组按钮时保留节点，让按压、选中底色和焦点连续过渡。 */
+function renderButtons(container, markup, key) {
+  const template = document.createElement('template');
+  template.innerHTML = markup;
+  const existing = new Map([...container.children].map(button => [button.getAttribute(key), button]));
+  for (const [index, next] of [...template.content.children].entries()) {
+    const value = next.getAttribute(key);
+    const button = existing.get(value) || next;
+    if (button !== next) {
+      for (const attribute of [...button.attributes]) if (!next.hasAttribute(attribute.name)) button.removeAttribute(attribute.name);
+      for (const attribute of next.attributes) if (button.getAttribute(attribute.name) !== attribute.value) button.setAttribute(attribute.name, attribute.value);
+      if (button.innerHTML !== next.innerHTML) button.innerHTML = next.innerHTML;
+    }
+    existing.delete(value);
+    if (container.children[index] !== button) container.insertBefore(button, container.children[index] || null);
+  }
+  for (const button of existing.values()) button.remove();
+}
+
 /* 图标加几个字：图标来自 index.html 顶部的 <symbol>，只用来配文字，读屏不读。 */
 const icon = (name, extra = '') => `<svg class="ico${extra ? ' ' + extra : ''}" aria-hidden="true" focusable="false"><use href="#sp-${name}"/></svg>`;
 
@@ -473,6 +492,7 @@ const state = {
   tab: 'on',
   chip: '',   // 分组筛选：'' 是全部，UPDATES_CHIP 是“有新版”，其余是分组名
   tag: '',    // 标签筛选，'' 是不筛
+  filtersCollapsed: false,
   cleanup: null,
   cleanupSelected: new Set(),
   logs: [],
@@ -579,6 +599,7 @@ function showPage(page) {
   if (page === 'settings') { renderConfigExport(); renderAgents(); refreshSettings(); refreshProgramUpdate(); }
   renderActionBar();
   window.scrollTo({top: 0, behavior: 'auto'});
+  if (page === 'skills') fitFilterRail();
 }
 
 document.querySelector('.nav').addEventListener('click', event => {
@@ -671,14 +692,14 @@ function renderAgentSummary() {
   const loads = Object.fromEntries(state.agents.map(agent => [agent.id, agentLoad(agent.id)]));
   const max = loadMax(loads);
   const current = currentAgent()?.id;
-  rail.innerHTML = state.agents.map(agent => {
+  renderButtons(rail, state.agents.map(agent => {
     const load = loads[agent.id];
     const count = load.countAfter !== load.countNow ? `${load.countNow} → ${load.countAfter} 个` : `${load.countNow} 个`;
     return `<button class="rail-item" data-pick-agent="${escape(agent.id)}" aria-current="${agent.id === current}">
       <span class="rail-name"><span>${swatch(agent.id)}${escape(agent.name)}</span><small>${count}</small></span>
       ${loadHtml(agent.id, load, max)}
     </button>`;
-  }).join('');
+  }).join(''), 'data-pick-agent');
 }
 
 function pickAgent(id) {
@@ -769,7 +790,7 @@ function groupedRows(rows) {
     .sort((a, b) => (a.name === '未分组') - (b.name === '未分组') || b.skills.length - a.skills.length);
 }
 
-/* 列表上方的筛选条：分组一排（全部 / 有新版 / 各分组），标签一排。
+/* 左侧目录：分组纵向排列，标签直接浏览。
    每个分组的数字是点了它会看到几个：按当前的“在用 / 可以加的”和搜索算，再叠上已选的标签；
    标签的数字则叠上已选的分组。已选中的就算数字是 0 也留着，免得点完不知道怎么退。 */
 function filtersHtml({skills, inTab, withUpdate, scope, hasTag, inChip}) {
@@ -778,27 +799,101 @@ function filtersHtml({skills, inTab, withUpdate, scope, hasTag, inChip}) {
     for (const row of rows) for (const key of keysOf(row)) counts.set(key, (counts.get(key) || 0) + 1);
     return counts;
   };
-  const chip = (attr, value, label, n, pressed, extra = '') =>
-    `<button class="fchip${extra}" ${attr}="${escape(value)}" aria-pressed="${pressed}"${pressed && value ? ' title="再点一下取消"' : ''}>${escape(label)}<span class="n">${n}</span></button>`;
+  const option = (attr, value, label, n, pressed, extra = '') =>
+    `<button type="button" class="filter-option${extra}" ${attr}="${escape(value)}" aria-pressed="${pressed}" title="${escape(label)}${pressed && value ? '；再点一下取消' : ''}"><span class="filter-name">${escape(label)}</span><span class="n">${n}</span></button>`;
 
   const groups = count(inTab.filter(hasTag), skill => [groupOf(skill.name)]);
   if (state.chip && state.chip !== UPDATES_CHIP && !groups.has(state.chip)) groups.set(state.chip, 0);
   const several = new Set(skills.map(skill => groupOf(skill.name))).size > 1;
-  const groupRow = several || withUpdate.length ? `<div class="chip-row"><span class="chip-label">分组</span>
-    <div class="chip-set" role="group" aria-label="按分组看">
-      ${chip('data-chip', '', '全部', inTab.filter(hasTag).length, !state.chip)}
-      ${withUpdate.length || state.chip === UPDATES_CHIP ? chip('data-chip', UPDATES_CHIP, '有新版', withUpdate.filter(hasTag).length, state.chip === UPDATES_CHIP, ' fchip-update') : ''}
+  const groupRow = `<div class="filter-group-list" data-filter-list="groups" role="group" aria-label="按分组看">
+      ${option('data-chip', '', '全部技能', inTab.filter(hasTag).length, !state.chip)}
+      ${withUpdate.length || state.chip === UPDATES_CHIP ? option('data-chip', UPDATES_CHIP, '有新版', withUpdate.filter(hasTag).length, state.chip === UPDATES_CHIP, ' filter-update') : ''}
       ${several ? [...groups].sort(([a, x], [b, y]) => (a === '未分组') - (b === '未分组') || y - x)
-        .map(([name, n]) => chip('data-chip', name, name, n, state.chip === name)).join('') : ''}
-    </div></div>` : '';
+        .map(([name, n]) => option('data-chip', name, name, n, state.chip === name)).join('') : ''}
+    </div>`;
 
   const tags = count(scope.filter(inChip), skill => skill.tags || []);
   if (state.tag && !tags.has(state.tag)) tags.set(state.tag, 0);
-  const tagRow = skills.some(skill => skill.tags?.length) && tags.size ? `<div class="chip-row"><span class="chip-label">标签</span>
-    <div class="chip-set" role="group" aria-label="按标签看">
-      ${[...tags].sort(([a, x], [b, y]) => y - x || a.localeCompare(b, 'zh-CN')).map(([name, n]) => chip('data-tag-chip', name, name, n, state.tag === name)).join('')}
-    </div></div>` : '';
-  return groupRow + tagRow;
+  const tagRow = skills.some(skill => skill.tags?.length) || state.tag ? `<section class="filter-tags" aria-labelledby="filter-tags-title">
+    <h3 id="filter-tags-title">标签</h3>
+    <div class="filter-tag-list" data-filter-list="tags" role="group" aria-label="按标签看">
+      ${option('data-tag-chip', '', '不限标签', scope.filter(inChip).length, !state.tag, ' filter-tag-option')}
+      ${[...tags].sort(([a, x], [b, y]) => y - x || a.localeCompare(b, 'zh-CN')).map(([name, n]) => option('data-tag-chip', name, name, n, state.tag === name, ' filter-tag-option')).join('')}
+    </div>
+    <p id="filter-tags-empty" class="filter-empty" role="status" hidden>没有可选标签</p>
+  </section>` : '';
+  return several || withUpdate.length || state.chip || tagRow ? groupRow + tagRow : '';
+}
+
+function renderFilterLayout() {
+  const available = Boolean($('skills-filters').innerHTML);
+  const collapsed = !available || state.filtersCollapsed;
+  $('skills-filter-slot').hidden = !available;
+  $('skills-filter-rail').hidden = !available;
+  $('skills-filter-rail').inert = collapsed;
+  $('skills-filter-rail').setAttribute('aria-hidden', String(collapsed));
+  $('filters-show').hidden = !available || !state.filtersCollapsed;
+  $('skills-browser').classList.toggle('without-filters', collapsed);
+}
+
+function fitFilterRail() {
+  const slot = $('skills-filter-slot');
+  if (slot.hidden || state.page !== 'skills') return;
+  const top = Math.max(16, slot.getBoundingClientRect().top);
+  slot.style.setProperty('--filter-space', `${Math.max(0, innerHeight - top - 16)}px`);
+}
+
+addEventListener('scroll', fitFilterRail, {passive: true});
+addEventListener('resize', fitFilterRail);
+
+let filterGroupMotion = null;
+
+/* 重画筛选时保留焦点和目录滚动位置。 */
+function renderSkillFilters(options) {
+  const filters = $('skills-filters');
+  const groupList = filters.querySelector('.filter-group-list');
+  const groupHeight = groupList?.getBoundingClientRect().height;
+  filterGroupMotion?.cancel();
+  const active = document.activeElement;
+  const selector = filters.contains(active) && active.hasAttribute('data-chip') ? `[data-chip="${CSS.escape(active.dataset.chip)}"]`
+    : filters.contains(active) && active.hasAttribute('data-tag-chip') ? `[data-tag-chip="${CSS.escape(active.dataset.tagChip)}"]` : null;
+  const scrolls = [...filters.querySelectorAll('[data-filter-list]')].map(list => [list.dataset.filterList, list.scrollTop]);
+  const template = document.createElement('template');
+  template.innerHTML = filtersHtml(options);
+  const lists = [...template.content.querySelectorAll('[data-filter-list]')];
+  if (lists.length && lists.length === filters.querySelectorAll('[data-filter-list]').length) {
+    for (const next of lists) {
+      const list = filters.querySelector(`[data-filter-list="${next.dataset.filterList}"]`);
+      renderButtons(list, next.innerHTML, next.dataset.filterList === 'groups' ? 'data-chip' : 'data-tag-chip');
+    }
+  } else filters.replaceChildren(template.content);
+  const empty = $('filter-tags-empty');
+  if (empty) empty.hidden = Boolean(filters.querySelector('[data-tag-chip]:not([data-tag-chip=""])'));
+  renderFilterLayout();
+  for (const [name, top] of scrolls) filters.querySelector(`[data-filter-list="${name}"]`)?.scrollTo(0, top);
+  const nextGroup = filters.querySelector('.filter-group-list');
+  const nextHeight = nextGroup?.getBoundingClientRect().height;
+  if (groupList && groupList === nextGroup && groupHeight !== nextHeight && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    filterGroupMotion = nextGroup.animate([{height: `${groupHeight}px`, flexShrink: 0}, {height: `${nextHeight}px`, flexShrink: 0}],
+      {duration: 260, easing: 'cubic-bezier(0.22, 1, 0.36, 1)'});
+  }
+  if (selector) {
+    const target = filters.querySelector(selector);
+    target?.focus({preventScroll: true});
+  }
+}
+
+let skillScope = '', skillListMotion = null;
+
+function animateSkillResults(agent) {
+  const scope = JSON.stringify([agent.id, state.tab, state.chip, state.tag]);
+  skillListMotion?.cancel();
+  if (skillScope && skillScope !== scope && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    skillListMotion = $('skills-list').animate([
+      {opacity: 0.75, transform: 'translateY(3px)'}, {opacity: 1, transform: 'translateY(0)'},
+    ], {duration: 180, easing: 'cubic-bezier(0.22, 1, 0.36, 1)'});
+  }
+  skillScope = scope;
 }
 
 /* 右边顶部：agent 名字、技能数和生效方式、占用条。
@@ -832,8 +927,8 @@ function renderSkillTable() {
 
   const skills = state.table.skills;
   const nOn = skills.filter(skill => assignedNow(skill.name, agent.id)).length;
-  $('skills-tabs').innerHTML = `<button class="seg" data-tab="on" aria-pressed="${state.tab === 'on'}">在用<span class="n">${nOn}</span></button>
-    <button class="seg" data-tab="off" aria-pressed="${state.tab === 'off'}">可以加的<span class="n">${skills.length - nOn}</span></button>`;
+  renderButtons($('skills-tabs'), `<button class="seg" data-tab="on" aria-pressed="${state.tab === 'on'}">在用<span class="n">${nOn}</span></button>
+    <button class="seg" data-tab="off" aria-pressed="${state.tab === 'off'}">可以加的<span class="n">${skills.length - nOn}</span></button>`, 'data-tab');
   $('skills-search').placeholder = `在 ${agent.name} 的技能里搜`;
 
   const query = $('skills-search').value.trim().toLowerCase();
@@ -846,7 +941,11 @@ function renderSkillTable() {
   const hasTag = skill => !state.tag || (skill.tags || []).includes(state.tag);
   const inChip = skill => !state.chip || state.chip === UPDATES_CHIP || groupOf(skill.name) === state.chip;
   const rows = scope.filter(inChip).filter(hasTag);
-  $('skills-filters').innerHTML = filtersHtml({skills, inTab, withUpdate, scope, hasTag, inChip});
+  $('skills-browser').style.setProperty('--c', agentColor(agent.id));
+  renderSkillFilters({skills, inTab, withUpdate, scope, hasTag, inChip});
+  $('skills-result-title').textContent = [state.chip === UPDATES_CHIP ? '有新版' : state.chip || '全部技能', state.tag].filter(Boolean).join(' · ');
+  $('skills-result-count').textContent = `${rows.length} 个技能`;
+  $('skills-clear-filters').hidden = !state.chip && !state.tag;
 
   // 空的时候只说一句话，需要下一步的给一个按钮，不写操作说明
   const empty = query ? emptyInner('search', '没找到，换个词试试')
@@ -856,7 +955,9 @@ function renderSkillTable() {
   $('skills-list').innerHTML = groupedRows(rows).map(group =>
     `<div class="list-group-head"><strong>${escape(group.name)}</strong><span>${group.skills.length} 个</span></div>`
     + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`;
+  animateSkillResults(agent);
   $('labels-hint').hidden = Boolean(state.table.groups?.length) || state.table.llm_configured;
+  fitFilterRail();
 }
 
 function pendingChanges() {
@@ -1089,7 +1190,20 @@ $('skills-filters').addEventListener('click', event => {
   else if (tag) toggleTag(tag.dataset.tagChip);
   else return;
   const selector = group ? `[data-chip="${CSS.escape(group.dataset.chip)}"]` : `[data-tag-chip="${CSS.escape(tag.dataset.tagChip)}"]`;
-  $('skills-filters').querySelector(selector)?.focus();
+  $('skills-filters').querySelector(selector)?.focus({preventScroll: true});
+});
+
+for (const id of ['filters-hide', 'filters-show']) $(id).addEventListener('click', () => {
+  state.filtersCollapsed = !state.filtersCollapsed;
+  renderFilterLayout();
+  $(state.filtersCollapsed ? 'filters-show' : 'filters-hide').focus({preventScroll: true});
+});
+
+$('skills-clear-filters').addEventListener('click', () => {
+  state.chip = '';
+  state.tag = '';
+  renderSkillTable();
+  ($('filters-show').hidden ? $('skills-filters').querySelector('[data-chip=""]') : $('filters-show'))?.focus({preventScroll: true});
 });
 
 $('agent-rail').addEventListener('click', event => {
