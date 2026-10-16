@@ -30,7 +30,7 @@ def make_fixture(case, checkout=False):
     case.upstream.mkdir(parents=True)
     for name in ('skill_pilot', 'scripts', 'assets', 'docs', 'skill'):
         shutil.copytree(store.PROJECT / name, case.upstream / name, ignore=shutil.ignore_patterns('__pycache__'))
-    for name in ('README.md', '.gitignore'):
+    for name in ('README.md', '.gitignore', 'skill-pilot'):
         shutil.copy2(store.PROJECT / name, case.upstream / name)
     source = case.upstream / 'skill_pilot/self_update.py'
     source.write_text(source.read_text().replace(repr(self_update.SOURCE), repr(case.upstream.as_uri())))

@@ -56,10 +56,9 @@ def bundle_files(project):
         paths = [p for name in BUNDLE_DIRS for p in (project / name).rglob('*')
                  if p.is_file() and '__pycache__' not in p.parts]
         paths += list(project.glob('*.md'))
-        if (project / '.gitignore').exists():
-            paths.append(project / '.gitignore')
-        if (project / '.claude/launch.json').exists():
-            paths.append(project / '.claude/launch.json')
+        for name in ('.gitignore', '.claude/launch.json', 'skill-pilot'):
+            if (project / name).exists():
+                paths.append(project / name)
     return {str(p.relative_to(project)): stamp(safe_path(project, str(p.relative_to(project))))
             for p in sorted(paths) if p.name != '.DS_Store' and p.suffix != '.pyc'}
 
