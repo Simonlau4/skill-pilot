@@ -160,10 +160,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        # 浏览器会自己来要 /favicon.ico，不带本次口令。只放行这一个地址，避免控制台报错。
+        if path == "/favicon.ico":
+            self.reply(204, b"")
+            return
         if not self.authorized():
             self.reply(403, {"error": "此页面只允许本机本次打开的浏览器访问。"})
             return
-        path = urllib.parse.urlsplit(self.path).path
         if path == "/api/scan":
             self.reply(200, self.server.inventory)
         elif path == '/api/settings':

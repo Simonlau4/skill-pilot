@@ -88,6 +88,13 @@ class WebTests(unittest.TestCase):
         headers = {"X-Skill-Pilot-Token": self.server.token}
         self.assertEqual(self.request('/brand/../favicon.svg', headers)[0], 404)
 
+    def test_browser_favicon_ico_needs_no_token(self):
+        status, body = self.request("/favicon.ico")
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        for path in ("/", "/app.js", "/app.css", "/favicon.svg", "/api/scan", "/favicon.ico/../"):
+            self.assertEqual(self.request(path)[0], 403, path)
+
 
 class MigrationWebTests(unittest.TestCase):
     def setUp(self):
