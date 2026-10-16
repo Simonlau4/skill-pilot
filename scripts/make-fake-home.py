@@ -10,7 +10,8 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from skill_pilot.store import EXTRA_SOURCES, check_links, guard
+from skill_pilot.extra_sources import paths as extra_source_paths
+from skill_pilot.store import check_links, guard
 from skill_pilot import profiles
 
 
@@ -29,7 +30,7 @@ def make_fake_home(source, destination):
     skill_roots.update(str(p.relative_to(source)) for p in source.glob('.*/skills') if p.is_dir() and
                        not any(p.is_relative_to(source / r) for r in profiles.readonly_roots(source)))
     roots = ['.skill-pilot', *sorted(skill_roots),
-             'Developer/vendor/stop-that-shit-local/skills/stss', *EXTRA_SOURCES, '.agents/.skill-lock.json']
+             'Developer/vendor/stop-that-shit-local/skills/stss', *extra_source_paths(source), '.agents/.skill-lock.json']
     copied, dependencies = set(), []
     def copy(relative):
         src, dst = source / relative, destination / relative

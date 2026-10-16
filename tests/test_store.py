@@ -41,7 +41,6 @@ class MigrationTests(unittest.TestCase):
         self.skill(".codex/skills/.system/inner", "inner")
         self.skill(".agents/skills/off", "off")
         (self.home / ".codex/config.toml").write_text('[skills]\nconfig=[{name="off",enabled=false}]\n')
-        self.skill("Documents/AI-Workbench/skills/simon-neat", "simon-neat")
         (self.home / ".agents/.skill-lock.json").write_text('{"version":3,"skills":{}}')
 
     def fingerprint(self):

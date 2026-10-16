@@ -19,8 +19,6 @@ from .scan import SKIP_CONTENT, content_digest, scan_root
 from .sync import reconcile, visibility
 
 PROJECT = Path(__file__).resolve().parents[1]
-EXTRA_SOURCES = ["Documents/AI-Workbench/skills/" + n for n in
-                 ("simon-neat", "agency-router", "marketing-router")]
 
 
 def target_home():
@@ -155,9 +153,13 @@ def preview(home=None, agent_ids=None):
                 raise ValueError("有技能名称不能安全用作文件夹名称，请先核对。")
             grouped[name].append(skill)
             entries[name].append(str(Path(skill["path"]).relative_to(home)))
-    for relative in EXTRA_SOURCES:
-        state[relative] = physical_state(home / relative)
-        for skill in scan_root(home / relative)["skills"]:
+    from .extra_sources import paths as extra_source_paths
+    for relative in extra_source_paths(home):
+        folder = home / relative
+        if not folder.is_dir():
+            continue
+        state[relative] = physical_state(folder)
+        for skill in scan_root(folder)["skills"]:
             if skill["valid"] and skill["name"] in grouped:
                 grouped[skill["name"]].append(skill)
     state['configs'] = {r: physical_state(home / r) for r in profiles.config_paths(home, selected)}

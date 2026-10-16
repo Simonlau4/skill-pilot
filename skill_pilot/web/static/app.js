@@ -1306,6 +1306,7 @@ const LLM_DEFAULTS = {
 };
 
 let llmSettings = {};
+let extraSourcePaths = [];
 let labelsAutoAttempted = false;
 let labelsRunning = false;
 let labelsDone = 0;   // 上一次轮询看到的整理进度
@@ -1325,9 +1326,29 @@ function renderLabelCounts() {
   }
 }
 
+function renderExtraSources() {
+  const writable = Boolean(state.table?.write_allowed);
+  $('extra-sources').innerHTML = extraSourcePaths.map((path, index) =>
+    `<div class="item-row"><span>${escape(path)}</span><span class="item-end"><button type="button" class="link-btn" data-extra-index="${index}">去掉</button></span></div>`).join('');
+  $('extra-source-path').disabled = !writable;
+  $('extra-source-add').disabled = !writable;
+  for (const button of $('extra-sources').querySelectorAll('button')) button.disabled = !writable;
+}
+
+async function saveExtraSource(path, remove) {
+  const result = await api('/api/settings/extra-sources', remove ? {path, remove: true} : {path});
+  $('extra-source-message').textContent = result.message;
+  extraSourcePaths = result.extra_sources || [];
+  renderExtraSources();
+  await refreshInventory();
+}
+
 async function refreshSettings() {
   try {
-    llmSettings = (await api('/api/settings')).llm;
+    const settings = await api('/api/settings');
+    llmSettings = settings.llm;
+    extraSourcePaths = settings.extra_sources || [];
+    renderExtraSources();
     const provider = llmSettings.provider || 'deepseek';
     $('llm-provider').value = provider in LLM_DEFAULTS ? provider : 'other';
     const defaults = LLM_DEFAULTS[$('llm-provider').value];
@@ -1531,6 +1552,35 @@ $('config-import-apply').addEventListener('click', async event => {
 function llmBody() {
   return {provider: $('llm-provider').value, base_url: $('llm-base-url').value, model: $('llm-model').value};
 }
+
+$('extra-source-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const path = $('extra-source-path').value.trim();
+  withBusy($('extra-source-add'), '正在记下…', async () => {
+    try {
+      await saveExtraSource(path, false);
+      $('extra-source-path').value = '';
+    } catch (error) {
+      $('extra-source-message').textContent = error.message;
+      toast({text: error.message, tone: 'error'});
+    }
+  });
+});
+
+$('extra-sources').addEventListener('click', event => {
+  const button = event.target.closest('[data-extra-index]');
+  if (!button) return;
+  const path = extraSourcePaths[Number(button.dataset.extraIndex)];
+  if (!path) return;
+  withBusy(button, '正在去掉…', async () => {
+    try {
+      await saveExtraSource(path, true);
+    } catch (error) {
+      $('extra-source-message').textContent = error.message;
+      toast({text: error.message, tone: 'error'});
+    }
+  });
+});
 
 $('llm-provider').addEventListener('change', () => {
   [$('llm-base-url').value, $('llm-model').value] = LLM_DEFAULTS[$('llm-provider').value];

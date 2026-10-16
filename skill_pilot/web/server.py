@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import SKIP_CONTENT, apply, backups, guard, preview, restore, target_home
-from .. import operations, updates, cleanup, labels, sharing, self_update
+from .. import operations, updates, cleanup, labels, sharing, self_update, extra_sources
 from .. import agents as agent_management
 from ..sources import github
 from . import runtime
@@ -39,6 +39,7 @@ class Dashboard(ThreadingHTTPServer):
         self.token = session.get('token', secrets.token_urlsafe(32))
         self.inventory = inventory
         self.home = Path(inventory.get("home", target_home()))
+        extra_sources.ensure(self.home)
         self.install_reviews = session.get('install_reviews', {})
         self.update_reviews = session.get('update_reviews', {})
         self.update_lock = threading.Lock()
@@ -248,7 +249,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/scan":
             self.reply(200, self.server.inventory)
         elif path == '/api/settings':
-            self.reply(200, labels.public_settings(self.server.home))
+            self.reply(200, {**labels.public_settings(self.server.home),
+                             'extra_sources': extra_sources.paths(self.server.home)})
         elif path == '/api/labels/progress':
             self.reply(200, self.server.labels_progress.copy())
         elif path == '/api/program/progress':
@@ -337,7 +339,8 @@ class Handler(BaseHTTPRequestHandler):
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply','/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply'}
-        settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run'}
+        settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
+                           '/api/settings/extra-sources'}
         program_routes = {'/api/program/check', '/api/program/apply'}
         if path not in {"/api/migration/apply", "/api/restore"} | read_routes | write_routes | settings_routes | program_routes:
             self.reply(405, {"error": "当前阶段没有这个操作。"})
@@ -370,6 +373,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(200, saved)
                 elif path == '/api/settings/llm/test':
                     self.reply(200, labels.test(self.server.home))
+                elif path == '/api/settings/extra-sources':
+                    folder = body.get('path', '')
+                    if not isinstance(folder, str):
+                        raise ValueError('请填写一个文件夹。')
+                    message = (extra_sources.remove(self.server.home, folder) if body.get('remove') is True
+                               else extra_sources.add(self.server.home, folder))
+                    self.server.inventory = scan(self.server.home)
+                    self.reply(200, {'message': message, 'extra_sources': extra_sources.paths(self.server.home)})
                 else:
                     mode = body.get('mode')
                     if mode not in ('missing', 'all'):

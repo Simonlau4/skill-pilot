@@ -15,6 +15,7 @@ description: 管理本机各 agent 的技能，查看和导出技能清单、打
 - `skill-pilot export-config --output <新文件>`（导出在用技能和依赖，不带正文、账号设置或本机目录；可加 `--agent <编号>` 只分享一个 agent 的配置；不覆盖已有文件）
 - `skill-pilot import-config <文件> --json`（只预览，不下载、不改动）
 - `skill-pilot ui`（打开看板；首次打开会自动安装本管理技能，记入操作记录，可撤销）
+- `skill-pilot extra-sources`（查看主目录里另外放着技能的文件夹；`skill-pilot extra-sources <文件夹>` 记下，加 `--remove` 不再额外查看。不设置就不额外查看）
 
 看板不统计用量，没有“多久没用”的数据；用户问哪些技能不用时，只能列出各 agent 分到的技能和说明各占多少 Token（粗估），由用户自己判断。
 
