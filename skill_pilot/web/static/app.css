@@ -690,7 +690,12 @@ input[type="checkbox"]:disabled { cursor: default; }
 .install-box:focus-within { border-color: var(--ink); box-shadow: var(--shadow-1), 0 0 0 2px var(--panel-deep); }
 .install-box .input { flex: 1; min-width: 0; padding: 0 var(--sp-3); background: none; border: 0; }
 .install-box .input:hover, .install-box .input:focus { border: 0; outline: none; }
-.install-actions { display: grid; gap: 6px; margin-top: var(--sp-1); }
+#install-card.rail-note { gap: 4px; padding-top: 8px; padding-bottom: 8px; }
+.install-summary { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.install-summary-name { margin: 0; color: var(--ink); font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.install-summary-detail { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.install-summary-purpose { min-width: 0; line-height: 1.45; }
+.install-actions { display: grid; gap: 6px; }
 .install-actions .btn-primary { width: 100%; height: auto; min-height: 34px; padding: 5px 10px; white-space: normal; line-height: 1.35; }
 .install-actions-row { display: flex; align-items: center; gap: var(--sp-1); }
 .install-actions-row .btn-iconic { margin-left: auto; }

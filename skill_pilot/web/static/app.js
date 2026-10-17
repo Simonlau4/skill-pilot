@@ -797,7 +797,7 @@ function pickAgent(id) {
   rememberPlace();
   renderAgentSummary();
   renderSkillTable();
-  renderInstallRail();   // 「全部装给」按钮上的 agent 名跟着换
+  renderInstallRail();   // 「装给谁」和「全部装给」跟着当前 agent 换
 }
 
 /* 左栏的 SP 新版提醒：和「设置 → 版本」共用同一份 programUpdate，
@@ -2574,6 +2574,7 @@ async function decideDependency(skill, requires, confirmed, button) {
 /* ==================== 安装技能：左栏粘贴框 + 概要卡片，详细挑选再开窗口 ==================== */
 
 let railReview = null;            // 左栏卡片记着的这次读取结果
+let installSummaryExpanded = false; // 读到多个技能时，卡片是否已经展开全部
 let dialogReview = null;          // 安装窗口这次显示的结果，点「安装」时用它
 let installReadError = '';        // 读取失败的原因；卡片上带「重试」
 let installInspectSequence = 0;   // 读取的先后顺序：后发的记更大的号，旧结果回来时丢掉
@@ -2588,19 +2589,71 @@ function installReadyNames(review) {
   return (review.skills || []).filter(skill => !conflicts.has(skill.name)).map(skill => skill.name);
 }
 
-/* 概要：读到几个技能，几个能直接装、几个已经装过、几个同名要先对比。 */
+/* 一句话用途：取说明里的第一句。太长就截断，卡片上不铺开整篇说明。 */
+function installPurpose(description) {
+  const text = String(description || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const end = text.search(/[。！？!?]|\.(?!\d)/);
+  const sentence = end < 0 ? text : text.slice(0, end + 1);
+  return sentence.length > 160 ? sentence.slice(0, 160).trimEnd() + '…' : sentence;
+}
+
+/* 概要：每个技能的名字和一句话用途，再加上几个能直接装、几个已经装过、几个同名要先对比。 */
 function installSummary(review) {
   const skills = review.skills || [];
   const conflicts = review.conflicts || [];
   const installed = conflicts.filter(item => item.same_content).length;
   const compare = conflicts.length - installed;
   const ready = installReadyNames(review).length;
-  if (!skills.length) return {title: '这个链接里没找到技能', notes: []};
+  if (!skills.length) return {title: '这个链接里没找到技能', notes: [], items: []};
   const notes = [];
   if (ready) notes.push(`${ready} 个可以直接装`);
   if (installed) notes.push(`${installed} 个已经装过`);
   if (compare) notes.push(`${compare} 个同名，要先对比`);
-  return {title: `读到 ${skills.length} 个技能`, notes};
+  const byName = new Map(conflicts.map(item => [item.name, item]));
+  const items = skills.map(skill => {
+    const conflict = byName.get(skill.name);
+    const status = conflict ? (conflict.same_content ? '已经装过' : '要先对比') : '';
+    return {name: skill.name, purpose: installPurpose(skill.description), status};
+  });
+  return {title: `读到 ${skills.length} 个技能`, notes, items};
+}
+
+/* 左栏卡片：不另开窗口就能看到装什么、有什么用、给谁。多于三个先显示前三个。 */
+function installSummaryCard(review, agentName, expanded, writable) {
+  const summary = installSummary(review);
+  const ready = installReadyNames(review);
+  const conflicts = review.conflicts || [];
+  const pickable = ready.length + conflicts.filter(item => !item.same_content).length > 0;
+  const preview = 3;
+  const shown = expanded ? summary.items : summary.items.slice(0, preview);
+  const hidden = summary.items.length - shown.length;
+  const showTarget = Boolean(agentName) && (ready.length > 0 || conflicts.some(item => !item.same_content));
+  const items = shown.map(item => {
+    const tag = item.status
+      ? `<span class="tag ${item.status === '要先对比' ? 'tag-warn' : 'tag-quiet'}">${escape(item.status)}</span>`
+      : '';
+    const purpose = item.purpose ? `<span class="install-summary-purpose">${escape(item.purpose)}</span>` : '';
+    const detail = purpose || tag ? `<p class="item-note install-summary-detail">${purpose}${tag}</p>` : '';
+    return `<li><p class="install-summary-name">${escape(item.name)}</p>${detail}</li>`;
+  }).join('');
+  const more = hidden
+    ? '<button type="button" class="link-btn" data-install-more>查看全部</button>'
+    : (expanded && summary.items.length > preview ? '<button type="button" class="link-btn" data-install-more="open">收起</button>' : '');
+  const facts = [];
+  if (showTarget) facts.push(`装给 ${agentName}`);
+  if (summary.notes.length) facts.push(summary.notes.join('，'));
+  return `<p class="rail-note-title">${icon('plus')}<strong>${escape(summary.title)}</strong></p>
+    ${items ? `<ul class="install-summary">${items}</ul>` : ''}
+    ${more}
+    ${facts.length ? `<p class="item-note">${escape(facts.join(' · '))}。</p>` : ''}
+    <div class="install-actions">
+      ${ready.length && agentName ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>全部装给 ${escape(agentName)}</button>` : ''}
+      <div class="install-actions-row">
+        ${pickable ? '<button class="btn btn-small" data-install-pick>挑一挑</button>' : ''}
+        ${installDismissButton()}
+      </div>
+    </div>`;
 }
 
 const installDismissButton = () =>
@@ -2632,20 +2685,9 @@ function renderInstallRail() {
     card.innerHTML = '';
     return;
   }
-  const summary = installSummary(railReview);
-  const ready = installReadyNames(railReview);
   const agent = currentAgent();
-  const pickable = ready.length + (railReview.conflicts || []).filter(item => !item.same_content).length > 0;
   card.hidden = false;
-  card.innerHTML = `<p class="rail-note-title">${icon('plus')}<strong>${escape(summary.title)}</strong></p>
-    ${summary.notes.length ? `<p class="item-note">${escape(summary.notes.join('，'))}。</p>` : ''}
-    <div class="install-actions">
-      ${ready.length && agent ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>全部装给 ${escape(agent.name)}</button>` : ''}
-      <div class="install-actions-row">
-        ${pickable ? '<button class="btn btn-small" data-install-pick>挑一挑</button>' : ''}
-        ${installDismissButton()}
-      </div>
-    </div>`;
+  card.innerHTML = installSummaryCard(railReview, agent ? agent.name : '', installSummaryExpanded, writable);
 }
 
 /* 收起卡片。装好了连粘贴框一起清空；用户点关闭只收卡片，链接留着还能再按回车重读。 */
@@ -2653,6 +2695,7 @@ function clearInstallRail(clearUrl = false) {
   railReview = null;
   installReadError = '';
   installInspectedUrl = '';
+  installSummaryExpanded = false;
   if (clearUrl) $('install-url').value = '';
   renderInstallRail();
 }
@@ -2684,6 +2727,7 @@ async function inspectInstall(force = false) {
   const sequence = ++installInspectSequence;
   railReview = null;
   installReadError = '';
+  installSummaryExpanded = false;
   renderInstallRail();
   try {
     const review = await api('/api/install/inspect', {url});
@@ -2747,12 +2791,18 @@ $('install-url').addEventListener('keydown', event => {
   inspectInstall(true);
 });
 
-/* 卡片上的按钮：重试、全部装给、挑一挑、关闭。 */
+/* 卡片上的按钮：重试、全部装给、查看全部、挑一挑、关闭。 */
 $('install-rail').addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button) return;
   if (button.dataset.installRetry !== undefined) { clearTimeout(installInspectTimer); inspectInstall(true); }
   else if (button.dataset.installAll !== undefined) installAllForCurrent(button);
+  else if (button.dataset.installMore !== undefined) {
+    installSummaryExpanded = button.dataset.installMore !== 'open';
+    renderInstallRail();
+    const moreButton = $('install-card').querySelector('[data-install-more]');
+    if (moreButton) moreButton.focus();
+  }
   else if (button.dataset.installPick !== undefined) openInstall(railReview);
   else if (button.dataset.installDismiss !== undefined) clearInstallRail();
 });
