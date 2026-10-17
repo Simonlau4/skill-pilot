@@ -206,7 +206,8 @@ def main():
             if args.yes:
                 return agent_management.join(request, plan['plan_id'])
             count = len(plan['skills'])
-            return {'message': f'将接入「{args.name}」，会登记 {count} 个技能。请核对后加 --yes 执行。',
+            names = '、'.join(p['name'] for p in plan['profiles'])
+            return {'message': f'将接入「{names}」，会登记 {count} 个技能。请核对后加 --yes 执行。',
                     'agents': plan['agents'], 'skills': [skill['name'] for skill in plan['skills']]}
         attempt(work)
         return

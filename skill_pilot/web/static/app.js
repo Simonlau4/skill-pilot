@@ -2023,7 +2023,7 @@ function renderAgents() {
     const shared = (agent.shared_with || []).map(nameOf);
     const info = [
       escape(agent.activation_text || ''),
-      shareHtml(shared, `${nameOf(agent.id)} 和 ${shared.join('、')} 读的是同一个技能文件夹。`),
+      shareHtml(shared, `${nameOf(agent.id)} 与${shared.join('、')} 存在共用的技能文件夹。`),
     ].filter(Boolean).join(' · ');
     const leave = agent.can_leave
       ? `<button class="btn btn-small btn-quiet" data-agent-leave="${escape(agent.id)}">不再管理…</button>`
@@ -2132,6 +2132,7 @@ let joinPlan = null;
 async function showJoinPreview(agents) {
   try {
     joinPlan = await api('/api/agents/join/preview', {agents});
+    joinPlan.requests = agents;
   } catch (error) {
     toast({text: error.message, tone: 'error', sticky: true});
     return;
@@ -2155,13 +2156,12 @@ $('agents-managed').addEventListener('click', event => {
   if (button) leaveAgent(button.dataset.agentLeave);
 });
 
-/* 新发现的（可接入、可忽略）和没在管理的（只能重新接入）两栏共用这一套按钮。
-   接入时连同“必须一起选”的 agent 一起预览，然后打开核对框。 */
+/* 两栏都只提交用户点选的 agent；后台计算需要新增的完整名单，核对后再接入。 */
 for (const id of ['agents-suggested', 'agents-ignored']) {
   $(id).addEventListener('click', event => {
     const join = event.target.closest('[data-agent-join]');
     const ignore = event.target.closest('[data-agent-ignore]');
-    if (join) showJoinPreview(joinIds(join.dataset.agentJoin));
+    if (join) showJoinPreview([join.dataset.agentJoin]);
     else if (ignore) ignoreAgent(ignore.dataset.agentIgnore);
   });
 }
@@ -2174,12 +2174,6 @@ const JOIN_ACTIONS = [
   ['choose', '内容不同，需要你选', '每一条单独选，默认保留仓库里的版本。'],
   ['skipped', '原样留着', '这些内容不动。'],
 ];
-
-/* 同组共用一个目录的 agent 要一起接入。 */
-function joinIds(id) {
-  const group = (state.agentsView?.must_select_together || []).find(item => item.includes(id));
-  return group ? [...group] : [id];
-}
 
 function joinRows(plan, action) {
   return plan.skills.filter(skill => skill.action === action);
@@ -2211,7 +2205,7 @@ function renderJoin(plan) {
   const skipped = plan.skipped || [];
   $('join-skipped-box').hidden = !skipped.length;
   $('join-skipped').innerHTML = skipped.map(item => `<p class="mono">${pathLabel(item.path)} · ${escape(item.reason)}</p>`).join('');
-  $('join-message').textContent = `${(plan.skills || []).length} 个技能会登记给 ${(plan.agents || []).map(nameOf).join('、')}。`;
+  $('join-message').textContent = `${(plan.skills || []).length} 个技能会登记给 ${(plan.profiles || []).map(profile => profile.name).join('、')}。`;
   $('join-apply').disabled = false;
 }
 
@@ -2241,7 +2235,7 @@ $('join-apply').addEventListener('click', async event => {
     busyText: '正在接入…',
     onError: error => { $('join-message').textContent = error.message; },
     work: async () => {
-      const result = await api('/api/agents/join/apply', {agents: joinPlan.agents, plan_id: joinPlan.plan_id, revision: joinPlan.revision, choices, confirmed: true});
+      const result = await api('/api/agents/join/apply', {agents: joinPlan.requests, plan_id: joinPlan.plan_id, revision: joinPlan.revision, choices, confirmed: true});
       $('agents-join-dialog').close();
       joinPlan = null;
       await refreshEverything();
@@ -3439,7 +3433,7 @@ function renderMigrationChoices() {
   const groups = state.agentsView?.must_select_together || [];
   $('migration-groups').textContent = groups.map(group => {
     const names = group.map(nameOf);
-    return names.length > 1 ? `${names.join(' 和 ')} 共用一个技能文件夹，要一起整理。` : '';
+    return names.length > 1 ? `${names.join('、')} 的技能文件夹有关联，要一起整理。` : '';
   }).filter(Boolean).join(' ');
 }
 

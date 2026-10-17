@@ -225,7 +225,7 @@ def preview(home=None, agent_ids=None):
             "conflicts": [s for s in skills if len(s["options"]) > 1], "before": before, "after": after,
             "roots": roots, "skipped": skipped, "read_only": True,
             "write_allowed": write_allowed(home), 'agent_catalog': catalog,
-            'must_select_together': profiles.shared_groups(catalog, home)}
+            'must_select_together': profiles.enrollment_groups(catalog, home=home, selected=selected)}
 
 
 def remove(path, checked):

@@ -157,8 +157,7 @@ class GenericAgentTests(unittest.TestCase):
         local['custom'] = [profiles.custom(a, a.capitalize(), '.joint/skills') for a in ['one', 'two']]
         (self.home / '.skill-pilot/agents.json').write_text(json.dumps(local))
         point = self.fingerprint()
-        with self.assertRaisesRegex(ValueError, '一起选择'):
-            agents.preview_join(['one'], self.home)
+        self.assertEqual(agents.preview_join(['one'], self.home)['agents'], ['one', 'two'])
         self.assertEqual(self.fingerprint(), point)
         plan = agents.preview_join(['one', 'two'], self.home)
         agents.join(['one', 'two'], plan['plan_id'], home=self.home)
@@ -379,6 +378,25 @@ class GenericAgentTests(unittest.TestCase):
         self.assertEqual(undone.returncode, 0, undone.stderr + undone.stdout)
         self.assertEqual(self.fingerprint(), before)
         self.assertFalse((folder / 'hello').is_symlink())
+
+    def test_cli_preview_names_every_required_new_reader(self):
+        self.skill('.joint/skills/shared', 'shared')
+        local = profiles.state(self.home)
+        local['custom'] = [profiles.custom(a, a.title(), '.joint/skills') for a in ['one', 'two']]
+        (self.home / '.skill-pilot/agents.json').write_text(json.dumps(local))
+        before = self.fingerprint()
+        preview = self.command('add-agent', '--name', 'Third', '.joint/skills', '--json')
+        self.assertEqual(preview.returncode, 0, preview.stderr + preview.stdout)
+        plan = json.loads(preview.stdout)
+        self.assertEqual(plan['agents'], ['joint', 'one', 'two'])
+        self.assertIn('Third、One、Two', plan['message'])
+        self.assertEqual(self.fingerprint(), before)
+        added = self.command('add-agent', '--name', 'Third', '.joint/skills', '--yes', '--json')
+        self.assertEqual(added.returncode, 0, added.stderr + added.stdout)
+        self.assertEqual(json.loads(added.stdout)['agents'], plan['agents'])
+        undone = self.command('undo', json.loads(added.stdout)['id'], '--json')
+        self.assertEqual(undone.returncode, 0, undone.stderr + undone.stdout)
+        self.assertEqual(self.fingerprint(), before)
 
     def test_forbidden_directories_and_last_managed_assistant(self):
         point = self.fingerprint()

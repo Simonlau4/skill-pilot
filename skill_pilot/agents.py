@@ -39,7 +39,7 @@ def overview(home=None, discovered=None):
                          'shared_with': [q['id'] for q in managed if q != p and set(q['skill_roots']) & set(p['skill_roots'])],
                          'can_leave': len(managed) > 1} for p in managed],
             'suggested': suggested, 'ignored': ignored,
-            'must_select_together': profiles.shared_groups(catalog, home)}
+            'must_select_together': profiles.enrollment_groups(catalog, local['onboarded'], home)}
 
 
 def _root(value, home):
@@ -96,7 +96,14 @@ def _selection(requests, home):
         if p['id'] not in known:
             catalog.append(p)
             known[p['id']] = p
-    profiles.require_shared([p['id'] for p in selected], catalog, local['onboarded'], home)
+    ids = {p['id'] for p in selected}
+    required = {a for group in profiles.enrollment_groups(catalog, local['onboarded'], home, ids)
+                if ids.intersection(group) for a in group}
+    for p in catalog:
+        if p['id'] in required - ids:
+            for root in p['skill_roots']:
+                _root(root, home)
+            selected.append(p)
     return selected, catalog
 
 
@@ -145,7 +152,7 @@ def preview_join(requests, home=None):
     return {'plan_id': hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(), 'revision': rev,
             'agents': ids, 'profiles': selected, 'skills': skills, 'conflicts': [s for s in skills if len(s['options']) > 1],
             'skipped': skipped, 'roots': roots, 'before': before,
-            'must_select_together': profiles.shared_groups(catalog, home), 'read_only': True}
+            'must_select_together': profiles.enrollment_groups(catalog, managed, home, ids), 'read_only': True}
 
 
 def join(requests, plan_id, expected=None, choices=None, home=None):

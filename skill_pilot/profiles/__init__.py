@@ -152,13 +152,26 @@ def shared_groups(profiles, home=None):
     return groups
 
 
+def enrollment_groups(profiles, already=(), home=None, selected=()):
+    """Connected pending readers; managed readers already satisfy enrollment."""
+    pending = [p for p in profiles if p['id'] not in already and
+               (home is None or p['id'] in selected or evidence(p, home))]
+    groups = []
+    for shared in shared_groups(pending):
+        connected = set(shared)
+        for group in groups[:]:
+            if connected.intersection(group):
+                connected.update(group)
+                groups.remove(group)
+        groups.append([p['id'] for p in pending if p['id'] in connected])
+    return groups
+
+
 def require_shared(selected, profiles, already=(), home=None):
-    if home is not None:
-        profiles = [p for p in profiles if p['id'] in set(selected) | set(already) or evidence(p, home)]
-    for group in shared_groups(profiles):
-        if set(group) & set(selected) and not set(group) <= set(selected) | set(already):
+    for group in enrollment_groups(profiles, already, home, selected):
+        if set(group) & set(selected) and not set(group) <= set(selected):
             names = ' 和 '.join(p['name'] for p in profiles if p['id'] in group)
-            raise ValueError(names + ' 共用一个技能目录，请一起选择并接入。')
+            raise ValueError(names + ' 的技能文件夹有关联，请一起选择并接入。')
 
 
 def activation_text(profile):
