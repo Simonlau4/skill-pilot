@@ -427,10 +427,11 @@ input[type="checkbox"]:disabled { cursor: default; }
 .toolbar-end { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-left: auto; }
 .row-wrap { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 
-/* 检查更新的结果：工具栏里一句话，没查成的可以展开看。 */
-.updates-status { display: inline-flex; align-items: center; gap: var(--sp-3); color: var(--ink-2); font-size: var(--fs-small); white-space: nowrap; }
+/* 检查结果单独占工具栏下面一行，长了就换行，不把按钮挤出这一行。 */
+.updates-status { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--sp-2) var(--sp-3); margin: calc(var(--sp-3) * -1) 0 var(--sp-3); color: var(--ink-2); font-size: var(--fs-small); line-height: 1.5; }
 .updates-status:empty { display: none; }
-.updates-status > span { display: inline-flex; align-items: center; gap: 6px; }
+.updates-status > span { display: inline-flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.updates-status .ico { flex: none; margin-top: 2px; }
 .updates-status .ico-ok { color: var(--ok-ink); }
 .updates-status .ico-up { color: var(--info-ink); }
 /* 技能页工具栏要在 1280 宽的窗口里排成一行，搜索框允许窄一点。 */

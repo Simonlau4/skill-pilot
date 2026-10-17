@@ -2975,8 +2975,52 @@ function showReview(review) {
   }
 }
 
-/* 工具栏：检查按钮（带进度）、结果小标记、“全部更新”（带数量）。
-   有新版时数量在“全部更新”上，不再另写一句话；没有新版或没查成才出现小标记。 */
+/* 这次没查的技能和原因。名单在开始检查时已经记下，这里只读。 */
+function uncheckedReasons(review) {
+  const items = (Array.isArray(review.unchecked) ? review.unchecked : []).filter(item => Number(item.count) > 0);
+  const count = items.reduce((sum, item) => sum + Number(item.count), 0);
+  const text = items.length === 1
+    ? items[0].reason
+    : items.map(item => `${number(item.count)} 个${item.reason}`).join('，');
+  return {count, text, single: items.length === 1, known: Array.isArray(review.unchecked)};
+}
+
+/* 检查时间用这次检查自己的记录，不用页脚的盘点时间。 */
+function updateCheckedAtText(value) {
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) return '';
+  const date = new Date(time);
+  const clock = `${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}`;
+  return `${friendlyDate(value)} ${clock}`;
+}
+
+/* 查了几个、几个没查、原因、什么时候查的。没查过的不说成最新。 */
+function updateResultSentence(review) {
+  const rows = review.skills || [];
+  const waiting = rows.filter(row => row.has_update).length;
+  const failed = rows.filter(row => row.error).length;
+  const skipped = uncheckedReasons(review);
+  const when = updateCheckedAtText(review.checked_at);
+  const finish = text => when ? `${text}。${when} 检查` : `${text}。`;
+  if (!review.total) {
+    let why = '还没有技能';
+    if (!skipped.known) why = '暂时说不清为什么没查';
+    else if (skipped.count) {
+      const detail = skipped.single ? `这 ${number(skipped.count)} 个${skipped.text}` : skipped.text;
+      why = `${detail}，所以没检查`;
+    }
+    return finish(`没有可查的技能：${why}`);
+  }
+  const outcome = waiting ? `${number(waiting)} 个有新版`
+    : (failed || skipped.count || !skipped.known) ? '没发现新版'
+    : '都是最新的';
+  const lead = `查了 ${number(review.total)} 个，${outcome}`;
+  if (!skipped.count) return finish(lead);
+  return finish(`${lead}。另外 ${number(skipped.count)} 个没查：${skipped.text}`);
+}
+
+/* 工具栏：检查按钮（带进度）和“全部更新”。
+   查完后在下面写清范围；有新版时数量仍在“全部更新”上。 */
 function renderUpdateBar() {
   const review = updateState.review;
   const checking = updateState.starting || Boolean(review?.running);
@@ -3000,11 +3044,11 @@ function renderUpdateBar() {
   all.innerHTML = `${icon('update-up', 'btn-icon')}<span>全部更新</span><span class="n">${batch.length}</span>`;
   all.disabled = checking || updateState.busy || Boolean(writeBusy) || !updatesWritable();
 
-  // 有新版、但都被卡住没法一键更新的，才单独写个数；能一键更新的数量已经在按钮上
-  const status = !review || checking ? ''
-    : !review.total ? `<span>${icon('info')}没有要查的技能</span>`
-    : waiting.length ? (batch.length ? '' : `<span>${icon('update-up', 'ico-up')}${waiting.length} 个有新版</span>`)
-    : `<span>${icon('check-circle', 'ico-ok')}${failed.length ? '没发现新版' : '都是最新的'}</span>`;
+  const sentence = !review || checking ? '' : updateResultSentence(review);
+  const skipped = review ? uncheckedReasons(review) : {count: 0, known: false};
+  const allCurrent = sentence && review.total && !waiting.length && !failed.length && !skipped.count && skipped.known;
+  const mark = !sentence ? '' : waiting.length ? icon('update-up', 'ico-up') : allCurrent ? icon('check-circle', 'ico-ok') : icon('info');
+  const status = sentence ? `<span>${mark}${escape(sentence)}</span>` : '';
   $('updates-status').innerHTML = status
     + (problems.length && !checking ? `<button class="link-btn" data-failed-toggle aria-expanded="${updateState.failedOpen}">${icon('warning')}${failureCounts}</button>` : '');
   const panel = $('updates-failed');

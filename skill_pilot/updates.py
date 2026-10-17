@@ -70,17 +70,25 @@ def create(home=None):
               'checked_at': datetime.now(timezone.utc).isoformat(), 'write_allowed': operations.write_allowed(home),
               'skills': [], 'errors': [], 'lark': None, 'running': True, 'done': 0, 'current': [],
               'update_count': 0, 'latest_count': 0, 'api_calls': 0, '_groups': {}}
+    # 没查的只记已经跳过的原因，不扩大检查范围。
+    no_source = unused = 0
     for name, skill in sorted(registry['skills'].items()):
         if not skill['assigned_agents']:
+            unused += 1
             continue  # 没有 agent 在用的不查
         try:
             source = normalize(skill['source'])
             if source['kind'] == 'skip':
+                no_source += 1
                 continue  # 自制的没有上游，不列出也不计数
         except ValueError as error:
             source = {'kind': 'skip', 'label': '没查清楚', 'error': str(error)}
         group = source.get('repository', source['kind'])
         result['_groups'].setdefault(group, []).append((name, skill, source))
+    result['unchecked'] = [item for item in (
+        {'reason': '没有上游来源', 'count': no_source},
+        {'reason': '没有 agent 在用', 'count': unused},
+    ) if item['count']]
     result['total'] = sum(map(len, result['_groups'].values()))
     result['remaining'] = result['total']
     result['repositories'] = sum(g not in {'skip', 'lark'} for g in result['_groups'])

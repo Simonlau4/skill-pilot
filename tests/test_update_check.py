@@ -195,11 +195,67 @@ class UpdateCheckTests(unittest.TestCase):
         # 自制的和没人用的都不出现；来源写坏的仍然列出并报“没查清楚”
         self.assertEqual({r['name']: r['status'] for r in review['skills']}, {'sample': '有更新', 'zbad': '没查清楚'})
         self.assertEqual((review['total'], review['repositories']), (2, 1))
+        self.assertEqual(review['unchecked'], [
+            {'reason': '没有上游来源', 'count': 1},
+            {'reason': '没有 agent 在用', 'count': 1},
+        ])
         self.assertNotIn('withdrawn', updates.public(review))
         self.server()  # 接口忽略旧的 withdrawn 字段
         first = self.request('/api/updates/check', {'withdrawn': True})[1]
         self.assertEqual(first['total'], 2)
+        self.assertEqual(first['unchecked'], review['unchecked'])
         self.until(lambda r: not r['running'])
+
+    def test_scope_explains_all_checked_partial_and_nothing(self):
+        path = self.home / '.skill-pilot/registry.json'
+        original = path.read_text()
+
+        def opened(mutate):
+            registry = json.loads(original)
+            mutate(registry)
+            path.write_text(json.dumps(registry))
+            review = updates.create(self.home)
+            self.addCleanup(shutil.rmtree, review['temporary'], True)
+            return updates.public(review)
+
+        def add(registry, name, source, assigned):
+            registry['skills'][name] = {'source': source, 'assigned_agents': assigned, 'entries': [], 'requires': []}
+
+        with self.subTest('all'):
+            review = opened(lambda registry: None)
+            self.assertEqual(review['total'], 1)
+            self.assertEqual(review['unchecked'], [])
+            self.assertTrue(review['checked_at'])
+            self.assertNotIn('home', review)
+
+        with self.subTest('partial'):
+            def partial(registry):
+                add(registry, 'zmade', {'source': '自制'}, ['codex'])
+                add(registry, 'zidle', {'source': 'https://github.com/example/repo'}, [])
+            review = opened(partial)
+            self.assertEqual(review['total'], 1)
+            self.assertEqual(review['repositories'], 1)
+            self.assertEqual(review['unchecked'], [
+                {'reason': '没有上游来源', 'count': 1},
+                {'reason': '没有 agent 在用', 'count': 1},
+            ])
+
+        with self.subTest('none'):
+            def nothing(registry):
+                registry['skills']['sample']['source'] = {'source': '自制'}
+                add(registry, 'zidle', {'source': 'https://github.com/example/repo'}, [])
+            review = opened(nothing)
+            self.assertEqual(review['total'], 0)
+            self.assertEqual(review['repositories'], 0)
+            self.assertEqual(review['unchecked'], [
+                {'reason': '没有上游来源', 'count': 1},
+                {'reason': '没有 agent 在用', 'count': 1},
+            ])
+            self.assertEqual(review['skills'], [])
+
+        with self.subTest('empty'):
+            review = opened(lambda registry: registry.update(skills={}))
+            self.assertEqual((review['total'], review['unchecked']), (0, []))
 
     def pin_baseline(self):
         path = self.home / '.skill-pilot/registry.json'
