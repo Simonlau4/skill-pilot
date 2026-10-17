@@ -152,6 +152,6 @@ HOME=<模拟目录> CODEX_HOME=<模拟目录>/.codex XDG_CONFIG_HOME=<模拟目�
 - 统一仓库 `~/.skill-pilot/store/` 收入 129 个技能，一次提交 `18506c8 首次收进统一仓库`；工具备份 `~/.skill-pilot/backups/20261011T041403221947`；另有主控独立备份 `~/.local/backups/skill-pilot-premigration-20261010/skill-roots-2112.tar`。
 - 四个根：`~/.codex/skills` 54 个入口指向仓库（`community/` 内 2 个嵌套入口同样指向仓库；`.system` 与空目录 `codex-primary-runtime` 原样保留）；`~/.agents/skills` 91 个指向仓库，断链 `doc` 原样保留；`~/.claude/skills` 43 个指向仓库，`synced/` 原样保留；`~/.gemini/config/skills` 38 个指向仓库。
 - `~/.codex/config.toml`、`~/.agents/.skill-lock.json` 与迁移前备份逐字节一致。
-- 可见名单：用迁移前备份重建的模拟 home 扫描，对比迁移后真实扫描，Codex 95、DSH 91 完全一致；Claude 43、Antigravity 38 一致（重建时 stss 指向 Developer/vendor 的链接不在备份范围，属重建假象）。
+- 可见名单：用迁移前备份重建的模拟 home 扫描，对比迁移后真实扫描，Codex 95、DSH 91 完全一致；Claude 43、Antigravity 38 一致（重建时 stss 指向某个本机私人技能目录的链接不在备份范围，属重建假象）。
 - 新会话实测：Codex `debug prompt-input` 列出 lark-base、simon-neat、reverse-engineer-anything、agency-router；Antigravity 报告 lark-base 为 1.2.23（迁移前其副本为 1.2.0）、能看到 stss；DSH 能看到 reverse-engineer-anything、lark-base、simon-neat；Claude 能看到 natural-text-writing、stss、simon-neat。
 - 迁移前 Claude 修正：Example-Notes 源码不再优先（agency-router、marketing-router 默认改选 9/16 的较新安装副本）；真实目录写入需 `SKILL_PILOT_ALLOW_REAL_HOME=1`；48 个来源按用户要求自动比对登记（见 `docs/source-attribution.md`）。

@@ -289,7 +289,7 @@ preview_assign < 100 ms: True
 
 ### 5.4 后台 HTTP 冒烟原始输出
 
-`work/generic-agents/http-smoke.py` 先用模拟脚本复制临时样本，随后通过 `SKILL_PILOT_HOME=<模拟目录> BROWSER=true ... -m skill_pilot ui --json` 启动独立后台。按请求完成发现、接入假的第五助手、分配 alpha、撤销分配、退出管理；检查 welcome 入口原样保留。未接触用户真实看板。以下为实际收到的完整响应，未列出后台会话口令；脚本只结束它自己创建的后台。
+`work/generic-agents/http-smoke.py` 先用模拟脚本复制临时样本，随后通过 `SKILL_PILOT_HOME=<模拟目录> BROWSER=true ... -m skill_pilot ui --json` 启动独立后台。按请求完成发现、接入假的第五助手、分配 alpha、撤销分配、退出管理；检查 welcome 入口原样保留。未接触用户真实看板。以下为实际收到的完整响应，未列出后台会话口令；复制清单里的一条本机私人技能目录已改成泛指。脚本只结束它自己创建的后台。
 
 ```text
 make-fake-home: {
@@ -301,7 +301,7 @@ make-fake-home: {
     ".codex/skills",
     ".dsh/skills",
     ".gemini/config/skills",
-    "Developer/vendor/stop-that-shit-local/skills/stss",
+    "某个本机私人技能目录",
     "Documents/Example-Notes/samples/simon-neat",
     "Documents/Example-Notes/samples/agency-router",
     "Documents/Example-Notes/samples/marketing-router",

@@ -32,7 +32,7 @@
 
 ## 模拟 home 规则（安全关键）
 
-- 复制：四个技能根、`~/.claude/skills` 链接指向的目标、stss 指向的 `~/Developer/vendor/stop-that-shit-local/skills/stss`、Example-Notes 三份源码、`~/.agents/.skill-lock.json`、`~/.codex/config.toml` 中只保留 `[skills]` 段（不复制认证和其他配置）。
+- 复制：四个技能根、`~/.claude/skills` 链接指向的目标、stss 指向的某个本机私人技能目录、Example-Notes 三份源码、`~/.agents/.skill-lock.json`、`~/.codex/config.toml` 中只保留 `[skills]` 段（不复制认证和其他配置）。
 - 复制后，把所有指向真实 home 的绝对链接改写成模拟 home 里对应的位置；相对链接保持不变。
 - 建好后断言：模拟 home 内任何链接解析后都不能落在模拟 home 之外，否则中止。
 - 代码层面加保护：任何写操作在执行前对目标做 `realpath`，落在当前目标 home 之外就拒绝。单测要覆盖这一条。

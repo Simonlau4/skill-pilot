@@ -63,7 +63,7 @@
 grep -rnE "'(codex|claude|dsh|antigravity)'|\"(codex|claude|dsh|antigravity)\"|\.codex/|\.claude/|\.dsh/|\.gemini/" skill_pilot --include='*.py'
 ```
 
-允许出现的地方：`skill_pilot/profiles/`（档案读取）、`skill_pilot/usage/` 下各读取器模块本身、`codex_config.py`（Codex 停用适配器本身，路径改为从档案拿也可以）、`research.py`（把 Codex 当工具调用，与被管理的助手无关）。`.agents/.skill-lock.json`（`npx skills` 的来源记录，不是助手）和用户自己的 `Developer/vendor/stop-that-shit-local` 路径不在本轮范围，原样保留。
+允许出现的地方：`skill_pilot/profiles/`（档案读取）、`skill_pilot/usage/` 下各读取器模块本身、`codex_config.py`（Codex 停用适配器本身，路径改为从档案拿也可以）、`research.py`（把 Codex 当工具调用，与被管理的助手无关）。`.agents/.skill-lock.json`（`npx skills` 的来源记录，不是助手）和用户自己的某个本机私人技能目录不在本轮范围，原样保留。
 
 主控已知的写死点（不保证完整，请自己再查一遍）：
 

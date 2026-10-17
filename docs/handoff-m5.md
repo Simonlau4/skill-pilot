@@ -15,7 +15,7 @@
    - Codex：`~/.codex/sessions/**/*.jsonl` 与 `~/.codex/archived_sessions/`，`payload.type` 为 `custom_tool_call`/`function_call`/`local_shell_call` 且参数含 `.../<目录>/SKILL.md`。
    - DSH：`~/.dsh/sessions/**/session.v{3,4}.jsonl.zstd`，按 S2 的方法逐 frame 解码（允许调用本机 Node 标准库），`type == "tool/call"` 且 `data.name == "skill"`，另加读取 SKILL.md 的调用；v3/v4 去重。去重可靠就把 DSH 记为“可统计”，否则仍记“统计不到”并写明原因。
    - Antigravity：S3 未完成。允许**一次**真实 `agy -p` 复现（命令见 `Codex记忆/工作流/多Agent协作.md` 第四节，在系统临时目录运行，只让它读一个现有技能回答一句话，不写任何文件），据此定位记录字段并做去重规则。做不成就保持“统计不到”。
-   - 路径到技能名的映射：日志里有迁移前的路径（`~/.codex/skills/x`、`~/.agents/skills/x`、`~/.gemini/config/skills/x`、`~/.codex/skills/community/x`、`~/Developer/vendor/stop-that-shit-local/skills/stss`）和迁移后的路径（同上加 `~/.skill-pilot/store/x`）；目录名与技能名不同的（如 `nuwa-skill` → `huashu-nuwa`）按 registry 的 `entries` 和迁移预览记录映射。
+   - 路径到技能名的映射：日志里有迁移前的路径（`~/.codex/skills/x`、`~/.agents/skills/x`、`~/.gemini/config/skills/x`、`~/.codex/skills/community/x`、某个本机私人技能目录）和迁移后的路径（同上加 `~/.skill-pilot/store/x`）；目录名与技能名不同的（如 `nuwa-skill` → `huashu-nuwa`）按 registry 的 `entries` 和迁移预览记录映射。
 2. **账本**：`~/.skill-pilot/usage.sqlite`，增量扫描（记住每个日志文件的扫描位置），日志被删后历史不丢。真实 home 本轮不建账本（只读）。
 3. **入库时间**：迁移时仓库是重建的，registry 和 store 里的时间不代表真实安装时间。按以下顺序取最早的可靠证据：`~/.agents/.skill-lock.json` 的 `installedAt` → 迁移备份 `~/.skill-pilot/backups/20261011T041403221947` 里原目录的文件时间 → 该技能名在各 agent 日志中第一次出现（含系统提示里的技能列表，这里只用来定“什么时候装的”，不算使用）。都拿不到就视为“刚装”，不进名单。
 4. **清理候选**（全部满足才进名单）：至少分配给一个 agent；入库满 60 天；所有可统计 agent 在 60 天内都没用过；没有分配给“统计不到”的 agent；不是 60 天内用过的技能的依赖（按 `requires` 传递展开）；最近 60 天内没被用户“留下”。

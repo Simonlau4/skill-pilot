@@ -21,7 +21,7 @@
 
 - **Codex**：本机 `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`，0.162.0-alpha。临时 home 中创建两个真实根，其中技能入口链接到临时 home **之外**的 `outside/`；一个入口直接放在 `skills/`，另一个放在 `skills/community/`。子进程覆盖 HOME、CODEX_HOME、XDG_CONFIG_HOME、XDG_CACHE_HOME，cwd 也在临时目录，stdin 为 `/dev/null`。`debug prompt-input` 返回 0，两种技能名都出现两次。未把真实根链接为临时 CODEX_HOME，避免 CLI 对 `.system` 的初始化影响原目录。
 - [Codex 官方说明](https://learn.chatgpt.com/docs/build-skills)明确支持技能目录链接。该页面也说明 `agents/openai.yaml` 的 `allow_implicit_invocation: false` 保留显式调用，但不自动触发。
-- **Claude Code**：[官方 Skills 文档](https://code.claude.com/docs/en/skills#where-skills-live)的 Symlinked folders 条目说明个人技能目录中的入口可以指向磁盘其他位置，相同目标只加载一次。本机 43 个个人入口全部为相对目录链接，其中 stss 指向 Developer 下的目录。文档依据与现状不能替代本机新绝对链接探针。
+- **Claude Code**：[官方 Skills 文档](https://code.claude.com/docs/en/skills#where-skills-live)的 Symlinked folders 条目说明个人技能目录中的入口可以指向磁盘其他位置，相同目标只加载一次。本机 43 个个人入口全部为相对目录链接，其中 stss 指向某个本机私人技能目录。文档依据与现状不能替代本机新绝对链接探针。
 - **DSH**：DeepSeek Harness 0.2.0-rc.2 的 `app.asar` 内，`@deepseek-ai/dsh-skill-filesystem` 同版本。`lib/index.js` 第 767–779 行对 symbolic link 使用 `stat(fullPath)` 判断目标类型；第 714 行通过 `realpath(path)` 读取目标。README.zh.md 也明确描述符号链接目录的发现与预览。源码没有限制目标必须留在根目录内部；仍需真实会话验证运行权限。
 - **Antigravity**：[官方 Skills 文档](https://antigravity.google/docs/skills)确认全局位置为 `~/.gemini/config/skills/<skill-folder>/`。现有全局技能目录包含工作台之外的链接；PLAN 已记录 agy 能识别既有链接。本轮没有运行 agy 对话，因此新绝对链接行为仍待验证。
 

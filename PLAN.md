@@ -47,7 +47,7 @@ v1 不做：定时检查或自动更新、项目目录内的技能、插件技�
 | --- | --- | --- | --- |
 | Codex | `~/.codex/skills/`（54 个直属真实目录 + `community/` 下 2 个嵌套，共 56）**和** `~/.agents/skills/` | 两个目录都读，会递归发现嵌套目录（临时 home 探针已验证）；扣除停用项后自动可用 94 个，另 2 个仅手动调用（grill-me、critical-gate） | `~/.codex/skills/.system/`（5）、`~/.codex/plugins/cache/`（192）、`~/.codex/plugins/user/`、`~/.codex/vendor_imports/` |
 | DSH | 程序包源码确认默认用户根为 `~/.dsh/skills`（当前不存在）和 `~/.agents/skills`；只发现根目录直属技能，不递归；支持动态刷新。S1 探针已实测能读 `~/.agents/skills` 里指向仓库外的链接 | 91 个入口，其中 22 个是指向 `~/.codex/skills` 的链接；`doc` 是断链（目标已不存在），扫描要能报出断链 | 未知 |
-| Claude | `~/.claude/skills/`（不读共享根） | 43 个，全部是相对链接（→ `../../.codex/skills/` 或 `../../.agents/skills/`，stss → `~/Developer/vendor/stop-that-shit-local/skills/stss`）；动态刷新，正在运行的会话也会立刻看到变化 | `~/.claude/plugins/`（33）；`~/.claude/skills/synced/`（Claude 桌面 app 自己同步的官方技能，**迁移、收编、对账一律跳过**） |
+| Claude | `~/.claude/skills/`（不读共享根） | 43 个，全部是相对链接（→ `../../.codex/skills/` 或 `../../.agents/skills/`，stss → 某个本机私人技能目录）；动态刷新，正在运行的会话也会立刻看到变化 | `~/.claude/plugins/`（33）；`~/.claude/skills/synced/`（Claude 桌面 app 自己同步的官方技能，**迁移、收编、对账一律跳过**） |
 | Antigravity | `~/.gemini/config/skills/`（不读共享根，已实测） | 38 个，部分链接、部分真实副本；指向仓库外的绝对路径链接已实测可用 | `~/.gemini/antigravity/builtin/skills/`（9）、`~/.gemini/antigravity-cli/builtin/skills/`（8）、`~/.gemini/config/plugins/*/skills/` |
 
 扫描时发现的其他 agent：Kimi 桌面版 `~/Library/Application Support/kimi-desktop/daimon-share/daimon/skills/`（72，Kimi 已于 10/8 退役）、WorkBuddy `~/.workbuddy/skills-marketplace/skills/`（170，疑似市场缓存）、Cursor `~/.cursor/skills-cursor/`（20）、Trae `~/.trae/builtin/*/*/skills/`（内置）。噪声：`~/.local/backups/**`、`~/.codex/.tmp/**`、各技能自带的 `references/` 子目录。
