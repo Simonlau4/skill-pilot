@@ -2359,6 +2359,89 @@ function renderDetail() {
 }
 
 let detailOpener = null;
+let detailHeld = [];
+let detailScrollLock = null;
+
+/* 折叠起来的内容不能走到；折叠标题本身还在，可以展开。 */
+function closedDetailsHides(element) {
+  const summary = element.closest('summary');
+  let node = summary ? summary.parentElement?.parentElement : element.parentElement;
+  while (node) {
+    if (node.tagName === 'DETAILS' && !node.open) return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
+/* 面板里能用 Tab 走到的控件。禁用的、藏起来的、折叠起来的都不算。 */
+function detailTabbables(panel) {
+  return [...panel.querySelectorAll('*')].filter(element => {
+    if (element.tabIndex < 0 || element.disabled) return false;
+    if (element.tagName === 'INPUT' && String(element.type || '').toLowerCase() === 'hidden') return false;
+    if (element.tagName === 'A' && !element.hasAttribute('href')) return false;
+    if (element.closest('[hidden]')) return false;
+    if (closedDetailsHides(element)) return false;
+    return true;
+  });
+}
+
+/* 详情开着时，Tab 和 Shift+Tab 只在面板里转圈，焦点不落到遮罩后面。 */
+function trapDetailTab(event) {
+  const panel = $('detail-panel');
+  // 开始收起后就不再拦 Tab，免得焦点被拉回正在消失的面板。
+  if (!state.detail || panel.hidden) return;
+  const items = detailTabbables(panel);
+  if (!items.length) {
+    event.preventDefault();
+    return;
+  }
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+  const inside = panel.contains(active);
+  const atStart = !inside || active === first;
+  const atEnd = !inside || active === last;
+  if (event.shiftKey ? atStart : atEnd) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
+}
+
+/* 详情开着时，后面的页面不能被点到，也不能被键盘走到。
+   确认框另外盖在上面，不在这里拦。 */
+function detailBackground() {
+  return [...document.body.children].filter(element =>
+    element.id !== 'detail-panel' && element.id !== 'panel-scrim' && element.id !== 'tip' && element.tagName !== 'DIALOG');
+}
+
+/* 详情开着时，后面的页面不再跟着翻页键滚动；面板里的长内容仍可自己滚动。 */
+function setDetailScrollLock(lock) {
+  const root = document.documentElement;
+  if (lock) {
+    if (detailScrollLock) return;
+    detailScrollLock = {root: root.style.overflow, body: document.body.style.overflow};
+    root.style.overflow = 'hidden';
+    document.body.style.overflow = 'hidden';
+    return;
+  }
+  if (!detailScrollLock) return;
+  root.style.overflow = detailScrollLock.root;
+  document.body.style.overflow = detailScrollLock.body;
+  detailScrollLock = null;
+}
+
+function holdDetailBackground(hold) {
+  if (hold) {
+    if (detailHeld.length) return;
+    detailHeld = detailBackground().filter(element => !element.inert);
+    for (const element of detailHeld) element.inert = true;
+    setDetailScrollLock(true);
+    return;
+  }
+  for (const element of detailHeld) if (element.isConnected) element.inert = false;
+  detailHeld = [];
+  setDetailScrollLock(false);
+}
 
 function openDetail(name) {
   if (state.detail !== name || $('detail-panel').hidden) detailOpener = document.activeElement?.closest('#skills-list') ? document.activeElement : null;
@@ -2368,8 +2451,13 @@ function openDetail(name) {
   panel.hidden = false;
   $('panel-scrim').hidden = false;
   $('detail-body').scrollTop = 0;
-  requestAnimationFrame(() => panel.classList.add('is-open'));
+  requestAnimationFrame(() => {
+    if (state.detail !== name || panel.hidden) return;
+    panel.classList.add('is-open');
+  });
+  // 先把焦点放进面板，再锁住后面的页面，避免焦点在中途落到页脚并带着页面滚。
   $('detail-close').focus();
+  holdDetailBackground(true);
 }
 
 function closeDetail() {
@@ -2378,9 +2466,11 @@ function closeDetail() {
   state.detail = null;
   setTimeout(() => {
     if (state.detail) return;
+    panel.classList.remove('is-open');
     panel.hidden = true;
     $('panel-scrim').hidden = true;
   }, 200);
+  holdDetailBackground(false);
   // 列表可能已经重画过：按技能名找回打开详情的那一行，把焦点还给它。
   const openerName = detailOpener?.dataset?.open || detailOpener?.dataset?.updateUp;   // 从技能名或更新小箭头打开的
   const opener = detailOpener?.isConnected ? detailOpener
@@ -2389,12 +2479,15 @@ function closeDetail() {
   detailOpener = null;
 }
 
+function onDetailKey(event) {
+  if (document.querySelector('dialog[open]')) return;
+  if (event.key === 'Tab') trapDetailTab(event);
+  else if (event.key === 'Escape' && !$('detail-panel').hidden) closeDetail();
+}
+
 $('detail-close').addEventListener('click', closeDetail);
 $('panel-scrim').addEventListener('click', closeDetail);
-document.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
-  if (!$('detail-panel').hidden) closeDetail();
-});
+document.addEventListener('keydown', onDetailKey);
 
 $('detail-body').addEventListener('change', event => {
   if (event.target.id === 'dep-select') $('dep-add').disabled = !event.target.value || Boolean(writeBusy);
