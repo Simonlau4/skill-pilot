@@ -2142,6 +2142,7 @@ async function joinAgent(id, button) {
   if (writeBusy || !state.table?.write_allowed) return;
   joiningAgent = {id, text: '正在读取…'};
   let choicePlan = null;
+  let sharedNames = [];
   await runWrite({
     button, busyText: '正在读取…', taskText: `正在读取 ${nameOf(id)} 的技能…`,
     work: async () => {
@@ -2152,8 +2153,12 @@ async function joinAgent(id, button) {
         choicePlan = {...plan, requests: [id]};
         return null;
       }
-      joiningAgent.text = '正在接入…';
-      setTask('write', {text: `正在接入 ${nameOf(id)}…`});
+      const profiles = plan.profiles || [];
+      sharedNames = profiles.filter(profile => profile.id !== id).map(profile => profile.name).filter(Boolean);
+      if (!profiles.length) sharedNames = (plan.agents || []).filter(agent => agent !== id).map(nameOf);
+      const together = sharedNames.length ? `，一并接入 ${sharedNames.join('、')}` : '';
+      joiningAgent.text = `正在接入…${together}`;
+      setTask('write', {text: `正在接入 ${nameOf(id)}${together}…`});
       renderRailNotes();
       renderAgents();
       const result = await api('/api/agents/join/apply', {
@@ -2163,10 +2168,15 @@ async function joinAgent(id, button) {
       await refreshAgents();
       return result;
     },
-    success: result => result && ({
-      text: result.message || '新 agent 已经接入',
-      undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
-    }),
+    success: result => {
+      if (!result) return null;
+      const missing = sharedNames.filter(name => !(result.message || '').includes(name));
+      const text = result.message || '新 agent 已经接入';
+      return {
+        text: missing.length ? `${text}，一并接入 ${missing.join('、')}` : text,
+        undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
+      };
+    },
   });
   joiningAgent = null;
   if (choicePlan) {

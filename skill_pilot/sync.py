@@ -77,6 +77,30 @@ def visibility(home, catalog=None):
     return result
 
 
+def _reads_resolved(profile, entry, home):
+    """Match readers by where the skill directory actually points.
+
+    The skill entry itself is often a link to the shared copy. Follow the
+    directory above it, so a fallback directory that only points at a shared
+    folder is not treated as a separate place.
+    """
+    if home is None:
+        return profiles.reads(profile, entry)
+    entry = Path(entry)
+    try:
+        actual = (Path(home) / entry.parent).resolve() / entry.name
+    except OSError:
+        return profiles.reads(profile, entry)
+    for root in profile['skill_roots']:
+        try:
+            relative = actual.relative_to((Path(home) / root).resolve())
+        except (OSError, ValueError):
+            continue
+        if relative.parts and (profile['nested'] or len(relative.parts) == 1):
+            return True
+    return False
+
+
 def assignment_entries(name, agents, home=None, catalog=None):
     """Cover recipients through safe roots, preferring their default placement."""
     catalog = catalog if catalog is not None else (profiles.managed(home) if home is not None else profiles.PROFILES)
@@ -86,15 +110,16 @@ def assignment_entries(name, agents, home=None, catalog=None):
     recipients = [p for p in catalog if p['id'] in assigned]
     roots = list(dict.fromkeys([p['link_root'] for p in recipients] +
                               [r for p in recipients for r in p['skill_roots']]))
-    readers = {r: {p['id'] for p in catalog if profiles.reads(p, Path(r) / name)} for r in roots}
+    readers = {r: {p['id'] for p in catalog if _reads_resolved(p, Path(r) / name, home)} for r in roots}
     blocked = {p['id'] for p in catalog if p['id'] not in assigned and not p['disable']}
     safe = [r for r in roots if not readers[r] & blocked]
     missing = assigned - set().union(*(readers[r] for r in safe))
     if missing:
         root = next(r for r in roots if readers[r] & missing)
-        other = next(p for p in catalog if p['id'] in readers[root] & blocked)
+        others = [p for p in catalog if p['id'] in readers[root] & blocked]
         names = ' 和 '.join(p['name'] for p in recipients if p['id'] in readers[root])
-        raise ValueError(names + ' 和 ' + other['name'] + ' 共用一个技能目录，没法只给 ' + names + '。')
+        blocked_names = '、'.join(p['name'] for p in others)
+        raise ValueError(names + ' 和 ' + blocked_names + ' 共用一个技能目录，没法只给 ' + names + '。')
     uncovered, chosen = set(assigned), []
     while uncovered:
         root = max(safe, key=lambda r: len(readers[r] & uncovered))
