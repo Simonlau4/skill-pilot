@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import SKIP_CONTENT, apply, backups, guard, preview, restore, target_home
-from .. import operations, updates, cleanup, labels, sharing, self_update, extra_sources
+from .. import operations, updates, cleanup, labels, tags, sharing, self_update, extra_sources
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from . import runtime
@@ -412,7 +412,7 @@ class Handler(BaseHTTPRequestHandler):
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply','/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply'}
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
-                           '/api/settings/extra-sources'}
+                           '/api/settings/extra-sources', '/api/tags'}
         program_routes = {'/api/program/check', '/api/program/apply'}
         if path not in {"/api/migration/apply", "/api/restore"} | read_routes | write_routes | settings_routes | program_routes:
             self.reply(405, {"error": "当前阶段没有这个操作。"})
@@ -448,6 +448,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(200, saved)
                 elif path == '/api/settings/llm/test':
                     self.reply(200, labels.test(self.server.home))
+                elif path == '/api/tags':
+                    self.reply(200, tags.update(self.server.home, body))
                 elif path == '/api/settings/extra-sources':
                     folder = body.get('path', '')
                     if not isinstance(folder, str):

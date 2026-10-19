@@ -921,6 +921,236 @@ function skillRowHtml(skill, agent) {
 /* 小标签：点一下按它筛，再点取消。行里、详情里、筛选条里都是同一个意思。 */
 const tagPickHtml = tag => `<button class="tag-pick" data-tag-pick="${escape(tag)}" aria-pressed="${state.tag === tag}">${escape(tag)}</button>`;
 
+/* 用户标签：标签由用户自己加，详情里改一个技能，结果标题那一行批量改。
+   接口只返回这次动过的技能；拿到后只更新本地这一份数据，不重新读整张表。 */
+let detailTagBusy = false;
+let tagDialogNames = [];
+let tagDialogBusy = false;
+let listedSkillNames = [];
+
+function skillByName(name) {
+  return (state.table?.skills || []).find(skill => skill.name === name) || state.skillIndex.get(name) || null;
+}
+
+/* 和后台一致：去掉首尾空白及开头的半角或全角井号，其余交给后台校验。 */
+function cleanTagInput(value) {
+  return String(value ?? '').trim().replace(/^[#＃\s]+/, '').trim();
+}
+
+const tagKey = value => String(value ?? '').toLocaleLowerCase();
+
+/* 所有技能里已经用过的标签，给输入框的候选提示；英文大小写只留第一次出现的写法。 */
+function usedTags() {
+  const seen = new Set();
+  const list = [];
+  for (const skill of state.table?.skills || []) {
+    for (const tag of skill.tags || []) {
+      const key = tagKey(tag);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      list.push(tag);
+    }
+  }
+  return list.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
+function renderUsedTags() {
+  const list = $('used-tags');
+  if (!list) return;
+  list.innerHTML = usedTags().map(tag => `<option value="${escape(tag)}"></option>`).join('');
+}
+
+/* 后台保存时会沿用已有标签的写法，提示里的标签名也跟着它走。 */
+function canonicalTag(value) {
+  const key = tagKey(cleanTagInput(value));
+  for (const skill of state.table?.skills || []) {
+    const existing = (skill.tags || []).find(tag => tagKey(tag) === key);
+    if (existing) return existing;
+  }
+  return cleanTagInput(value);
+}
+
+function canonicalTagFromResult(result, value) {
+  const key = tagKey(cleanTagInput(value));
+  for (const list of Object.values(result?.tags || {})) {
+    const found = list.find(tag => tagKey(tag) === key);
+    if (found) return found;
+  }
+  return canonicalTag(value);
+}
+
+/* 只改本地这份列表；选中的标签已经没人用了，就回到“不限标签”，不留 0 个结果。 */
+function applyTagResult(result) {
+  for (const [name, tags] of Object.entries(result?.tags || {})) {
+    const skill = skillByName(name);
+    if (skill) skill.tags = Array.isArray(tags) ? [...tags] : [];
+  }
+  if (state.tag && !(state.table?.skills || []).some(skill => (skill.tags || []).includes(state.tag))) state.tag = '';
+  renderUsedTags();
+  renderSkillTable();
+  if (state.detail) renderDetail();
+}
+
+/* 详情里的一句话下面：标签本身照常能点了筛选，右边多一个小的去掉按钮。
+   只读时不出现输入框和去掉按钮，标签照常显示。 */
+function detailTagsHtml(skill, locked) {
+  const canWrite = Boolean(state.table?.write_allowed);
+  const tags = (skill.tags || []).map(tag => `<span class="detail-tag">
+      ${tagPickHtml(tag)}
+      ${canWrite ? `<button type="button" class="tag-remove" data-tag-remove="${escape(tag)}"
+        aria-label="${escape(`去掉标签「${tag}」`)}" title="${escape(`去掉标签「${tag}」`)}"${locked ? ' disabled' : ''}>${icon('close')}</button>` : ''}
+    </span>`).join('');
+  const tagList = tags ? `<div class="detail-tags">${tags}</div>` : '';
+  if (!canWrite) return tagList;
+  return `${tagList}
+    <form id="detail-tag-form" class="tag-editor" novalidate>
+      <div class="tag-editor-row">
+        <input id="detail-tag-input" class="input" list="used-tags" autocomplete="off" placeholder="加个标签，比如项目名" aria-label="新标签"${locked ? ' disabled' : ''}>
+        <button id="detail-tag-add" class="btn btn-small" type="submit" disabled>加上</button>
+        ${hint('标签由你自己打，用来按项目、客户这类事找技能，可以不打。')}
+      </div>
+      <p id="detail-tag-error" class="row-note is-error" role="alert" hidden></p>
+    </form>`;
+}
+
+function detailTagLocked() {
+  return detailTagBusy || Boolean(writeBusy) || !state.table?.write_allowed;
+}
+
+function updateDetailTagAdd() {
+  const input = $('detail-tag-input');
+  const button = $('detail-tag-add');
+  if (!input || !button) return;
+  button.disabled = detailTagLocked() || !cleanTagInput(input.value);
+}
+
+function setDetailTagBusy(busy) {
+  detailTagBusy = busy;
+  const body = $('detail-body');
+  if (!body) return;
+  const locked = detailTagLocked();
+  const input = $('detail-tag-input');
+  if (input) input.disabled = locked;
+  for (const button of body.querySelectorAll('[data-tag-remove]')) button.disabled = locked;
+  updateDetailTagAdd();
+}
+
+function showDetailTagError(message) {
+  const error = $('detail-tag-error');
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = false;
+}
+
+async function writeDetailTag(action, value) {
+  if (detailTagBusy || writeBusy || !state.detail || !state.table?.write_allowed) return;
+  const name = state.detail;
+  if (!cleanTagInput(value)) {
+    showDetailTagError('请先写一个标签。');
+    $('detail-tag-input')?.focus();
+    return;
+  }
+  $('detail-tag-error').hidden = true;
+  setDetailTagBusy(true);
+  try {
+    const result = await api('/api/tags', action === 'add' ? {skills: [name], add: value} : {skills: [name], remove: value});
+    detailTagBusy = false;
+    applyTagResult(result);
+    if (state.detail === name) $('detail-tag-input')?.focus();
+  } catch (error) {
+    setDetailTagBusy(false);
+    if (state.detail === name) {
+      showDetailTagError(error.message);
+      $('detail-tag-input')?.focus();
+    } else {
+      toast({text: error.message, tone: 'error'});
+    }
+  }
+}
+
+/* 批量窗口：勾选当前列表里的技能，默认全选；没填标签或没勾选都不能提交。 */
+function tagDialogChecked() {
+  return [...$('tag-dialog-skills').querySelectorAll('input[data-tag-skill]:checked')].map(input => input.dataset.tagSkill);
+}
+
+function renderTagDialogControls() {
+  const checked = tagDialogChecked();
+  const tag = cleanTagInput($('tag-dialog-input').value);
+  const key = tagKey(tag);
+  const hasTag = Boolean(tag) && checked.some(name => (skillByName(name)?.tags || []).some(item => tagKey(item) === key));
+  $('tag-dialog-count').textContent = `已选 ${checked.length} 个`;
+  $('tag-dialog-add').disabled = tagDialogBusy || !tag || !checked.length;
+  $('tag-dialog-remove').disabled = tagDialogBusy || !tag || !checked.length || !hasTag;
+  $('tag-dialog-close').disabled = tagDialogBusy;
+  $('tag-dialog-input').disabled = tagDialogBusy;
+  for (const input of $('tag-dialog-skills').querySelectorAll('input[data-tag-skill]')) input.disabled = tagDialogBusy;
+}
+
+function openTagDialog() {
+  if (writeBusy || !state.table?.write_allowed || listedSkillNames.length < 2) return;
+  tagDialogNames = listedSkillNames.filter(name => skillByName(name));
+  if (tagDialogNames.length < 2) return;
+  renderUsedTags();
+  $('tag-dialog-title').textContent = `给这 ${tagDialogNames.length} 个技能打标签`;
+  $('tag-dialog-input').value = '';
+  $('tag-dialog-error').hidden = true;
+  $('tag-dialog-skills').innerHTML = tagDialogNames.map(name => `<label class="check tag-skill-row">
+      <input type="checkbox" data-tag-skill="${escape(name)}" checked>
+      <span class="tag-skill-name">${nameHtml(name)}</span>
+    </label>`).join('');
+  tagDialogBusy = false;
+  renderTagDialogControls();
+  $('tag-dialog').showModal();
+  $('tag-dialog-input').focus();
+}
+
+async function applyBatchTag(action) {
+  if (tagDialogBusy) return;
+  const names = tagDialogChecked();
+  const value = $('tag-dialog-input').value;
+  const tag = cleanTagInput(value);
+  if (!tag || !names.length) return;
+  const button = action === 'add' ? $('tag-dialog-add') : $('tag-dialog-remove');
+  tagDialogBusy = true;
+  $('tag-dialog-error').hidden = true;
+  renderTagDialogControls();
+  try {
+    const result = await withBusy(button, '正在保存…', () => api('/api/tags',
+      action === 'add' ? {skills: names, add: value} : {skills: names, remove: value}));
+    const canonical = canonicalTagFromResult(result, value);
+    tagDialogBusy = false;
+    $('tag-dialog').close();
+    applyTagResult(result);
+    toast({text: action === 'add'
+      ? `已给 ${names.length} 个技能加上「${canonical}」`
+      : `已从 ${names.length} 个技能去掉「${canonical}」`});
+  } catch (error) {
+    tagDialogBusy = false;
+    $('tag-dialog-error').textContent = error.message;
+    $('tag-dialog-error').hidden = false;
+    renderTagDialogControls();
+    $('tag-dialog-input').focus();
+  } finally {
+    tagDialogBusy = false;
+    renderTagDialogControls();
+  }
+}
+
+$('tags-batch').addEventListener('click', openTagDialog);
+$('tag-dialog-add').addEventListener('click', () => applyBatchTag('add'));
+$('tag-dialog-remove').addEventListener('click', () => applyBatchTag('remove'));
+$('tag-dialog-close').addEventListener('click', () => { if (!tagDialogBusy) $('tag-dialog').close(); });
+$('tag-dialog-input').addEventListener('input', () => {
+  $('tag-dialog-error').hidden = true;
+  renderTagDialogControls();
+});
+$('tag-dialog-skills').addEventListener('change', renderTagDialogControls);
+$('tag-dialog').addEventListener('cancel', event => { if (tagDialogBusy) event.preventDefault(); });
+$('tag-dialog').querySelector('form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (!$('tag-dialog-add').disabled) applyBatchTag('add');
+});
+
 /* 分组：组按这次列出的技能数排，「未分组」放最后；组内按中文名排。
    列表按已应用的分配分“在用 / 可以加的”，开关拨了也不会跳到另一边。 */
 function groupedRows(rows) {
@@ -1069,6 +1299,8 @@ function renderSkillTable() {
     $('skills-tabs').innerHTML = '';
     $('skills-filters').innerHTML = '';
     $('skills-list').innerHTML = '<p class="empty">正在读取技能列表…</p>';
+    listedSkillNames = [];
+    $('tags-batch').hidden = true;
     return;
   }
   renderAgentHead();
@@ -1103,6 +1335,9 @@ function renderSkillTable() {
   $('skills-list').innerHTML = groupedRows(rows).map(group =>
     `<div class="list-group-head"><strong>${escape(group.name)}</strong><span>${group.skills.length} 个</span></div>`
     + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`;
+  listedSkillNames = rows.map(skill => skill.name);
+  $('tags-batch').hidden = !state.table.write_allowed || listedSkillNames.length < 2;
+  $('tags-batch').disabled = Boolean(writeBusy);
   animateSkillResults(agent);
   $('labels-hint').hidden = Boolean(state.table.groups?.length) || state.table.llm_configured;
   fitFilterRail();
@@ -1476,6 +1711,7 @@ async function refreshTable(preserveDraft = false) {
   renderNewSkills();
   renderRailNotes();
   renderAgentSummary();
+  renderUsedTags();
   renderSkillTable();
   if (state.detail) renderDetail();
   renderCleanup();
@@ -1616,7 +1852,7 @@ function renderLabelCounts() {
   const remaining = table.labels_pending;
   const done = table.skills.length - remaining;
   $('labels-count').innerHTML = remaining
-    ? `${icon('warning')}<span>已整理 ${done} 个，还差 ${remaining} 个</span>${hint('还差的是缺中文名、中文说明或标签的技能。')}`
+    ? `${icon('warning')}<span>已整理 ${done} 个，还差 ${remaining} 个</span>${hint('还差的是缺中文名或中文说明的技能。')}`
     : `${icon('check-circle')}<span>已整理 ${done} 个，都齐了</span>`;
   $('labels-missing').hidden = !remaining;
   $('labels-missing').querySelector('span').textContent = `整理剩下的 ${remaining} 个`;
@@ -1914,7 +2150,7 @@ $('llm-form').addEventListener('submit', event => {
 $('llm-clear').addEventListener('click', async event => {
   const ok = await confirmDialog({
     title: '删除已保存的 key？',
-    lines: ['删除后不会再自动整理技能的中文名、说明和标签，已经整理好的会保留。'],
+    lines: ['删除后不会再自动整理技能的中文名、说明和分组，已经整理好的会保留。'],
     okText: '删除 key',
   });
   if (!ok) return;
@@ -1931,7 +2167,7 @@ $('llm-clear').addEventListener('click', async event => {
   });
 });
 
-/* 整理中文名、说明和标签在后台跑，进度显示在页头任务条上。 */
+/* 整理中文名、说明和分组在后台跑，进度显示在页头任务条上。 */
 async function startLabels(mode) {
   if (labelsRunning) return;
   labelsRunning = true;
@@ -1955,7 +2191,7 @@ async function pollLabels() {
     const progress = await api('/api/labels/progress');
     if (progress.running) {
       setTask('labels', progress.total
-        ? {text: `正在整理中文名和标签 ${progress.done}/${progress.total}`, ratio: progress.done / progress.total}
+        ? {text: `正在整理中文名和说明 ${progress.done}/${progress.total}`, ratio: progress.done / progress.total}
         : {text: '正在准备技能名单…'});
       // 每整理完一批，后台就存一次；这时刷一下列表，新装的技能不用等整轮做完就有中文名。
       // 只在 done 变了的那一次刷，不是每秒都刷。
@@ -1984,7 +2220,7 @@ $('labels-missing').addEventListener('click', () => startLabels('missing'));
 $('labels-all').addEventListener('click', async () => {
   const ok = await confirmDialog({
     title: '重新整理全部中文名？',
-    lines: ['会重新整理全部中文名、分组、中文说明和标签，原来的会留一份备份。'],
+    lines: ['会重新整理全部中文名、分组和中文说明，原来的会留一份备份。'],
     okText: '重新整理全部',
   });
   if (ok) startLabels('all');
@@ -2354,7 +2590,7 @@ function renderDetail() {
   }).join('');
 
   const update = updateRow(skill.name);
-  const tags = (skill.tags || []).map(tagPickHtml).join('');
+  const tags = detailTagsHtml(skill, locked || detailTagBusy);
   const zh = skill.description_zh;
   // 有些说明本来就是中文，这时没有“英文原文”可说
   const original = /[\u4e00-\u9fff]/.test(skill.description) ? '看原文' : '看英文原文';
@@ -2363,7 +2599,7 @@ function renderDetail() {
     ${skill.title ? `<p class="detail-id">${escape(skill.name)}</p>` : ''}
     ${update ? detailUpdateHtml(update) : ''}
     ${skill.summary ? `<p class="detail-summary">${escape(skill.summary)}</p>` : ''}
-    ${tags ? `<div class="detail-tags">${tags}</div>` : ''}
+    ${tags}
 
     <h3 class="sub-title">谁在用</h3>
     <div class="who">${who}</div>
@@ -2459,7 +2695,8 @@ function trapDetailTab(event) {
    确认框另外盖在上面，不在这里拦。 */
 function detailBackground() {
   return [...document.body.children].filter(element =>
-    element.id !== 'detail-panel' && element.id !== 'panel-scrim' && element.id !== 'tip' && element.tagName !== 'DIALOG');
+    element.id !== 'detail-panel' && element.id !== 'panel-scrim' && element.id !== 'tip'
+      && element.tagName !== 'DIALOG' && element.tagName !== 'DATALIST');
 }
 
 /* 详情开着时，后面的页面不再跟着翻页键滚动；面板里的长内容仍可自己滚动。 */
@@ -2542,11 +2779,25 @@ $('detail-body').addEventListener('change', event => {
   else if (event.target.dataset.updateChoice) chooseUpdate(event.target);
 });
 
+$('detail-body').addEventListener('input', event => {
+  if (event.target.id !== 'detail-tag-input') return;
+  $('detail-tag-error').hidden = true;
+  updateDetailTagAdd();
+});
+
+$('detail-body').addEventListener('submit', event => {
+  if (event.target.id !== 'detail-tag-form') return;
+  event.preventDefault();
+  const input = event.target.querySelector('#detail-tag-input');
+  writeDetailTag('add', input?.value || '');
+});
+
 $('detail-body').addEventListener('click', async event => {
   const button = event.target.closest('button');
   if (!button) return;
   if (button.dataset.skill && button.dataset.agent) { toggleAssignment(button.dataset.skill, button.dataset.agent); return; }
   if (button.dataset.open) { openDetail(button.dataset.open); return; }
+  if (button.dataset.tagRemove) { await writeDetailTag('remove', button.dataset.tagRemove); return; }
   if (button.dataset.tagPick) {
     // 点详情里的标签：关掉面板，回到列表按它筛
     closeDetail();

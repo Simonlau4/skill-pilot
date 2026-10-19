@@ -211,7 +211,7 @@
           <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-sparkle"/></svg>
           <span>还没设置 AI 服务</span>
           <button id="labels-settings" class="link-btn">去设置</button>
-          <button type="button" class="hint" data-hint="设置好以后，技能会自动有中文名、中文说明、分组和标签。"></button>
+          <button type="button" class="hint" data-hint="设置好以后，技能会自动有中文名、中文说明和分组。"></button>
         </p>
 
         <div id="skills-browser" class="skills-browser without-filters">
@@ -229,6 +229,7 @@
               <button id="filters-show" class="btn btn-quiet btn-small" aria-expanded="false" aria-controls="skills-filter-rail" hidden><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-chevron-left"/></svg>展开筛选</button>
               <h3 id="skills-result-title">全部技能</h3>
               <button id="skills-clear-filters" class="link-btn" hidden>清除筛选</button>
+              <button id="tags-batch" class="link-btn" hidden>批量打标签</button>
               <span id="skills-result-count" role="status" aria-atomic="true"></span>
             </div>
             <div id="skills-list" class="skills-list"></div>
@@ -296,12 +297,12 @@
       <div class="settings-main">
         <h2 class="set-group-title">常用</h2>
 
-        <!-- ========== 常用：AI 整理（原来的「AI 服务」和「技能的中文名、说明和标签」合成一块） ========== -->
+        <!-- ========== 常用：AI 整理（原来的「AI 服务」和「技能的中文名、说明和分组」合成一块） ========== -->
         <section class="set-block" id="block-ai" data-block="ai" aria-labelledby="set-ai-title">
           <div class="set-head">
             <div class="set-head-text">
               <h2 id="set-ai-title">AI 整理</h2>
-              <p class="set-lead">让 AI 给技能起中文名、写中文说明、按用途分组，再打上标签。</p>
+              <p class="set-lead">让 AI 给技能起中文名、写中文说明、按用途分组。</p>
             </div>
           </div>
 
@@ -318,7 +319,7 @@
             <p id="llm-note" class="note-line">
               <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
               <span>只发技能的名字和说明，不发其他文件；key 只存在这台电脑上。</span>
-              <button type="button" class="hint" data-hint="技能的名字和说明会发给你选的这家 AI 服务，用来起中文名、翻译说明、按用途分组和打标签。"></button>
+              <button type="button" class="hint" data-hint="技能的名字和说明会发给你选的这家 AI 服务，用来起中文名、翻译说明和按用途分组。"></button>
             </p>
             <p class="row-wrap"><button id="llm-save" class="btn btn-primary">保存并试一下</button>
               <button id="llm-clear" type="button" class="link-btn" hidden>删除 key</button></p>
@@ -546,6 +547,9 @@
 <!-- 图标旁的长说明：所有带 data-hint 的元素共用这一个浮层（app.js 里的“提示”一节） -->
 <div id="tip" role="tooltip" popover="manual"></div>
 
+<!-- 用户自己打过的标签，给详情和批量窗口的输入框提示用 -->
+<datalist id="used-tags"></datalist>
+
 <dialog id="confirm-dialog" class="dialog">
   <form method="dialog" class="dialog-form">
     <h2 id="confirm-title">确认操作</h2>
@@ -611,6 +615,24 @@
     <div class="dialog-actions">
       <button id="install-close" type="button" class="btn">关闭</button>
       <button id="install-apply" type="button" class="btn btn-primary" disabled>安装</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="tag-dialog" class="dialog dialog-wide" aria-labelledby="tag-dialog-title">
+  <form class="dialog-form">
+    <h2 id="tag-dialog-title">批量打标签</h2>
+    <div class="tag-editor-row">
+      <input id="tag-dialog-input" class="input input-grow" list="used-tags" autocomplete="off" placeholder="加个标签，比如项目名" aria-label="标签">
+      <button type="button" class="hint" data-hint="标签由你自己打，用来按项目、客户这类事找技能，可以不打。"></button>
+    </div>
+    <p id="tag-dialog-count" class="muted" role="status" aria-live="polite">已选 0 个</p>
+    <div id="tag-dialog-skills" class="tag-skill-list" role="group" aria-label="要打标签的技能"></div>
+    <p id="tag-dialog-error" class="row-note is-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="tag-dialog-close" type="button" class="btn">关闭</button>
+      <button id="tag-dialog-remove" type="button" class="btn" disabled>去掉这个标签</button>
+      <button id="tag-dialog-add" type="button" class="btn btn-primary" disabled>加上</button>
     </div>
   </form>
 </dialog>

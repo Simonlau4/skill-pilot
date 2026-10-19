@@ -264,10 +264,10 @@ class AdditionalOperationsTests(unittest.TestCase):
         rows={row['name']:row for row in view['skills']}
         self.assertTrue(rows['grilling']['title'] and rows['grilling']['summary'])
         self.assertEqual((rows['grilling']['description_zh'],rows['grilling']['tags']),('',[]))  # 旧格式只有名字和一句话
-        self.assertEqual((rows['other']['description_zh'],rows['other']['tags']),('中文说明',['杂项']))
+        self.assertEqual((rows['other']['description_zh'],rows['other']['tags']),('中文说明',[]))  # 旧 AI 标签不显示
         self.assertEqual((rows['grill-me']['title'],rows['grill-me']['summary'],rows['grill-me']['tags']),('','',[]))
         self.assertTrue(any('grilling' in group['skills'] for group in view['groups']))
-        self.assertEqual(view['labels_pending'],2)  # 只有 other 的名字、中文说明和标签都齐了
+        self.assertEqual(view['labels_pending'],2)  # other 有中文名和说明，没有用户标签也不算待整理
 
     def test_token_estimate_in_table_agents_and_assignment_preview(self):
         cost={n: tokens(n+' 示例技能') for n in ('grill-me','grilling','other')}
@@ -292,7 +292,7 @@ class AdditionalOperationsTests(unittest.TestCase):
         self.assertNotIn('未分组',group_names)  # 看板用它放没写进对照表的技能
         for group in groups:
             for name,label in group['skills'].items():
-                self.assertEqual(set(label),{'title','summary','description','tags'},name)
+                self.assertEqual(set(label),{'title','summary','description'},name)
                 self.assertTrue(label['title'] and label['summary'],name)
 
     @patch.object(operations, 'curated_dependencies', REAL_CURATED)

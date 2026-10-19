@@ -14,7 +14,7 @@ from .store import (PROJECT, _restore, backup, check_links, git_tree, guard, phy
                     target_home, transaction, write_allowed, write_json)
 from .sync import assignment_entries, reconcile_assignments, visibility, cell_notes, notes
 from .sources import github, normalize
-from . import labels, normalization
+from . import labels, tags, normalization
 
 DEPENDENCY_DECISIONS = PROJECT / 'docs/dependency-decisions.json'
 
@@ -110,14 +110,15 @@ def table(home=None):
     # 看板上的中文名和分组只用于显示；没写的技能显示原名。
     groups = labels.read(home)
     display = {name: label for group in groups for name, label in group['skills'].items()}
-    blank = {'title': '', 'summary': '', 'description': '', 'tags': []}
+    user_tags = tags.read(home)
+    blank = {'title': '', 'summary': '', 'description': ''}
     rows = []
     for name, skill in sorted(registry['skills'].items()):
         path = home / '.skill-pilot/store' / name
         info = metadata((path / 'SKILL.md').read_text())
         label = display.get(name, blank)
         rows.append({'name': name, 'title': label['title'], 'summary': label['summary'], 'description': info.get('description', ''),
-                     'description_zh': label['description'], 'tags': label['tags'],
+                     'description_zh': label['description'], 'tags': user_tags.get(name, []),
                      'description_tokens': listing_tokens(name, info), 'source': skill['source'],
                      'source_label': normalize(skill['source'])['label'],
                      'assigned_agents': skill['assigned_agents'], 'requires': skill.get('requires', []),

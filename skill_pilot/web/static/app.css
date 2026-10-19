@@ -984,7 +984,34 @@ table.grid tbody tr:hover td { background: var(--panel-soft); }
 
 .detail-id { margin: 2px 0 0; color: var(--muted); font-family: var(--font-mono); font-size: var(--fs-small); }
 .detail-summary { font-size: var(--fs-lead); color: var(--ink-2); margin: var(--sp-3) 0 0; }
-.detail-tags { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-3); }
+.detail-tags { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-3); }
+.detail-tag { display: inline-flex; align-items: center; gap: 2px; }
+
+/* 详情里去掉一个标签：小圆形按钮，图标和 tag-pick 并排。 */
+.tag-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background-color var(--speed) var(--ease), color var(--speed) var(--ease);
+}
+.tag-remove:hover { background: var(--panel-deep); color: var(--danger-ink); }
+.tag-remove:disabled { opacity: 0.5; cursor: default; }
+.tag-remove:hover:disabled { background: none; color: var(--muted); }
+.tag-remove .ico { width: 14px; height: 14px; }
+
+/* 详情和批量窗口共用的标签输入行。 */
+.tag-editor { display: flex; flex-direction: column; gap: 6px; margin-top: var(--sp-3); }
+.tag-editor-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.tag-editor-row .input { flex: 0 1 240px; min-width: 0; }
+.tag-editor .row-note { margin: 0; }
 .detail-desc {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1341,6 +1368,31 @@ pre {
 /* 接入核对框：每个要选的技能一行，路径用等宽小字。 */
 .join-choice { margin: var(--sp-2) 0; }
 .join-option { display: flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; margin: var(--sp-1) 0; }
+
+/* 批量打标签：标签输入在上，技能勾选列表在下。 */
+#tag-dialog-count { margin: var(--sp-3) 0 var(--sp-2); }
+.tag-skill-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.tag-skill-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 38px;
+  padding: 4px var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+.tag-skill-row:last-child { border-bottom: 0; }
+.tag-skill-row:hover { background: var(--panel-soft); }
+.tag-skill-name { display: inline-flex; align-items: baseline; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+#tag-dialog-error { margin: var(--sp-2) 0 0; }
 
 /* 确认框里的明细：按 agent 分组，超过 8 个折叠。 */
 .confirm-group { margin: var(--sp-3) 0 0; }
