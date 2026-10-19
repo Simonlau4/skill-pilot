@@ -16,13 +16,15 @@ from ..store import attribution, git_tree
 def git(directory, *args, timeout=120, input=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT='0')
+    command = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+               '-C', str(directory), *args]
     try:
-        result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
-                                 '-C', str(directory), *args], env=env, capture_output=True, text=True, timeout=timeout, input=input)
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout, input=input)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ValueError('仓库读取超时或工具暂时不可用，请稍后重试。') from error
     if result.returncode:
-        raise ValueError('仓库读取没能完成，请检查链接和网络后重试。')
+        raise ValueError('仓库读取没能完成，请检查链接和网络后重试。') from subprocess.CalledProcessError(
+            result.returncode, command, output=result.stdout, stderr=result.stderr)
     return result.stdout if '-z' in args else result.stdout.strip()
 
 

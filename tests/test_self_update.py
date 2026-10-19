@@ -221,7 +221,7 @@ class SelfUpdateTests(unittest.TestCase):
     def test_download_failure_never_changes_original(self):
         before = store.physical_state(self.code)
         with patch.object(self_update, 'SOURCE', (self.root / 'unreachable').as_uri()):
-            with self.assertRaisesRegex(ValueError, 'SP 更新没有完成，请检查网络'):
+            with self.assertRaisesRegex(ValueError, 'SP 检查新版没有完成'):
                 self_update.check(self.home, self.code)
         self.assertEqual(before, store.physical_state(self.code))
 
