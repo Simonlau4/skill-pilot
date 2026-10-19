@@ -38,15 +38,15 @@ class UserTagsTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
     def test_normalization_length_order_and_case_reuse_across_skills(self):
-        tags.update(self.home, {'skills': ['alpha'], 'add': '  # Ascentiz  '})
-        self.assertEqual(tags.update(self.home, {'skills': ['beta'], 'add': 'ascentiz'}),
-                         {'tags': {'beta': ['Ascentiz']}})
+        tags.update(self.home, {'skills': ['alpha'], 'add': '  # Acme  '})
+        self.assertEqual(tags.update(self.home, {'skills': ['beta'], 'add': 'acme'}),
+                         {'tags': {'beta': ['Acme']}})
         before = self.path.read_bytes()
-        tags.update(self.home, {'skills': ['alpha', 'beta'], 'add': '＃ ASCENTIZ '})
+        tags.update(self.home, {'skills': ['alpha', 'beta'], 'add': '＃ ACME '})
         self.assertEqual(self.path.read_bytes(), before)
         for value in (' ＃ 博客 \t', ' # ＃ # 博客 ', '字', '字' * 20):
             tags.update(self.home, {'skills': ['alpha'], 'add': value})
-        self.assertEqual(tags.read(self.home)['alpha'], ['Ascentiz', '博客', '字', '字' * 20])
+        self.assertEqual(tags.read(self.home)['alpha'], ['Acme', '博客', '字', '字' * 20])
         saved = json.loads(self.path.read_text())
         self.assertEqual(saved, {'version': 1, 'skills': tags.read(self.home)})
         self.assertEqual(list(self.path.parent.glob('.tags.json.*')), [])
@@ -65,12 +65,12 @@ class UserTagsTests(unittest.TestCase):
         tags.update(self.home, {'skills': ['gamma'], 'add': '其他'})
         self.assertEqual(tags.update(self.home, {'skills': ['alpha', 'beta'], 'add': '博客'}),
                          {'tags': {'alpha': ['博客'], 'beta': ['博客']}})
-        tags.update(self.home, {'skills': ['alpha'], 'add': 'Ascentiz'})
+        tags.update(self.home, {'skills': ['alpha'], 'add': 'Acme'})
         tags.update(self.home, {'skills': ['alpha'], 'add': '独立站'})
-        self.assertEqual(tags.update(self.home, {'skills': ['alpha', 'beta'], 'remove': 'ascentiz'}),
+        self.assertEqual(tags.update(self.home, {'skills': ['alpha', 'beta'], 'remove': 'acme'}),
                          {'tags': {'alpha': ['博客', '独立站'], 'beta': ['博客']}})
-        tags.update(self.home, {'skills': ['alpha'], 'add': 'Ascentiz'})
-        self.assertEqual(tags.read(self.home), {'gamma': ['其他'], 'alpha': ['博客', '独立站', 'Ascentiz'], 'beta': ['博客']})
+        tags.update(self.home, {'skills': ['alpha'], 'add': 'Acme'})
+        self.assertEqual(tags.read(self.home), {'gamma': ['其他'], 'alpha': ['博客', '独立站', 'Acme'], 'beta': ['博客']})
 
     def test_invalid_selection_and_action_reject_the_whole_batch(self):
         tags.update(self.home, {'skills': ['alpha'], 'add': '博客'})
@@ -134,7 +134,7 @@ class UserTagsTests(unittest.TestCase):
         malformed += [json.dumps(value).encode() for value in (
             {}, {'version': 2, 'skills': {}}, {'version': True, 'skills': {}}, {'version': 1, 'skills': []},
             *({'version': 1, 'skills': {'alpha': value}} for value in (
-                '博客', [None], [''], ['字' * 21], ['# 博客'], ['甲'] * 2, ['Ascentiz', 'ascentiz'],
+                '博客', [None], [''], ['字' * 21], ['# 博客'], ['甲'] * 2, ['Acme', 'acme'],
                 [f'标签{i}' for i in range(11)])))]
         for content in malformed:
             with self.subTest(content=content):
@@ -161,7 +161,7 @@ class UserTagsTests(unittest.TestCase):
         self.assertNotIn('tags', (self.path.parent / 'labels.json').read_text())
 
     def test_removed_registry_entry_is_retained_hidden_and_restored_with_its_tags(self):
-        tags.update(self.home, {'skills': ['alpha'], 'add': 'Ascentiz'})
+        tags.update(self.home, {'skills': ['alpha'], 'add': 'Acme'})
         before = self.path.read_bytes()
         registry_path = self.path.parent / 'registry.json'
         registry_bytes = registry_path.read_bytes()
@@ -169,16 +169,16 @@ class UserTagsTests(unittest.TestCase):
         del registry['skills']['alpha']
         registry_path.write_text(json.dumps(registry))
         self.assertNotIn('alpha', {row['name'] for row in operations.table(self.home)['skills']})
-        self.assertEqual(tags.read(self.home)['alpha'], ['Ascentiz'])
+        self.assertEqual(tags.read(self.home)['alpha'], ['Acme'])
         with self.assertRaisesRegex(ValueError, '不在登记表'):
-            tags.update(self.home, {'skills': ['alpha'], 'remove': 'Ascentiz'})
+            tags.update(self.home, {'skills': ['alpha'], 'remove': 'Acme'})
         self.assertEqual(self.path.read_bytes(), before)
-        tags.update(self.home, {'skills': ['beta'], 'add': 'ascentiz'})
-        self.assertEqual(tags.read(self.home)['alpha'], ['Ascentiz'])
-        self.assertEqual(tags.read(self.home)['beta'], ['Ascentiz'])
+        tags.update(self.home, {'skills': ['beta'], 'add': 'acme'})
+        self.assertEqual(tags.read(self.home)['alpha'], ['Acme'])
+        self.assertEqual(tags.read(self.home)['beta'], ['Acme'])
         registry_path.write_bytes(registry_bytes)
         rows = {row['name']: row for row in operations.table(self.home)['skills']}
-        self.assertEqual(rows['alpha']['tags'], ['Ascentiz'])
+        self.assertEqual(rows['alpha']['tags'], ['Acme'])
 
     def test_table_uses_only_user_tags_and_does_not_mark_untagged_labels_pending(self):
         old = {'title': '中文名', 'summary': '一句话', 'description': '中文说明', 'tags': ['旧 AI 标签']}
