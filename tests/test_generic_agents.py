@@ -73,6 +73,13 @@ class PlacementTests(unittest.TestCase):
                 self.assertEqual(assignment_entries('sample', ['alpha'], catalog=catalog),
                                  ['.alpha/skills/sample' if nested else '.shared/nested/sample'])
 
+    def test_shared_directory_error_lists_every_blocking_agent(self):
+        catalog = [profiles.custom('alpha', 'Alpha', '.shared/skills'),
+                   profiles.custom('beta', 'Beta', '.shared/skills'),
+                   profiles.custom('gamma', 'Gamma', '.shared/skills')]
+        with self.assertRaisesRegex(ValueError, 'Alpha 和 Beta、Gamma 共用一个技能目录，没法只给 Alpha'):
+            assignment_entries('sample', ['alpha'], catalog=catalog)
+
 
 class GenericAgentTests(unittest.TestCase):
     setUp = test_operations.OperationsTests.setUp
@@ -236,6 +243,54 @@ class GenericAgentTests(unittest.TestCase):
         changes = [{'skill': 'other', 'agent': 'codex', 'enabled': False},
                    {'skill': 'other', 'agent': 'dsh', 'enabled': True}]
         self.assertEqual(operations.preview_assign(changes, self.home)['cell_notes']['other'], {'codex': 'Codex 里已自动停用'})
+
+    def test_linked_fallback_directory_keeps_preview_and_apply_on_the_same_reason(self):
+        (self.home / 'Applications/Cursor.app').mkdir(parents=True)
+        plan = agents.preview_join(['cursor'], self.home)
+        agents.join(['cursor'], plan['plan_id'], home=self.home)
+        shared = self.home / '.agents/skills'
+        shared.mkdir(parents=True, exist_ok=True)
+        fallback = self.home / '.dsh/skills'
+        if fallback.is_symlink() or fallback.is_file():
+            fallback.unlink()
+        elif fallback.exists():
+            shutil.rmtree(fallback)
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        fallback.symlink_to(shared, target_is_directory=True)
+        before, visible = self.fingerprint(), visibility(self.home)
+        changes = [{'skill': 'other', 'agent': profile['id'], 'enabled': profile['id'] == 'dsh'}
+                   for profile in profiles.managed(self.home)]
+        with self.assertRaisesRegex(ValueError, '共用一个技能目录') as preview:
+            operations.preview_assign(changes, self.home)
+        with self.assertRaisesRegex(ValueError, '共用一个技能目录') as applied:
+            operations.apply_assign(changes, confirmed=True, home=self.home)
+        self.assertEqual(str(preview.exception), str(applied.exception))
+        self.assertIn('Cursor', str(preview.exception))
+        self.assertNotIn('原有停用设置', str(applied.exception))
+        self.assertEqual(self.fingerprint(), before)
+        self.assertEqual(visibility(self.home), visible)
+
+    def test_circular_skill_directory_keeps_the_skill_list_readable(self):
+        def replace(relative):
+            path = self.home / relative
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+
+        left = replace('.claude/skills')
+        left.symlink_to(left.name, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, '有技能目录没能完整读取，请解决后重新预览'):
+            operations.table(self.home)
+
+        right = replace('.gemini/config/skills')
+        left.unlink()
+        left.symlink_to(os.path.relpath(right, left.parent), target_is_directory=True)
+        right.symlink_to(os.path.relpath(left, right.parent), target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, '有技能目录没能完整读取，请解决后重新预览'):
+            operations.table(self.home)
 
     def test_cursor_enrollment_keeps_all_shared_reader_assignments_independent(self):
         (self.home / 'Applications/Cursor.app').mkdir(parents=True)

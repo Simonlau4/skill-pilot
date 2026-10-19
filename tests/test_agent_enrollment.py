@@ -320,3 +320,42 @@ const join = () => vm.runInContext("joinAgent('new', {})", context);
 """
         result = subprocess.run(['node', '-e', script], cwd=store.PROJECT, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_one_click_join_names_agents_enrolled_together(self):
+        script = r"""
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync('skill_pilot/web/static/app.js', 'utf8');
+const flow = source.slice(source.indexOf('async function joinAgent('), source.indexOf('async function showJoinPreview('));
+const names = source.slice(source.indexOf('function nameOf('), source.indexOf('function homePath('));
+const tasks = [], notices = [];
+const plan = {skills: [], profiles: [
+  {id:'new', name:'新工具'}, {id:'shared', name:'共用工具'}
+], agents:['new', 'shared'], plan_id:'p', revision:'r'};
+const context = vm.createContext({
+  state:{table:{write_allowed:true}, agents:[], catalog:new Map()},
+  writeBusy:null, joiningAgent:null, joinPlan:null,
+  $: () => ({showModal() {}}),
+  api: async path => path.endsWith('preview') ? plan : {id:'operation', message:'接入完成'},
+  renderRailNotes() {}, renderAgents() {},
+  setTask: (id, task) => { if (task && task.text) tasks.push(task.text); },
+  refreshEverything: async () => {}, refreshAgents: async () => {},
+  renderJoin() {}, undoOperation() {},
+  runWrite: async options => {
+    const result = await options.work();
+    const notice = options.success(result);
+    if (notice) notices.push(notice.text);
+    return result;
+  },
+});
+vm.runInContext(names + '\n' + flow, context);
+vm.runInContext("indexCatalog({suggested:[{id:'new', name:'新工具'}, {id:'shared', name:'共用工具'}]})", context);
+(async () => {
+  await vm.runInContext("joinAgent('new', {})", context);
+  assert.ok(tasks.some(text => text.includes('正在接入 新工具，一并接入 共用工具…')), tasks.join(' | '));
+  assert.ok(!tasks.some(text => text.includes('…，')), tasks.join(' | '));
+  assert.ok(notices.some(text => text.includes('共用工具')), notices.join(' | '));
+  assert.strictEqual(context.joiningAgent, null);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+        result = subprocess.run(['node', '-e', script], cwd=store.PROJECT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)

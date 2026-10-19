@@ -35,11 +35,16 @@ def git(project, *arguments, **options):
             denied = isinstance(cause, PermissionError) or bool(re.search(
                 r'permission denied|operation not permitted|read-only file system', detail, re.I))
             certificate = bool(re.search(r'certificate|SSL peer', detail, re.I))
+            timed_out = isinstance(cause, subprocess.TimeoutExpired) or bool(re.search(
+                r'operation timed out', detail, re.I))
             interrupted = bool(re.search(
                 r'connection (reset|timed out)|could not resolve host|failed to connect|empty reply|'
-                r'HTTP/2|TLS.*(terminated|handshake)|SSL_(read|connect)|requested URL returned error: 50[234]',
+                r'HTTP/2 stream\b.*(not closed cleanly|was reset)|'
+                r'Error in the HTTP2 framing layer|transfer closed with outstanding read data remaining|'
+                r'GnuTLS recv error|TLS.*(terminated|handshake)|SSL_(read|connect)|'
+                r'requested URL returned error: 50[234]',
                 detail, re.I))
-            if remote and not denied and not certificate and attempt == 0 and (isinstance(cause, subprocess.TimeoutExpired) or interrupted):
+            if remote and not denied and not certificate and attempt == 0 and (timed_out or interrupted):
                 continue
             step = {'ls-remote': '检查新版', 'fetch': '下载或准备新版', 'merge': '安装新版',
                     'reset': '恢复原版', 'checkout': '展开新版文件'}.get(command, '读取程序文件')
@@ -47,7 +52,7 @@ def git(project, *arguments, **options):
                 reason = '访问权限不足，当前用户无法完成这一步'
             elif isinstance(cause, FileNotFoundError):
                 reason = '找不到更新所需的工具，请按安装说明补齐'
-            elif isinstance(cause, subprocess.TimeoutExpired):
+            elif timed_out:
                 reason = '连接更新服务器超时' if remote else '读取程序超时'
             elif certificate:
                 reason = '安全连接验证失败，请检查系统时间和网络代理'
