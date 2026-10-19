@@ -44,9 +44,9 @@ class UserTagsTests(unittest.TestCase):
         before = self.path.read_bytes()
         tags.update(self.home, {'skills': ['alpha', 'beta'], 'add': '＃ ACME '})
         self.assertEqual(self.path.read_bytes(), before)
-        for value in (' ＃ 博客 \t', ' # ＃ # 博客 ', '字', '字' * 20):
+        for value in (' ＃ 博客 \t', ' # ＃ # 博客 ', '字', '字' * 20, '# 内部 空格 '):
             tags.update(self.home, {'skills': ['alpha'], 'add': value})
-        self.assertEqual(tags.read(self.home)['alpha'], ['Acme', '博客', '字', '字' * 20])
+        self.assertEqual(tags.read(self.home)['alpha'], ['Acme', '博客', '字', '字' * 20, '内部 空格'])
         saved = json.loads(self.path.read_text())
         self.assertEqual(saved, {'version': 1, 'skills': tags.read(self.home)})
         self.assertEqual(list(self.path.parent.glob('.tags.json.*')), [])
@@ -58,6 +58,16 @@ class UserTagsTests(unittest.TestCase):
             for action in ('add', 'remove'):
                 with self.subTest(value=value, action=action):
                     with self.assertRaisesRegex(ValueError, '标签'):
+                        tags.update(self.home, {'skills': ['alpha'], action: value})
+                    self.assertEqual(self.path.read_bytes(), before)
+
+    def test_control_and_invisible_characters_are_rejected_without_changing_bytes(self):
+        tags.update(self.home, {'skills': ['alpha'], 'add': '博客'})
+        before = self.path.read_bytes()
+        for value in ('a\nb', '\x00', '\u200b', 'a\tb', 'a\u2028b', 'a\u2029b'):
+            for action in ('add', 'remove'):
+                with self.subTest(value=value, action=action):
+                    with self.assertRaisesRegex(ValueError, '标签里不能有换行或看不见的字符'):
                         tags.update(self.home, {'skills': ['alpha'], action: value})
                     self.assertEqual(self.path.read_bytes(), before)
 
@@ -135,6 +145,7 @@ class UserTagsTests(unittest.TestCase):
             {}, {'version': 2, 'skills': {}}, {'version': True, 'skills': {}}, {'version': 1, 'skills': []},
             *({'version': 1, 'skills': {'alpha': value}} for value in (
                 '博客', [None], [''], ['字' * 21], ['# 博客'], ['甲'] * 2, ['Acme', 'acme'],
+                ['a\nb'], ['\x00'], ['\u200b'], ['a\u2028b'], ['a\u2029b'],
                 [f'标签{i}' for i in range(11)])))]
         for content in malformed:
             with self.subTest(content=content):

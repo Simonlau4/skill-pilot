@@ -79,8 +79,11 @@ def as_label(value):
     assert isinstance(value, dict)
     assert all(isinstance(value[k], str) and value[k].strip() for k in ('title', 'summary'))
     assert isinstance(value.get('description', ''), str)
-    return {'title': value['title'], 'summary': value['summary'],
-            'description': value.get('description', '')}
+    label = {'title': value['title'], 'summary': value['summary'],
+             'description': value.get('description', '')}
+    if 'tags' in value:
+        label['tags'] = value['tags']  # 旧 AI 标签只原样留存。
+    return label
 
 
 def needs_work(item):

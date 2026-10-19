@@ -186,20 +186,20 @@ class LabelsTests(unittest.TestCase):
                                                            'skill-02': {'title': '半新', 'summary': '半新说明'}}}])
         skills = {n: v for g in labels.read(self.home) for n, v in g['skills'].items()}
         self.assertEqual(skills['skill-00'], {'title': '旧中文名', 'summary': '旧说明', 'description': ''})
-        self.assertEqual(skills['skill-01'], {'title': '新名', 'summary': '新说明', 'description': '完整说明'})
+        self.assertEqual(skills['skill-01'], {'title': '新名', 'summary': '新说明', 'description': '完整说明', 'tags': ['整理']})
         self.assertEqual(skills['skill-02'], {'title': '半新', 'summary': '半新说明', 'description': ''})
         self.configure()
         self.run_labels()
         written = json.loads(path.read_text())['groups']
-        self.assertTrue(all(isinstance(v, dict) and set(v) == {'title', 'summary', 'description'}
+        self.assertTrue(all(isinstance(v, dict) and set(v) - {'tags'} == {'title', 'summary', 'description'}
                             for g in written for v in g['skills'].values()))
         self.assertEqual(labels.read(self.home), written)  # 写下去再读回来不变
 
-    def test_legacy_tags_are_ignored_but_wrong_label_structure_is_refused(self):
+    def test_legacy_tags_are_preserved_without_validation_but_wrong_label_structure_is_refused(self):
         good = {'title': '名', 'summary': '说明'}
-        for old_tags in (['甲', ' ', '甲', '乙', '丙', '丁', '太长太长太长太长太长'], '整理', ['整理', 5]):
+        for old_tags in (['甲', ' ', '甲', '乙', '丙', '丁', '太长太长太长太长太长'], '整理', ['整理', 5], None, 5, {'旧': True}):
             self.write_labels([{'name': '组', 'skills': {'skill-00': good | {'tags': old_tags}}}])
-            self.assertEqual(labels.read(self.home)[0]['skills']['skill-00'], good | {'description': ''})
+            self.assertEqual(labels.read(self.home)[0]['skills']['skill-00'], good | {'description': '', 'tags': old_tags})
         for bad in ([1, 2], ['名'], ['名', ''], ['名', '说明', '多'], {'title': '名'}, {'title': '', 'summary': '说明'},
                     good | {'description': 5}, None, 'text'):
             with self.subTest(bad=bad):
@@ -239,6 +239,35 @@ class LabelsTests(unittest.TestCase):
         self.assertNotIn('existing_tags', payload)
         self.assertEqual(labels.read(self.home)[0]['skills']['skill-00'], done)
 
+    def test_missing_preserves_legacy_tags_with_and_without_work_and_keeps_them_private(self):
+        self.configure()
+        old_tags = {f'skill-{i:02}': value for i, value in enumerate((
+            [' 旧 AI 标签 ', ' ', '旧 AI 标签', '太长太长太长太长太长太长太长'], '旧 AI 标签字符串', ['旧 AI 标签', 5]))}
+        for pending in (True, False):
+            with self.subTest(pending=pending):
+                self.ai.calls.clear()
+                path = self.write_labels([{'name': '手写组', 'skills': {
+                    name: {'title': '手写名', 'summary': '手写说明', 'description': '' if pending else '已有翻译', 'tags': value}
+                    for name, value in old_tags.items()}}])
+                progress = self.run_labels()
+                count = 3 if pending else 0
+                self.assertEqual((progress['done'], progress['total'], progress['error']), (count, count, ''))
+                written = json.loads(path.read_text())['groups'][0]['skills']
+                self.assertEqual({name: item['tags'] for name, item in written.items()}, old_tags)
+                self.assertFalse((path.parent / 'labels.previous.json').exists())
+                table = operations.table(self.home)
+                self.assertEqual(table['labels_pending'], 0)
+                self.assertTrue(all(row['tags'] == [] for row in table['skills']))
+                self.assertEqual(len(self.ai.calls), int(pending))
+                if pending:
+                    body = self.ai.calls[0]['body']
+                    payload = json.loads(body['messages'][1]['content'])
+                    self.assertEqual(set(payload), {'existing_groups', 'skills', '规则'})
+                    self.assertEqual(payload['existing_groups'], ['手写组'])
+                    self.assertTrue(all(set(item) == {'name', 'description'} for item in payload['skills']))
+                    self.assertNotIn('旧 AI 标签', json.dumps(body, ensure_ascii=False))
+                    self.assertNotIn('tags', json.dumps(body))
+
     def test_ai_replies_without_tags_or_with_empty_or_malformed_tags_are_accepted(self):
         self.configure()
         self.ai.replies = [json.dumps({'skills': [
@@ -267,7 +296,8 @@ class LabelsTests(unittest.TestCase):
 
     def test_all_keeps_previous_and_sorts_groups_by_size(self):
         self.configure()
-        path = self.write_labels([{'name': '原组', 'skills': {'skill-00': ['旧中文名', '说明']}}])
+        path = self.write_labels([{'name': '原组', 'skills': {'skill-00': {
+            'title': '旧中文名', 'summary': '说明', 'description': '旧翻译', 'tags': ['旧 AI 标签', 5]}}}])
         previous = path.read_bytes()
         self.ai.replies = [json.dumps({'skills': [
             {'name': f'skill-{i:02}', 'title': '新名字', 'summary': '说明', 'group': '小组' if i == 0 else '大组',
@@ -279,6 +309,7 @@ class LabelsTests(unittest.TestCase):
         self.assertEqual(payload['existing_groups'], [])
         self.assertNotIn('existing_tags', payload)
         self.assertEqual(labels.read(self.home)[1]['skills']['skill-00']['title'], '新名字')  # 旧的手写名字被整个重做
+        self.assertTrue(all('tags' not in item for group in labels.read(self.home) for item in group['skills'].values()))
 
     def test_table_missing_corrupt_and_configured(self):
         for content in (None, '{', '{"groups": [null]}', '{"groups": "bad"}'):

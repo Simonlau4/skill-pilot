@@ -1,6 +1,7 @@
 """User-owned tags, independent of AI display labels."""
 import json
 import threading
+import unicodedata
 from pathlib import Path
 
 from .labels import atomic_write
@@ -16,6 +17,8 @@ def clean_tag(value):
     value = value.strip()
     while value.startswith(('#', '＃')):
         value = value.lstrip('#＃').strip()
+    if any(unicodedata.category(char) in {'Cc', 'Cf', 'Zl', 'Zp'} for char in value):
+        raise ValueError('标签里不能有换行或看不见的字符，请修改后重试。')
     if not 1 <= len(value) <= 20:
         raise ValueError('每个标签需要 1–20 个字，请修改后重试。')
     return value

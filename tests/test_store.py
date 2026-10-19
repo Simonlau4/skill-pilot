@@ -300,6 +300,9 @@ class MigrationTests(unittest.TestCase):
         (self.home / ".agents/skills/sample").symlink_to(self.home / ".codex/skills/sample")
         legacy_root = self.home / '.skill-pilot'
         legacy_root.mkdir(exist_ok=True)
+        (legacy_root / 'tags.json').write_text('{"version":1,"skills":{"sample":["用户标签"]}}\n')
+        (legacy_root / 'tag-link').symlink_to(legacy_root / 'tags.json')
+        (legacy_root / 'labels.json').write_text('{"groups":[]}\n')
         legacy = [legacy_root / ('usage.sqlite' + suffix) for suffix in ['', '-wal', '-shm']]
         for path in legacy:
             path.write_bytes(b'legacy database')
@@ -314,6 +317,8 @@ class MigrationTests(unittest.TestCase):
             self.assertNotIn("secret", (fake / ".codex/config.toml").read_text())
             self.assertEqual((fake / ".agents/skills/sample").resolve(), fake / ".codex/skills/sample")
             self.assertFalse(any((fake / '.skill-pilot').glob('usage.sqlite*')))
+            self.assertFalse((fake / '.skill-pilot/tags.json').exists())
+            self.assertEqual((fake / '.skill-pilot/labels.json').read_bytes(), (legacy_root / 'labels.json').read_bytes())
         self.assertEqual([(p.read_bytes(), p.stat().st_mtime_ns) for p in legacy], before)
 
     def test_simulator_copies_link_dependencies_and_optional_extra_sources(self):

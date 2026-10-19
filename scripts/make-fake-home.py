@@ -34,7 +34,7 @@ def make_fake_home(source, destination):
     copied, dependencies = set(), []
     def copy(relative):
         src, dst = source / relative, destination / relative
-        if relative == '.skill-pilot/settings.json' or Path(relative).parent == Path('.skill-pilot') and Path(relative).name.startswith('usage.sqlite'):
+        if relative in {'.skill-pilot/settings.json', '.skill-pilot/tags.json'} or Path(relative).parent == Path('.skill-pilot') and Path(relative).name.startswith('usage.sqlite'):
             copied.add(relative)
             return
         if relative in copied or dst.exists() or dst.is_symlink():
@@ -49,7 +49,7 @@ def make_fake_home(source, destination):
             guard(dst, destination).symlink_to(os.readlink(src), target_is_directory=src.is_dir())
         elif src.is_dir():
             shutil.copytree(src, guard(dst, destination), symlinks=True,
-                            ignore=(lambda directory, names: [n for n in names if n in {"backups", "settings.json"} or n.startswith('usage.sqlite')]
+                            ignore=(lambda directory, names: [n for n in names if n in {"backups", "settings.json", "tags.json"} or n.startswith('usage.sqlite')]
                                     if Path(directory) == source / ".skill-pilot" else []))
         else:
             shutil.copy2(src, guard(dst, destination))
