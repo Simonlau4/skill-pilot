@@ -78,20 +78,26 @@ def visibility(home, catalog=None):
 
 
 def assignment_entries(name, agents, home=None, catalog=None):
-    """Greedily cover recipients, using only their placement roots."""
+    """Cover recipients through safe roots, preferring their default placement."""
     catalog = catalog if catalog is not None else (profiles.managed(home) if home is not None else profiles.PROFILES)
     assigned = set(agents)
     if not assigned <= {p['id'] for p in catalog}:
         raise ValueError('请选择已接入的 agent。')
-    roots = list(dict.fromkeys(p['link_root'] for p in catalog if p['id'] in assigned))
-    readers = {r: {p['id'] for p in catalog if r in p['skill_roots']} for r in roots}
+    recipients = [p for p in catalog if p['id'] in assigned]
+    roots = list(dict.fromkeys([p['link_root'] for p in recipients] +
+                              [r for p in recipients for r in p['skill_roots']]))
+    readers = {r: {p['id'] for p in catalog if profiles.reads(p, Path(r) / name)} for r in roots}
+    blocked = {p['id'] for p in catalog if p['id'] not in assigned and not p['disable']}
+    safe = [r for r in roots if not readers[r] & blocked]
+    missing = assigned - set().union(*(readers[r] for r in safe))
+    if missing:
+        root = next(r for r in roots if readers[r] & missing)
+        other = next(p for p in catalog if p['id'] in readers[root] & blocked)
+        names = ' 和 '.join(p['name'] for p in recipients if p['id'] in readers[root])
+        raise ValueError(names + ' 和 ' + other['name'] + ' 共用一个技能目录，没法只给 ' + names + '。')
     uncovered, chosen = set(assigned), []
     while uncovered:
-        root = max(roots, key=lambda r: len(readers[r] & uncovered))
-        for p in catalog:
-            if p['id'] in readers[root] - assigned and not p['disable']:
-                recipients = ' 和 '.join(q['name'] for q in catalog if q['id'] in readers[root] & assigned)
-                raise ValueError(recipients + ' 和 ' + p['name'] + ' 共用一个技能目录，没法只给 ' + recipients + '。')
+        root = max(safe, key=lambda r: len(readers[r] & uncovered))
         chosen.append(str(Path(root) / name))
         uncovered -= readers[root]
     return sorted(chosen)

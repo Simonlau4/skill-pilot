@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from tests import test_operations
 from skill_pilot import store, agent_discovery
+from skill_pilot.sync import visibility
 from skill_pilot.web.server import Dashboard
 
 
@@ -55,6 +56,32 @@ class AgentWebTests(unittest.TestCase):
                 return response.status, json.load(response)
         except urllib.error.HTTPError as error:
             return error.code, json.load(error)
+
+    def test_shared_reader_toggle_preview_apply_refresh_and_undo(self):
+        (self.home / 'Applications/Cursor.app').mkdir(parents=True)
+        status, plan = self.request('/api/agents/join/preview', {'agents': ['cursor']})
+        self.assertEqual(status, 200, plan)
+        status, joined = self.request('/api/agents/join/apply', {
+            'agents': ['cursor'], 'plan_id': plan['plan_id'], 'revision': plan['revision'], 'confirmed': True})
+        self.assertEqual(status, 200, joined)
+        before = self.fingerprint()
+        changes = [{'skill': 'other', 'agent': 'dsh', 'enabled': True}]
+        status, preview = self.request('/api/assignment/preview', {'changes': changes})
+        self.assertEqual(status, 200, preview)
+        self.assertEqual(preview['assignments']['other'], ['codex', 'dsh'])
+        self.assertEqual(self.fingerprint(), before)
+        _, table = self.request('/api/table')
+        status, applied = self.request('/api/assignment/apply', {
+            'changes': changes, 'revision': table['revision'], 'confirmed': True})
+        self.assertEqual(status, 200, applied)
+        _, refreshed = self.request('/api/table')
+        row = next(s for s in refreshed['skills'] if s['name'] == 'other')
+        self.assertEqual(row['assigned_agents'], ['codex', 'dsh'])
+        self.assertEqual(visibility(self.home)['cursor']['available'], [])
+        status, undone = self.request('/api/undo', {
+            'id': applied['id'], 'revision': refreshed['revision'], 'confirmed': True})
+        self.assertEqual(status, 200, undone)
+        self.assertEqual(self.fingerprint(), before)
 
     def test_read_preview_write_guards_and_roundtrip(self):
         status, view = self.request('/api/agents')
