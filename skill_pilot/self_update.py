@@ -2,15 +2,17 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .environment import tool_environment
 from .sources.github import git as repository_git
-from .store import PROJECT, write_allowed
+from .store import PROJECT, guard, write_allowed
 
 SOURCE = 'https://github.com/Simonlau4/skill-pilot.git'
 BRANCH = 'main'
@@ -19,10 +21,76 @@ BUNDLE_DIRS = ('skill_pilot', 'scripts', 'assets', 'docs', 'skill', 'tests')
 
 
 def git(project, *arguments, **options):
+    command = arguments[0]
+    remote = (command in ('ls-remote', 'fetch') and SOURCE in arguments
+              and SOURCE.startswith(('https://', 'http://')))
+    for attempt in range(2 if remote else 1):
+        try:
+            return repository_git(project, *arguments, **options)
+        except ValueError as error:
+            cause = error.__cause__ or error
+            detail = getattr(cause, 'stderr', '') or str(cause)
+            if isinstance(detail, bytes):
+                detail = detail.decode('utf-8', 'replace')
+            denied = isinstance(cause, PermissionError) or bool(re.search(
+                r'permission denied|operation not permitted|read-only file system', detail, re.I))
+            certificate = bool(re.search(r'certificate|SSL peer', detail, re.I))
+            interrupted = bool(re.search(
+                r'connection (reset|timed out)|could not resolve host|failed to connect|empty reply|'
+                r'HTTP/2|TLS.*(terminated|handshake)|SSL_(read|connect)|requested URL returned error: 50[234]',
+                detail, re.I))
+            if remote and not denied and not certificate and attempt == 0 and (isinstance(cause, subprocess.TimeoutExpired) or interrupted):
+                continue
+            step = {'ls-remote': '检查新版', 'fetch': '下载或准备新版', 'merge': '安装新版',
+                    'reset': '恢复原版', 'checkout': '展开新版文件'}.get(command, '读取程序文件')
+            if denied:
+                reason = '访问权限不足，当前用户无法完成这一步'
+            elif isinstance(cause, FileNotFoundError):
+                reason = '找不到更新所需的工具，请按安装说明补齐'
+            elif isinstance(cause, subprocess.TimeoutExpired):
+                reason = '连接更新服务器超时' if remote else '读取程序超时'
+            elif certificate:
+                reason = '安全连接验证失败，请检查系统时间和网络代理'
+            elif interrupted:
+                reason = '与更新服务器的连接中断'
+            else:
+                reason = '当前操作失败，请查看本机更新日志中的详细原因'
+            retry = '，自动重试一次后仍未完成' if attempt else ''
+            raise ValueError(f'SP {step}没有完成：{reason}{retry}。') from error
+
+
+def record_failure(home, action, error):
+    """Keep failure diagnostics outside the reversible skill-operation history."""
+    home = Path(home).resolve()
+    if not write_allowed(home):
+        return
+    cause = error
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    detail = getattr(cause, 'stderr', '') or str(error)
+    if isinstance(detail, bytes):
+        detail = detail.decode('utf-8', 'replace')
+    detail = re.sub(r'\b(?:https?|file)://[^\s\'"<>]+', '[链接已隐藏]', detail)
+    detail = re.sub(r'(?im)\b(authorization|proxy-authorization|api[_-]?key|access[_-]?token|password|secret)\s*[:=][^\r\n]*',
+                    '[凭据已隐藏]', detail)
+    detail = re.sub(r'\b(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]+', '[凭据已隐藏]', detail)
+    for directory in sorted({str(home), str(Path.home())}, key=len, reverse=True):
+        detail = detail.replace(directory, '~')
+    command = getattr(cause, 'cmd', [])
+    step = command[command.index('-C') + 2] if isinstance(command, list) and '-C' in command else action
+    record = {'time': datetime.now(timezone.utc).isoformat(), 'action': action, 'step': step,
+              'error_type': type(cause).__name__, 'returncode': getattr(cause, 'returncode', None),
+              'timeout': getattr(cause, 'timeout', None), 'detail': detail[:4000]}
     try:
-        return repository_git(project, *arguments, **options)
-    except ValueError as error:
-        raise ValueError('SP 更新没有完成，请检查网络和项目文件夹权限后重试。') from error
+        path = guard(home / '.skill-pilot/logs/program-update.jsonl', home)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(json.dumps(record, ensure_ascii=False) + '\n')
+    except (OSError, ValueError):
+        # A log-folder problem must not hide the original update failure.
+        pass
 
 
 def safe_path(root, name):

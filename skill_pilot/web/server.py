@@ -148,6 +148,7 @@ class Dashboard(ThreadingHTTPServer):
                 self.program_review['available'] = False
                 self.program_progress.update(result, phase='ready', message='新版已装好，刷新后生效')
         except Exception as error:
+            self_update.record_failure(self.home, action, error)
             if automatic:
                 self.program_progress.update(phase='idle', available=False, error='', message='还没查到新版信息')
             else:
