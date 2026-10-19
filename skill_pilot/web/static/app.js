@@ -2156,9 +2156,9 @@ async function joinAgent(id, button) {
       const profiles = plan.profiles || [];
       sharedNames = profiles.filter(profile => profile.id !== id).map(profile => profile.name).filter(Boolean);
       if (!profiles.length) sharedNames = (plan.agents || []).filter(agent => agent !== id).map(nameOf);
-      const together = sharedNames.length ? `，一并接入 ${sharedNames.join('、')}` : '';
-      joiningAgent.text = `正在接入…${together}`;
-      setTask('write', {text: `正在接入 ${nameOf(id)}${together}…`});
+      const together = sharedNames.join('、');
+      joiningAgent.text = together ? `正在接入，一并接入 ${together}…` : '正在接入…';
+      setTask('write', {text: together ? `正在接入 ${nameOf(id)}，一并接入 ${together}…` : `正在接入 ${nameOf(id)}…`});
       renderRailNotes();
       renderAgents();
       const result = await api('/api/agents/join/apply', {

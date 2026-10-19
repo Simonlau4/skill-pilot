@@ -39,7 +39,9 @@ def git(project, *arguments, **options):
                 r'operation timed out', detail, re.I))
             interrupted = bool(re.search(
                 r'connection (reset|timed out)|could not resolve host|failed to connect|empty reply|'
-                r'HTTP/2 stream\b.*not closed cleanly|TLS.*(terminated|handshake)|SSL_(read|connect)|'
+                r'HTTP/2 stream\b.*(not closed cleanly|was reset)|'
+                r'Error in the HTTP2 framing layer|transfer closed with outstanding read data remaining|'
+                r'GnuTLS recv error|TLS.*(terminated|handshake)|SSL_(read|connect)|'
                 r'requested URL returned error: 50[234]',
                 detail, re.I))
             if remote and not denied and not certificate and attempt == 0 and (timed_out or interrupted):

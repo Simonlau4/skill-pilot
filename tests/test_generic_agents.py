@@ -270,6 +270,28 @@ class GenericAgentTests(unittest.TestCase):
         self.assertEqual(self.fingerprint(), before)
         self.assertEqual(visibility(self.home), visible)
 
+    def test_circular_skill_directory_keeps_the_skill_list_readable(self):
+        def replace(relative):
+            path = self.home / relative
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+
+        left = replace('.claude/skills')
+        left.symlink_to(left.name, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, '有技能目录没能完整读取，请解决后重新预览'):
+            operations.table(self.home)
+
+        right = replace('.gemini/config/skills')
+        left.unlink()
+        left.symlink_to(os.path.relpath(right, left.parent), target_is_directory=True)
+        right.symlink_to(os.path.relpath(left, right.parent), target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, '有技能目录没能完整读取，请解决后重新预览'):
+            operations.table(self.home)
+
     def test_cursor_enrollment_keeps_all_shared_reader_assignments_independent(self):
         (self.home / 'Applications/Cursor.app').mkdir(parents=True)
         plan = agents.preview_join(['cursor'], self.home)

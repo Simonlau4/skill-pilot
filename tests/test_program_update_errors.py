@@ -48,13 +48,15 @@ class ProgramUpdateErrorTests(unittest.TestCase):
         self.assertNotIn('文件夹', str(caught.exception))
 
     def test_http2_status_is_not_treated_as_a_dropped_connection(self):
-        with patch.object(github.subprocess, 'run', return_value=self.failure(
-                'error: RPC failed; HTTP/2 403')) as run:
-            with self.assertRaises(ValueError) as caught:
-                self_update.git(self.project, 'fetch', self_update.SOURCE, 'a' * 40)
-        self.assertEqual(run.call_count, 1)
-        self.assertNotIn('连接中断', str(caught.exception))
-        self.assertNotIn('重试', str(caught.exception))
+        for status in (401, 403, 404, 500):
+            with self.subTest(status=status):
+                with patch.object(github.subprocess, 'run', return_value=self.failure(
+                        f'error: RPC failed; HTTP/2 {status}')) as run:
+                    with self.assertRaises(ValueError) as caught:
+                        self_update.git(self.project, 'fetch', self_update.SOURCE, 'a' * 40)
+                self.assertEqual(run.call_count, 1)
+                self.assertNotIn('连接中断', str(caught.exception))
+                self.assertNotIn('重试', str(caught.exception))
 
     def test_curl_operation_timeout_retries_once_and_says_timeout(self):
         failure = self.failure('fatal: RPC failed; curl 56 Recv failure: Operation timed out')
@@ -66,12 +68,19 @@ class ProgramUpdateErrorTests(unittest.TestCase):
         self.assertNotIn('连接中断', str(caught.exception))
 
     def test_http2_stream_reset_still_retries_as_a_dropped_connection(self):
-        failure = self.failure('curl: (92) HTTP/2 stream 1 was not closed cleanly: PROTOCOL_ERROR')
-        with patch.object(github.subprocess, 'run', side_effect=[failure,
-                subprocess.CompletedProcess([], 0, 'downloaded\n', '')]) as run:
-            result = self_update.git(self.project, 'fetch', '--no-tags', self_update.SOURCE, 'a' * 40)
-        self.assertEqual(result, 'downloaded')
-        self.assertEqual(run.call_count, 2)
+        for detail in ('curl: (92) HTTP/2 stream 1 was not closed cleanly: PROTOCOL_ERROR',
+                       'curl: (92) HTTP/2 stream 1 was reset',
+                       'curl: (16) Error in the HTTP2 framing layer',
+                       'curl: (18) transfer closed with outstanding read data remaining',
+                       'error: GnuTLS recv error (-110)'):
+            with self.subTest(detail=detail):
+                failure = self.failure(detail)
+                with patch.object(github.subprocess, 'run', return_value=failure) as run:
+                    with self.assertRaisesRegex(ValueError, '连接中断') as caught:
+                        self_update.git(self.project, 'fetch', self_update.SOURCE, 'a' * 40)
+                self.assertEqual(run.call_count, 2)
+                self.assertIn('重试', str(caught.exception))
+                self.assertNotIn('当前操作失败', str(caught.exception))
 
     def test_certificate_errors_are_explicit_and_not_retried(self):
         with patch.object(github.subprocess, 'run', return_value=self.failure('fatal: SSL_connect: certificate verify failed')) as run:

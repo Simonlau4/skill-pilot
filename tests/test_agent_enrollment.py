@@ -351,7 +351,8 @@ vm.runInContext(names + '\n' + flow, context);
 vm.runInContext("indexCatalog({suggested:[{id:'new', name:'新工具'}, {id:'shared', name:'共用工具'}]})", context);
 (async () => {
   await vm.runInContext("joinAgent('new', {})", context);
-  assert.ok(tasks.some(text => text.includes('共用工具')), tasks.join(' | '));
+  assert.ok(tasks.some(text => text.includes('正在接入 新工具，一并接入 共用工具…')), tasks.join(' | '));
+  assert.ok(!tasks.some(text => text.includes('…，')), tasks.join(' | '));
   assert.ok(notices.some(text => text.includes('共用工具')), notices.join(' | '));
   assert.strictEqual(context.joiningAgent, null);
 })().catch(error => { console.error(error); process.exitCode = 1; });

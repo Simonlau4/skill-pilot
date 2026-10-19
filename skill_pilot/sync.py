@@ -77,24 +77,30 @@ def visibility(home, catalog=None):
     return result
 
 
+def _follow_directory(path):
+    """Resolve a directory. A link loop raises RuntimeError on Python 3.11+."""
+    return Path(path).resolve()
+
+
 def _reads_resolved(profile, entry, home):
     """Match readers by where the skill directory actually points.
 
     The skill entry itself is often a link to the shared copy. Follow the
     directory above it, so a fallback directory that only points at a shared
-    folder is not treated as a separate place.
+    folder is not treated as a separate place. A circular link cannot be
+    followed; compare the written path instead of failing the request.
     """
     if home is None:
         return profiles.reads(profile, entry)
     entry = Path(entry)
     try:
-        actual = (Path(home) / entry.parent).resolve() / entry.name
-    except OSError:
+        actual = _follow_directory(Path(home) / entry.parent) / entry.name
+    except (OSError, RuntimeError):
         return profiles.reads(profile, entry)
     for root in profile['skill_roots']:
         try:
-            relative = actual.relative_to((Path(home) / root).resolve())
-        except (OSError, ValueError):
+            relative = actual.relative_to(_follow_directory(Path(home) / root))
+        except (OSError, RuntimeError, ValueError):
             continue
         if relative.parts and (profile['nested'] or len(relative.parts) == 1):
             return True
