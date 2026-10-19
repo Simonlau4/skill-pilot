@@ -140,7 +140,7 @@ class AgentDetectionTests(unittest.TestCase):
         operations.undo(joined['id'], home=self.home)
         self.assertEqual([p['id'] for p in agents.overview(self.home)['suggested']], ids)
 
-    def test_cursor_shared_skills_require_the_other_installed_readers(self):
+    def test_cursor_shared_skills_require_joint_enrollment_but_allow_separate_assignment(self):
         self.install_app(profiles.ADDITIONAL_PROFILES[0])
         (self.home / '.dsh').mkdir()
         self.skill('.agents/skills', 'shared')
@@ -150,8 +150,15 @@ class AgentDetectionTests(unittest.TestCase):
         self.assertIn('cursor', plan['agents'])
         store.apply(plan['plan_id'], self.home)
         self.assertEqual(visibility(self.home)['cursor']['available'], ['shared'])
-        with self.assertRaisesRegex(ValueError, '共用一个技能目录'):
-            operations.apply_assign([{'skill': 'shared', 'agent': 'cursor', 'enabled': False}], home=self.home)
+        before = store.physical_state(self.home / '.agents/skills')
+        result = operations.apply_assign([{'skill': 'shared', 'agent': 'cursor', 'enabled': False}], home=self.home)
+        visible = visibility(self.home)
+        self.assertNotIn('shared', visible['cursor']['available'])
+        self.assertIn('shared', visible['codex']['available'])
+        self.assertIn('shared', visible['dsh']['available'])
+        operations.undo(result['id'], home=self.home)
+        self.assertEqual(store.physical_state(self.home / '.agents/skills'), before)
+        self.assertIn('shared', visibility(self.home)['cursor']['available'])
 
     def test_ignoring_an_empty_installed_agent_remains_visible_and_can_be_undone(self):
         self.skill('.codex/skills', 'sample')

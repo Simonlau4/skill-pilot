@@ -37,6 +37,42 @@ class PlacementTests(unittest.TestCase):
             with self.subTest(selected=selected):
                 self.assertEqual(assignment_entries('sample', selected), original_assignment_entries('sample', selected))
 
+    def test_private_roots_isolate_every_selection_and_disable_combination(self):
+        ids = ['alpha', 'beta', 'gamma', 'delta']
+        for disabled in itertools.product([False, True], repeat=4):
+            catalog = [profiles.custom(a, a.title(), '.common/skills') for a in ids]
+            for profile, can_disable in zip(catalog, disabled):
+                profile['skill_roots'].append('.' + profile['id'] + '/skills')
+                profile['disable'] = 'codex_config' if can_disable else None
+            for flags in itertools.product([False, True], repeat=4):
+                selected = {a for a, enabled in zip(ids, flags) if enabled}
+                with self.subTest(disabled=disabled, selected=selected):
+                    entries = assignment_entries('sample', selected, catalog=catalog)
+                    readers = {p['id'] for p in catalog if any(profiles.reads(p, e) for e in entries)}
+                    self.assertTrue(selected <= readers)
+                    self.assertTrue(all(p['disable'] for p in catalog if p['id'] in readers - selected))
+                    if selected == set(ids):
+                        self.assertEqual(entries, ['.common/skills/sample'])
+
+    def test_invalid_preferred_root_does_not_hide_another_shared_placement(self):
+        catalog = [profiles.custom('alpha', 'Alpha', '.blocked/skills'),
+                   profiles.custom('beta', 'Beta', '.blocked/skills'),
+                   profiles.custom('gamma', 'Gamma', '.blocked/skills')]
+        catalog[0]['skill_roots'].append('.valid/skills')
+        catalog[1]['skill_roots'].append('.valid/skills')
+        self.assertEqual(assignment_entries('sample', ['alpha', 'beta'], catalog=catalog),
+                         ['.valid/skills/sample'])
+
+    def test_nested_reader_is_respected_when_choosing_an_alternative_root(self):
+        catalog = [profiles.custom('alpha', 'Alpha', '.shared/nested'),
+                   profiles.custom('beta', 'Beta', '.shared')]
+        catalog[0]['skill_roots'].append('.alpha/skills')
+        for nested in [False, True]:
+            with self.subTest(nested=nested):
+                catalog[1]['nested'] = nested
+                self.assertEqual(assignment_entries('sample', ['alpha'], catalog=catalog),
+                                 ['.alpha/skills/sample' if nested else '.shared/nested/sample'])
+
 
 class GenericAgentTests(unittest.TestCase):
     setUp = test_operations.OperationsTests.setUp
@@ -200,6 +236,47 @@ class GenericAgentTests(unittest.TestCase):
         changes = [{'skill': 'other', 'agent': 'codex', 'enabled': False},
                    {'skill': 'other', 'agent': 'dsh', 'enabled': True}]
         self.assertEqual(operations.preview_assign(changes, self.home)['cell_notes']['other'], {'codex': 'Codex 里已自动停用'})
+
+    def test_cursor_enrollment_keeps_all_shared_reader_assignments_independent(self):
+        (self.home / 'Applications/Cursor.app').mkdir(parents=True)
+        plan = agents.preview_join(['cursor'], self.home)
+        agents.join(['cursor'], plan['plan_id'], home=self.home)
+        ids = ['codex', 'dsh', 'cursor']
+        before = self.fingerprint() | {'.cursor/skills': store.physical_state(self.home / '.cursor/skills')}
+        config = (self.home / '.codex/config.toml').read_bytes()
+        for flags in itertools.product([False, True], repeat=3):
+            selected = {a for a, enabled in zip(ids, flags) if enabled}
+            changes = [{'skill': 'other', 'agent': a, 'enabled': a in selected} for a in ids]
+            with self.subTest(selected=selected):
+                preview = operations.preview_assign(changes, self.home)
+                self.assertEqual(set(preview['assignments']['other']), selected)
+                self.assertEqual(self.fingerprint() | {'.cursor/skills': store.physical_state(self.home / '.cursor/skills')}, before)
+                result = operations.apply_assign(changes, confirmed=True, home=self.home)
+                visible = visibility(self.home)
+                self.assertEqual({a for a in visible if 'other' in visible[a]['available']}, selected)
+                row = next(s for s in operations.table(self.home)['skills'] if s['name'] == 'other')
+                self.assertEqual(set(row['assigned_agents']), selected)
+                if selected == {'codex', 'dsh'}:
+                    self.assertEqual(operations.load(self.home)[1]['skills']['other']['entries'],
+                                     ['.codex/skills/other', '.dsh/skills/other'])
+                if selected == {'dsh'}:
+                    self.assertEqual(operations.load(self.home)[1]['skills']['other']['entries'], ['.dsh/skills/other'])
+                    self.assertEqual((self.home / '.codex/config.toml').read_bytes(), config)
+                if 'id' in result:
+                    operations.undo(result['id'], home=self.home)
+                self.assertEqual(self.fingerprint() | {'.cursor/skills': store.physical_state(self.home / '.cursor/skills')}, before)
+
+    def test_dependency_uses_private_roots_without_enabling_other_readers(self):
+        (self.home / 'Applications/Cursor.app').mkdir(parents=True)
+        plan = agents.preview_join(['cursor'], self.home)
+        agents.join(['cursor'], plan['plan_id'], home=self.home)
+        operations.decide_dependencies([{'skill': 'grill-me', 'requires': 'grilling', 'confirmed': True}], home=self.home)
+        before = self.fingerprint()
+        added = self.assign('grill-me', 'dsh')
+        self.assertEqual(visibility(self.home)['dsh']['available'], ['grill-me', 'grilling'])
+        self.assertEqual(visibility(self.home)['cursor']['available'], [])
+        operations.undo(added['id'], home=self.home)
+        self.assertEqual(self.fingerprint(), before)
 
     def test_ignore_and_undo(self):
         self.incoming()
