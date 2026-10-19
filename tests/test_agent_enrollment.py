@@ -191,7 +191,7 @@ const plan = {agents: ['manual', 'alpha'], profiles: [
   {id:'manual', name:'手动工具', skill_roots:['.joint/skills']},
   {id:'alpha', name:'关联工具', skill_roots:['.joint/skills']}
 ], skills:[], plan_id:'plan', revision:'revision'};
-const context = vm.createContext({$, document:{querySelectorAll: () => []},
+const context = vm.createContext({$, writeBusy:null, document:{querySelectorAll: () => []},
   api: async (path, body) => { sent.push({path, body}); return JSON.parse(JSON.stringify(plan)); },
   runWrite: async options => options.work(), refreshEverything: async () => {},
   JOIN_ACTIONS: [], joinRows: () => [], joinChoiceRow: () => '', rootsLabel: roots => roots.join('、')});
@@ -215,18 +215,108 @@ vm.runInContext('let joinPlan = null;\n' +
         script = r"""
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
 const source = fs.readFileSync('skill_pilot/web/static/app.js', 'utf8');
-const start = source.indexOf("for (const id of ['agents-suggested', 'agents-ignored'])");
+const start = source.indexOf("for (const id of ['rail-notes', 'agents-suggested', 'agents-ignored'])");
 const listeners = {}, submitted = [];
 vm.runInNewContext(source.slice(start, source.indexOf('const JOIN_ACTIONS', start)), {
   $: id => ({addEventListener: (type, callback) => { listeners[id] = callback; }}),
-  showJoinPreview: ids => submitted.push(Array.from(ids)),
+  joinAgent: (id, button) => { assert.strictEqual(button.dataset.agentJoin, id); submitted.push(id); },
 });
-for (const [index, id] of ['cursor', 'arbitrary-tool'].entries()) {
-  listeners[index ? 'agents-ignored' : 'agents-suggested']({target: {
+for (const [index, id] of ['cursor', 'arbitrary-tool', 'ignored-tool'].entries()) {
+  listeners[['rail-notes', 'agents-suggested', 'agents-ignored'][index]]({target: {
     closest: selector => selector === '[data-agent-join]' ? {dataset: {agentJoin: id}} : null
   }});
 }
-assert.deepStrictEqual(submitted, [['cursor'], ['arbitrary-tool']]);
+assert.deepStrictEqual(submitted, ['cursor', 'arbitrary-tool', 'ignored-tool']);
+"""
+        result = subprocess.run(['node', '-e', script], cwd=store.PROJECT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_one_click_join_progress_defaults_failure_retry_and_undo(self):
+        script = r"""
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync('skill_pilot/web/static/app.js', 'utf8');
+const flow = source.slice(source.indexOf('async function joinAgent('), source.indexOf('async function showJoinPreview('));
+const button = source.slice(source.indexOf('function agentJoinButton('), source.indexOf('function renderRailNotes('));
+const names = source.slice(source.indexOf('function nameOf('), source.indexOf('function homePath('));
+const sent = [], stages = [], errors = [], notices = [];
+let modal = 0, renderedPlan = null, refreshes = 0, release;
+const agent = {id:'new', name:'新工具<&'};
+let plan = {skills:[{action:'choose', options:[{id:'store'}, {id:'incoming'}]}], plan_id:'p', revision:'r'};
+let fail = '', paused = false;
+const context = vm.createContext({
+  state:{table:{write_allowed:true}, agents:[]}, writeBusy:null, joiningAgent:null, joinPlan:null,
+  escape: value => String(value).replace(/</g, '&lt;').replace(/&(?!(lt;))/g, '&amp;'),
+  $: () => ({showModal: () => modal++}),
+  api: async (path, body) => {
+    sent.push({path, body});
+    if (paused) { paused = false; await new Promise(resolve => { release = resolve; }); }
+    if (fail === path) { fail = ''; throw new Error('读取失败'); }
+    return path.endsWith('preview') ? plan : {id:'operation', message:'接入完成'};
+  },
+  renderRailNotes: () => stages.push(vm.runInContext('agentJoinButton', context)(agent)),
+  renderAgents() {}, setTask() {},
+  refreshEverything: async () => refreshes++, refreshAgents: async () => refreshes++,
+  renderJoin: value => { renderedPlan = value; },
+  undoOperation: (...args) => args,
+  runWrite: async options => {
+    assert.ok(options.taskText.includes(agent.name));
+    context.writeBusy = options.busyText;
+    try {
+      const result = await options.work();
+      const notice = options.success(result);
+      if (notice) notices.push(notice);
+      return result;
+    } catch (error) { errors.push(error.message); return null; }
+    finally { context.writeBusy = null; }
+  },
+});
+vm.runInContext(names + '\n' + button + '\n' + flow, context);
+vm.runInContext('indexCatalog(' + JSON.stringify({ignored:[agent]}) + ')', context);
+const join = () => vm.runInContext("joinAgent('new', {})", context);
+(async () => {
+  paused = true;
+  const first = join();
+  await join(); // 重复点击不能发第二次请求。
+  assert.strictEqual(sent.length, 1);
+  assert.match(stages[0], /正在读取/);
+  assert.match(stages[0], /aria-busy="true".* disabled/s);
+  release();
+  await first;
+  assert.strictEqual(sent.length, 2);
+  assert.strictEqual(sent[1].path, '/api/agents/join/apply');
+  assert.strictEqual(JSON.stringify(sent[1].body), JSON.stringify({agents:['new'], plan_id:'p', revision:'r', confirmed:true}));
+  assert.strictEqual(modal, 0);
+  assert.ok(stages.some(html => html.includes('正在接入')));
+  assert.strictEqual(refreshes, 2);
+  assert.strictEqual(notices[0].undo('button')[0], 'operation');
+  assert.match(vm.runInContext('agentJoinButton', context)(agent), /新工具&lt;&amp;/);
+  assert.doesNotMatch(vm.runInContext('agentJoinButton', context)(agent), / disabled/);
+
+  for (const path of ['/api/agents/join/preview', '/api/agents/join/apply']) {
+    const before = sent.length;
+    fail = path;
+    await join();
+    assert.strictEqual(context.joiningAgent, null);
+    assert.strictEqual(sent.length - before, path.endsWith('preview') ? 1 : 2);
+    assert.strictEqual(notices.length, path.endsWith('preview') ? 1 : 2);
+    await join();
+  }
+  assert.strictEqual(errors.length, 2);
+  assert.strictEqual(notices.length, 3);
+  context.state.table.write_allowed = false;
+  const before = sent.length;
+  await join();
+  assert.strictEqual(sent.length, before);
+  assert.match(vm.runInContext('agentJoinButton', context)(agent), / disabled/);
+  context.state.table.write_allowed = true;
+
+  plan = {...plan, skills:[{action:'choose', options:[{id:'first'}, {id:'second'}]}]};
+  await join();
+  assert.strictEqual(sent.length, before + 1);
+  assert.strictEqual(modal, 1);
+  assert.strictEqual(JSON.stringify(renderedPlan.requests), '["new"]');
+  assert.strictEqual(notices.length, 3);
+})().catch(error => { console.error(error); process.exitCode = 1; });
 """
         result = subprocess.run(['node', '-e', script], cwd=store.PROJECT, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

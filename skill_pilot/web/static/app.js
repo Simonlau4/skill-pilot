@@ -298,7 +298,7 @@ const WRITE_LOCK_SELECTORS = [
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
   '#log-list button', '#log-refresh', '#log-export', '#detail-body button:not(.hint)', '#detail-body select',
   '#new-absorb', '#new-toggle', '#install-dialog button:not(.hint)',
-  '#agents-scan', '#agents-managed button:not(.hint)', '#agents-suggested button:not(.hint)', '#agents-ignored button:not(.hint)', '#agents-join-dialog input', '#agents-join-dialog button:not(.hint)',
+  '#agents-scan', '#agent-add-submit', '#agents-managed button:not(.hint)', '#agents-suggested button:not(.hint)', '#agents-ignored button:not(.hint)', '#agents-join-dialog input', '#agents-join-dialog button:not(.hint)',
   '#migration-preview', '#migration-apply', '#migration-back', '#migration-agents input',
   '#migration-versions input', '#migration-backups', '#migration-restore', '#migration-backup-list button',
 ];
@@ -327,7 +327,8 @@ function renderBusyAreas() {
   renderLog();
   renderInstallRail();
   if (state.detail) renderDetail();
-  $('agents-scan').disabled = Boolean(writeBusy || state.agentsView?.discovery?.running);
+  renderRailNotes();
+  renderAgents();
 }
 
 async function runWrite({button = null, busyText, taskText = busyText, success = null, onError = null, work}) {
@@ -504,7 +505,7 @@ function nameOf(id) {
 function indexCatalog(view) {
   state.agentsView = view;
   const catalog = new Map();
-  for (const item of [...(view?.managed || []), ...(view?.suggested || [])]) {
+  for (const item of [...(view?.managed || []), ...(view?.suggested || []), ...(view?.ignored || [])]) {
     if (item?.id) catalog.set(item.id, item);
   }
   state.catalog = catalog;
@@ -835,8 +836,15 @@ function railUpdateNote() {
   return '';
 }
 
-/* 左栏下面的提醒：SP 有新版在最上面，然后是发现新 agent。只给去处，不在这里直接改技能。 */
+/* 左栏下面的提醒：SP 有新版在最上面，然后是可以直接接入的新 agent。 */
 let railNotesHtml = null;
+
+function agentJoinButton(agent) {
+  const busy = Boolean(writeBusy) && joiningAgent?.id === agent.id;
+  const label = busy ? joiningAgent.text : '接入';
+  return `<button class="btn btn-small btn-primary" data-agent-join="${escape(agent.id)}"
+    aria-label="${escape(label + ' ' + agent.name)}" aria-busy="${busy}"${writeBusy || !state.table?.write_allowed ? ' disabled' : ''}>${label}</button>`;
+}
 
 function renderRailNotes() {
   const ignored = new Set((state.agentsView?.ignored || []).map(item => (item && typeof item === 'object') ? item.id : item));
@@ -844,8 +852,8 @@ function renderRailNotes() {
   const notes = [railUpdateNote(), ...suggested.map(item => `<div class="rail-note">
       <p class="rail-note-title">${icon('plus')}<strong>发现新 agent：${escape(item.name)}</strong></p>
       <div class="rail-note-row">
-        ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后，就能在这里和其他 agent 一起管它的技能。')}
-        <button class="btn btn-small" data-goto="settings/agents">去接入…</button>
+        ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后一起管理技能；同名内容沿用统一仓库里的版本，完成后可以撤销。')}
+        ${agentJoinButton(item)}
       </div>
     </div>`)];
   const html = notes.filter(Boolean).join('');
@@ -2009,6 +2017,7 @@ function ignoredAgents(view) {
 function renderAgents() {
   const view = state.agentsView;
   const discovery = view?.discovery || {};
+  const locked = writeBusy || !state.table?.write_allowed ? ' disabled' : '';
   $('agents-scan').disabled = Boolean(discovery.running || writeBusy);
   $('agents-scan').setAttribute('aria-busy', String(Boolean(discovery.running)));
   $('agents-scan').querySelector('span').textContent = discovery.running ? '正在扫描…' : '重新扫描 agent';
@@ -2026,7 +2035,7 @@ function renderAgents() {
       shareHtml(shared, `${nameOf(agent.id)} 与${shared.join('、')} 存在共用的技能文件夹。`),
     ].filter(Boolean).join(' · ');
     const leave = agent.can_leave
-      ? `<button class="btn btn-small btn-quiet" data-agent-leave="${escape(agent.id)}">不再管理…</button>`
+      ? `<button class="btn btn-small btn-quiet" data-agent-leave="${escape(agent.id)}"${locked}>不再管理…</button>`
       : `<span class="item-note agent-share">${icon('lock')}至少留一个</span>`;
     return `<div class="item-row">
       <div>
@@ -2050,13 +2059,11 @@ function renderAgents() {
       <span class="item-end">${action}</span>
     </div>`;
   };
-  const joinButton = agent => `<button class="btn btn-small btn-primary" data-agent-join="${escape(agent.id)}">接入</button>`;
-
   $('agents-suggested-box').hidden = !suggested.length;
   $('agents-suggested').innerHTML = suggested.map(agent => row(agent,
-    `${joinButton(agent)}<button class="btn btn-small" data-agent-ignore="${escape(agent.id)}">忽略</button>`)).join('');
+    `${agentJoinButton(agent)}<button class="btn btn-small" data-agent-ignore="${escape(agent.id)}"${locked}>忽略</button>`)).join('');
   $('agents-ignored-box').hidden = !ignored.length;
-  $('agents-ignored').innerHTML = ignored.map(agent => row({...agent, ignored: true}, joinButton(agent))).join('');
+  $('agents-ignored').innerHTML = ignored.map(agent => row({...agent, ignored: true}, agentJoinButton(agent))).join('');
 }
 
 $('agents-scan').addEventListener('click', async () => {
@@ -2128,8 +2135,49 @@ async function ignoreAgent(id) {
 }
 
 let joinPlan = null;
+let joiningAgent = null;
+
+/* 已发现的 agent 一次点击完成读取和接入；只有新技能存在多份不同内容时才需要选版本。 */
+async function joinAgent(id, button) {
+  if (writeBusy || !state.table?.write_allowed) return;
+  joiningAgent = {id, text: '正在读取…'};
+  let choicePlan = null;
+  await runWrite({
+    button, busyText: '正在读取…', taskText: `正在读取 ${nameOf(id)} 的技能…`,
+    work: async () => {
+      renderRailNotes();
+      renderAgents();
+      const plan = await api('/api/agents/join/preview', {agents: [id]});
+      if (plan.skills.some(skill => skill.action === 'choose' && !skill.options.some(option => option.id === 'store'))) {
+        choicePlan = {...plan, requests: [id]};
+        return null;
+      }
+      joiningAgent.text = '正在接入…';
+      setTask('write', {text: `正在接入 ${nameOf(id)}…`});
+      renderRailNotes();
+      renderAgents();
+      const result = await api('/api/agents/join/apply', {
+        agents: [id], plan_id: plan.plan_id, revision: plan.revision, confirmed: true,
+      });
+      await refreshEverything();
+      await refreshAgents();
+      return result;
+    },
+    success: result => result && ({
+      text: result.message || '新 agent 已经接入',
+      undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
+    }),
+  });
+  joiningAgent = null;
+  if (choicePlan) {
+    joinPlan = choicePlan;
+    renderJoin(joinPlan);
+    $('agents-join-dialog').showModal();
+  }
+}
 
 async function showJoinPreview(agents) {
+  if (writeBusy) return;
   try {
     joinPlan = await api('/api/agents/join/preview', {agents});
     joinPlan.requests = agents;
@@ -2156,12 +2204,12 @@ $('agents-managed').addEventListener('click', event => {
   if (button) leaveAgent(button.dataset.agentLeave);
 });
 
-/* 两栏都只提交用户点选的 agent；后台计算需要新增的完整名单，核对后再接入。 */
-for (const id of ['agents-suggested', 'agents-ignored']) {
+/* 只提交用户点选的 agent；后台计算共用目录需要一起接入的完整名单。 */
+for (const id of ['rail-notes', 'agents-suggested', 'agents-ignored']) {
   $(id).addEventListener('click', event => {
     const join = event.target.closest('[data-agent-join]');
     const ignore = event.target.closest('[data-agent-ignore]');
-    if (join) showJoinPreview([join.dataset.agentJoin]);
+    if (join) joinAgent(join.dataset.agentJoin, join);
     else if (ignore) ignoreAgent(ignore.dataset.agentIgnore);
   });
 }
