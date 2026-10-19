@@ -44,7 +44,7 @@ def git(project, *arguments, **options):
             step = {'ls-remote': '检查新版', 'fetch': '下载或准备新版', 'merge': '安装新版',
                     'reset': '恢复原版', 'checkout': '展开新版文件'}.get(command, '读取程序文件')
             if denied:
-                reason = '文件夹权限不足，请检查程序文件夹的读写权限'
+                reason = '访问权限不足，当前用户无法完成这一步'
             elif isinstance(cause, FileNotFoundError):
                 reason = '找不到更新所需的工具，请按安装说明补齐'
             elif isinstance(cause, subprocess.TimeoutExpired):
