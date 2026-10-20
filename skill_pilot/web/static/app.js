@@ -2212,31 +2212,48 @@ function renderTeamSettings() {
   const team = state.team;
   if (!team) return;
   if (!teamUrlEdited) $('team-url').value = team.url || '';
+  const connected = Boolean(team.member);
+  $('team-name-label').hidden = connected;
+  $('team-name').hidden = connected;
   $('team-key').placeholder = team.has_key ? '已保存；不改就留空' : '粘贴管理员给你的口令';
   $('team-message').textContent = [team.error || (team.member ? `已连接，你是 ${team.member.name}。` : ''),
     teamSettingsWritable() ? '' : '只读模式下不能修改。'].filter(Boolean).join(' ');
   $('team-goto').hidden = !team.configured;
   const locked = !teamSettingsWritable() || Boolean(writeBusy);
-  for (const element of $('team-form').querySelectorAll('input, #team-save')) element.disabled = locked;
+  for (const element of $('team-form').querySelectorAll('input, #team-save, #team-key-toggle')) element.disabled = locked;
+}
+
+function setTeamKeyOpen(open) {
+  $('team-key-box').hidden = !open;
+  $('team-key-toggle').setAttribute('aria-expanded', String(open));
 }
 
 $('team-url').addEventListener('input', () => { teamUrlEdited = true; });
+$('team-key-toggle').addEventListener('click', () => setTeamKeyOpen($('team-key-box').hidden));
 $('team-goto').addEventListener('click', () => showPage('team'));
 $('team-setup').addEventListener('click', () => gotoPlace('settings/team'));
 
 $('team-form').addEventListener('submit', event => {
   event.preventDefault();
+  let failed = false;
   withBusy($('team-save'), '正在连接…', async () => {
     try {
-      const result = await api('/api/team/settings', {url: $('team-url').value.trim(), key: $('team-key').value.trim()});
+      const result = await api('/api/team/settings', {
+        url: $('team-url').value.trim(),
+        name: $('team-name').value.trim(),
+        key: $('team-key').value.trim(),
+      });
       teamUrlEdited = false;
+      $('team-name').value = '';
       $('team-key').value = '';
+      setTeamKeyOpen(false);
       state.team = result;
       state.teamShares = state.teamDetail = null;
       state.teamSelected = new Set();
       document.querySelector('.nav-item[data-page="team"]').hidden = false;
       toast({text: `已连上分享站，你是 ${result.member.name}。`});
     } catch (error) {
+      failed = true;
       $('team-message').textContent = error.message;
       toast({text: error.message, tone: 'error'});
     }
@@ -2244,7 +2261,7 @@ $('team-form').addEventListener('submit', event => {
     // withBusy 会放开按钮，这里按最新状态重画（只读、写入中会重新禁用），并保留刚才的报错。
     const message = $('team-message').textContent;
     renderTeamSettings();
-    if (!state.team?.member) $('team-message').textContent = message;
+    if (failed) $('team-message').textContent = message;
   });
 });
 

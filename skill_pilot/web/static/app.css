@@ -399,6 +399,9 @@ textarea.input { padding: var(--sp-2) var(--sp-3); }
 .settings-form { display: grid; gap: var(--sp-2); max-width: 560px; }
 .settings-form .input { width: 100%; min-width: 0; }
 .settings-form label { margin-top: var(--sp-2); }
+/* 团队分享的口令默认收起来：展开后和上面几行一样上下排。 */
+#team-key-box { display: grid; gap: var(--sp-2); }
+#team-key-box label { margin-top: 0; }
 
 .check {
   display: inline-flex;
