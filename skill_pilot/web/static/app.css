@@ -1508,7 +1508,7 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  min-height: 196px;
+  min-height: 176px;
   padding: var(--sp-4) var(--sp-5);
   font: inherit;
   color: var(--ink);
@@ -1550,7 +1550,7 @@ pre {
 .store-card-quote .by { color: var(--muted); }
 .store-card .store-card-foot { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-tiny); color: var(--muted); }
 .store-card-foot > span + span::before { content: "·"; margin-right: var(--sp-2); color: var(--line-strong); }
-.store-card.is-skeleton { min-height: 196px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); cursor: default; animation: skeleton 1.4s var(--ease) infinite alternate; }
+.store-card.is-skeleton { min-height: 176px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); cursor: default; animation: skeleton 1.4s var(--ease) infinite alternate; }
 @keyframes skeleton { from { opacity: 0.55; } to { opacity: 1; } }
 
 .store-empty { padding: var(--sp-8) var(--sp-4); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
@@ -1599,7 +1599,7 @@ pre {
 }
 .store-row:last-child { border-bottom: 0; }
 .store-row:hover { background: var(--panel-soft); }
-.store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) 112px 150px auto; }
+.store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) 112px 150px 196px; }
 .store-row-main {
   display: grid;
   gap: 1px;
@@ -1691,7 +1691,8 @@ pre {
 /* 上架窗口：挑技能（勾上后多出推荐语输入）→ 核对要传的文件。 */
 #store-publish-dialog .dialog-form { display: flex; flex-direction: column; max-height: calc(100vh - 48px); }
 #store-publish-dialog .dialog-form > * { flex-shrink: 0; }
-#store-pick { display: flex; flex-direction: column; min-height: 0; flex-shrink: 1; margin-top: var(--sp-3); }
+#store-publish-dialog .dialog-form > :is(#store-pick, #store-review) { min-height: 0; flex-shrink: 1; }
+#store-pick { display: flex; flex-direction: column; margin-top: var(--sp-3); }
 #store-pick .search-field { flex: none; }
 .store-pick-list { min-height: 0; max-height: none; flex-shrink: 1; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .store-pick-loading { margin: var(--sp-3) var(--sp-4); }
@@ -1705,7 +1706,6 @@ pre {
 .store-pick-tags { display: inline-flex; align-items: center; gap: var(--sp-1); flex: none; }
 .store-pick-row > .row-note { margin: 0 0 2px 40px; }
 .store-pick-note { display: block; width: calc(100% - 40px); margin: var(--sp-1) 0 var(--sp-1) 40px; min-height: 34px; }
-.store-review { min-height: 0; flex-shrink: 1; }
 .store-review .banner { margin-bottom: var(--sp-3); }
 .store-review-list li { padding: var(--sp-3) 0; border-bottom: 1px solid var(--line); }
 .store-review-list li:last-child { border-bottom: 0; }
@@ -1723,7 +1723,8 @@ pre {
   .shelf-cards > :nth-child(4) { display: none; }
 }
 @media (max-width: 1023px) {
-  .store-row, .store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) 112px auto; }
+  .store-row { grid-template-columns: minmax(0, 1fr) 112px 116px; }
+  .store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) 112px 196px; }
   .store-row-by { display: none; }
 }
 @media (max-width: 720px) {

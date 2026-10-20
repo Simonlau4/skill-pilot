@@ -2376,7 +2376,7 @@ function storeRowHtml(card) {
       <span class="store-row-sub">${escape(card.summary || card.listings.find(item => item.note)?.note || '')}</span>
     </button>
     <span class="store-row-rating">${storeRatingHtml(card.rating)}</span>
-    <span class="store-row-by">${escape(storeRecommenders(card))}</span>
+    <span class="store-row-by">${escape(mine ? `${friendlyDate(storeMyListing(card)?.updated_at)}上架` : storeRecommenders(card))}</span>
     <span class="store-row-end">${end}</span>
   </div>`;
 }
@@ -2557,13 +2557,16 @@ async function unlistStore(name, button) {
 /* ---------- 详情：沿用技能页右侧的详情面板 ---------- */
 
 let storeOpener = null;
+let storeOpenerArea = null;   // store-shelves 或 store-list：卡片重画后按编号在同一处找回
 let storeGet = null;   // 详情里的「装上」：{key, agents, plan, reading, error}
 
 const storeCard = key => state.store?.cards.find(card => card.key === key) || null;
+const storeMyListing = card => card.listings.find(item => item.member.id === state.store?.member?.id) || card.listings[0];
 
 function openStoreDetail(key, opener = null) {
   if (state.storeDetail !== key || !storeGet) storeGet = {key, agents: new Set(state.agents.map(agent => agent.id)), plan: null, reading: false, error: ''};
   storeOpener = opener;
+  storeOpenerArea = opener?.closest('#store-shelves, #store-list')?.id || null;
   state.storeDetail = key;
   renderStoreDetail(true);
   showDetailPanel(() => state.storeDetail === key);
@@ -2595,10 +2598,18 @@ function renderStoreDetail(fresh = false) {
     ${storeReviewsHtml(card)}
     ${card.description ? `<h3 class="sub-title">说明</h3><p class="detail-desc">${escape(card.description)}</p>` : ''}
     ${card.requires?.length ? `<h3 class="sub-title">所需技能${hint('装上它时，这些技能会一起带上；本机已有同名的就直接用本机的。')}</h3>
-      <p class="store-requires">${card.requires.map(escape).join('、')}</p>` : ''}
+      <p class="store-requires">${card.requires.map(name => escape(storeRequireTitle(card, name))).join('、')}</p>` : ''}
     <h3 class="sub-title">来源</h3>
     <p class="store-source">${escape(storeSourceText(card))}</p>`;
   body.scrollTop = scroll;
+}
+
+/* 所需技能优先用同一作者上架的那张卡片的中文名，没有就写原名。 */
+function storeRequireTitle(card, name) {
+  const authors = new Set(card.listings.map(item => item.member.id));
+  const cards = state.store?.cards.filter(item => item.name === name) || [];
+  const found = cards.find(item => item.listings.some(listing => authors.has(listing.member.id))) || cards[0];
+  return found?.title || name;
 }
 
 function storeSourceText(card) {
@@ -2611,7 +2622,7 @@ function storeSourceText(card) {
 /* 详情里最重要的一块：能不能装、装给谁。 */
 function storeGetHtml(card) {
   const local = card.local || {};
-  const users = (local.agents || []).map(agentName).join('、');
+  const users = (local.agents || []).map(nameOf).join('、');
   const box = (tone, text, action = '') => `<section class="store-get store-get-${tone}">
     <p class="store-get-line">${text}</p>${action ? `<div class="store-get-actions">${action}</div>` : ''}</section>`;
   const locked = teamCanWrite() ? '' : ' disabled';
@@ -2783,15 +2794,24 @@ async function applyStoreInstall(button) {
       await loadStore();
       return result;
     },
-    success: result => ({
+    success: result => {
+      focusStorePanel('.store-get button, .store-get a');
+      return {
       text: result.message || `装上了「${storeTitle(card)}」`,
       undo: result.id ? undoButton => undoStoreInstall(result, undoButton) : null,
-    }),
+      };
+    },
   });
 }
 
+/* 详情重画会换掉刚按过的按钮：焦点放到面板里的下一个合适位置，找不到就放在「关闭」上。 */
+function focusStorePanel(selector) {
+  if (!state.storeDetail || $('detail-body').contains(document.activeElement)) return;
+  ($('detail-body').querySelector(selector) || $('detail-close')).focus();
+}
+
 async function undoStoreInstall(result, button) {
-  const done = await undoOperation(result.id, {skills: result.install || [], message: result.message, button});
+  const done = await undoOperation(result.id, {skills: result.installed || [], message: result.message, button});
   if (done) await loadStore();
   return done;
 }
@@ -2814,6 +2834,7 @@ async function rateStore(form, remove) {
         remove ? {key: card.key} : {key: card.key, stars, ...(text ? {text} : {})});
       toast({text: remove ? '已删除你的评价。' : '已保存你的评价，同事都能看到。'});
       await loadStore();
+      focusStorePanel('[data-store-rate] [type="submit"]');
     } catch (error) {
       if (form.isConnected) message.textContent = error.message;
       else toast({text: error.message, tone: 'error'});
@@ -2913,11 +2934,11 @@ function storeReviewHtml(plan) {
       <ul class="confirm-items">${plan.errors.map(item => `<li>${escape(item.name)}：${escape(item.reason)}</li>`).join('')}</ul>
     </div>` : '';
   const rows = (plan.listings || []).map(item => {
-    const what = item.files ? `连文件一起传：${number(item.files.count)} 个文件，${sizeText(item.files.size)}`
+    const what = item.kind === 'files' ? `连文件一起传：${number(item.files?.count || 0)} 个文件，${sizeText(item.files?.size || 0)}`
       : item.kind === 'lark' ? '飞书官方技能，只传名字和说明' : '网上的公开技能，只传名字和来源';
     const blocked = item.files?.blocked || [];
     return `<li class="store-review-row">
-      <p class="store-review-name"><strong>${escape(item.title || item.name)}</strong>${item.title ? ` <span class="skill-id">${escape(item.name)}</span>` : ''}</p>
+      <p class="store-review-name"><strong>${escape(item.title || item.name)}</strong>${item.title && item.title !== item.name ? ` <span class="skill-id">${escape(item.name)}</span>` : ''}</p>
       <p class="row-note">${escape(what)}</p>
       <p class="store-review-note">${item.note ? `“${escape(item.note)}”` : `<span class="muted">没写推荐语，同事看到的是技能自带的一句话。</span>`}</p>
       ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.join('、'))} 需要它，一起上架</p>` : ''}
@@ -3698,8 +3719,9 @@ function closeDetail() {
   holdDetailBackground(false);
   if (storeKey) {
     // 商店的卡片或列表行可能已经重画过：按卡片编号找回来，把焦点还给它。
+    const selector = `[data-store-open="${CSS.escape(storeKey)}"]`;
     const opener = storeOpener?.isConnected ? storeOpener
-      : $('page-team').querySelector(`[data-store-open="${CSS.escape(storeKey)}"]`);
+      : (storeOpenerArea && $(storeOpenerArea)?.querySelector(selector)) || $('page-team').querySelector(selector);
     opener?.focus();
     storeOpener = null;
     return;
