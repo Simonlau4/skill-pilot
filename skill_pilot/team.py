@@ -10,17 +10,23 @@ from pathlib import Path
 
 from . import labels, sharing
 from .store import guard
-from .team_hub import clean_config
+from .team_hub import clean_config, member_name
 
 MAX_BODY = 1024 * 1024
 TIMEOUT = 10
 FORMAT_ERROR = '分享站的名单格式不对，请联系分享者重新上传。'
 
 
+class RequestError(ValueError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
 def _settings(value):
     url, key = value.get('url'), value.get('key')
     if not isinstance(url, str) or not isinstance(key, str):
-        raise ValueError('请填写分享站地址和自己的口令。')
+        raise ValueError('请填写分享站地址。')
     url, key = url.strip().rstrip('/'), key.strip()
     try:
         address = urllib.parse.urlsplit(url)
@@ -33,7 +39,7 @@ def _settings(value):
         valid = False
     if not valid:
         raise ValueError('分享站地址只支持 http 或 https，不能带账号、密码或查询参数。')
-    if not re.fullmatch(r'[A-Za-z0-9_-]+', key):
+    if key and not re.fullmatch(r'[A-Za-z0-9_-]+', key):
         raise ValueError('请粘贴管理员给你的完整口令。')
     return {'url': url, 'key': key}
 
@@ -43,18 +49,25 @@ def settings(home):
     if not path.exists():
         return {}
     try:
-        return _settings(json.loads(path.read_text(encoding='utf-8')))
+        config = _settings(json.loads(path.read_text(encoding='utf-8')))
+        if not config['key']:
+            raise ValueError
+        return config
     except (OSError, ValueError, AttributeError):
-        raise ValueError('分享站设置没能读懂，请重新填写地址和口令。') from None
+        raise ValueError('分享站设置没能读懂，请在设置里重新连接。') from None
 
 
 def _request(config, path, method='GET', data=None):
     body = json.dumps(data, ensure_ascii=False).encode('utf-8') if data is not None else None
     if body is not None and len(body) > MAX_BODY:
         raise ValueError('名单超过 1 MB，请减少分享的技能后重试。')
+    key = config.get('key', '')
+    headers = {'Content-Type': 'application/json'}
+    if key:
+        headers['Authorization'] = 'Bearer ' + key
     try:
         request = urllib.request.Request(config['url'] + path, data=body, method=method,
-            headers={'Authorization': 'Bearer ' + config['key'], 'Content-Type': 'application/json'})
+                                         headers=headers)
         with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=TIMEOUT) as response:
             raw = response.read(MAX_BODY + 1)
         if len(raw) > MAX_BODY:
@@ -63,7 +76,7 @@ def _request(config, path, method='GET', data=None):
             raise ValueError
         def redact(value):
             if isinstance(value, str):
-                return value.replace(config['key'], '[已隐藏]')
+                return value.replace(key, '[已隐藏]')
             if isinstance(value, list):
                 return [redact(item) for item in value]
             if isinstance(value, dict):
@@ -74,19 +87,22 @@ def _request(config, path, method='GET', data=None):
             if not isinstance(result, dict):
                 raise ValueError
             # Even a misconfigured service must not echo our credential to the page or history.
-            result = redact(result)
+            if key:
+                result = redact(result)
         except (ValueError, RecursionError):
             raise ValueError(FORMAT_ERROR) from None
         return result
     except urllib.error.HTTPError as error:
         status = error.code
         error.close()
-        message = ('口令不对或已经失效，请向管理员核对。' if status in {401, 403} else
+        message = ('这个分享站需要管理员发的口令，请点「管理员给了口令？」填上。'
+                   if path == '/api/join' and status == 403 else
+                   '分享站没认出你（口令不对、已失效或已被移出），请到设置里重新连接。' if status in {401, 403} else
                    '分享站地址发生了跳转，请填写最终地址后重试。' if 300 <= status < 400 else
                    '这位成员还没有分享，或已经撤回。' if status == 404 else
                    '名单超过 1 MB，请减少分享的技能后重试。' if status == 413 else
                    '连不上分享站，请检查地址，或请管理员确认分享站已开启。')
-        raise ValueError(message) from None
+        raise RequestError(status, message) from None
     except UnicodeError:
         raise ValueError(FORMAT_ERROR) from None
     except (OSError, HTTPException):
@@ -155,11 +171,33 @@ def status(home, config=None, strict=True):
 
 def save_settings(home, body):
     guard(Path(home) / '.skill-pilot', home)
-    value = {'url': body.get('url'), 'key': body.get('key', '')}
-    if value['key'] == '':
-        value['key'] = settings(home).get('key', '')
-    config = _settings(value)
-    result = status(home, config)
+    config = _settings({'url': body.get('url'), 'key': body.get('key', '')})
+    supplied_key = bool(config['key'])
+    if not supplied_key:
+        try:
+            config['key'] = settings(home).get('key', '')
+        except ValueError:
+            config['key'] = ''
+    result = None
+    if config['key']:
+        try:
+            result = status(home, config)
+        except RequestError as error:
+            if supplied_key or error.status not in {401, 403} or not body.get('name'):
+                raise
+    if result is None:
+        name = body.get('name', '')
+        if isinstance(name, str) and not name.strip():
+            raise ValueError('请填写你的名字，同事会看到它。')
+        name = member_name(name)
+        joined = _request({'url': config['url']}, '/api/join', 'POST', {'name': name})
+        if (joined.get('service') != 'skill-pilot-team' or type(joined.get('api')) is not int or
+                joined['api'] != 1 or not isinstance(joined.get('token'), str) or
+                not re.fullmatch(r'[A-Za-z0-9_-]+', joined['token'])):
+            raise ValueError(FORMAT_ERROR)
+        _member(joined.get('member'))
+        config['key'] = joined['token']
+        result = status(home, config)
     # Failed connections leave the previous working settings intact.
     labels.atomic_write(home, 'team.json', json.dumps(config, ensure_ascii=False) + '\n', 0o600)
     return {**result, 'message': '分享站已连接，设置已保存。'}

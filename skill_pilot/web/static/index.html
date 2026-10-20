@@ -416,13 +416,18 @@
 
           <form id="team-form" class="settings-form">
             <label for="team-url">分享站地址</label>
-            <input id="team-url" type="url" class="input" placeholder="管理员给的地址，例如 http://192.168.1.20:8765" autocomplete="off" spellcheck="false" required>
-            <label for="team-key">我的口令</label>
-            <input id="team-key" type="password" class="input" autocomplete="off" aria-describedby="team-note">
+            <input id="team-url" type="url" class="input" placeholder="分享站地址，例如 http://192.168.1.20:8765" autocomplete="off" spellcheck="false" required>
+            <label for="team-name" id="team-name-label" hidden>你的名字</label>
+            <input id="team-name" type="text" class="input" placeholder="同事看到的称呼，第一次连接时填" maxlength="40" autocomplete="off" hidden>
+            <p class="row-wrap"><button id="team-key-toggle" type="button" class="link-btn" aria-expanded="false" aria-controls="team-key-box">管理员给了口令？</button></p>
+            <div id="team-key-box" hidden>
+              <label for="team-key">管理员给的口令</label>
+              <input id="team-key" type="password" class="input" autocomplete="off" aria-describedby="team-note">
+            </div>
             <p id="team-note" class="note-line">
               <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
-              <span>口令只存在这台电脑上；只有你点“分享”时才上传技能名单。</span>
-              <button type="button" class="hint" data-hint="分享站只收技能名单、中文名和说明，不收技能文件、AI 服务的 key 和本机目录。地址和口令向管理员要，口令每人一个。"></button>
+              <span>连接信息只存在这台电脑上；只有你点“分享”时才上传技能名单。</span>
+              <button type="button" class="hint" data-hint="分享站只收技能名单、中文名和说明，不收技能文件、AI 服务的 key 和本机目录。名字是同事看到的称呼；分享站要求口令时，向管理员要。"></button>
             </p>
             <p class="row-wrap"><button id="team-save" class="btn btn-primary">保存并连接</button>
               <button id="team-goto" type="button" class="link-btn" hidden>去团队页</button></p>

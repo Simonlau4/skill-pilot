@@ -183,6 +183,192 @@ class TeamTests(unittest.TestCase):
         self.assertIn('口令不对', result['error'])
         self.assertEqual(store.physical_state(self.home), before)
 
+    def test_open_station_connects_by_name_and_reuses_saved_identity(self):
+        self.hub.open = True
+        history = operations.history(self.home)
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            result = self.ok(self.a, '/api/team/settings', {'url': self.url, 'name': '  示例新成员  '})
+            self.assertEqual(result['member']['name'], '示例新成员')
+            path = self.home / '.skill-pilot/team.json'
+            original = path.read_bytes()
+            saved = json.loads(original)
+            self.assertEqual(set(saved), {'url', 'key'})
+            self.assertRegex(saved['key'], r'^[A-Za-z0-9_-]+$')
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(len(self.hub.store.members()), 3)
+            for body in ({'url': self.url}, {'url': self.url, 'name': '其他示例名字', 'key': ''},
+                         {'url': self.url, 'name': ['忽略已连接用户的名字']}):
+                self.assertEqual(self.ok(self.a, '/api/team/settings', body)['member'], result['member'])
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(len(self.hub.store.members()), 3)
+            public = self.ok(self.a, '/api/team')
+            self.assertEqual(set(public), {'url', 'has_key', 'configured', 'member', 'share'})
+            self.assertEqual(public['member'], result['member'])
+            self.assertNotIn(saved['key'], json.dumps([result, public]) + stderr.getvalue())
+        self.assertEqual(operations.history(self.home), history)
+        self.ok(self.b, '/api/team/settings', {'url': self.url, 'name': '另一示例成员', 'key': ''})
+        self.assertEqual(len(self.hub.store.members()), 4)
+
+    def test_damaged_settings_are_repaired_only_after_join_succeeds(self):
+        path = self.home / '.skill-pilot/team.json'
+        damaged = [b'{"url":', b'\xff', b'[]', json.dumps({'url': self.url}).encode(),
+                   json.dumps({'url': self.url, 'key': ''}).encode()]
+        for raw in damaged:
+            with self.subTest(raw=raw):
+                path.write_bytes(raw)
+                before = store.physical_state(self.home)
+                self.hub.open = False
+                status, result = self.request(self.a, '/api/team/settings', {
+                    'url': self.url, 'name': '示例新成员'})
+                self.assertEqual(status, 409)
+                self.assertEqual(result['error'], '这个分享站需要管理员发的口令，请点「管理员给了口令？」填上。')
+                self.assertEqual(store.physical_state(self.home), before)
+                self.hub.open = True
+                connected = self.ok(self.a, '/api/team/settings', {'url': self.url, 'name': '示例新成员'})
+                self.assertEqual(connected['member']['name'], '示例新成员')
+                saved = team.settings(self.home)
+                self.assertEqual(saved['url'], self.url)
+                self.assertRegex(saved['key'], r'^[A-Za-z0-9_-]+$')
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(self.ok(self.a, '/api/team')['member'], connected['member'])
+                self.assertNotIn(saved['key'], json.dumps(connected))
+
+    def test_closed_station_requires_admin_key_and_leaves_settings_unchanged(self):
+        before = [store.physical_state(home) for home in (self.home, self.hub.store.data)]
+        status, result = self.request(self.a, '/api/team/settings', {'url': self.url, 'name': '示例新成员'})
+        self.assertEqual(status, 409)
+        self.assertEqual(result['error'], '这个分享站需要管理员发的口令，请点「管理员给了口令？」填上。')
+        self.assertFalse((self.home / '.skill-pilot/team.json').exists())
+        self.assertEqual([store.physical_state(home) for home in (self.home, self.hub.store.data)], before)
+        connected = self.ok(self.a, '/api/team/settings', {'url': self.url, 'key': self.first['token'], 'name': []})
+        self.assertEqual(connected['member']['id'], self.first['id'])
+
+    def test_missing_or_invalid_join_name_never_contacts_station(self):
+        before = store.physical_state(self.home)
+        with socket.socket() as unused:
+            unused.bind(('127.0.0.1', 0))
+            url = 'http://127.0.0.1:' + str(unused.getsockname()[1])
+            with patch.object(team, '_request') as network:
+                for body in ({'url': url}, *({'url': url, 'name': name} for name in
+                             ('', '   ', '字' * 41, '示例\n成员', '示例\x00成员', '示例\x7f成员', None, [], 1))):
+                    with self.subTest(body=body):
+                        status, result = self.request(self.a, '/api/team/settings', body)
+                        self.assertEqual(status, 409)
+                        name = body.get('name', '')
+                        self.assertEqual(result['error'], '请填写你的名字，同事会看到它。' if
+                                         isinstance(name, str) and not name.strip()
+                                         else '请填写名字，不超过 40 个字，不能换行或含控制字符。')
+                network.assert_not_called()
+        self.assertEqual(store.physical_state(self.home), before)
+
+    def test_removed_member_can_rejoin_by_name(self):
+        self.hub.open = True
+        connected = self.ok(self.a, '/api/team/settings', {'url': self.url, 'name': '示例新成员'})
+        path = self.home / '.skill-pilot/team.json'
+        old_key = json.loads(path.read_bytes())['key']
+        original = path.read_bytes()
+        self.hub.store.remove_member(connected['member']['id'])
+        self.assertEqual(self.ok(self.a, '/api/team')['error'],
+                         '分享站没认出你（口令不对、已失效或已被移出），请到设置里重新连接。')
+        self.assertEqual(self.request(self.a, '/api/team/settings', {'url': self.url})[0], 409)
+        self.assertEqual(path.read_bytes(), original)
+        rejoined = self.ok(self.a, '/api/team/settings', {'url': self.url, 'name': '示例新成员'})
+        self.assertNotEqual(rejoined['member']['id'], connected['member']['id'])
+        self.assertNotEqual(json.loads(path.read_bytes())['key'], old_key)
+        self.assertEqual(len(self.hub.store.members()), 3)
+
+    def test_saved_key_is_tried_on_new_address_and_only_auth_rejection_allows_join(self):
+        self.configure()
+        self.hub.open = True
+        other = self.start(team_hub.HubServer(self.hub.store.data, '127.0.0.1', 0, open=True))
+        url = 'http://127.0.0.1:' + str(other.server_port)
+        result = self.ok(self.a, '/api/team/settings', {'url': url, 'name': '不会另建成员'})
+        self.assertEqual(result['member']['id'], self.first['id'])
+        self.assertEqual(len(self.hub.store.members()), 2)
+        before = store.physical_state(self.home)
+        with socket.socket() as unused:
+            unused.bind(('127.0.0.1', 0))
+            closed_url = 'http://127.0.0.1:' + str(unused.getsockname()[1])
+            with patch.object(team, '_request', wraps=team._request) as network:
+                status, result = self.request(self.a, '/api/team/settings', {'url': closed_url, 'name': '示例成员'})
+                self.assertEqual(status, 409)
+                self.assertIn('连不上分享站', result['error'])
+                self.assertEqual([call.args[1] for call in network.call_args_list], ['/api/me'])
+        with patch.object(team, '_request', wraps=team._request) as network:
+            self.assertEqual(self.request(self.a, '/api/team/settings', {
+                'url': self.url, 'key': 'wrong', 'name': '示例成员'})[0], 409)
+            self.assertEqual([call.args[1] for call in network.call_args_list], ['/api/me'])
+        self.assertEqual(store.physical_state(self.home), before)
+
+    def test_invalid_join_responses_never_save_credentials_or_send_authorization(self):
+        self.configure()
+        before = store.physical_state(self.home)
+        joined = {'service': 'skill-pilot-team', 'api': 1,
+                  'member': {'id': 'a' * 32, 'name': '示例成员'}, 'token': 'example-joined-token'}
+        invalid = [dict(joined, service='other'), dict(joined, api=2), dict(joined, api=True),
+                   dict(joined, member=None), dict(joined, member={'id': '../outside', 'name': '示例成员'}),
+                   dict(joined, member={'id': 'a' * 32, 'name': ''}),
+                   *(dict(joined, token=value) for value in (None, '', 'bad token', 'bad\ntoken', '非口令')),
+                   [], b'{broken', b'\xff']
+        for body in invalid:
+            requests = []
+            def respond(path, headers):
+                requests.append((path, headers.get('Authorization')))
+                return (200, body, {}) if path == '/api/join' else (401, {}, {})
+            service = self.faulty_service(respond)
+            url = 'http://127.0.0.1:' + str(service.server_port)
+            with self.subTest(body=body):
+                status, result = self.request(self.a, '/api/team/settings', {'url': url, 'name': '示例成员'})
+                self.assertEqual(status, 409)
+                self.assertEqual(result['error'], team.FORMAT_ERROR)
+                self.assertEqual(requests, [('/api/me', 'Bearer ' + self.first['token']), ('/api/join', None)])
+                self.assertNotIn(joined['token'], json.dumps(result))
+                self.assertEqual(store.physical_state(self.home), before)
+
+    def test_saved_key_403_can_join_and_new_token_is_verified_and_redacted(self):
+        self.configure()
+        new_key = 'example-joined-token'
+        requests = []
+        def respond(path, headers):
+            requests.append((path, headers.get('Authorization')))
+            if path == '/api/join':
+                return 200, {'service': 'skill-pilot-team', 'api': 1,
+                             'member': {'id': 'a' * 32, 'name': '示例成员'}, 'token': new_key}, {}
+            if headers.get('Authorization') != 'Bearer ' + new_key:
+                return 403, {}, {}
+            return 200, ({'service': 'skill-pilot-team', 'api': 1, 'member': {'id': 'a' * 32, 'name': new_key}}
+                         if path == '/api/me' else {'shares': []}), {}
+        service = self.faulty_service(respond)
+        url = 'http://127.0.0.1:' + str(service.server_port)
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            result = self.ok(self.a, '/api/team/settings', {'url': url, 'name': '示例成员'})
+            self.assertEqual(result['member']['name'], '[已隐藏]')
+            self.assertNotIn(new_key, json.dumps(result) + stderr.getvalue())
+        self.assertEqual(requests, [('/api/me', 'Bearer ' + self.first['token']), ('/api/join', None),
+                                    ('/api/me', 'Bearer ' + new_key), ('/api/shares', 'Bearer ' + new_key)])
+        self.assertEqual(team.settings(self.home), {'url': url, 'key': new_key})
+
+    def test_joined_token_must_pass_status_before_replacing_settings(self):
+        self.configure()
+        before = store.physical_state(self.home)
+        new_key = 'example-joined-token'
+        requests = []
+        def respond(path, headers):
+            requests.append(path)
+            if path == '/api/join':
+                return 200, {'service': 'skill-pilot-team', 'api': 1,
+                             'member': {'id': 'a' * 32, 'name': '示例成员'}, 'token': new_key}, {}
+            return ((200, {'service': 'skill-pilot-team', 'api': 2}, {})
+                    if headers.get('Authorization') == 'Bearer ' + new_key else (401, {}, {}))
+        service = self.faulty_service(respond)
+        status, result = self.request(self.a, '/api/team/settings', {
+            'url': 'http://127.0.0.1:' + str(service.server_port), 'name': '示例成员'})
+        self.assertEqual(status, 409)
+        self.assertIn('版本不匹配', result['error'])
+        self.assertNotIn(new_key, json.dumps(result))
+        self.assertEqual(requests, ['/api/me', '/api/join', '/api/me'])
+        self.assertEqual(store.physical_state(self.home), before)
+
     def test_get_status_keeps_settings_while_station_is_offline_and_recovers(self):
         self.configure()
         self.publish()
@@ -264,24 +450,34 @@ class TeamTests(unittest.TestCase):
         result = self.ok(self.a, '/api/team')
         self.assertEqual({key: value for key, value in result.items() if key != 'error'}, {
             'url': '', 'has_key': False, 'configured': False, 'member': None, 'share': None})
-        self.assertIn('分享站设置没能读懂', result['error'])
-        self.assertEqual(self.request(self.a, '/api/team/settings', {'url': self.url})[0], 409)
+        self.assertEqual(result['error'], '分享站设置没能读懂，请在设置里重新连接。')
+        with patch.object(team, '_request') as network:
+            status, result = self.request(self.a, '/api/team/settings', {'url': self.url})
+            self.assertEqual(status, 409)
+            self.assertEqual(result['error'], '请填写你的名字，同事会看到它。')
+            network.assert_not_called()
         self.assertEqual(store.physical_state(self.home), before)
         self.ok(self.a, '/api/team/settings', {'url': self.url, 'key': self.first['token']})
         self.assertEqual(self.ok(self.a, '/api/team'), normal)
 
     def test_invalid_addresses_and_keys_never_connect_or_write(self):
         before = store.physical_state(self.home)
-        addresses = ['ftp://example.invalid', 'file:///tmp/example', 'http://a:b@example.invalid',
+        addresses = [None, [], 1, 'ftp://example.invalid', 'file:///tmp/example', 'http://a:b@example.invalid',
                      'http://@example.invalid', 'http://example.invalid?key=secret',
                      'http://example.invalid?', 'http://example.invalid#fragment', 'http://example.invalid:bad',
                      'http://example.invalid:65536', 'http://example.invalid:0', 'http://exa\nmple.invalid']
         with patch.object(team, '_request') as network:
             for url in addresses:
                 with self.subTest(url=url):
-                    self.assertEqual(self.request(self.a, '/api/team/settings', {'url': url, 'key': self.first['token']})[0], 409)
-            for key in (None, [], 'invalid\nkey', 'not a token', '非口令'):
-                self.assertEqual(self.request(self.a, '/api/team/settings', {'url': self.url, 'key': key})[0], 409)
+                    status, result = self.request(self.a, '/api/team/settings', {'url': url, 'key': self.first['token']})
+                    self.assertEqual(status, 409)
+                    if not isinstance(url, str):
+                        self.assertEqual(result['error'], '请填写分享站地址。')
+            for key in (None, [], 1, 'invalid\nkey', 'not a token', '非口令'):
+                status, result = self.request(self.a, '/api/team/settings', {'url': self.url, 'key': key})
+                self.assertEqual(status, 409)
+                if not isinstance(key, str):
+                    self.assertEqual(result['error'], '请填写分享站地址。')
             network.assert_not_called()
         self.assertEqual(store.physical_state(self.home), before)
 
@@ -292,6 +488,7 @@ class TeamTests(unittest.TestCase):
             'member': self.first['id'], 'skills': ['acme-main'], 'agents': ['claude']})
         before = [store.physical_state(home) for home in (self.home, self.other, self.hub.store.data)]
         writes = [('/api/team/settings', {'url': self.url, 'key': self.second['token']}),
+                  ('/api/team/settings', {'url': self.url, 'name': '示例成员'}),
                   ('/api/team/upload/apply', {'review': uploaded['review']}), ('/api/team/withdraw', {}),
                   ('/api/team/import/apply', {'review': imported['review'], 'revision': imported['revision']})]
         for readonly in (patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}),
@@ -419,6 +616,7 @@ class TeamTests(unittest.TestCase):
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            do_POST = do_GET
         return self.start(ThreadingHTTPServer(('127.0.0.1', 0), Handler))
 
     def test_network_errors_version_format_and_size_leave_files_unchanged(self):

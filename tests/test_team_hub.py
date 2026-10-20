@@ -79,24 +79,117 @@ class TeamHubTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE((self.data / 'members.json').stat().st_mode), 0o600)
         self.store.add_member('Acme 示例成员一')
         self.assertEqual(len(self.store.members()), 3)
-        for name in ('', '   ', 'Acme\nexample', 'Acme\x00example'):
-            with self.subTest(name=name), self.assertRaises(ValueError):
+        for name in ('', '   ', '字' * 41, 'Acme\nexample', 'Acme\x00example', 'Acme\x7fexample', None):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, '不超过 40 个字'):
                 self.store.add_member(name)
         with self.assertRaises(ValueError):
             self.store.remove_member('../members')
         self.assertEqual(len(self.store.members()), 3)
 
+    def test_open_join_returns_a_usable_token_but_stores_only_its_digest(self):
+        self.server.open = True
+        status, joined = self.request('/api/join', 'POST', {'name': '  示例成员  '}, token=None)
+        self.assertEqual(status, 200)
+        self.assertEqual(set(joined), {'service', 'api', 'member', 'token'})
+        self.assertEqual(joined['service'], 'skill-pilot-team')
+        self.assertEqual(joined['api'], 1)
+        self.assertEqual(joined['member']['name'], '示例成员')
+        self.assertEqual(set(joined['member']), {'id', 'name'})
+        token = joined['token']
+        self.assertRegex(token, r'^[A-Za-z0-9_-]+$')
+        self.assertEqual(self.request(token=token)[1]['member'], joined['member'])
+        self.assertEqual(self.put(token=token)[0], 200)
+        self.assertEqual(self.request('/api/shares/' + joined['member']['id'])[1]['config'], config())
+        self.assertEqual(self.request('/api/shares/me', 'DELETE', token=token), (200, {}))
+        self.assertEqual(self.request('/api/shares/' + joined['member']['id'])[0], 404)
+        saved = (self.data / 'members.json').read_text()
+        self.assertNotIn(token, saved)
+        self.assertEqual(json.loads(saved)['members'][-1]['token_sha256'], hashlib.sha256(token.encode()).hexdigest())
+        duplicate = self.request('/api/join', 'POST', {'name': '示例成员'}, token=None)[1]
+        self.assertNotEqual(duplicate['member']['id'], joined['member']['id'])
+        self.assertEqual(len(self.store.members()), 4)
+
+    def test_closed_join_does_not_read_or_write_member_data(self):
+        path = self.data / 'members.json'
+        path.unlink()
+        before = {entry.name: entry.read_bytes() for entry in self.data.iterdir()}
+        with patch.object(self.server.store, 'locked', side_effect=AssertionError('must not access members')):
+            self.assertEqual(self.request('/api/join', 'POST', {'name': '示例成员'}, token=None),
+                             (403, {'error': '这个分享站需要管理员发的口令。'}))
+            self.assertEqual(self.raw_upload([], path='/api/join', method='POST', token=None)[0], 403)
+        self.assertEqual({entry.name: entry.read_bytes() for entry in self.data.iterdir()}, before)
+        self.assertFalse(path.exists())
+
+    def test_join_validates_name_and_object_before_creating_members(self):
+        self.server.open = True
+        path = self.data / 'members.json'
+        before = path.read_bytes()
+        invalid = [{}, [], '示例成员', 1, *({'name': name} for name in
+                   ('', '   ', '字' * 41, '示例\n成员', '示例\x00成员', '示例\x7f成员', None, [], 1))]
+        for data in invalid:
+            with self.subTest(data=data):
+                self.assertEqual(self.request('/api/join', 'POST', data, token=None)[0], 400)
+                self.assertEqual(path.read_bytes(), before)
+        joined = self.request('/api/join', 'POST', {'name': '  ' + '字' * 40 + '  '}, token=None)
+        self.assertEqual(joined[0], 200)
+        self.assertEqual(joined[1]['member']['name'], '字' * 40)
+
+    def test_join_rejects_invalid_lengths_encoding_and_json(self):
+        self.server.open = True
+        before = (self.data / 'members.json').read_bytes()
+        for headers, expected in [([], 411), ([('Content-Length', '4097')], 413),
+                                  ([('Content-Length', '-1')], 400), ([('Content-Length', 'wrong')], 400),
+                                  ([('Content-Length', '2'), ('Content-Length', '2')], 400),
+                                  ([('Transfer-Encoding', 'chunked')], 400),
+                                  ([('Content-Length', '100')], 400)]:
+            with self.subTest(headers=headers):
+                self.assertEqual(self.raw_upload(headers, path='/api/join', method='POST', token=None)[0], expected)
+        for body in (b'{broken', b'\xff', b'null', b'{"name": NaN}', b'[' * 1100):
+            with self.subTest(body=body[:30]):
+                self.assertEqual(self.raw_upload([('Content-Length', str(len(body)))], body,
+                                 '/api/join', 'POST', None)[0], 400)
+        self.assertEqual((self.data / 'members.json').read_bytes(), before)
+        body = json.dumps({'name': '示例成员'}, ensure_ascii=False).encode()
+        self.assertEqual(self.raw_upload([('Content-Length', '4096')], body + b' ' * (4096 - len(body)),
+                         '/api/join', 'POST', None)[0], 200)
+
+    def test_closing_open_join_after_restart_keeps_member_and_share(self):
+        self.close()
+        self.server = team_hub.HubServer(self.data, '127.0.0.1', 0, open=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .01})
+        self.thread.start()
+        joined = self.request('/api/join', 'POST', {'name': '示例成员'}, token=None)[1]
+        self.assertEqual(self.put(token=joined['token'])[0], 200)
+        self.close()
+        self.server = team_hub.HubServer(self.data, '127.0.0.1', 0)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .01})
+        self.thread.start()
+        self.assertEqual(self.request(token=joined['token'])[1]['member'], joined['member'])
+        self.assertEqual(self.request('/api/shares/' + joined['member']['id'], token=joined['token'])[1]['config'], config())
+        self.assertEqual(self.request('/api/join', 'POST', {'name': '新示例成员'}, token=None)[0], 403)
+        self.store.remove_member(joined['member']['id'])
+        self.assertEqual(self.request(token=joined['token'])[0], 401)
+
     def test_every_path_and_method_requires_a_valid_token(self):
+        self.server.open = True
         for path, method in [('/api/me', 'GET'), ('/api/shares', 'GET'),
                              ('/api/shares/' + self.first['id'], 'GET'),
                              ('/api/shares/me', 'PUT'), ('/api/shares/me', 'DELETE'),
-                             ('/members.json', 'GET'), ('/api/me', 'BREW')]:
+                             ('/members.json', 'GET'), ('/api/me', 'BREW'),
+                             ('/api/join', 'GET'), ('/api/join', 'PUT'), ('/api/join', 'BREW'),
+                             ('/api/join?name=example', 'POST'), ('/api/join/', 'POST'), ('/api/Join', 'POST')]:
             for token in (None, '', 'wrong'):
                 with self.subTest(path=path, method=method, token=token):
                     status, body = self.request(path, method, token=token)
                     self.assertEqual(status, 401)
                     self.assertEqual(set(body), {'error'})
         self.assertEqual(self.request(headers={'Authorization': 'Basic wrong'})[0], 401)
+
+    def test_join_auth_exemption_requires_the_exact_request_target(self):
+        self.server.open = True
+        for path in ('/api/join?', '//api/join', '///api/join'):
+            with self.subTest(path=path):
+                self.assertEqual(self.raw_upload([], path=path, method='POST', token=None)[0], 401)
 
     def test_identity_empty_list_and_missing_share(self):
         status, body = self.request()
@@ -204,10 +297,12 @@ class TeamHubTests(unittest.TestCase):
         self.assertEqual(self.raw_upload([('Content-Length', str(team_hub.MAX_BODY + 1))])[0], 413)
         self.assertEqual(self.request('/api/shares')[1]['shares'][0]['skill_count'], 1)
 
-    def raw_upload(self, headers, body=b''):
+    def raw_upload(self, headers, body=b'', path='/api/shares/me', method='PUT', token='first'):
+        if token == 'first':
+            token = self.first['token']
         with socket.create_connection(self.server.server_address, timeout=3) as connection:
-            rows = [('Host', 'localhost'), ('Authorization', 'Bearer ' + self.first['token']), *headers]
-            head = 'PUT /api/shares/me HTTP/1.1\r\n' + ''.join(f'{key}: {value}\r\n' for key, value in rows)
+            rows = [('Host', 'localhost'), *([('Authorization', 'Bearer ' + token)] if token is not None else []), *headers]
+            head = f'{method} {path} HTTP/1.1\r\n' + ''.join(f'{key}: {value}\r\n' for key, value in rows)
             connection.sendall(head.encode() + b'\r\n' + body)
             connection.shutdown(socket.SHUT_WR)
             response = http.client.HTTPResponse(connection)
@@ -286,15 +381,20 @@ class TeamHubTests(unittest.TestCase):
 
     def test_only_documented_routes_and_methods_exist(self):
         for path in ('/', '/members.json', '/api/me?token=wrong', '/api/shares/../members.json',
-                     '/api/shares/' + self.first['id'] + '/'):
+                     '/api/shares/' + self.first['id'] + '/', '/api/join?name=example', '/api/join/'):
             self.assertEqual(self.request(path)[0], 404)
+        self.assertEqual(self.request('/api/join', 'POST', {'name': '示例成员'})[0], 403)
+        for method in ('GET', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'BREW'):
+            self.assertEqual(self.request('/api/join', method)[0], 405)
         self.assertEqual(self.request('/api/shares/me')[0], 405)
         for method in ('POST', 'PATCH', 'OPTIONS', 'BREW'):
             self.assertEqual(self.request('/api/me', method)[0], 405)
         self.assertEqual(self.request('/api/me', 'HEAD')[0], 405)
 
     def test_http_logs_never_contain_tokens_paths_or_lists(self):
+        self.server.open = True
         with patch('sys.stderr', new_callable=io.StringIO) as log:
+            self.assertEqual(self.request('/api/join', 'POST', {'name': '日志里不能出现的示例成员'}, token=None)[0], 200)
             self.put(config('private-list-name'))
             self.request('/api/me?token=' + self.first['token'])
             self.request(token='wrong')
@@ -339,6 +439,21 @@ class TeamHubCliTests(unittest.TestCase):
                 result = self.command(*args)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn('--data', result.stderr)
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_serve_open_flag_and_startup_access_message(self):
+        for flags, opened, message in (([], False, '只有管理员发了口令的成员能用'),
+                                       (['--open'], True, '开放加入，知道地址的同事填名字就能加入')):
+            argv = ['skill-pilot', 'hub', 'serve', '--data', str(self.data), *flags]
+            with self.subTest(open=opened), patch.object(sys, 'argv', argv), \
+                    patch.object(team_hub, 'HubServer') as server_class, redirect_stdout(io.StringIO()) as output:
+                server = server_class.return_value.__enter__.return_value
+                server.server_port = 8765
+                server.serve_forever.side_effect = KeyboardInterrupt
+                cli.main()
+                server_class.assert_called_once_with(str(self.data), '0.0.0.0', 8765, open=opened)
+                self.assertIn(message, output.getvalue())
+        self.assertIn('开放加入：知道地址的同事填名字就能加入，不用口令', self.command('serve', '--help').stdout)
         self.assertEqual(list(self.home.iterdir()), [])
 
     def test_add_list_remove_and_errors(self):

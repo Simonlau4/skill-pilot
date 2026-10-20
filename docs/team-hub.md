@@ -2,7 +2,12 @@
 
 分享站只保存同事上传的技能名单、来源和分配关系，不保存技能文件，也不读取任何人的本机技能库或 Skill Pilot 设置。上传、浏览和导入由各自电脑的看板完成，见下文“同事怎么用”。这一部分提供分享站程序、成员管理和接口，没有网页界面。
 
-所有访问都需要成员口令，包括查看名单。每人一份分享，再次上传会覆盖自己的旧分享。管理员在运行分享站的电脑上用命令加、删成员；持有成员口令的人可以查看全体分享、上传或撤回自己的分享。
+分享站有两种加入方式：
+
+- **开放加入**：启动时加 `--open`，适合可信局域网里的小团队。启动后把地址告诉同事，同事填自己的名字即可加入，不用管理员发口令。局域网里知道地址的人都能加入并看到全部分享，所以只在可信网络开放。
+- **只限成员（默认）**：启动时不加 `--open`，管理员为每位同事生成口令并单独交付。
+
+两种方式都使用成员口令认出每个人；开放加入时由看板自动领取并保存在自己电脑上，不用自己填写。每人一份分享，再次上传会覆盖自己的旧分享。管理员在运行分享站的电脑上用命令加、删成员；持有成员口令的人可以查看全体分享、上传或撤回自己的分享。
 
 ## 准备
 
@@ -24,11 +29,11 @@ python3 --version
 cd "/srv/Skill Pilot"
 ```
 
-为两位同事添加成员（显示名可以重复，成员编号各不相同）：
+下面的启动示例采用开放加入，不用提前添加成员。如果要只限成员，先为同事添加成员（显示名可以重复，成员编号各不相同；去掉首尾空白后为 1–40 个字，不能换行或含控制字符）：
 
 ```bash
-python3 -m skill_pilot hub add-member "Acme 示例成员一" --data "/srv/Team Hub Data"
-python3 -m skill_pilot hub add-member "Acme 示例成员二" --data "/srv/Team Hub Data"
+python3 -m skill_pilot hub add-member "示例成员一" --data "/srv/Team Hub Data"
+python3 -m skill_pilot hub add-member "示例成员二" --data "/srv/Team Hub Data"
 python3 -m skill_pilot hub members --data "/srv/Team Hub Data"
 ```
 
@@ -37,10 +42,10 @@ python3 -m skill_pilot hub members --data "/srv/Team Hub Data"
 在程序文件夹中，用下面这条固定命令启动；手动重启时仍用同一条命令：
 
 ```bash
-/usr/bin/env python3 -m skill_pilot hub serve --data "/srv/Team Hub Data" --host 0.0.0.0 --port 8765
+/usr/bin/env python3 -m skill_pilot hub serve --data "/srv/Team Hub Data" --host 0.0.0.0 --port 8765 --open
 ```
 
-看到“分享站已启动”即可使用。终端需要保持打开；临时试用结束按 Ctrl+C 停止。只想在该机器上检查时可用 `--host 127.0.0.1`，同事将不能直接连接。省略 `--host` 和 `--port` 时分别采用 `0.0.0.0`、`8765`。所有命令都必须明确填写 `--data`，不会默认使用主目录。
+看到“分享站已启动”即可使用，提示里会写明是否开放加入。只限成员时去掉命令末尾的 `--open`。终端需要保持打开；临时试用结束按 Ctrl+C 停止。只想在该机器上检查时可用 `--host 127.0.0.1`，同事将不能直接连接。省略 `--host` 和 `--port` 时分别采用 `0.0.0.0`、`8765`。所有命令都必须明确填写 `--data`，不会默认使用主目录。
 
 ### 电脑或 NAS 重启后自动运行
 
@@ -57,7 +62,7 @@ After=network.target
 Type=simple
 User=<运行账号>
 WorkingDirectory=/srv/Skill Pilot
-ExecStart=/usr/bin/env python3 -m skill_pilot hub serve --data "/srv/Team Hub Data" --host 0.0.0.0 --port 8765
+ExecStart=/usr/bin/env python3 -m skill_pilot hub serve --data "/srv/Team Hub Data" --host 0.0.0.0 --port 8765 --open
 Restart=always
 RestartSec=5
 
@@ -88,7 +93,7 @@ docker run -d --name skill-pilot-team \
   -v "/srv/Team Hub Data:/data" \
   -w /app -e PYTHONDONTWRITEBYTECODE=1 \
   python:3.12-slim \
-  python3 -m skill_pilot hub serve --data /data --host 0.0.0.0 --port 8765
+  python3 -m skill_pilot hub serve --data /data --host 0.0.0.0 --port 8765 --open
 ```
 
 也可在 NAS 的容器管理界面填写同样的镜像、挂载、工作目录、端口和命令。程序挂载只读，数据挂载可读写；数据不能只留在容器内部。若改变对外端口，只改 `-p` 左边的数字，同事也使用新的端口。
@@ -98,12 +103,18 @@ docker run -d --name skill-pilot-team \
 成员管理同样在这台机器上进行，使用容器内的数据位置：
 
 ```bash
-docker exec skill-pilot-team python3 -m skill_pilot hub add-member "Acme 示例成员一" --data /data
+docker exec skill-pilot-team python3 -m skill_pilot hub add-member "示例成员一" --data /data
 docker exec skill-pilot-team python3 -m skill_pilot hub members --data /data
 docker exec skill-pilot-team python3 -m skill_pilot hub remove-member <成员编号> --data /data
 ```
 
 通过 `docker logs skill-pilot-team` 查看启动结果。部署后执行 `docker restart skill-pilot-team`，确认原成员口令仍能访问、原分享仍能读取，再重启 NAS 验证开机恢复。只要保留数据挂载文件夹，重启或重新创建容器都保留成员和分享。
+
+## 以后收紧
+
+从启动命令里去掉 `--open`，保留原数据文件夹并重启分享站即可。已经加入的人照常使用，新人需要管理员发口令；删人仍用下面的 `remove-member` 命令。
+
+直接运行时先按 Ctrl+C 停止，再用不带 `--open` 的原命令启动。systemd 要从 `ExecStart` 中去掉 `--open`，执行 `sudo systemctl daemon-reload` 后再 `sudo systemctl restart skill-pilot-team`。容器要在停止并移除旧容器后，用相同挂载、端口和不带 `--open` 的命令重新创建；保留数据挂载文件夹，不删除其中的文件。重启已有容器不会改变它原来的启动命令。
 
 ## 删成员、备份与更新
 
@@ -132,7 +143,7 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 
 每位同事用自己电脑上的 Skill Pilot 看板，不用另外安装。
 
-1. **连上分享站**：在看板「设置 → 团队分享」填管理员给的分享站地址和自己的口令，点「保存并连接」。看到“已连接，你是某某”就好了，页头会多出「团队」。口令只存在自己电脑上；以后改地址时口令可以留空，沿用原来的。
+1. **连上分享站**：在看板「设置 → 团队分享」填分享站地址和自己的名字；要口令的分享站，点「管理员给了口令？」填上管理员给的口令，再点「保存并连接」。看到“已连接，你是某某”就好了，页头会多出「团队」。口令只存在自己电脑上，开放加入时看板会自动领取；以后保存或改地址时可以留空，先沿用原来的口令，连接成功不会多出一个自己。
 2. **分享自己的技能**：在「团队」页点「分享我的技能…」，选全部在用技能或某个 agent 在用的技能。名单默认全选，取消不想分享的；被别的技能需要的会自动留下。自制或改过的技能，同事只能看到名字和说明，拿不到文件。核对后点「分享」；再分享一次会换成新的名单，「撤回分享」后同事就看不到了。
 3. **挑同事的技能**：在「团队」页点某位同事的「看看」，可以搜索、按分组看，每个技能标着在自己电脑上的状态：本机已有、可以装、要另外补齐（原因放在旁边的说明图标里）。默认一个都不勾，勾上想要的，选好“给谁用”，点「导入」先核对，再导入。导入后可以在结果里或操作记录里整批撤销。
 
@@ -140,10 +151,11 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 
 ## 接口与连通检查
 
-所有接口都带 `Authorization: Bearer <口令>`。没有口令或口令错误返回 `401`，没有匿名内容；错误统一返回 `{"error":"中文说明"}`。成功返回 `200`，未知地址返回 `404`，不支持的操作返回 `405`。
+只有 `POST /api/join` 不需要口令；没有开放加入时，这条接口返回 `403`。其余接口都带 `Authorization: Bearer <口令>`，没有口令或口令错误返回 `401`。只有完全相同的加入路径和方法可以不带口令，带查询参数也不放行。错误统一返回 `{"error":"中文说明"}`。成功返回 `200`，通过口令检查后，未知地址返回 `404`，不支持的操作返回 `405`。
 
 | 操作 | 结果 |
 | --- | --- |
+| `POST /api/join` | 仅此接口不需要口令；请求体为 `{"name":"显示名"}`。开放时返回 `{"service":"skill-pilot-team","api":1,"member":{"id":"成员编号","name":"显示名"},"token":"口令"}`；未开放返回 `403`，不创建成员 |
 | `GET /api/me` | `{"service":"skill-pilot-team","api":1,"member":{"id":"成员编号","name":"显示名"}}` |
 | `GET /api/shares` | `{"shares":[{"member":{"id":"成员编号","name":"显示名"},"updated_at":"时间","skill_count":1,"agents":[{"id":"agent编号","name":"名称"}]}]}`；最新上传在前，无分享的成员不列出 |
 | `GET /api/shares/<成员编号>` | `{"member":{"id":"成员编号","name":"显示名"},"updated_at":"时间","config":{...}}`；未分享或已撤回返回 `404` |
@@ -151,6 +163,21 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 | `DELETE /api/shares/me` | 撤回自己的分享，返回 `{}`；重复撤回也成功 |
 
 上传须直接发送 JSON 文件并带上 `Content-Length`，最多 **1,048,576 字节（1 MB）**；超限直接返回 `413`，格式不支持返回 `400`。不接受分块上传；不接收技能文件。验证配置后只保存 `format`、`version`、`created_at`、agent 的 `id/name`，以及技能的 `name/assigned_agents/requires/source/local_modified/title/summary/group/description`；可选说明字段有才保留。来源只保留受支持的来源字段，不保留额外账号信息。`instructions` 和其他多余字段会丢掉。
+
+加入请求也须带上 `Content-Length`，最多 **4096 字节**，不接受分块发送。缺少长度返回 `411`，超过上限返回 `413`，格式或名字不合要求返回 `400`。名字去掉首尾空白后为 1–40 个字，不能换行或含控制字符，允许与其他成员同名。
+
+开放的分享站可以先用下面的方式自助加入。返回内容含口令，用只有自己能读的临时文件接收，再读进变量，避免把它打印到终端或公共日志：
+
+```bash
+HUB_ADDRESS="http://<局域网地址>:8765"
+HUB_JOIN_FILE="$(mktemp)"
+curl --fail-with-body --silent --show-error -H 'Content-Type: application/json' \
+  --data '{"name":"示例成员"}' --output "$HUB_JOIN_FILE" "$HUB_ADDRESS/api/join"
+HUB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["token"])' "$HUB_JOIN_FILE")"
+rm -f "$HUB_JOIN_FILE"
+curl --fail-with-body -H "Authorization: Bearer $HUB_TOKEN" "$HUB_ADDRESS/api/me"
+unset HUB_TOKEN HUB_JOIN_FILE
+```
 
 管理员可以用下面的方式检查接口。在终端交互输入口令，它不会显示在屏幕上；以下示例使用 bash，`HUB_ADDRESS` 换成自己的局域网地址：
 
@@ -167,4 +194,4 @@ curl --fail-with-body -X DELETE -H "Authorization: Bearer $HUB_TOKEN" "$HUB_ADDR
 unset HUB_TOKEN
 ```
 
-示例中的 `skill-pilot-config.json` 是从自己电脑导出的技能配置。分享站只验证、保存名单，不下载或安装任何技能，不执行配置里的说明。服务日志不记录口令、访问路径或名单内容；请勿把添加成员时显示的口令保存到公共日志。
+示例中的 `skill-pilot-config.json` 是从自己电脑导出的技能配置。分享站只验证、保存名单，不下载或安装任何技能，不执行配置里的说明。服务日志不记录口令、加入的名字、访问路径或名单内容；请勿把添加成员时显示或自助加入时领到的口令保存到公共日志，也不要在打印命令参数的调试模式中运行上述检查。

@@ -15,6 +15,25 @@ class TeamStaticTests(unittest.TestCase):
             self.assertIn(marker, html)
         self.assertRegex((STATIC / 'app.js').read_text(), r"const SETTINGS_BLOCKS = \[[^\]]*'team'")
 
+    def test_team_settings_support_open_join(self):
+        html = (STATIC / 'index.html').read_text()
+        name_input = re.search(r'<input[^>]*id="team-name"[^>]*>', html)
+        self.assertIsNotNone(name_input, '设置页没有“你的名字”输入框')
+        self.assertIn('type="text"', name_input.group(0))
+        self.assertIn('maxlength="40"', name_input.group(0))
+        self.assertIn('autocomplete="off"', name_input.group(0))
+
+        key_box = re.search(r'<div id="team-key-box"[^>]*>', html)
+        self.assertIsNotNone(key_box, '口令区域不见了')
+        self.assertIn('hidden', key_box.group(0), '口令区域应该默认收起')
+        toggle = re.search(r'<button[^>]*id="team-key-toggle"[^>]*>', html)
+        self.assertIsNotNone(toggle, '没有展开口令的按钮')
+        self.assertIn('aria-controls="team-key-box"', toggle.group(0))
+        self.assertIn('aria-expanded="false"', toggle.group(0))
+
+        source = (STATIC / 'app.js').read_text()
+        self.assertRegex(source, r"api\('/api/team/settings', \{[^}]*name: \$\('team-name'\)\.value\.trim\(\)[^}]*\}\)")
+
     def test_shared_text_is_escaped_and_filters_work(self):
         source = (STATIC / 'app.js').read_text()
         escape = re.search(r'const escape = value => [^\n]+', source).group(0)
