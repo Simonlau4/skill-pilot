@@ -1,6 +1,6 @@
 /* Skill Pilot 看板。
    分段：通用工具 → 页头与导航 → 技能页 → 技能详情 → 安装技能 → 接入新 agent →
-        检查更新（结果显示在技能页和详情里） → 清理页 → 操作记录页 → 诊断与备份页 → 设置页 → 启动。
+        检查更新（结果显示在技能页和详情里） → 清理页 → 操作记录页 → 诊断与备份页 → 设置页 → 团队分享 → 启动。
    页面不写死任何具体 agent：名字、顺序、生效方式都来自接口。 */
 
 /* ==================== 通用工具：请求、转义、提示、确认框、按钮忙碌态 ==================== */
@@ -77,7 +77,7 @@ async function withBusy(button, label, work) {
 const CONFIRM_FOLD = 8;
 
 function confirmItems(items) {
-  return items.map(item => `<li>${nameHtml(item.name)}${item.note ? `<span class="confirm-note-inline">（${escape(item.note)}）</span>` : ''}</li>`).join('');
+  return items.map(item => `<li>${item.html || nameHtml(item.name)}${item.note ? `<span class="confirm-note-inline">（${escape(item.note)}）</span>` : ''}</li>`).join('');
 }
 
 function confirmGroupsHtml(groups) {
@@ -290,6 +290,8 @@ $('task-bar').addEventListener('click', event => {
      任务条转成错误样式（写入不给「重试」，让用户看清原因自己决定）。
    返回 work() 的结果；失败返回 null，不往外抛。 */
 const WRITE_LOCK_SELECTORS = [
+  '#team-form input', '#team-save', '#page-team button:not(.hint)', '#page-team input', '#page-team select',
+  '#team-upload-dialog input', '#team-upload-dialog select', '#team-upload-dialog button:not(.hint)', '#team-import-dialog button:not(.hint)',
   '#skills-list button[data-skill]', '#skills-list button[data-update-up]', '#action-bar button', '#skills-refresh',
   '#install-url', '#install-rail button:not(.hint)',
   '#cleanup-rows input[data-cleanup]', '#withdrawn-list button', '#withdrawn-refresh',
@@ -329,6 +331,8 @@ function renderBusyAreas() {
   if (state.detail) renderDetail();
   renderRailNotes();
   renderAgents();
+  renderTeamSettings();
+  renderTeam();
 }
 
 async function runWrite({button = null, busyText, taskText = busyText, success = null, onError = null, work}) {
@@ -493,6 +497,11 @@ const state = {
   cleanup: null,
   cleanupSelected: new Set(),
   logs: [],
+  team: null,          // /api/team：有没有连上分享站、我是谁、我的分享
+  teamShares: null,    // 同事的分享列表；null 是还没读
+  teamDetail: null,    // 正在看的那一份分享
+  teamSelected: new Set(),
+  teamError: '',
 };
 
 /* 编号翻名字：先看接口给的目录（操作记录、已撤下的技能不在当前表里，也从这里兜底），
@@ -590,6 +599,7 @@ function showPage(page) {
   }
   if (page === 'cleanup') { renderCleanup(); loadCleanup(); }
   if (page === 'settings') renderSettings();
+  if (page === 'team') enterTeam();
   renderActionBar();
   window.scrollTo({top: 0, behavior: 'auto'});
   if (page === 'skills') fitFilterRail();
@@ -608,7 +618,7 @@ function gotoPlace(place) {
 
 /* ==================== 设置页：左边一列目录，右边六块连在一起（用户选的 B 版） ==================== */
 
-const SETTINGS_BLOCKS = ['ai', 'agents', 'share', 'log', 'diagnostics', 'version'];
+const SETTINGS_BLOCKS = ['ai', 'agents', 'share', 'team', 'log', 'diagnostics', 'version'];
 const prefersReducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function highlightSettingsBlock(name) {
@@ -673,6 +683,7 @@ function renderSettings() {
   renderConfigExport();
   renderAgents();
   refreshSettings();
+  refreshTeam();
   refreshProgramUpdate();
   refreshLog();
   renderDiagnostics();
@@ -1956,20 +1967,24 @@ function renderConfigImportControls() {
   $('config-import-undo').hidden = !configImportResult?.id;
 }
 
-function renderConfigImportReview(plan, done = false) {
-  const items = names => names.map(name => ({name, note: [
+function importReviewHtml(plan, done, unmappedTip, html = () => '') {
+  const items = names => names.map(name => ({name, html: html(name), note: [
     (plan.assignments[name] || []).map(nameOf).join('、'),
     plan.dependencies[name]?.length ? `补上所需技能：${plan.dependencies[name].join('、')}` : '',
   ].filter(Boolean).join('；')}));
-  $('config-import-review').innerHTML = [
+  return [
     [done ? '新装好了' : '将安装', items(plan.install)],
     ['沿用本机', items(plan.reuse)],
-    ['待补齐，本次跳过', plan.skipped.map(row => ({name: row.name, note: row.reason}))],
+    ['待补齐，本次跳过', plan.skipped.map(row => ({name: row.name, html: html(row.name), note: row.reason}))],
   ].filter(([, rows]) => rows.length).map(([label, rows]) =>
     `<details class="fold fold-inner" ${rows.length <= CONFIRM_FOLD ? 'open' : ''}>
       <summary>${escape(label)} ${rows.length} 个</summary><ul class="confirm-items">${confirmItems(rows)}</ul>
     </details>`).join('') + (plan.unmapped_agents.length
-      ? `<p class="muted">这些 agent 还没接入，${done ? '相应分配未导入' : '可在上方指定接收方'}：${escape(plan.unmapped_agents.map(nameOf).join('、'))}。</p>` : '');
+      ? `<p class="muted">这些 agent 还没接入，${done ? '相应分配未导入' : unmappedTip}：${escape(plan.unmapped_agents.map(nameOf).join('、'))}。</p>` : '');
+}
+
+function renderConfigImportReview(plan, done = false) {
+  $('config-import-review').innerHTML = importReviewHtml(plan, done, '可在上方指定接收方');
 }
 
 async function previewConfigImport() {
@@ -2082,6 +2097,494 @@ $('config-import-apply').addEventListener('click', async event => {
     success: result => ({text: result.complete ? result.message : '可用部分已处理，未完成项见导入结果。',
       undo: result.id ? button => undoConfigImport(result, button) : null}),
   });
+});
+
+/* ==================== 团队分享：设置里连上分享站；「团队」页分享自己的名单、挑同事的技能导入 ==================== */
+
+/* 分享站来的名字和说明都是别人写的：一律当纯文字转义，链接只认 https。
+   技能可能本机还没有，所以名字用分享者给的中文名，不查本机的整理结果。 */
+const TEAM_STATUS = {installed: ['tag-ok', '本机已有'], installable: ['tag-quiet', '可以装'], needs_files: ['tag-warn', '要另外补齐']};
+const teamTitle = row => row.title || row.name;
+const teamNameHtml = row => row.title ? `${escape(row.title)} <span class="skill-id">${escape(row.name)}</span>` : escape(row.name);
+const teamCanWrite = () => Boolean(state.table?.write_allowed) && !writeBusy;
+// 还没整理过时没有技能表，就看 /api/status 给的只读状态。
+const teamSettingsWritable = () => state.table ? Boolean(state.table.write_allowed) : state.writeAllowed;
+let teamUrlEdited = false;
+
+async function refreshTeam() {
+  try {
+    state.team = await api('/api/team');
+  } catch (error) {
+    state.team = {configured: false, url: '', has_key: false, member: null, share: null, error: error.message};
+  }
+  document.querySelector('.nav-item[data-page="team"]').hidden = !state.team.configured;
+  renderTeamSettings();
+  renderTeam();
+}
+
+function renderTeamSettings() {
+  const team = state.team;
+  if (!team) return;
+  if (!teamUrlEdited) $('team-url').value = team.url || '';
+  $('team-key').placeholder = team.has_key ? '已保存；不改就留空' : '粘贴管理员给你的口令';
+  $('team-message').textContent = [team.error || (team.member ? `已连接，你是 ${team.member.name}。` : ''),
+    teamSettingsWritable() ? '' : '只读模式下不能修改。'].filter(Boolean).join(' ');
+  $('team-goto').hidden = !team.configured;
+  const locked = !teamSettingsWritable() || Boolean(writeBusy);
+  for (const element of $('team-form').querySelectorAll('input, #team-save')) element.disabled = locked;
+}
+
+$('team-url').addEventListener('input', () => { teamUrlEdited = true; });
+$('team-goto').addEventListener('click', () => showPage('team'));
+$('team-setup').addEventListener('click', () => gotoPlace('settings/team'));
+
+$('team-form').addEventListener('submit', event => {
+  event.preventDefault();
+  withBusy($('team-save'), '正在连接…', async () => {
+    try {
+      const result = await api('/api/team/settings', {url: $('team-url').value.trim(), key: $('team-key').value.trim()});
+      teamUrlEdited = false;
+      $('team-key').value = '';
+      state.team = result;
+      state.teamShares = state.teamDetail = null;
+      state.teamSelected = new Set();
+      document.querySelector('.nav-item[data-page="team"]').hidden = false;
+      toast({text: `已连上分享站，你是 ${result.member.name}。`});
+    } catch (error) {
+      $('team-message').textContent = error.message;
+      toast({text: error.message, tone: 'error'});
+    }
+  }).finally(() => {
+    // withBusy 会放开按钮，这里按最新状态重画（只读、写入中会重新禁用），并保留刚才的报错。
+    const message = $('team-message').textContent;
+    renderTeamSettings();
+    if (!state.team?.member) $('team-message').textContent = message;
+  });
+});
+
+/* 进团队页：先画已知的，再读最新状态和同事列表。 */
+async function enterTeam() {
+  renderTeam();
+  await refreshTeam();
+  if (state.team?.configured && !state.team.error) await loadTeamShares();
+}
+
+let teamSharesSequence = 0;
+async function loadTeamShares() {
+  const sequence = ++teamSharesSequence;
+  try {
+    const result = await api('/api/team/shares');
+    if (sequence !== teamSharesSequence) return;
+    state.teamShares = result.shares;
+    state.teamError = '';
+  } catch (error) {
+    if (sequence !== teamSharesSequence) return;
+    state.teamError = error.message;
+  }
+  renderTeam();
+}
+
+function renderTeam() {
+  if (state.page !== 'team') return;
+  const team = state.team;
+  $('team-unset').hidden = !team || team.configured;
+  $('team-ready').hidden = Boolean(team) && !team.configured;
+  if (team && !team.configured) return;
+  const share = team?.share;
+  const ready = Boolean(team?.member) && !team?.error;
+  $('team-mine-title').textContent = !team ? '正在读取…' : !ready ? '暂时连不上分享站'
+    : share ? `已分享 ${number(share.skill_count)} 个技能` : '还没分享过';
+  $('team-mine-note').textContent = [
+    share ? `${friendlyDate(share.updated_at)}分享，同事看到的名字是 ${team.member.name}` : ready ? `同事看到的名字是 ${team.member.name}` : '',
+    !state.table ? '整理过技能后才能分享和导入' : !state.table.write_allowed ? '只读模式下只能看' : '',
+  ].filter(Boolean).join(' · ');
+  const canShare = ready && teamCanWrite();
+  $('team-share').disabled = !canShare;
+  $('team-share').querySelector('span').textContent = share ? '重新分享…' : '分享我的技能…';
+  $('team-withdraw').hidden = !share;
+  $('team-withdraw').disabled = !canShare;
+  const problem = (team && !ready && team.error) || state.teamError;
+  $('team-error').hidden = !problem;
+  $('team-error').textContent = problem || '';
+  renderTeamShares();
+  renderTeamDetail();
+}
+
+function renderTeamShares() {
+  const detail = state.teamDetail;
+  $('team-shares').hidden = Boolean(detail);
+  $('team-back').hidden = !detail;
+  $('team-others-title').textContent = detail ? `${detail.member.name} 分享的技能` : '同事的分享';
+  if (detail) return;
+  const me = state.team?.member?.id;
+  const rows = state.teamShares;
+  if (rows === null) {
+    $('team-shares').innerHTML = state.teamError || state.team?.error ? '' : '<p class="item-note">正在读取…</p>';
+    return;
+  }
+  $('team-shares').innerHTML = rows.filter(row => row.member.id !== me).map(row => `<div class="item-row">
+    <div>
+      <div class="item-title">${escape(row.member.name)}</div>
+      <div class="item-note">${number(row.skill_count)} 个技能 · ${escape(friendlyDate(row.updated_at))}分享${row.agents.length ? ` · 用在 ${escape(row.agents.map(agent => agent.name).join('、'))}` : ''}</div>
+    </div>
+    <span class="item-end"><button class="btn btn-small" type="button" data-team-open="${escape(row.member.id)}"${writeBusy ? ' disabled' : ''}>看看</button></span>
+  </div>`).join('') || `<div class="empty">${emptyInner('team', '同事还没有分享')}</div>`;
+}
+
+$('team-shares').addEventListener('click', async event => {
+  const button = event.target.closest('[data-team-open]');
+  if (!button) return;
+  await withBusy(button, '正在读取…', async () => {
+    try {
+      await openTeamShare(button.dataset.teamOpen);
+      $('team-search').focus();
+    } catch (error) {
+      toast({text: error.message, tone: 'error'});
+    }
+  });
+});
+
+async function openTeamShare(id) {
+  const detail = await api('/api/team/shares/' + encodeURIComponent(id));
+  const same = state.teamDetail?.member.id === id;
+  const names = new Set(detail.config.skills.filter(row => row.local.status !== 'needs_files').map(row => row.name));
+  state.teamSelected = new Set([...(same ? state.teamSelected : [])].filter(name => names.has(name)));
+  if (!same) {
+    $('team-search').value = '';
+    $('team-group').value = '';
+  }
+  state.teamDetail = detail;
+  renderTeamChoices();
+  renderTeam();
+}
+
+/* 导入或撤销之后，本机状态变了，重新读一次正在看的那份。
+   读不到（同事撤回了、分享站连不上）就回到同事列表，不留着过时的名单。 */
+async function reloadTeamDetail() {
+  if (!state.teamDetail) return;
+  try {
+    await openTeamShare(state.teamDetail.member.id);
+  } catch (error) {
+    state.teamDetail = null;
+    state.teamSelected = new Set();
+    renderTeam();
+    toast({text: error.message, tone: 'error'});
+    if (state.team?.configured && !state.team.error) loadTeamShares();
+  }
+}
+
+$('team-back').addEventListener('click', () => {
+  state.teamDetail = null;
+  state.teamSelected = new Set();
+  renderTeam();
+  loadTeamShares();
+});
+
+$('team-refresh').addEventListener('click', event => withBusy(event.currentTarget, '', async () => {
+  await enterTeam();
+  await reloadTeamDetail();
+}));
+
+/* 分组和“给谁用”的选项：每打开一份分享更新一次。 */
+function renderTeamChoices() {
+  const skills = state.teamDetail?.config.skills || [];
+  const groups = [...new Set(skills.map(row => row.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const group = $('team-group').value;
+  $('team-group').innerHTML = '<option value="">全部分组</option>'
+    + groups.map(name => `<option value="${escape(name)}">${escape(name)}</option>`).join('')
+    + (skills.some(row => !row.group) ? '<option value="-">没分组</option>' : '');
+  $('team-group').value = [...$('team-group').options].some(option => option.value === group) ? group : '';
+  const agent = $('team-agent').value;
+  $('team-agent').innerHTML = '<option value="">按同事的分配</option>' + state.agents.map(item =>
+    `<option value="${escape(item.id)}">全部给 ${escape(item.name)}</option>`).join('');
+  $('team-agent').value = state.agents.some(item => item.id === agent) ? agent : '';
+}
+
+function teamRows() {
+  const query = $('team-search').value.trim().toLowerCase();
+  const group = $('team-group').value;
+  return (state.teamDetail?.config.skills || []).filter(row =>
+    (!group || (group === '-' ? !row.group : row.group === group)) &&
+    (!query || [row.name, row.title, row.summary, row.description, row.group].some(value => String(value || '').toLowerCase().includes(query))));
+}
+
+function renderTeamDetail() {
+  const detail = state.teamDetail;
+  $('team-detail').hidden = !detail;
+  if (!detail) return;
+  const searching = Boolean($('team-search').value.trim() || $('team-group').value);
+  $('team-rows').innerHTML = teamRows().map(row => {
+    const [tone, label] = TEAM_STATUS[row.local.status] || ['tag-quiet', row.local.label];
+    const blocked = row.local.status === 'needs_files';
+    const link = String(row.source.url || '').startsWith('https://')
+      ? ` <a class="team-link" href="${escape(row.source.url)}" target="_blank" rel="noopener noreferrer">怎么装</a>` : '';
+    return `<tr>
+      <td class="col-check"><label class="check-hit"><input type="checkbox" data-team-pick="${escape(row.name)}"
+        aria-label="${escape('要 ' + teamTitle(row))}" ${state.teamSelected.has(row.name) ? 'checked' : ''} ${blocked || writeBusy ? 'disabled' : ''}></label></td>
+      <td><strong>${teamNameHtml(row)}</strong>${row.description ? hint(row.description) : ''}${row.summary ? `<p class="skill-desc">${escape(row.summary)}</p>` : ''}</td>
+      <td>${escape(row.group || '')}</td>
+      <td><span class="tag ${tone}">${escape(label)}</span>${row.local.reason ? hint(row.local.reason) : ''}${link}</td>
+    </tr>`;
+  }).join('') || `<tr><td class="empty" colspan="4">${searching ? emptyInner('search', '没找到，换个词试试') : emptyInner('team', '这份分享里没有技能')}</td></tr>`;
+  renderTeamImportBar();
+}
+
+function renderTeamImportBar() {
+  const count = state.teamSelected.size;
+  $('team-import').disabled = !count || !teamCanWrite();
+  $('team-import').textContent = count ? `导入 ${count} 个…` : '导入';
+  $('team-import-note').textContent = !state.table ? '整理过技能后才能导入。'
+    : !state.table.write_allowed ? '只读模式下只能看，不能导入。' : count ? '' : '先勾选想要的技能，默认一个都不选。';
+  $('team-pick-installable').disabled = $('team-pick-none').disabled = Boolean(writeBusy);
+  $('team-agent').disabled = Boolean(writeBusy);
+}
+
+$('team-search').addEventListener('input', renderTeamDetail);
+$('team-group').addEventListener('change', renderTeamDetail);
+$('team-rows').addEventListener('change', event => {
+  const box = event.target.closest('[data-team-pick]');
+  if (!box) return;
+  if (box.checked) state.teamSelected.add(box.dataset.teamPick);
+  else state.teamSelected.delete(box.dataset.teamPick);
+  renderTeamImportBar();
+});
+$('team-pick-installable').addEventListener('click', () => {
+  for (const row of teamRows()) if (row.local.status === 'installable') state.teamSelected.add(row.name);
+  renderTeamDetail();
+});
+$('team-pick-none').addEventListener('click', () => {
+  state.teamSelected = new Set();
+  renderTeamDetail();
+});
+
+/* ---------- 分享我的技能：默认全选，只挑不想分享的；被别的技能需要的自动留下 ---------- */
+
+let teamUploadAll = null;      // 这个范围里能分享的全部技能（第一次核对时拿到）
+let teamUploadPreview = null;  // 最新一次核对：要上传的名单、自动留下的技能、预览编号
+let teamUploadExclude = new Set();
+let teamUploadSequence = 0;
+
+function renderTeamUploadControls() {
+  const count = teamUploadPreview?.skill_count || 0;
+  $('team-upload-apply').disabled = Boolean(writeBusy) || !teamUploadPreview || !count || !state.table?.write_allowed;
+  if (!writeBusy) $('team-upload-apply').textContent = count ? `分享 ${count} 个` : '分享';
+  $('team-upload-agent').disabled = Boolean(writeBusy);
+  $('team-upload-close').disabled = Boolean(writeBusy);
+}
+
+function renderTeamUploadList() {
+  const preview = teamUploadPreview;
+  const chosen = new Set((preview?.config.skills || []).map(row => row.name));
+  const retained = new Map((preview?.retained || []).map(row => [row.name, row]));
+  $('team-upload-list').innerHTML = (teamUploadAll || []).map(row => {
+    const kept = retained.get(row.name);
+    const notes = [
+      kept ? `<div class="item-note">${icon('link')} ${escape(kept.required_by.map(titleOf).join('、'))} 需要它，会一起分享</div>` : '',
+      row.source.kind === 'manual' || row.local_modified ? `<div class="item-note">${icon('lock')} 同事只能看到名字和说明，拿不到文件</div>` : '',
+    ].join('');
+    return `<div class="item-row">
+      <label class="check-hit"><input type="checkbox" data-team-upload="${escape(row.name)}" aria-label="${escape('分享 ' + titleOf(row.name))}"
+        ${chosen.has(row.name) ? 'checked' : ''} ${kept || writeBusy ? 'disabled' : ''}></label>
+      <div><div class="item-title">${nameHtml(row.name)}</div>${notes}</div>
+    </div>`;
+  }).join('') || (teamUploadAll ? `<div class="empty">${emptyInner('team', '这里没有在用的技能')}</div>` : '');
+  if (preview) {
+    const count = preview.skill_count;
+    $('team-upload-message').textContent = !count ? '一个都没选，先勾上要分享的技能。'
+      : `将分享 ${count} 个技能${preview.retained.length ? `，其中 ${preview.retained.length} 个是别的技能需要的` : ''}${state.team?.share ? '，会替换你上次的分享' : ''}。`;
+  }
+}
+
+async function previewTeamUpload() {
+  const sequence = ++teamUploadSequence;
+  teamUploadPreview = null;
+  $('team-upload-message').textContent = '正在整理名单…';
+  renderTeamUploadControls();
+  try {
+    const result = await api('/api/team/upload/preview', {agent: $('team-upload-agent').value || null, exclude: [...teamUploadExclude]});
+    if (sequence !== teamUploadSequence) return;
+    if (!teamUploadAll) teamUploadAll = result.config.skills;
+    teamUploadPreview = result;
+    renderTeamUploadList();
+  } catch (error) {
+    if (sequence === teamUploadSequence) $('team-upload-message').textContent = error.message;
+  } finally {
+    if (sequence === teamUploadSequence) renderTeamUploadControls();
+  }
+}
+
+$('team-share').addEventListener('click', () => {
+  teamUploadAll = teamUploadPreview = null;
+  teamUploadExclude = new Set();
+  $('team-upload-agent').innerHTML = '<option value="">全部在用技能</option>' + state.agents.map(agent =>
+    `<option value="${escape(agent.id)}">${escape(agent.name)} 在用的技能</option>`).join('');
+  $('team-upload-list').replaceChildren();
+  $('team-upload-dialog').showModal();
+  previewTeamUpload();
+});
+
+$('team-upload-agent').addEventListener('change', () => {
+  teamUploadAll = null;
+  teamUploadExclude = new Set();
+  $('team-upload-list').replaceChildren();
+  previewTeamUpload();
+});
+
+/* 整理名单要读每个技能的文件，有点慢：连续勾选时等停手再核对一次。 */
+let teamUploadTimer = null;
+$('team-upload-list').addEventListener('change', event => {
+  const box = event.target.closest('[data-team-upload]');
+  if (!box) return;
+  if (box.checked) teamUploadExclude.delete(box.dataset.teamUpload);
+  else teamUploadExclude.add(box.dataset.teamUpload);
+  teamUploadSequence++;
+  teamUploadPreview = null;
+  $('team-upload-message').textContent = '正在核对…';
+  renderTeamUploadControls();
+  clearTimeout(teamUploadTimer);
+  teamUploadTimer = setTimeout(previewTeamUpload, 600);
+});
+
+$('team-upload-close').addEventListener('click', () => $('team-upload-dialog').close());
+$('team-upload-dialog').addEventListener('cancel', event => { if (writeBusy) event.preventDefault(); });
+$('team-upload-dialog').addEventListener('close', () => { teamUploadSequence++; clearTimeout(teamUploadTimer); });
+$('team-upload-dialog').querySelector('form').addEventListener('submit', event => event.preventDefault());
+
+$('team-upload-apply').addEventListener('click', async event => {
+  const preview = teamUploadPreview;
+  if (!preview || writeBusy) return;
+  await runWrite({
+    button: event.currentTarget, busyText: '正在分享…',
+    work: async () => {
+      const result = await api('/api/team/upload/apply', {review: preview.review});
+      $('team-upload-dialog').close();
+      await refreshTeam();
+      return result;
+    },
+    success: result => ({text: `已分享 ${result.skill_count} 个技能，同事现在能看到了。`}),
+  });
+  renderTeamUploadControls();
+});
+
+$('team-withdraw').addEventListener('click', async event => {
+  const ok = await confirmDialog({
+    title: '撤回我的分享',
+    lines: ['同事将看不到你分享的技能名单。', '已经照着装好的同事不受影响；你随时可以重新分享。'],
+    okText: '撤回',
+  });
+  if (!ok) return;
+  await runWrite({
+    button: event.currentTarget, busyText: '正在撤回…',
+    work: async () => {
+      const result = await api('/api/team/withdraw', {});
+      await refreshTeam();
+      return result;
+    },
+    success: () => ({text: '已撤回你的分享。'}),
+  });
+});
+
+/* ---------- 导入同事的技能：先核对，再导入，导入后可以整批撤销 ---------- */
+
+let teamImportPlan = null;
+let teamImportResult = null;
+let teamImportSequence = 0;
+let teamImportReading = false;
+
+const teamImportAgents = () => $('team-agent').value ? [$('team-agent').value] : null;
+
+function teamReviewName(name) {
+  const row = state.teamDetail?.config.skills.find(item => item.name === name);
+  return row ? teamNameHtml(row) : '';
+}
+
+function renderTeamImportControls() {
+  const busy = Boolean(writeBusy);
+  const count = (teamImportPlan?.install.length || 0) + (teamImportPlan?.reuse.length || 0);
+  $('team-import-apply').disabled = busy || !state.table?.write_allowed || !teamImportPlan || !count;
+  $('team-import-apply').hidden = Boolean(teamImportResult);
+  if (!busy) $('team-import-apply').textContent = count ? `导入 ${count} 个` : '导入';
+  $('team-import-close').disabled = busy;
+  $('team-import-retry').disabled = busy || teamImportReading;
+  $('team-import-undo').disabled = busy || !state.table?.write_allowed;
+  $('team-import-undo').hidden = !teamImportResult?.id;
+}
+
+async function previewTeamImport() {
+  const detail = state.teamDetail;
+  if (!detail) return;
+  const sequence = ++teamImportSequence;
+  teamImportPlan = null;
+  teamImportReading = true;
+  $('team-import-review').replaceChildren();
+  $('team-import-retry').hidden = true;
+  $('team-import-message').textContent = '正在核对…';
+  renderTeamImportControls();
+  try {
+    const plan = await api('/api/team/import/preview', {member: detail.member.id, skills: [...state.teamSelected], agents: teamImportAgents()});
+    if (sequence !== teamImportSequence) return;
+    teamImportPlan = plan;
+    $('team-import-message').textContent = plan.message + '。';
+    $('team-import-review').innerHTML = importReviewHtml(plan, false, '可以关掉这里，在「给谁用」里指定接收方', teamReviewName);
+  } catch (error) {
+    if (sequence !== teamImportSequence) return;
+    $('team-import-message').textContent = error.message;
+    $('team-import-retry').hidden = false;
+  } finally {
+    if (sequence === teamImportSequence) {
+      teamImportReading = false;
+      renderTeamImportControls();
+    }
+  }
+}
+
+$('team-import').addEventListener('click', () => {
+  teamImportPlan = teamImportResult = null;
+  $('team-import-title').textContent = `导入 ${state.teamDetail.member.name} 分享的技能`;
+  $('team-import-dialog').showModal();
+  previewTeamImport();
+});
+
+$('team-import-retry').addEventListener('click', previewTeamImport);
+$('team-import-close').addEventListener('click', () => $('team-import-dialog').close());
+$('team-import-dialog').addEventListener('cancel', event => { if (writeBusy) event.preventDefault(); });
+$('team-import-dialog').addEventListener('close', () => { teamImportSequence++; });
+$('team-import-dialog').querySelector('form').addEventListener('submit', event => event.preventDefault());
+
+async function undoTeamImport(result, button) {
+  if (await undoOperation(result.id, {skills: [...result.install, ...result.reuse], message: result.message, button})) {
+    if (result === teamImportResult) $('team-import-dialog').close();
+    await reloadTeamDetail();
+  }
+}
+
+$('team-import-undo').addEventListener('click', event => undoTeamImport(teamImportResult, event.currentTarget));
+$('team-import-apply').addEventListener('click', async event => {
+  if (!teamImportPlan || writeBusy) return;
+  const plan = teamImportPlan;
+  await runWrite({
+    button: event.currentTarget, busyText: '正在下载并导入…',
+    onError: error => {
+      teamImportPlan = null;
+      $('team-import-message').textContent = error.message;
+      $('team-import-retry').hidden = false;
+      renderTeamImportControls();
+    },
+    work: async () => {
+      const result = await api('/api/team/import/apply', {review: plan.review, revision: plan.revision});
+      teamImportResult = result;
+      $('team-import-title').textContent = '导入结果';
+      $('team-import-message').textContent = result.message + (result.complete ? '。' : '。未完成项见下方明细。');
+      $('team-import-review').innerHTML = importReviewHtml({...plan, ...result}, true, '', teamReviewName);
+      state.teamSelected = new Set();
+      await refreshEverything();
+      await reloadTeamDetail();
+      return result;
+    },
+    success: result => ({text: result.complete ? result.message : '可用部分已处理，未完成项见导入结果。',
+      undo: result.id ? button => undoTeamImport(result, button) : null}),
+  });
+  renderTeamImportControls();
 });
 
 function llmBody() {
@@ -4145,6 +4648,7 @@ async function refreshMigrationStatus() {
   try {
     const status = await api('/api/status');
     state.writeAllowed = !status.read_only;
+    renderTeamSettings();
     if (!state.table) $('mode-badge').hidden = state.writeAllowed;
     renderMigrationMode(state.writeAllowed);
     $('migration-apply').disabled = !state.writeAllowed;
@@ -4191,6 +4695,7 @@ function placeFromHash() {
   if (page === 'settings') return {page: 'settings', block: SETTINGS_BLOCKS.includes(arg) ? arg : 'ai'};
   if (page === 'log' || page === 'diagnostics') return {page: 'settings', block: page};
   if (page === 'cleanup') return {page: 'cleanup'};
+  if (page === 'team') return {page: 'team'};
   if (page === 'skills' && arg) return {page: 'skills', agent: decodeURIComponent(arg)};
   return {page: 'skills'};
 }
@@ -4227,6 +4732,8 @@ async function start() {
   await refreshLog();
   refreshMigrationStatus();
   refreshUpdates();
+  // 连没连上分享站决定页头有没有「团队」；分享站慢也不挡页面。
+  if (startPlace.page !== 'team') refreshTeam();
   showPage(startPlace.page);
   // 地址点名了设置页的哪一块，等内容都画完再滚过去。
   if (startPlace.page === 'settings') setTimeout(() => showSettingsBlock(state.settingsBlock), 300);

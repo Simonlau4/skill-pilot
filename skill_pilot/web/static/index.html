@@ -29,6 +29,10 @@
       <circle cx="12" cy="12" r="9"/>
       <path d="M12 6v6h4"/>
     </symbol>
+    <symbol id="sp-team" viewBox="0 0 24 24">
+      <circle cx="9" cy="8" r="3.5"/>
+      <path d="M2.5 20a6.5 6.5 0 0 1 13 0 M15.5 4.6a3.5 3.5 0 0 1 0 6.8 M18 14a6.5 6.5 0 0 1 3.5 6"/>
+    </symbol>
     <symbol id="sp-settings" viewBox="0 0 24 24">
       <path d="M3 6h4 M11 6h10 M3 12h10 M17 12h4 M3 18h4 M11 18h10"/>
       <circle cx="9" cy="6" r="2"/>
@@ -105,6 +109,7 @@
     <nav class="nav" aria-label="主导航">
       <button class="nav-item" data-page="skills" aria-current="page"><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-skills"/></svg><span>技能</span></button>
       <button class="nav-item" data-page="cleanup"><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-cleanup"/></svg><span>清理</span></button>
+      <button class="nav-item" data-page="team" hidden><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>团队</span></button>
       <button class="nav-item" data-page="settings"><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-settings"/></svg><span>设置</span></button>
     </nav>
     <span id="mode-badge" class="tag tag-quiet" hidden>只读预览</span>
@@ -276,7 +281,7 @@
     </div>
   </section>
 
-  <!-- ========== 设置页：左边目录固定，右边六块按顺序排下来；点目录滚过去，滚动时高亮跟着走 ========== -->
+  <!-- ========== 设置页：左边目录固定，右边七块按顺序排下来；点目录滚过去，滚动时高亮跟着走 ========== -->
   <section id="page-settings" class="page-section" hidden>
     <div class="settings-split">
       <nav id="settings-nav" class="rail-list settings-nav" aria-label="设置内容">
@@ -285,6 +290,7 @@
           <button class="rail-item set-nav-item" type="button" data-block="ai" aria-current="true">AI 整理</button>
           <button class="rail-item set-nav-item" type="button" data-block="agents">agent</button>
           <button class="rail-item set-nav-item" type="button" data-block="share">分享配置</button>
+          <button class="rail-item set-nav-item" type="button" data-block="team">团队分享</button>
         </div>
         <div class="set-nav-group" role="group" aria-labelledby="set-nav-upkeep">
           <p class="set-nav-title" id="set-nav-upkeep">记录与维护</p>
@@ -394,6 +400,31 @@
             <button id="config-export" class="btn" disabled><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg><span>导出配置</span></button>
             <button id="config-import" class="btn" disabled><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-inbox"/></svg><span>导入配置</span></button>
           </p>
+        </section>
+
+        <!-- ========== 常用：团队分享（连上 NAS 或团队电脑上的分享站） ========== -->
+        <section class="set-block" id="block-team" data-block="team" aria-labelledby="set-team-title">
+          <div class="set-head">
+            <div class="set-head-text">
+              <h2 id="set-team-title">团队分享</h2>
+              <p class="set-lead">连上团队的分享站，看同事在用的技能，挑适合的装上。</p>
+            </div>
+          </div>
+
+          <form id="team-form" class="settings-form">
+            <label for="team-url">分享站地址</label>
+            <input id="team-url" type="url" class="input" placeholder="管理员给的地址，例如 http://192.168.1.20:8765" autocomplete="off" spellcheck="false" required>
+            <label for="team-key">我的口令</label>
+            <input id="team-key" type="password" class="input" autocomplete="off" aria-describedby="team-note">
+            <p id="team-note" class="note-line">
+              <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
+              <span>口令只存在这台电脑上；只有你点“分享”时才上传技能名单。</span>
+              <button type="button" class="hint" data-hint="分享站只收技能名单、中文名和说明，不收技能文件、AI 服务的 key 和本机目录。地址和口令向管理员要，口令每人一个。"></button>
+            </p>
+            <p class="row-wrap"><button id="team-save" class="btn btn-primary">保存并连接</button>
+              <button id="team-goto" type="button" class="link-btn" hidden>去团队页</button></p>
+            <p id="team-message" class="muted" role="status"></p>
+          </form>
         </section>
 
         <h2 class="set-group-title">记录与维护</h2>
@@ -510,6 +541,67 @@
       </div>
     </div>
   </section>
+  <!-- ========== 团队页：我的分享在上，同事的分享在下；点开一份挑技能导入 ========== -->
+  <section id="page-team" class="page-section" hidden>
+    <div id="team-unset" hidden>
+      <div class="empty"><svg class="ico ico-lg" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>还没连上团队的分享站</span><button id="team-setup" type="button" class="link-btn">去设置</button></div>
+    </div>
+    <div id="team-ready">
+      <div class="section-head">
+        <h2>我的分享</h2>
+        <button type="button" class="hint" data-hint="分享的是技能名单、中文名和说明，同事可以照着装公开来源的技能。自制或改过的技能，同事只能看到名字和说明。再分享一次会换成新的名单。"></button>
+      </div>
+      <div class="item-row team-mine">
+        <div>
+          <div id="team-mine-title" class="item-title">正在读取…</div>
+          <div id="team-mine-note" class="item-note"></div>
+        </div>
+        <span class="item-end">
+          <button id="team-withdraw" class="btn btn-small btn-quiet" type="button" hidden>撤回分享…</button>
+          <button id="team-share" class="btn btn-small" type="button" disabled><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>分享我的技能…</span></button>
+        </span>
+      </div>
+
+      <div class="section-head">
+        <h2 id="team-others-title">同事的分享</h2>
+        <button id="team-back" class="link-btn" type="button" hidden>返回同事列表</button>
+        <button id="team-refresh" class="btn btn-small btn-quiet" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg><span>刷新</span></button>
+      </div>
+      <p id="team-error" class="banner banner-danger" role="alert" hidden></p>
+      <div id="team-shares" class="list"></div>
+
+      <div id="team-detail" hidden>
+        <div class="toolbar">
+          <input id="team-search" type="search" class="input input-search" placeholder="搜技能的名字或用途" aria-label="搜索同事分享的技能" autocomplete="off" spellcheck="false">
+          <select id="team-group" class="input" aria-label="按分组看"><option value="">全部分组</option></select>
+          <span class="toolbar-end">
+            <button id="team-pick-installable" class="link-btn" type="button">选中所有可以装的</button>
+            <button id="team-pick-none" class="link-btn" type="button">清空</button>
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table class="grid team-grid">
+            <thead>
+              <tr>
+                <th class="col-check">要</th>
+                <th>技能</th>
+                <th>分组</th>
+                <th>在我这里</th>
+              </tr>
+            </thead>
+            <tbody id="team-rows"></tbody>
+          </table>
+        </div>
+        <div class="row-wrap team-import-bar">
+          <label for="team-agent">给谁用</label>
+          <select id="team-agent" class="input"><option value="">按同事的分配</option></select>
+          <button id="team-import" class="btn btn-primary" type="button" disabled>导入</button>
+          <span id="team-import-note" class="muted"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <footer class="footer">
@@ -596,6 +688,39 @@
       <button id="config-import-retry" type="button" class="btn" hidden>重新预览</button>
       <button id="config-import-undo" type="button" class="btn" hidden>撤销这次导入</button>
       <button id="config-import-apply" type="button" class="btn btn-primary" disabled>导入</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="team-upload-dialog" class="dialog dialog-wide" aria-labelledby="team-upload-title">
+  <form class="dialog-form">
+    <h2 id="team-upload-title">分享我的技能</h2>
+    <div class="settings-form">
+      <label for="team-upload-agent">分享哪些</label>
+      <select id="team-upload-agent" class="input"><option value="">全部在用技能</option></select>
+    </div>
+    <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
+      <span>只传技能名单、中文名和说明，不传技能文件、key 和本机目录。</span></p>
+    <p id="team-upload-message" role="status">正在整理名单…</p>
+    <div id="team-upload-list" class="dialog-body list"></div>
+    <div class="dialog-actions">
+      <button id="team-upload-close" type="button" class="btn">取消</button>
+      <button id="team-upload-apply" type="button" class="btn btn-primary" disabled>分享</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="team-import-dialog" class="dialog dialog-wide" aria-labelledby="team-import-title">
+  <form class="dialog-form">
+    <h2 id="team-import-title">导入同事的技能</h2>
+    <p class="muted">已有同名技能会保留，只补上分配和所需技能。导入后可整批撤销。</p>
+    <p id="team-import-message" role="status">正在核对…</p>
+    <div id="team-import-review" class="dialog-body"></div>
+    <div class="dialog-actions">
+      <button id="team-import-close" type="button" class="btn">关闭</button>
+      <button id="team-import-retry" type="button" class="btn" hidden>重新预览</button>
+      <button id="team-import-undo" type="button" class="btn" hidden>撤销这次导入</button>
+      <button id="team-import-apply" type="button" class="btn btn-primary" disabled>导入</button>
     </div>
   </form>
 </dialog>

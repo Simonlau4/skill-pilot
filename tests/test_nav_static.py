@@ -23,13 +23,15 @@ def extract_function(source, signature):
 
 
 class NavStaticTests(unittest.TestCase):
-    def test_header_has_three_items_and_old_addresses_open_settings(self):
+    def test_header_items_and_old_addresses_open_settings(self):
         html = (STATIC / 'index.html').read_text()
         nav = re.search(r'<nav class="nav"[\s\S]*?</nav>', html)
         self.assertIsNotNone(nav, '页头导航不见了')
         items = re.findall(r'data-page="([^"]+)"[\s\S]*?<span>([^<]+)</span>', nav.group(0))
-        self.assertEqual(items, [('skills', '技能'), ('cleanup', '清理'), ('settings', '设置')])
-        self.assertEqual(nav.group(0).count('class="nav-item"'), 3)
+        self.assertEqual(items, [('skills', '技能'), ('cleanup', '清理'), ('team', '团队'), ('settings', '设置')])
+        self.assertEqual(nav.group(0).count('class="nav-item"'), 4)
+        # 「团队」只在连上分享站后出现，默认藏着。
+        self.assertRegex(nav.group(0), r'data-page="team" hidden')
         self.assertIn('id="mode-badge"', html)
         self.assertIn('只读预览', html)
 
@@ -46,6 +48,8 @@ const cases = [
   ['#settings/log', 'settings', 'log'],
   ['#settings/diagnostics', 'settings', 'diagnostics'],
   ['#cleanup', 'cleanup', ''],
+  ['#team', 'team', ''],
+  ['#settings/team', 'settings', 'team'],
   ['#skills', 'skills', ''],
 ];
 for (const [hash, page, block] of cases) {{
@@ -72,6 +76,7 @@ function $(id) {
 const state = {table: null, writeAllowed: true};
 let readOnly = true;
 function renderMigrationMode() {}
+function renderTeamSettings() {}
 function migrationError(error) { throw error; }
 async function api(path) {
   if (path !== '/api/status') throw new Error(path);

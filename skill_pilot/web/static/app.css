@@ -1440,6 +1440,31 @@ pre {
   .set-nav-title { margin: 0 var(--sp-1) 0 var(--sp-2); }
 }
 
+/* ---------- 团队页：我的分享、同事的分享、一份分享里的技能 ---------- */
+
+#page-team .section-head:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.team-mine, #team-shares {
+  padding: 0 var(--sp-4);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+.team-mine { padding-top: var(--sp-4); padding-bottom: var(--sp-4); }
+#team-shares:empty { display: none; }
+#team-shares > .empty { margin: 0 calc(-1 * var(--sp-4)); border-radius: var(--radius-lg); }
+#team-error { margin: var(--sp-2) 0; }
+#team-detail .toolbar { margin: var(--sp-2) 0 var(--sp-3); }
+#team-group { width: auto; min-width: 140px; }
+table.team-grid td:nth-child(2) { width: 58%; }
+table.team-grid td:nth-child(3), table.team-grid td:nth-child(4) { white-space: nowrap; }
+table.team-grid td .hint { margin-left: 2px; }
+.team-link { margin-left: var(--sp-2); font-size: var(--fs-small); color: var(--info-ink); }
+.team-import-bar { margin-top: var(--sp-4); }
+.team-import-bar #team-agent { width: auto; min-width: 180px; }
+#team-upload-list .item-row { flex-wrap: nowrap; align-items: flex-start; }
+#team-upload-list .item-note .ico { vertical-align: -3px; }
+
 @media (max-width: 720px) {
   #mode-badge { display: none; }
   .skill-row { grid-template-columns: minmax(0, 1fr) 88px; }
