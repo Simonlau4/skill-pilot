@@ -91,7 +91,7 @@ def create(home=None):
     ) if item['count']]
     result['total'] = sum(map(len, result['_groups'].values()))
     result['remaining'] = result['total']
-    result['repositories'] = sum(g not in {'skip', 'lark'} for g in result['_groups'])
+    result['repositories'] = sum(g not in {'skip', 'lark', 'team'} for g in result['_groups'])
     return result
 
 
@@ -117,6 +117,13 @@ def check(home=None, review=None, lock=None):
                     packages = lark.prepare({n: s for n, _, s in items}, temporary, result['lark']['latest_version'], reader.deadline)
             except (ValueError, OSError, KeyError, TypeError) as error:
                 failure = str(error); result['lark'] = {'available': False, 'message': '飞书更新没查清楚', 'error': failure}
+        if group == 'team':
+            from . import team
+            try:
+                team_config, _, cards = team._fetch(home)
+                listings = {(r['member']['id'], r['name']): r for card in cards for r in card['listings']}
+            except (ValueError, OSError) as error:
+                failure = str(error)
         for name, skill, source in items:
             row = {'name': name, 'source': source, 'has_update': False, 'local_modified': False, 'status': '已是最新'}
             try:
@@ -132,6 +139,22 @@ def check(home=None, review=None, lock=None):
                         if name in packages:
                             row.update(_base_path=str(base), _upstream_path=packages[name]['path'], package=packages[name],
                                        tree_sha=git_tree(Path(packages[name]['path'])), has_update=True, status=result['lark']['message'])
+                    elif group == 'team':
+                        if failure: raise ValueError(failure)
+                        listing = listings.get((source['member'], source['name']))
+                        if not listing or listing['source']['kind'] != 'files':
+                            row['status'] = '作者已下架'
+                        else:
+                            version = listing['source']['version']
+                            row.update(version=version, has_update=version != source['version'],
+                                       status='有更新' if version != source['version'] else '已是最新')
+                            if row['has_update']:
+                                incoming = team.package(team_config, source['member'], source['name'], version,
+                                                        Path(temporary) / 'team' / name)
+                                processing = normalization.apply(incoming)
+                                row.update(_base_path=str(base), _upstream_path=str(incoming),
+                                           tree_sha=git_tree(incoming), normalized_tree_sha=git_tree(incoming),
+                                           normalization=processing)
                     else:
                         reader.remaining()
                         record = skill['source'].get('record', skill['source'])
@@ -395,6 +418,8 @@ def _apply_group(review, names, choices, merge_ids):
             skill['source'].update(tree_sha=row['tree_sha'])
             if row['source']['kind'] == 'github':
                 skill['source'].update(repository=row['source']['repository'], commit=row['commit'], source_path=row['source']['path'])
+            elif row['source']['kind'] == 'team':
+                skill['source']['team']['version'] = row['version']
             else:
                 skill['source'].update(cli_version=review['lark']['latest_version'], digest=row['package']['digest'])
             skill['last_update_choice'] = row['_choice']

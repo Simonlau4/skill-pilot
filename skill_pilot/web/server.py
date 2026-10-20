@@ -97,6 +97,9 @@ class Dashboard(ThreadingHTTPServer):
         if self._program_thread_blocks_exit():
             self.program_thread.join()
         if self.reload_thread: self.reload_thread.join()
+        for review in self.team_import_reviews.values():
+            if review.get('temporary'):
+                shutil.rmtree(review['temporary'], ignore_errors=True)
         if self.program_review:
             shutil.rmtree(self.program_review['temporary'], ignore_errors=True)
 
@@ -334,11 +337,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, sharing.export_config(self.server.home, query.get('agent', [None])[0]))
             except (ValueError, OSError, KeyError) as error:
                 self.reply(409, {'error': str(error)})
-        elif path in {'/api/team', '/api/team/shares'} or path.startswith('/api/team/shares/'):
+        elif path in {'/api/team', '/api/team/catalog', '/api/team/listings/candidates'}:
             try:
                 result = (team.status(self.server.home, strict=False) if path == '/api/team' else
-                          team.shares(self.server.home) if path == '/api/team/shares' else
-                          team.detail(self.server.home, path.removeprefix('/api/team/shares/')))
+                          team.catalog(self.server.home) if path == '/api/team/catalog' else
+                          team.listing_candidates(self.server.home))
                 self.reply(200, result)
             except (ValueError, OSError) as error:
                 self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取团队分享，请稍后重试。'})
@@ -417,14 +420,18 @@ class Handler(BaseHTTPRequestHandler):
         read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan', '/api/team/upload/preview', '/api/team/import/preview'}
+                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/install/preview'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply','/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
-                        '/api/team/upload/apply', '/api/team/withdraw', '/api/team/import/apply'}
+                        '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/install/apply',
+                        '/api/team/ratings', '/api/team/ratings/remove'}
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
                            '/api/settings/extra-sources', '/api/tags', '/api/team/settings'}
         program_routes = {'/api/program/check', '/api/program/apply'}
+        if path.startswith(('/api/team/shares', '/api/team/upload/', '/api/team/import/')) or path == '/api/team/withdraw':
+            self.reply(404, {'error': '没有这个团队商店操作。'})
+            return
         if path not in {"/api/migration/apply", "/api/restore"} | read_routes | write_routes | settings_routes | program_routes:
             self.reply(405, {"error": "当前阶段没有这个操作。"})
             return
@@ -624,29 +631,31 @@ class Handler(BaseHTTPRequestHandler):
         home = self.server.home
         if path == '/api/team/settings':
             return team.save_settings(home, body)
-        if path == '/api/team/upload/preview':
-            result = team.upload_preview(home, body.get('agent'), body.get('exclude', []))
+        if path == '/api/team/listings/preview':
+            saved, result = team.listings_preview(home, body.get('skills'))
             review = secrets.token_urlsafe(16)
-            self.server.team_upload_reviews[review] = result
-            return {**result, 'review': review, 'skill_count': len(result['config']['skills'])}
-        if path == '/api/team/import/preview':
-            saved, plan = team.import_preview(home, body.get('member'), body.get('skills'), body.get('agents'))
+            self.server.team_upload_reviews[review] = saved
+            return {**result, 'review': review}
+        if path == '/api/team/install/preview':
+            saved, plan = team.install_preview(home, body.get('key'), body.get('agents'))
             review = secrets.token_urlsafe(16)
             self.server.team_import_reviews[review] = saved
-            return {**plan, 'review': review, 'member': saved['member'], 'config': saved['config']}
-        if path == '/api/team/withdraw':
-            return team.withdraw(home)
-        reviews = self.server.team_upload_reviews if path == '/api/team/upload/apply' else self.server.team_import_reviews
+            return {**plan, 'review': review}
+        if path == '/api/team/listings/remove':
+            return team.listings_remove(home, body.get('names'))
+        if path in {'/api/team/ratings', '/api/team/ratings/remove'}:
+            return team.rate(home, body, path.endswith('/remove'))
+        reviews = self.server.team_upload_reviews if path == '/api/team/listings/apply' else self.server.team_import_reviews
         identifier = body.get('review')
         if not isinstance(identifier, str) or identifier not in reviews:
             raise ValueError('这份预览已失效，请重新预览。')
         review = reviews[identifier]
-        if path == '/api/team/upload/apply':
-            return team.upload(home, review['config'])
-        if not isinstance(body.get('revision'), str) or body['revision'] != review['revision']:
-            raise ValueError('请使用这份预览确认导入；本机技能有变化时需要重新预览。')
-        result = sharing.import_config(review['config'], review['agents'], home, review['revision'],
-                                       member_name=review['member']['name'])
+        if path == '/api/team/listings/apply':
+            result = team.listings_apply(home, review)
+        else:
+            result = team.install_apply(home, review)
+            shutil.rmtree(review['temporary'], ignore_errors=True)
+        reviews.pop(identifier, None)
         self.server.invalidate_agents()
         self.server.inventory = scan(home)
         return result

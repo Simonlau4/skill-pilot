@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import store, team, team_hub
+from skill_pilot import operations, store, team, team_hub
 from skill_pilot.web import runtime, server
 from tests import set_up_home
 
@@ -236,12 +236,19 @@ server.run(json_output=True)
         self.addCleanup(stop_hub)
         member = hub.store.add_member('示例成员')
         team.save_settings(self.home, {'url': 'http://127.0.0.1:' + str(hub.server_port), 'key': member['token']})
-        team.upload(self.home, team.upload_preview(self.home)['config'])
+        saved, _ = team.listings_preview(self.home, [{'name': 'sample'}])
+        team.listings_apply(self.home, saved)
+        colleague = hub.store.add_member('Acme 示例同事')
+        from tests.test_team_hub import listing, file
+        incoming = listing('acme-incoming', 'files')
+        incoming['source']['files'] = [file('SKILL.md', '---\nname: acme-incoming\ndescription: example\n---\nexample\n')]
+        team._request({'url': 'http://127.0.0.1:' + str(hub.server_port), 'key': colleague['token']},
+                      '/api/listings/me', 'PUT', {'listings': [incoming]})
         before = store.physical_state(self.home)
         self.start()
-        status, upload = self.request('/api/team/upload/preview', {})
+        status, upload = self.request('/api/team/listings/preview', {'skills': [{'name': 'sample'}]})
         self.assertEqual(status, 200, upload)
-        status, imported = self.request('/api/team/import/preview', {'member': member['id'], 'skills': ['sample']})
+        status, imported = self.request('/api/team/install/preview', {'key': 'team:' + colleague['id'] + ':acme-incoming', 'agents': ['codex']})
         self.assertEqual(status, 200, imported)
         self.change_backend()
         path = self.code / 'skill_pilot/web/server.py'
@@ -251,11 +258,13 @@ server.run(json_output=True)
             "'test_team_uploads': self.server.team_upload_reviews, 'test_team_imports': self.server.team_import_reviews, "))
         self.request('/api/runtime/refresh', {})
         current = self.wait_status(lambda s: s.get('test_marker') == 'new-program')
-        self.assertEqual(current['test_team_uploads'][upload['review']]['config'], upload['config'])
+        self.assertEqual(current['test_team_uploads'][upload['review']]['listings'][0]['name'], 'sample')
         saved = current['test_team_imports'][imported['review']]
-        self.assertEqual(saved['config'], imported['config'])
-        self.assertEqual(saved['revision'], imported['revision'])
-        self.assertEqual(saved['member'], imported['member'])
+        self.assertEqual(saved['reuse'], imported['reuse'])
+        self.assertEqual(saved['agents'], imported['agents'])
+        self.assertEqual(saved['revision'], operations.revision(self.home, ['codex']))
+        self.assertEqual(saved['items'][0]['name'], 'acme-incoming')
+        self.assertTrue((Path(saved['items'][0]['path']) / 'SKILL.md').is_file())
         self.assertEqual(store.physical_state(self.home), before)
 
     def test_unloadable_update_keeps_old_program_available_then_allows_retry(self):
