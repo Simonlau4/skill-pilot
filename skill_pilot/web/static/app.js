@@ -339,8 +339,8 @@ $('task-bar').addEventListener('click', event => {
      任务条转成错误样式（写入不给「重试」，让用户看清原因自己决定）。
    返回 work() 的结果；失败返回 null，不往外抛。 */
 const WRITE_LOCK_SELECTORS = [
-  '#team-form input', '#team-save', '#page-team button:not(.hint)', '#page-team input', '#page-team select',
-  '#team-upload-dialog input', '#team-upload-dialog select', '#team-upload-dialog button:not(.hint)', '#team-import-dialog button:not(.hint)',
+  '#team-form input', '#team-save', '#store-publish', '#store-list [data-store-republish]', '#store-list [data-store-unlist]',
+  '#store-shelves [data-store-publish]', '#store-publish-dialog input', '#store-publish-dialog button:not(.hint)',
   '#skills-list button[data-skill]', '#skills-list button[data-update-up]', '#action-bar button', '#skills-refresh',
   '#install-url', '#install-rail button:not(.hint)',
   '#cleanup-rows input[data-cleanup]', '#withdrawn-list button', '#withdrawn-refresh',
@@ -546,11 +546,13 @@ const state = {
   cleanup: null,
   cleanupSelected: new Set(),
   logs: [],
-  team: null,          // /api/team：有没有连上分享站、我是谁、我的分享
-  teamShares: null,    // 同事的分享列表；null 是还没读
-  teamDetail: null,    // 正在看的那一份分享
-  teamSelected: new Set(),
-  teamError: '',
+  team: null,          // /api/team：有没有连上分享站、我是谁
+  store: null,         // /api/team/catalog：团队技能商店的全部卡片；null 是还没读
+  storeError: '',
+  storeSort: 'latest', // 全部技能的排序：latest / rating / popular
+  storeGroup: '',      // 选中的分组；'-' 是没分组
+  storeMine: false,    // 只看我上架的
+  storeDetail: null,   // 详情面板里正在看的卡片编号
 };
 
 /* 编号翻名字：先看接口给的目录（操作记录、已撤下的技能不在当前表里，也从这里兜底），
@@ -3291,7 +3293,7 @@ function detailTabbables(panel) {
 function trapDetailTab(event) {
   const panel = $('detail-panel');
   // 开始收起后就不再拦 Tab，免得焦点被拉回正在消失的面板。
-  if (!state.detail || panel.hidden) return;
+  if (!(state.detail || state.storeDetail) || panel.hidden) return;
   const items = detailTabbables(panel);
   if (!items.length) {
     event.preventDefault();
@@ -3350,12 +3352,17 @@ function openDetail(name) {
   if (state.detail !== name || $('detail-panel').hidden) detailOpener = document.activeElement?.closest('#skills-list') ? document.activeElement : null;
   state.detail = name;
   renderDetail();
+  showDetailPanel(() => state.detail === name);
+}
+
+/* 技能详情和团队商店的详情共用这块面板。stillOpen 判断动画开始前用户有没有换走。 */
+function showDetailPanel(stillOpen) {
   const panel = $('detail-panel');
   panel.hidden = false;
   $('panel-scrim').hidden = false;
   $('detail-body').scrollTop = 0;
   requestAnimationFrame(() => {
-    if (state.detail !== name || panel.hidden) return;
+    if (!stillOpen() || panel.hidden) return;
     panel.classList.add('is-open');
   });
   // 先把焦点放进面板，再锁住后面的页面，避免焦点在中途落到页脚并带着页面滚。
@@ -3366,14 +3373,25 @@ function openDetail(name) {
 function closeDetail() {
   const panel = $('detail-panel');
   panel.classList.remove('is-open');
+  const storeKey = state.storeDetail;
   state.detail = null;
+  state.storeDetail = null;
+  storeGet = null;
   setTimeout(() => {
-    if (state.detail) return;
+    if (state.detail || state.storeDetail) return;
     panel.classList.remove('is-open');
     panel.hidden = true;
     $('panel-scrim').hidden = true;
   }, 200);
   holdDetailBackground(false);
+  if (storeKey) {
+    // 商店的卡片或列表行可能已经重画过：按卡片编号找回来，把焦点还给它。
+    const opener = storeOpener?.isConnected ? storeOpener
+      : $('page-team').querySelector(`[data-store-open="${CSS.escape(storeKey)}"]`);
+    opener?.focus();
+    storeOpener = null;
+    return;
+  }
   // 列表可能已经重画过：按技能名找回打开详情的那一行，把焦点还给它。
   const openerName = detailOpener?.dataset?.open || detailOpener?.dataset?.updateUp;   // 从技能名或更新小箭头打开的
   const opener = detailOpener?.isConnected ? detailOpener

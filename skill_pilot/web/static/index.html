@@ -33,6 +33,9 @@
       <circle cx="9" cy="8" r="3.5"/>
       <path d="M2.5 20a6.5 6.5 0 0 1 13 0 M15.5 4.6a3.5 3.5 0 0 1 0 6.8 M18 14a6.5 6.5 0 0 1 3.5 6"/>
     </symbol>
+    <symbol id="sp-star" viewBox="0 0 24 24">
+      <path d="M12 3.6l2.55 5.2 5.75.84-4.16 4.05.98 5.72L12 16.7l-5.12 2.71.98-5.72L3.7 9.64l5.75-.84z"/>
+    </symbol>
     <symbol id="sp-settings" viewBox="0 0 24 24">
       <path d="M3 6h4 M11 6h10 M3 12h10 M17 12h4 M3 18h4 M11 18h10"/>
       <circle cx="9" cy="6" r="2"/>
@@ -544,64 +547,41 @@
       </div>
     </div>
   </section>
-  <!-- ========== 团队页：我的分享在上，同事的分享在下；点开一份挑技能导入 ========== -->
+  <!-- ========== 团队页：团队技能商店。上面几排推荐，下面是全部技能；点开在右侧详情里装上、评价 ========== -->
   <section id="page-team" class="page-section" hidden>
     <div id="team-unset" hidden>
       <div class="empty"><svg class="ico ico-lg" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>还没连上团队的分享站</span><button id="team-setup" type="button" class="link-btn">去设置</button></div>
     </div>
     <div id="team-ready">
-      <div class="section-head">
-        <h2>我的分享</h2>
-        <button type="button" class="hint" data-hint="分享的是技能名单、中文名和说明，同事可以照着装公开来源的技能。自制或改过的技能，同事只能看到名字和说明。再分享一次会换成新的名单。"></button>
-      </div>
-      <div class="item-row team-mine">
-        <div>
-          <div id="team-mine-title" class="item-title">正在读取…</div>
-          <div id="team-mine-note" class="item-note"></div>
-        </div>
-        <span class="item-end">
-          <button id="team-withdraw" class="btn btn-small btn-quiet" type="button" hidden>撤回分享…</button>
-          <button id="team-share" class="btn btn-small" type="button" disabled><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>分享我的技能…</span></button>
+      <div class="toolbar store-bar">
+        <label class="search-field">
+          <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
+          <input id="store-search" type="search" class="input input-search" placeholder="搜技能的名字、用途或推荐语" aria-label="搜索团队技能" autocomplete="off" spellcheck="false">
+        </label>
+        <span class="toolbar-end">
+          <button id="store-refresh" class="btn btn-iconic btn-quiet" type="button" aria-label="刷新" title="刷新"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg></button>
+          <button id="store-mine" class="btn" type="button" aria-pressed="false"><span>我上架的</span><span id="store-mine-count" class="n"></span></button>
+          <button id="store-publish" class="btn btn-primary" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-plus"/></svg><span>上架技能</span></button>
         </span>
       </div>
-
-      <div class="section-head">
-        <h2 id="team-others-title">同事的分享</h2>
-        <button id="team-back" class="link-btn" type="button" hidden>返回同事列表</button>
-        <button id="team-refresh" class="btn btn-small btn-quiet" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg><span>刷新</span></button>
+      <div id="store-error" class="banner banner-danger banner-row" role="alert" hidden>
+        <span id="store-error-text"></span>
+        <span class="banner-actions"><button id="store-retry" class="btn btn-small" type="button">重试</button></span>
       </div>
-      <p id="team-error" class="banner banner-danger" role="alert" hidden></p>
-      <div id="team-shares" class="list"></div>
-
-      <div id="team-detail" hidden>
-        <div class="toolbar">
-          <input id="team-search" type="search" class="input input-search" placeholder="搜技能的名字或用途" aria-label="搜索同事分享的技能" autocomplete="off" spellcheck="false">
-          <select id="team-group" class="input" aria-label="按分组看"><option value="">全部分组</option></select>
-          <span class="toolbar-end">
-            <button id="team-pick-installable" class="link-btn" type="button">选中所有可以装的</button>
-            <button id="team-pick-none" class="link-btn" type="button">清空</button>
-          </span>
+      <div id="store-shelves"></div>
+      <section id="store-all" class="store-all" aria-labelledby="store-all-title">
+        <div class="store-all-head">
+          <h2 id="store-all-title" tabindex="-1">全部技能</h2>
+          <span id="store-count" class="store-count"></span>
+          <div id="store-sort" class="segmented" role="group" aria-label="排序">
+            <button class="seg" type="button" data-store-sort="latest" aria-pressed="true">最新上架</button>
+            <button class="seg" type="button" data-store-sort="rating" aria-pressed="false">最受好评</button>
+            <button class="seg" type="button" data-store-sort="popular" aria-pressed="false">推荐最多</button>
+          </div>
         </div>
-        <div class="table-wrap">
-          <table class="grid team-grid">
-            <thead>
-              <tr>
-                <th class="col-check">要</th>
-                <th>技能</th>
-                <th>分组</th>
-                <th>在我这里</th>
-              </tr>
-            </thead>
-            <tbody id="team-rows"></tbody>
-          </table>
-        </div>
-        <div class="row-wrap team-import-bar">
-          <label for="team-agent">给谁用</label>
-          <select id="team-agent" class="input"><option value="">按同事的分配</option></select>
-          <button id="team-import" class="btn btn-primary" type="button" disabled>导入</button>
-          <span id="team-import-note" class="muted"></span>
-        </div>
-      </div>
+        <div id="store-groups" class="store-groups" role="group" aria-label="按分组看"></div>
+        <div id="store-list" class="store-list"></div>
+      </section>
     </div>
   </section>
 
@@ -695,35 +675,25 @@
   </form>
 </dialog>
 
-<dialog id="team-upload-dialog" class="dialog dialog-wide" aria-labelledby="team-upload-title">
+<dialog id="store-publish-dialog" class="dialog dialog-wide" aria-labelledby="store-publish-title">
   <form class="dialog-form">
-    <h2 id="team-upload-title">分享我的技能</h2>
-    <div class="settings-form">
-      <label for="team-upload-agent">分享哪些</label>
-      <select id="team-upload-agent" class="input"><option value="">全部在用技能</option></select>
-    </div>
+    <h2 id="store-publish-title">上架技能</h2>
     <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
-      <span>只传技能名单、中文名和说明，不传技能文件、key 和本机目录。</span></p>
-    <p id="team-upload-message" role="status">正在整理名单…</p>
-    <div id="team-upload-list" class="dialog-body list"></div>
-    <div class="dialog-actions">
-      <button id="team-upload-close" type="button" class="btn">取消</button>
-      <button id="team-upload-apply" type="button" class="btn btn-primary" disabled>分享</button>
+      <span>自制或改过的技能会连文件一起传，疑似密钥、密码的文件会被拦下。</span></p>
+    <div id="store-pick">
+      <label class="search-field">
+        <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
+        <input id="store-pick-search" type="search" class="input input-search" placeholder="搜自己的技能" aria-label="搜索自己的技能" autocomplete="off" spellcheck="false">
+      </label>
+      <div id="store-pick-list" class="dialog-body store-pick-list"></div>
     </div>
-  </form>
-</dialog>
-
-<dialog id="team-import-dialog" class="dialog dialog-wide" aria-labelledby="team-import-title">
-  <form class="dialog-form">
-    <h2 id="team-import-title">导入同事的技能</h2>
-    <p class="muted">已有同名技能会保留，只补上分配和所需技能。导入后可整批撤销。</p>
-    <p id="team-import-message" role="status">正在核对…</p>
-    <div id="team-import-review" class="dialog-body"></div>
+    <div id="store-review" class="dialog-body store-review" hidden></div>
+    <p id="store-publish-message" class="store-publish-message" role="status"></p>
     <div class="dialog-actions">
-      <button id="team-import-close" type="button" class="btn">关闭</button>
-      <button id="team-import-retry" type="button" class="btn" hidden>重新预览</button>
-      <button id="team-import-undo" type="button" class="btn" hidden>撤销这次导入</button>
-      <button id="team-import-apply" type="button" class="btn btn-primary" disabled>导入</button>
+      <button id="store-publish-back" type="button" class="btn" hidden>上一步</button>
+      <button id="store-publish-close" type="button" class="btn">取消</button>
+      <button id="store-publish-next" type="button" class="btn btn-primary" disabled>下一步：核对</button>
+      <button id="store-publish-apply" type="button" class="btn btn-primary" hidden disabled>上架</button>
     </div>
   </form>
 </dialog>
