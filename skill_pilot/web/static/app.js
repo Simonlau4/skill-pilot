@@ -2187,13 +2187,16 @@ $('config-import-apply').addEventListener('click', async event => {
   });
 });
 
-/* ==================== 团队分享：设置里连上分享站；「团队」页分享自己的名单、挑同事的技能导入 ==================== */
+/* ==================== 团队技能商店：设置里连上分享站；「团队」页浏览、装上、评价、上架 ==================== */
 
-/* 分享站来的名字和说明都是别人写的：一律当纯文字转义，链接只认 https。
-   技能可能本机还没有，所以名字用分享者给的中文名，不查本机的整理结果。 */
-const TEAM_STATUS = {installed: ['tag-ok', '本机已有'], installable: ['tag-quiet', '可以装'], needs_files: ['tag-warn', '要另外补齐']};
-const teamTitle = row => row.title || row.name;
-const teamNameHtml = row => row.title ? `${escape(row.title)} <span class="skill-id">${escape(row.name)}</span>` : escape(row.name);
+/* 商店里的名字、说明、推荐语和评价都是同事写的：一律当纯文字转义。
+   技能可能本机还没有，所以名字用上架者给的中文名，不查本机的整理结果。 */
+const STORE_STATUS = {
+  installed: ['tag-ok', '已装'], update: ['tag', '有新版'], installable: ['tag-quiet', '可以装'],
+  lark: ['tag-quiet', '飞书官方'], conflict: ['tag-warn', '本机有同名技能'], blocked: ['tag-warn', '暂时装不了'],
+  mine: ['tag-quiet', '我上架的'],
+};
+const storeTitle = card => card.title || card.name;
 const teamCanWrite = () => Boolean(state.table?.write_allowed) && !writeBusy;
 // 还没整理过时没有技能表，就看 /api/status 给的只读状态。
 const teamSettingsWritable = () => state.table ? Boolean(state.table.write_allowed) : state.writeAllowed;
@@ -2203,7 +2206,7 @@ async function refreshTeam() {
   try {
     state.team = await api('/api/team');
   } catch (error) {
-    state.team = {configured: false, url: '', has_key: false, member: null, share: null, error: error.message};
+    state.team = {configured: false, url: '', has_key: false, member: null, error: error.message};
   }
   document.querySelector('.nav-item[data-page="team"]').hidden = !state.team.configured;
   renderTeamSettings();
@@ -2250,8 +2253,8 @@ $('team-form').addEventListener('submit', event => {
       $('team-key').value = '';
       setTeamKeyOpen(false);
       state.team = result;
-      state.teamShares = state.teamDetail = null;
-      state.teamSelected = new Set();
+      state.store = null;
+      storeCandidates = null;
       document.querySelector('.nav-item[data-page="team"]').hidden = false;
       toast({text: `已连上分享站，你是 ${result.member.name}。`});
     } catch (error) {
@@ -2267,27 +2270,129 @@ $('team-form').addEventListener('submit', event => {
   });
 });
 
-/* 进团队页：先画已知的，再读最新状态和同事列表。 */
+/* 进团队页：先画已知的，再读最新状态和商店目录。 */
 async function enterTeam() {
   renderTeam();
   await refreshTeam();
-  if (state.team?.configured && !state.team.error) await loadTeamShares();
+  if (state.team?.configured && !state.team.error) await loadStore();
 }
 
-let teamSharesSequence = 0;
-async function loadTeamShares() {
-  const sequence = ++teamSharesSequence;
+let storeSequence = 0;
+async function loadStore() {
+  const sequence = ++storeSequence;
   try {
-    const result = await api('/api/team/shares');
-    if (sequence !== teamSharesSequence) return;
-    state.teamShares = result.shares;
-    state.teamError = '';
+    const result = await api('/api/team/catalog');
+    if (sequence !== storeSequence) return;
+    state.store = result;
+    state.storeError = '';
   } catch (error) {
-    if (sequence !== teamSharesSequence) return;
-    state.teamError = error.message;
+    if (sequence !== storeSequence) return;
+    state.storeError = error.message;
   }
   renderTeam();
+  if (state.storeDetail) renderStoreDetail();
 }
+
+/* 自己能上架的技能（含已上架的是否改过）：打开上架窗口或看“我上架的”时才读。 */
+let storeCandidates = null;
+async function loadCandidates() {
+  storeCandidates = (await api('/api/team/listings/candidates')).skills;
+  return storeCandidates;
+}
+
+/* ---------- 排序与筛选：只看数据，不碰页面，方便单独测试 ---------- */
+
+const storeTime = card => Date.parse(card.updated_at) || 0;
+const storeScore = card => card.rating?.count ? card.rating.average : -1;
+const STORE_SORTS = {
+  latest: (a, b) => storeTime(b) - storeTime(a),
+  rating: (a, b) => storeScore(b) - storeScore(a) || (b.rating?.count || 0) - (a.rating?.count || 0) || storeTime(b) - storeTime(a),
+  popular: (a, b) => b.listings.length - a.listings.length || storeScore(b) - storeScore(a) || storeTime(b) - storeTime(a),
+};
+
+function storeFilter(cards, {query = '', group = '', mine = false} = {}) {
+  const words = query.trim().toLowerCase();
+  return cards.filter(card =>
+    (!mine || card.local?.status === 'mine') &&
+    (!group || (group === '-' ? !card.group : card.group === group)) &&
+    (!words || [card.name, card.title, card.summary, card.description, card.group,
+      ...card.listings.flatMap(item => [item.note, item.member?.name])]
+      .some(value => String(value || '').toLowerCase().includes(words))));
+}
+
+function storeGroups(cards) {
+  const counts = new Map();
+  for (const card of cards) counts.set(card.group || '-', (counts.get(card.group || '-') || 0) + 1);
+  return [...counts].sort((a, b) => (a[0] === '-') - (b[0] === '-') || b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'));
+}
+
+/* 谁推荐的：两个人以内写全名，多了写“某某等 N 人”。 */
+function storeRecommenders(card) {
+  const names = card.listings.map(item => item.member.name);
+  return names.length > 2 ? `${names[0]} 等 ${names.length} 人推荐` : `${names.join('、')} 推荐`;
+}
+
+/* ---------- 小部件：星级、状态标签、卡片、列表行 ---------- */
+
+const starIcon = on => `<svg class="star${on ? ' is-on' : ''}" aria-hidden="true" focusable="false"><use href="#sp-star"/></svg>`;
+const starsHtml = stars => `<span class="stars" role="img" aria-label="${stars} 星">${[1, 2, 3, 4, 5].map(n => starIcon(n <= stars)).join('')}</span>`;
+
+function storeRatingHtml(rating) {
+  if (!rating?.count) return '<span class="rating is-empty">还没有评价</span>';
+  return `<span class="rating" aria-label="${rating.average.toFixed(1)} 分，${rating.count} 人评价">${starIcon(true)}<b>${rating.average.toFixed(1)}</b><span>${rating.count} 人评</span></span>`;
+}
+
+function storeStatusTag(card) {
+  const [tone, label] = STORE_STATUS[card.local?.status] || ['tag-quiet', card.local?.label || ''];
+  return label ? `<span class="tag ${tone}">${escape(label)}</span>` : '';
+}
+
+const sizeText = bytes => bytes < 1024 ? `${bytes} 字节` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+function storeCardHtml(card) {
+  const quote = card.listings.find(item => item.note);
+  const people = card.listings.length > 1 ? `<span>${card.listings.length} 人推荐</span>` : '';
+  return `<button class="store-card" type="button" data-store-open="${escape(card.key)}">
+    <span class="store-card-top"><span class="store-card-title">${escape(storeTitle(card))}</span>${storeStatusTag(card)}</span>
+    <span class="store-card-sum">${escape(card.summary || '')}</span>
+    <span class="store-card-quote">${quote
+      ? `“${escape(quote.note)}”<span class="by"> — ${escape(quote.member.name)}</span>`
+      : `<span class="by">${escape(storeRecommenders(card))}</span>`}</span>
+    <span class="store-card-foot">${storeRatingHtml(card.rating)}${people}${card.group ? `<span>${escape(card.group)}</span>` : ''}</span>
+  </button>`;
+}
+
+function storeRowHtml(card) {
+  const mine = state.storeMine;
+  const candidate = mine ? storeCandidates?.find(item => item.name === card.name) : null;
+  const locked = teamCanWrite() ? '' : ' disabled';
+  const end = mine
+    ? `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>` : ''}
+       <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`
+    : storeStatusTag(card);
+  return `<div class="store-row">
+    <button class="store-row-main" type="button" data-store-open="${escape(card.key)}">
+      <span class="store-row-name"><span class="t">${escape(storeTitle(card))}</span>${card.title ? `<span class="skill-id">${escape(card.name)}</span>` : ''}</span>
+      <span class="store-row-sub">${escape(card.summary || card.listings.find(item => item.note)?.note || '')}</span>
+    </button>
+    <span class="store-row-rating">${storeRatingHtml(card.rating)}</span>
+    <span class="store-row-by">${escape(storeRecommenders(card))}</span>
+    <span class="store-row-end">${end}</span>
+  </div>`;
+}
+
+/* ---------- 商店首页：几排推荐 + 全部技能 ---------- */
+
+const STORE_SHELVES = [
+  {sort: 'rating', title: '最受好评', pick: cards => cards.filter(card => card.rating?.count)},
+  {sort: 'latest', title: '最新上架', pick: cards => cards},
+  {sort: 'popular', title: '同事推荐最多', pick: cards => cards.filter(card => card.listings.length > 1)},
+];
+const SHELF_SIZE = 4;
+const SHELF_MIN = 8;   // 技能少于这个数时不分几排，直接看全部
+
+const storeQuery = () => $('store-search').value.trim();
+const storeBrowsing = () => !storeQuery() && !state.storeGroup && !state.storeMine;
 
 function renderTeam() {
   if (state.page !== 'team') return;
@@ -2295,402 +2400,592 @@ function renderTeam() {
   $('team-unset').hidden = !team || team.configured;
   $('team-ready').hidden = Boolean(team) && !team.configured;
   if (team && !team.configured) return;
-  const share = team?.share;
+  const problem = (team && team.error) || state.storeError;
+  $('store-error').hidden = !problem;
+  $('store-error-text').textContent = problem || '';
+  const cards = state.store?.cards || null;
   const ready = Boolean(team?.member) && !team?.error;
-  $('team-mine-title').textContent = !team ? '正在读取…' : !ready ? '暂时连不上分享站'
-    : share ? `已分享 ${number(share.skill_count)} 个技能` : '还没分享过';
-  $('team-mine-note').textContent = [
-    share ? `${friendlyDate(share.updated_at)}分享，同事看到的名字是 ${team.member.name}` : ready ? `同事看到的名字是 ${team.member.name}` : '',
-    !state.table ? '整理过技能后才能分享和导入' : !state.table.write_allowed ? '只读模式下只能看' : '',
-  ].filter(Boolean).join(' · ');
-  const canShare = ready && teamCanWrite();
-  $('team-share').disabled = !canShare;
-  $('team-share').querySelector('span').textContent = share ? '重新分享…' : '分享我的技能…';
-  $('team-withdraw').hidden = !share;
-  $('team-withdraw').disabled = !canShare;
-  const problem = (team && !ready && team.error) || state.teamError;
-  $('team-error').hidden = !problem;
-  $('team-error').textContent = problem || '';
-  renderTeamShares();
-  renderTeamDetail();
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  $('store-publish').disabled = !ready || !teamCanWrite();
+  $('store-publish').title = !state.table ? '整理过技能后才能上架' : readOnly ? '只读预览，不能上架' : '';
+  const mineCount = (cards || []).filter(card => card.local?.status === 'mine').length;
+  $('store-mine').disabled = !cards;
+  $('store-mine').setAttribute('aria-pressed', String(state.storeMine));
+  $('store-mine-count').textContent = mineCount ? number(mineCount) : '';
+  renderStoreShelves(cards);
+  renderStoreAll(cards);
 }
 
-function renderTeamShares() {
-  const detail = state.teamDetail;
-  $('team-shares').hidden = Boolean(detail);
-  $('team-back').hidden = !detail;
-  $('team-others-title').textContent = detail ? `${detail.member.name} 分享的技能` : '同事的分享';
-  if (detail) return;
-  const me = state.team?.member?.id;
-  const rows = state.teamShares;
-  if (rows === null) {
-    $('team-shares').innerHTML = state.teamError || state.team?.error ? '' : '<p class="item-note">正在读取…</p>';
+function renderStoreShelves(cards) {
+  const box = $('store-shelves');
+  if (!cards) {
+    box.innerHTML = state.storeError || state.team?.error ? '' : `<section class="shelf">
+      <div class="shelf-head"><h2 class="is-loading" role="status">正在读取团队技能…</h2></div>
+      <div class="shelf-cards" aria-hidden="true">${'<span class="store-card is-skeleton"></span>'.repeat(SHELF_SIZE)}</div>
+    </section>`;
     return;
   }
-  $('team-shares').innerHTML = rows.filter(row => row.member.id !== me).map(row => `<div class="item-row">
-    <div>
-      <div class="item-title">${escape(row.member.name)}</div>
-      <div class="item-note">${number(row.skill_count)} 个技能 · ${escape(friendlyDate(row.updated_at))}分享${row.agents.length ? ` · 用在 ${escape(row.agents.map(agent => agent.name).join('、'))}` : ''}</div>
-    </div>
-    <span class="item-end"><button class="btn btn-small" type="button" data-team-open="${escape(row.member.id)}"${writeBusy ? ' disabled' : ''}>看看</button></span>
-  </div>`).join('') || `<div class="empty">${emptyInner('team', '同事还没有分享')}</div>`;
+  if (!cards.length) {
+    box.innerHTML = `<div class="empty store-empty">${emptyInner('team', '还没有人上架技能')}
+      <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>`;
+    return;
+  }
+  if (!storeBrowsing() || cards.length < SHELF_MIN) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = STORE_SHELVES.map(shelf => {
+    const picked = [...shelf.pick(cards)].sort(STORE_SORTS[shelf.sort]).slice(0, SHELF_SIZE);
+    return picked.length ? `<section class="shelf" aria-labelledby="shelf-${shelf.sort}">
+      <div class="shelf-head">
+        <h2 id="shelf-${shelf.sort}">${shelf.title}</h2>
+        <button class="link-btn" type="button" data-store-more="${shelf.sort}">查看全部</button>
+      </div>
+      <div class="shelf-cards">${picked.map(storeCardHtml).join('')}</div>
+    </section>` : '';
+  }).join('');
 }
 
-$('team-shares').addEventListener('click', async event => {
-  const button = event.target.closest('[data-team-open]');
+function renderStoreAll(cards) {
+  $('store-all').hidden = !cards?.length;
+  if (!cards?.length) return;
+  const query = storeQuery();
+  const base = storeFilter(cards, {query, mine: state.storeMine});
+  const groups = storeGroups(base);
+  // 选中的分组搜不到时也留着，数量写 0，免得筛选条件悄悄消失。
+  if (state.storeGroup && !groups.some(([name]) => name === state.storeGroup)) groups.push([state.storeGroup, 0]);
+  renderButtons($('store-groups'), [['', base.length], ...groups].map(([name, count]) =>
+    `<button class="store-group" type="button" data-store-group="${escape(name)}" aria-pressed="${name === state.storeGroup}">${
+      escape(name === '' ? '全部' : name === '-' ? '没分组' : name)}<span class="n">${number(count)}</span></button>`).join(''), 'data-store-group');
+  $('store-groups').hidden = groups.length < 2 && !state.storeGroup;
+  const rows = storeFilter(base, {group: state.storeGroup}).sort(STORE_SORTS[state.storeSort]);
+  $('store-all-title').textContent = state.storeMine ? '我上架的' : query ? '搜索结果' : '全部技能';
+  $('store-count').textContent = `${number(rows.length)} 个`;
+  for (const button of $('store-sort').querySelectorAll('[data-store-sort]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.storeSort === state.storeSort));
+  }
+  const empty = state.storeMine && !base.length
+    ? emptyInner('team', '你还没上架技能', `<button type="button" class="link-btn" data-store-publish${teamCanWrite() ? '' : ' disabled'}>上架技能</button>`)
+    : emptyInner('search', '没找到，换个词试试');
+  $('store-list').innerHTML = rows.length
+    ? `<div class="store-list-inner${state.storeMine ? ' is-mine' : ''}">${rows.map(storeRowHtml).join('')}</div>`
+    : `<div class="empty">${empty}</div>`;
+}
+
+$('store-search').addEventListener('input', renderTeam);
+
+$('store-sort').addEventListener('click', event => {
+  const button = event.target.closest('[data-store-sort]');
   if (!button) return;
-  await withBusy(button, '正在读取…', async () => {
-    try {
-      await openTeamShare(button.dataset.teamOpen);
-      $('team-search').focus();
-    } catch (error) {
-      toast({text: error.message, tone: 'error'});
-    }
-  });
+  state.storeSort = button.dataset.storeSort;
+  renderTeam();
 });
 
-async function openTeamShare(id) {
-  const detail = await api('/api/team/shares/' + encodeURIComponent(id));
-  const same = state.teamDetail?.member.id === id;
-  const names = new Set(detail.config.skills.filter(row => row.local.status !== 'needs_files').map(row => row.name));
-  state.teamSelected = new Set([...(same ? state.teamSelected : [])].filter(name => names.has(name)));
-  if (!same) {
-    $('team-search').value = '';
-    $('team-group').value = '';
-  }
-  state.teamDetail = detail;
-  renderTeamChoices();
+$('store-groups').addEventListener('click', event => {
+  const button = event.target.closest('[data-store-group]');
+  if (!button) return;
+  // 再点一次当前分组就回到全部。
+  state.storeGroup = button.dataset.storeGroup === state.storeGroup ? '' : button.dataset.storeGroup;
   renderTeam();
-}
+});
 
-/* 导入或撤销之后，本机状态变了，重新读一次正在看的那份。
-   读不到（同事撤回了、分享站连不上）就回到同事列表，不留着过时的名单。 */
-async function reloadTeamDetail() {
-  if (!state.teamDetail) return;
+$('store-mine').addEventListener('click', async () => {
+  state.storeMine = !state.storeMine;
+  state.storeGroup = '';
+  renderTeam();
+  if (!state.storeMine || storeCandidates) return;
   try {
-    await openTeamShare(state.teamDetail.member.id);
+    await loadCandidates();
   } catch (error) {
-    state.teamDetail = null;
-    state.teamSelected = new Set();
-    renderTeam();
     toast({text: error.message, tone: 'error'});
-    if (state.team?.configured && !state.team.error) loadTeamShares();
   }
-}
-
-$('team-back').addEventListener('click', () => {
-  state.teamDetail = null;
-  state.teamSelected = new Set();
   renderTeam();
-  loadTeamShares();
 });
 
-$('team-refresh').addEventListener('click', event => withBusy(event.currentTarget, '', async () => {
-  await enterTeam();
-  await reloadTeamDetail();
-}));
-
-/* 分组和“给谁用”的选项：每打开一份分享更新一次。 */
-function renderTeamChoices() {
-  const skills = state.teamDetail?.config.skills || [];
-  const groups = [...new Set(skills.map(row => row.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
-  const group = $('team-group').value;
-  $('team-group').innerHTML = '<option value="">全部分组</option>'
-    + groups.map(name => `<option value="${escape(name)}">${escape(name)}</option>`).join('')
-    + (skills.some(row => !row.group) ? '<option value="-">没分组</option>' : '');
-  $('team-group').value = [...$('team-group').options].some(option => option.value === group) ? group : '';
-  const agent = $('team-agent').value;
-  $('team-agent').innerHTML = '<option value="">按同事的分配</option>' + state.agents.map(item =>
-    `<option value="${escape(item.id)}">全部给 ${escape(item.name)}</option>`).join('');
-  $('team-agent').value = state.agents.some(item => item.id === agent) ? agent : '';
-}
-
-function teamRows() {
-  const query = $('team-search').value.trim().toLowerCase();
-  const group = $('team-group').value;
-  return (state.teamDetail?.config.skills || []).filter(row =>
-    (!group || (group === '-' ? !row.group : row.group === group)) &&
-    (!query || [row.name, row.title, row.summary, row.description, row.group].some(value => String(value || '').toLowerCase().includes(query))));
-}
-
-function renderTeamDetail() {
-  const detail = state.teamDetail;
-  $('team-detail').hidden = !detail;
-  if (!detail) return;
-  const searching = Boolean($('team-search').value.trim() || $('team-group').value);
-  $('team-rows').innerHTML = teamRows().map(row => {
-    const [tone, label] = TEAM_STATUS[row.local.status] || ['tag-quiet', row.local.label];
-    const blocked = row.local.status === 'needs_files';
-    const link = String(row.source.url || '').startsWith('https://')
-      ? ` <a class="team-link" href="${escape(row.source.url)}" target="_blank" rel="noopener noreferrer">怎么装</a>` : '';
-    return `<tr>
-      <td class="col-check"><label class="check-hit"><input type="checkbox" data-team-pick="${escape(row.name)}"
-        aria-label="${escape('要 ' + teamTitle(row))}" ${state.teamSelected.has(row.name) ? 'checked' : ''} ${blocked || writeBusy ? 'disabled' : ''}></label></td>
-      <td><strong>${teamNameHtml(row)}</strong>${row.description ? hint(row.description) : ''}${row.summary ? `<p class="skill-desc">${escape(row.summary)}</p>` : ''}</td>
-      <td>${escape(row.group || '')}</td>
-      <td><span class="tag ${tone}">${escape(label)}</span>${row.local.reason ? hint(row.local.reason) : ''}${link}</td>
-    </tr>`;
-  }).join('') || `<tr><td class="empty" colspan="4">${searching ? emptyInner('search', '没找到，换个词试试') : emptyInner('team', '这份分享里没有技能')}</td></tr>`;
-  renderTeamImportBar();
-}
-
-function renderTeamImportBar() {
-  const count = state.teamSelected.size;
-  $('team-import').disabled = !count || !teamCanWrite();
-  $('team-import').textContent = count ? `导入 ${count} 个…` : '导入';
-  $('team-import-note').textContent = !state.table ? '整理过技能后才能导入。'
-    : !state.table.write_allowed ? '只读模式下只能看，不能导入。' : count ? '' : '先勾选想要的技能，默认一个都不选。';
-  $('team-pick-installable').disabled = $('team-pick-none').disabled = Boolean(writeBusy);
-  $('team-agent').disabled = Boolean(writeBusy);
-}
-
-$('team-search').addEventListener('input', renderTeamDetail);
-$('team-group').addEventListener('change', renderTeamDetail);
-$('team-rows').addEventListener('change', event => {
-  const box = event.target.closest('[data-team-pick]');
-  if (!box) return;
-  if (box.checked) state.teamSelected.add(box.dataset.teamPick);
-  else state.teamSelected.delete(box.dataset.teamPick);
-  renderTeamImportBar();
-});
-$('team-pick-installable').addEventListener('click', () => {
-  for (const row of teamRows()) if (row.local.status === 'installable') state.teamSelected.add(row.name);
-  renderTeamDetail();
-});
-$('team-pick-none').addEventListener('click', () => {
-  state.teamSelected = new Set();
-  renderTeamDetail();
-});
-
-/* ---------- 分享我的技能：默认全选，只挑不想分享的；被别的技能需要的自动留下 ---------- */
-
-let teamUploadAll = null;      // 这个范围里能分享的全部技能（第一次核对时拿到）
-let teamUploadPreview = null;  // 最新一次核对：要上传的名单、自动留下的技能、预览编号
-let teamUploadExclude = new Set();
-let teamUploadSequence = 0;
-
-function renderTeamUploadControls() {
-  const count = teamUploadPreview?.skill_count || 0;
-  $('team-upload-apply').disabled = Boolean(writeBusy) || !teamUploadPreview || !count || !state.table?.write_allowed;
-  if (!writeBusy) $('team-upload-apply').textContent = count ? `分享 ${count} 个` : '分享';
-  $('team-upload-agent').disabled = Boolean(writeBusy);
-  $('team-upload-close').disabled = Boolean(writeBusy);
-}
-
-function renderTeamUploadList() {
-  const preview = teamUploadPreview;
-  const chosen = new Set((preview?.config.skills || []).map(row => row.name));
-  const retained = new Map((preview?.retained || []).map(row => [row.name, row]));
-  $('team-upload-list').innerHTML = (teamUploadAll || []).map(row => {
-    const kept = retained.get(row.name);
-    const notes = [
-      kept ? `<div class="item-note">${icon('link')} ${escape(kept.required_by.map(titleOf).join('、'))} 需要它，会一起分享</div>` : '',
-      row.source.kind === 'manual' || row.local_modified ? `<div class="item-note">${icon('lock')} 同事只能看到名字和说明，拿不到文件</div>` : '',
-    ].join('');
-    return `<div class="item-row">
-      <label class="check-hit"><input type="checkbox" data-team-upload="${escape(row.name)}" aria-label="${escape('分享 ' + titleOf(row.name))}"
-        ${chosen.has(row.name) ? 'checked' : ''} ${kept || writeBusy ? 'disabled' : ''}></label>
-      <div><div class="item-title">${nameHtml(row.name)}</div>${notes}</div>
-    </div>`;
-  }).join('') || (teamUploadAll ? `<div class="empty">${emptyInner('team', '这里没有在用的技能')}</div>` : '');
-  if (preview) {
-    const count = preview.skill_count;
-    $('team-upload-message').textContent = !count ? '一个都没选，先勾上要分享的技能。'
-      : `将分享 ${count} 个技能${preview.retained.length ? `，其中 ${preview.retained.length} 个是别的技能需要的` : ''}${state.team?.share ? '，会替换你上次的分享' : ''}。`;
-  }
-}
-
-async function previewTeamUpload() {
-  const sequence = ++teamUploadSequence;
-  teamUploadPreview = null;
-  $('team-upload-message').textContent = '正在整理名单…';
-  renderTeamUploadControls();
-  try {
-    const result = await api('/api/team/upload/preview', {agent: $('team-upload-agent').value || null, exclude: [...teamUploadExclude]});
-    if (sequence !== teamUploadSequence) return;
-    if (!teamUploadAll) teamUploadAll = result.config.skills;
-    teamUploadPreview = result;
-    renderTeamUploadList();
-  } catch (error) {
-    if (sequence === teamUploadSequence) $('team-upload-message').textContent = error.message;
-  } finally {
-    if (sequence === teamUploadSequence) renderTeamUploadControls();
-  }
-}
-
-$('team-share').addEventListener('click', () => {
-  teamUploadAll = teamUploadPreview = null;
-  teamUploadExclude = new Set();
-  $('team-upload-agent').innerHTML = '<option value="">全部在用技能</option>' + state.agents.map(agent =>
-    `<option value="${escape(agent.id)}">${escape(agent.name)} 在用的技能</option>`).join('');
-  $('team-upload-list').replaceChildren();
-  $('team-upload-dialog').showModal();
-  previewTeamUpload();
-});
-
-$('team-upload-agent').addEventListener('change', () => {
-  teamUploadAll = null;
-  teamUploadExclude = new Set();
-  $('team-upload-list').replaceChildren();
-  previewTeamUpload();
-});
-
-/* 整理名单要读每个技能的文件，有点慢：连续勾选时等停手再核对一次。 */
-let teamUploadTimer = null;
-$('team-upload-list').addEventListener('change', event => {
-  const box = event.target.closest('[data-team-upload]');
-  if (!box) return;
-  if (box.checked) teamUploadExclude.delete(box.dataset.teamUpload);
-  else teamUploadExclude.add(box.dataset.teamUpload);
-  teamUploadSequence++;
-  teamUploadPreview = null;
-  $('team-upload-message').textContent = '正在核对…';
-  renderTeamUploadControls();
-  clearTimeout(teamUploadTimer);
-  teamUploadTimer = setTimeout(previewTeamUpload, 600);
-});
-
-$('team-upload-close').addEventListener('click', () => $('team-upload-dialog').close());
-$('team-upload-dialog').addEventListener('cancel', event => { if (writeBusy) event.preventDefault(); });
-$('team-upload-dialog').addEventListener('close', () => { teamUploadSequence++; clearTimeout(teamUploadTimer); });
-$('team-upload-dialog').querySelector('form').addEventListener('submit', event => event.preventDefault());
-
-$('team-upload-apply').addEventListener('click', async event => {
-  const preview = teamUploadPreview;
-  if (!preview || writeBusy) return;
-  await runWrite({
-    button: event.currentTarget, busyText: '正在分享…',
-    work: async () => {
-      const result = await api('/api/team/upload/apply', {review: preview.review});
-      $('team-upload-dialog').close();
-      await refreshTeam();
-      return result;
-    },
-    success: result => ({text: `已分享 ${result.skill_count} 个技能，同事现在能看到了。`}),
+async function reloadStorePage(button) {
+  await withBusy(button, '', async () => {
+    await enterTeam();
+    if (state.storeMine || storeCandidates) await loadCandidates().catch(() => { storeCandidates = null; });
+    renderTeam();
   });
-  renderTeamUploadControls();
+}
+$('store-refresh').addEventListener('click', event => reloadStorePage(event.currentTarget));
+$('store-retry').addEventListener('click', event => reloadStorePage(event.currentTarget));
+$('store-publish').addEventListener('click', () => openPublish());
+
+/* 卡片、列表行和空状态里的按钮都在团队页里，统一在这里分派。 */
+$('page-team').addEventListener('click', event => {
+  const open = event.target.closest('[data-store-open]');
+  const more = event.target.closest('[data-store-more]');
+  const publish = event.target.closest('[data-store-publish]');
+  const republish = event.target.closest('[data-store-republish]');
+  const unlist = event.target.closest('[data-store-unlist]');
+  if (open) openStoreDetail(open.dataset.storeOpen, open);
+  else if (more) {
+    state.storeSort = more.dataset.storeMore;
+    renderTeam();
+    $('store-all').scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start'});
+    $('store-all-title').focus({preventScroll: true});
+  } else if (publish) openPublish();
+  else if (republish) openPublish([republish.dataset.storeRepublish]);
+  else if (unlist) unlistStore(unlist.dataset.storeUnlist, unlist);
 });
 
-$('team-withdraw').addEventListener('click', async event => {
+async function unlistStore(name, button) {
+  const card = state.store?.cards.find(item => item.local?.status === 'mine' && item.name === name);
   const ok = await confirmDialog({
-    title: '撤回我的分享',
-    lines: ['同事将看不到你分享的技能名单。', '已经照着装好的同事不受影响；你随时可以重新分享。'],
-    okText: '撤回',
+    title: `下架「${card ? storeTitle(card) : name}」`,
+    lines: ['同事在商店里将看不到它。', '已经装上的同事不受影响；你随时可以重新上架。'],
+    okText: '下架',
   });
   if (!ok) return;
-  await runWrite({
-    button: event.currentTarget, busyText: '正在撤回…',
-    work: async () => {
-      const result = await api('/api/team/withdraw', {});
-      await refreshTeam();
-      return result;
-    },
-    success: () => ({text: '已撤回你的分享。'}),
-  });
-});
-
-/* ---------- 导入同事的技能：先核对，再导入，导入后可以整批撤销 ---------- */
-
-let teamImportPlan = null;
-let teamImportResult = null;
-let teamImportSequence = 0;
-let teamImportReading = false;
-
-const teamImportAgents = () => $('team-agent').value ? [$('team-agent').value] : null;
-
-function teamReviewName(name) {
-  const row = state.teamDetail?.config.skills.find(item => item.name === name);
-  return row ? teamNameHtml(row) : '';
-}
-
-function renderTeamImportControls() {
-  const busy = Boolean(writeBusy);
-  const count = (teamImportPlan?.install.length || 0) + (teamImportPlan?.reuse.length || 0);
-  $('team-import-apply').disabled = busy || !state.table?.write_allowed || !teamImportPlan || !count;
-  $('team-import-apply').hidden = Boolean(teamImportResult);
-  if (!busy) $('team-import-apply').textContent = count ? `导入 ${count} 个` : '导入';
-  $('team-import-close').disabled = busy;
-  $('team-import-retry').disabled = busy || teamImportReading;
-  $('team-import-undo').disabled = busy || !state.table?.write_allowed;
-  $('team-import-undo').hidden = !teamImportResult?.id;
-}
-
-async function previewTeamImport() {
-  const detail = state.teamDetail;
-  if (!detail) return;
-  const sequence = ++teamImportSequence;
-  teamImportPlan = null;
-  teamImportReading = true;
-  $('team-import-review').replaceChildren();
-  $('team-import-retry').hidden = true;
-  $('team-import-message').textContent = '正在核对…';
-  renderTeamImportControls();
-  try {
-    const plan = await api('/api/team/import/preview', {member: detail.member.id, skills: [...state.teamSelected], agents: teamImportAgents()});
-    if (sequence !== teamImportSequence) return;
-    teamImportPlan = plan;
-    $('team-import-message').textContent = plan.message + '。';
-    $('team-import-review').innerHTML = importReviewHtml(plan, false, '可以关掉这里，在「给谁用」里指定接收方', teamReviewName);
-  } catch (error) {
-    if (sequence !== teamImportSequence) return;
-    $('team-import-message').textContent = error.message;
-    $('team-import-retry').hidden = false;
-  } finally {
-    if (sequence === teamImportSequence) {
-      teamImportReading = false;
-      renderTeamImportControls();
+  await withBusy(button, '正在下架…', async () => {
+    try {
+      const result = await api('/api/team/listings/remove', {names: [name]});
+      if (state.storeDetail === card?.key) closeDetail();
+      storeCandidates = null;
+      await loadStore();
+      if (state.storeMine) await loadCandidates().catch(() => {});
+      renderTeam();
+      toast({text: result.message || '已下架。'});
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
     }
+  });
+}
+
+/* ---------- 详情：沿用技能页右侧的详情面板 ---------- */
+
+let storeOpener = null;
+let storeGet = null;   // 详情里的「装上」：{key, agents, plan, reading, error}
+
+const storeCard = key => state.store?.cards.find(card => card.key === key) || null;
+
+function openStoreDetail(key, opener = null) {
+  if (state.storeDetail !== key || !storeGet) storeGet = {key, agents: new Set(state.agents.map(agent => agent.id)), plan: null, reading: false, error: ''};
+  storeOpener = opener;
+  state.storeDetail = key;
+  renderStoreDetail(true);
+  showDetailPanel(() => state.storeDetail === key);
+  if (storeCard(key)?.local?.status === 'mine' && !storeCandidates) {
+    loadCandidates().then(() => { if (state.storeDetail === key) renderStoreDetail(); }).catch(() => {});
   }
 }
 
-$('team-import').addEventListener('click', () => {
-  teamImportPlan = teamImportResult = null;
-  $('team-import-title').textContent = `导入 ${state.teamDetail.member.name} 分享的技能`;
-  $('team-import-dialog').showModal();
-  previewTeamImport();
+function renderStoreDetail(fresh = false) {
+  const card = storeCard(state.storeDetail);
+  if (!card) {
+    // 同事下架了，或者分享站换了人：详情跟着关掉。
+    closeDetail();
+    return;
+  }
+  const body = $('detail-body');
+  const scroll = fresh ? 0 : body.scrollTop;
+  $('detail-title').textContent = storeTitle(card);
+  body.innerHTML = `
+    <p class="detail-id">${escape(card.name)}</p>
+    ${card.summary ? `<p class="detail-summary">${escape(card.summary)}</p>` : ''}
+    <p class="store-facts">${storeRatingHtml(card.rating)}<span>${escape(storeRecommenders(card))}</span>${card.group ? `<span>${escape(card.group)}</span>` : ''}</p>
+    ${storeGetHtml(card)}
+    <h3 class="sub-title">谁推荐的</h3>
+    <ul class="store-recs">${card.listings.map(item => `<li>
+      <p class="store-rec-head"><strong>${escape(item.member.name)}</strong><span>${escape(friendlyDate(item.updated_at))}上架</span></p>
+      ${item.note ? `<p class="store-rec-note">“${escape(item.note)}”</p>` : ''}
+    </li>`).join('')}</ul>
+    ${storeReviewsHtml(card)}
+    ${card.description ? `<h3 class="sub-title">说明</h3><p class="detail-desc">${escape(card.description)}</p>` : ''}
+    ${card.requires?.length ? `<h3 class="sub-title">所需技能${hint('装上它时，这些技能会一起带上；本机已有同名的就直接用本机的。')}</h3>
+      <p class="store-requires">${card.requires.map(escape).join('、')}</p>` : ''}
+    <h3 class="sub-title">来源</h3>
+    <p class="store-source">${escape(storeSourceText(card))}</p>`;
+  body.scrollTop = scroll;
+}
+
+function storeSourceText(card) {
+  if (card.kind === 'github') return '网上的公开技能，装的时候从原作者那里下载。';
+  if (card.kind === 'lark') return '飞书官方技能。';
+  const latest = card.listings[0];
+  return `${latest.member.name} 上传的文件${latest.file_count ? `，共 ${number(latest.file_count)} 个、${sizeText(latest.size || 0)}` : ''}。`;
+}
+
+/* 详情里最重要的一块：能不能装、装给谁。 */
+function storeGetHtml(card) {
+  const local = card.local || {};
+  const users = (local.agents || []).map(agentName).join('、');
+  const box = (tone, text, action = '') => `<section class="store-get store-get-${tone}">
+    <p class="store-get-line">${text}</p>${action ? `<div class="store-get-actions">${action}</div>` : ''}</section>`;
+  const locked = teamCanWrite() ? '' : ' disabled';
+  if (local.status === 'installed') {
+    return box('ok', `${icon('check-circle')}<span><strong>已装</strong>${users ? `，${escape(users)} 在用` : '，还没有 agent 在用'}</span>`,
+      `<button class="link-btn" type="button" data-store-goto="${escape(card.name)}">在技能页看看</button>`);
+  }
+  if (local.status === 'update') {
+    return box('info', `${icon('update-up')}<span><strong>有新版</strong>${users ? `，${escape(users)} 在用` : ''}</span>`,
+      `<button class="btn btn-small btn-update" type="button" data-store-goto="${escape(card.name)}">去技能页更新</button>`);
+  }
+  if (local.status === 'mine') {
+    const candidate = storeCandidates?.find(item => item.name === card.name);
+    return box('quiet', `${icon('team')}<span><strong>这是你上架的</strong>${candidate?.changed ? '，本机改过，可以上架新版' : ''}</span>`,
+      `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>` : ''}
+       <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`);
+  }
+  if (local.status === 'lark') {
+    return box('quiet', `${icon('info')}<span><strong>要用飞书官方方式装</strong>${local.reason ? hint(local.reason) : ''}</span>`);
+  }
+  if (local.status !== 'installable') {
+    return box('warn', `${icon('warning')}<span><strong>${escape(local.label || '暂时装不了')}</strong>${local.reason ? `：${escape(local.reason)}` : ''}</span>`);
+  }
+  return storeInstallHtml(card);
+}
+
+function storeInstallHtml(card) {
+  const get = storeGet;
+  const plan = get.plan;
+  const locked = !teamCanWrite();
+  const agents = state.agents.map(agent => `<label class="store-agent">
+      <input type="checkbox" data-store-agent="${escape(agent.id)}" ${get.agents.has(agent.id) ? 'checked' : ''}${locked || get.reading ? ' disabled' : ''}>
+      ${swatch(agent.id)}<span>${escape(agent.name)}</span></label>`).join('');
+  const count = get.agents.size;
+  const cost = `每个 agent 每次新对话多占约 <b>${tokenText(card.tokens)} Token</b>${hint(TOKEN_HINT)}`;
+  let review = '';
+  let actions = `<button class="btn btn-primary" type="button" data-store-install${locked || !count || get.reading ? ' disabled' : ''}>${get.reading ? '正在核对…' : `装上${count ? `（给 ${count} 个 agent）` : ''}`}</button>`;
+  if (plan) {
+    const names = list => list.map(item => escape(item.title || item.name || item)).join('、');
+    review = `<div class="store-plan" role="status">
+      ${plan.install?.length ? `<p>会装上 ${plan.install.length} 个：${names(plan.install)}</p>` : ''}
+      ${plan.reuse?.length ? `<p>本机已有，直接用：${names(plan.reuse)}</p>` : ''}
+      ${plan.skipped?.length ? `<p class="is-warn">${icon('warning')}跳过 ${plan.skipped.length} 个：${plan.skipped.map(item => `${escape(item.name)}（${escape(item.reason)}）`).join('、')}</p>` : ''}
+      <p class="muted">${escape(plan.message || '')}</p>
+    </div>`;
+    const empty = !plan.install?.length && !plan.reuse?.length;
+    actions = `<button class="btn" type="button" data-store-plan-cancel>改一改</button>
+      <button class="btn btn-primary" type="button" data-store-install-apply${locked || empty ? ' disabled' : ''}>确认装上</button>`;
+  }
+  return `<section class="store-get store-get-install" aria-labelledby="store-get-title">
+    <h3 id="store-get-title" class="store-get-title">装到哪些 agent</h3>
+    <div class="store-agents">${agents}</div>
+    <p class="store-cost">${cost}</p>
+    ${get.error ? `<p class="store-get-error" role="alert">${escape(get.error)}</p>` : ''}
+    ${review}
+    <div class="store-get-actions">${actions}</div>
+    ${locked && !writeBusy ? '<p class="row-note">只读预览，不能装上。</p>' : ''}
+  </section>`;
+}
+
+function storeReviewsHtml(card) {
+  const me = state.store?.member?.id;
+  const reviews = card.reviews || [];
+  const others = card.can_rate ? reviews.filter(review => review.member.id !== me) : reviews;
+  const editor = card.can_rate ? storeRateHtml(card)
+    : `<p class="store-rate-note">${icon('info')}${card.local?.status === 'mine' ? '自己上架的不能评价' : '装上以后可以打分'}</p>`;
+  const summary = card.rating?.count ? `<span class="sub-note">· ${card.rating.average.toFixed(1)} 分，${card.rating.count} 人</span>` : '';
+  return `<h3 class="sub-title">评价 ${summary}</h3>
+    ${editor}
+    ${others.length ? `<ul class="store-reviews">${others.map(review => `<li>
+      <p class="store-review-head"><strong>${escape(review.member.name)}</strong>${starsHtml(review.stars)}<span>${escape(friendlyDate(review.updated_at))}</span></p>
+      ${review.text ? `<p class="store-review-text">${escape(review.text)}</p>` : ''}
+    </li>`).join('')}</ul>` : card.can_rate ? '' : '<p class="muted store-rate-empty">还没有人评价。</p>'}`;
+}
+
+/* 打分：五颗星是一组单选，倒着排再用 CSS 反过来，鼠标移到哪颗，它和左边的都亮。 */
+function storeRateHtml(card) {
+  const mine = card.my_rating;
+  const stars = [5, 4, 3, 2, 1].map(n => `<input class="sr-only" type="radio" name="store-stars" id="store-star-${n}" value="${n}"${mine?.stars === n ? ' checked' : ''}>
+    <label for="store-star-${n}" title="${n} 星">${starIcon(false)}<span class="sr-only">${n} 星</span></label>`).join('');
+  return `<form class="store-rate" data-store-rate>
+    <fieldset class="star-input"><legend>${mine ? '我的评价' : '给它打分'}</legend><span class="star-input-row">${stars}</span></fieldset>
+    <input class="input store-rate-text" name="text" maxlength="200" placeholder="一句话说说好不好用（可不填）" aria-label="一句话评价" value="${escape(mine?.text || '')}">
+    <span class="store-rate-actions">
+      <button class="btn btn-small btn-primary" type="submit">${mine ? '保存' : '提交评价'}</button>
+      ${mine ? '<button class="btn btn-small btn-quiet" type="button" data-store-rate-remove>删除</button>' : ''}
+    </span>
+    <p class="row-note" data-store-rate-message role="status"></p>
+  </form>`;
+}
+
+$('detail-body').addEventListener('change', event => {
+  const box = event.target.closest('[data-store-agent]');
+  if (!box || !storeGet) return;
+  if (box.checked) storeGet.agents.add(box.dataset.storeAgent);
+  else storeGet.agents.delete(box.dataset.storeAgent);
+  storeGet.plan = null;
+  storeGet.error = '';
+  renderStoreDetail();
+  $('detail-body').querySelector(`[data-store-agent="${CSS.escape(box.dataset.storeAgent)}"]`)?.focus();
 });
 
-$('team-import-retry').addEventListener('click', previewTeamImport);
-$('team-import-close').addEventListener('click', () => $('team-import-dialog').close());
-$('team-import-dialog').addEventListener('cancel', event => { if (writeBusy) event.preventDefault(); });
-$('team-import-dialog').addEventListener('close', () => { teamImportSequence++; });
-$('team-import-dialog').querySelector('form').addEventListener('submit', event => event.preventDefault());
+$('detail-body').addEventListener('click', async event => {
+  if (!state.storeDetail) return;
+  const target = event.target;
+  if (target.closest('[data-store-install]')) previewStoreInstall();
+  else if (target.closest('[data-store-plan-cancel]')) {
+    storeGet.plan = null;
+    renderStoreDetail();
+    $('detail-body').querySelector('[data-store-agent]')?.focus();
+  } else if (target.closest('[data-store-install-apply]')) applyStoreInstall(target.closest('[data-store-install-apply]'));
+  else if (target.closest('[data-store-goto]')) {
+    const name = target.closest('[data-store-goto]').dataset.storeGoto;
+    closeDetail();
+    showPage('skills');
+    if (state.table?.skills.some(skill => skill.name === name)) openDetail(name);
+  } else if (target.closest('[data-store-republish]')) {
+    const name = target.closest('[data-store-republish]').dataset.storeRepublish;
+    closeDetail();
+    openPublish([name]);
+  } else if (target.closest('[data-store-unlist]')) {
+    const button = target.closest('[data-store-unlist]');
+    unlistStore(button.dataset.storeUnlist, button);
+  } else if (target.closest('[data-store-rate-remove]')) rateStore(target.closest('form'), true);
+});
 
-async function undoTeamImport(result, button) {
-  if (await undoOperation(result.id, {skills: [...result.install, ...result.reuse], message: result.message, button})) {
-    if (result === teamImportResult) $('team-import-dialog').close();
-    await reloadTeamDetail();
+$('detail-body').addEventListener('submit', event => {
+  const form = event.target.closest('[data-store-rate]');
+  if (!form) return;
+  event.preventDefault();
+  rateStore(form, false);
+});
+
+async function previewStoreInstall() {
+  const get = storeGet;
+  const card = storeCard(get?.key);
+  if (!card || get.reading) return;
+  get.reading = true;
+  get.error = '';
+  renderStoreDetail();
+  try {
+    get.plan = await api('/api/team/install/preview', {key: card.key, agents: state.agents.map(agent => agent.id).filter(id => get.agents.has(id))});
+  } catch (error) {
+    get.error = error.message;
   }
+  get.reading = false;
+  if (storeGet !== get) return;
+  renderStoreDetail();
+  $('detail-body').querySelector('[data-store-install-apply], [data-store-install]')?.focus();
 }
 
-$('team-import-undo').addEventListener('click', event => undoTeamImport(teamImportResult, event.currentTarget));
-$('team-import-apply').addEventListener('click', async event => {
-  if (!teamImportPlan || writeBusy) return;
-  const plan = teamImportPlan;
+async function applyStoreInstall(button) {
+  const get = storeGet;
+  const plan = get?.plan;
+  const card = storeCard(get?.key);
+  if (!plan || !card || writeBusy) return;
   await runWrite({
-    button: event.currentTarget, busyText: '正在下载并导入…',
+    button, busyText: '正在装上…',
     onError: error => {
-      teamImportPlan = null;
-      $('team-import-message').textContent = error.message;
-      $('team-import-retry').hidden = false;
-      renderTeamImportControls();
+      if (storeGet !== get) return;
+      get.plan = null;
+      get.error = error.message;
+      renderStoreDetail();
     },
     work: async () => {
-      const result = await api('/api/team/import/apply', {review: plan.review, revision: plan.revision});
-      teamImportResult = result;
-      $('team-import-title').textContent = '导入结果';
-      $('team-import-message').textContent = result.message + (result.complete ? '。' : '。未完成项见下方明细。');
-      $('team-import-review').innerHTML = importReviewHtml({...plan, ...result}, true, '', teamReviewName);
-      state.teamSelected = new Set();
+      const result = await api('/api/team/install/apply', {review: plan.review});
+      get.plan = null;
       await refreshEverything();
-      await reloadTeamDetail();
+      await loadStore();
       return result;
     },
-    success: result => ({text: result.complete ? result.message : '可用部分已处理，未完成项见导入结果。',
-      undo: result.id ? button => undoTeamImport(result, button) : null}),
+    success: result => ({
+      text: result.message || `装上了「${storeTitle(card)}」`,
+      undo: result.id ? undoButton => undoStoreInstall(result, undoButton) : null,
+    }),
   });
-  renderTeamImportControls();
+}
+
+async function undoStoreInstall(result, button) {
+  const done = await undoOperation(result.id, {skills: result.install || [], message: result.message, button});
+  if (done) await loadStore();
+  return done;
+}
+
+async function rateStore(form, remove) {
+  const card = storeCard(state.storeDetail);
+  if (!card || !form) return;
+  const message = form.querySelector('[data-store-rate-message]');
+  const stars = Number(form.querySelector('input[name="store-stars"]:checked')?.value || 0);
+  if (!remove && !stars) {
+    message.textContent = '先点星星打分。';
+    form.querySelector('input[name="store-stars"]').focus();
+    return;
+  }
+  const button = remove ? form.querySelector('[data-store-rate-remove]') : form.querySelector('[type="submit"]');
+  await withBusy(button, remove ? '正在删除…' : '正在保存…', async () => {
+    try {
+      const text = form.elements.text.value.trim();
+      await api(remove ? '/api/team/ratings/remove' : '/api/team/ratings',
+        remove ? {key: card.key} : {key: card.key, stars, ...(text ? {text} : {})});
+      toast({text: remove ? '已删除你的评价。' : '已保存你的评价，同事都能看到。'});
+      await loadStore();
+    } catch (error) {
+      if (form.isConnected) message.textContent = error.message;
+      else toast({text: error.message, tone: 'error'});
+    }
+  });
+}
+
+/* ---------- 上架：先挑技能、写推荐语，再核对要传的文件 ---------- */
+
+let storePick = null;   // {selected: Map(技能名 → 推荐语), plan}
+let storePublishing = false;
+
+async function openPublish(preselect = []) {
+  storePick = {selected: new Map(), plan: null};
+  $('store-pick-search').value = '';
+  showPublishStep('pick');
+  $('store-pick-list').innerHTML = '<p class="muted store-pick-loading">正在读取你在用的技能…</p>';
+  $('store-publish-message').textContent = '';
+  $('store-publish-dialog').showModal();
+  try {
+    await loadCandidates();
+  } catch (error) {
+    $('store-pick-list').replaceChildren();
+    $('store-publish-message').textContent = error.message;
+    return;
+  }
+  for (const name of preselect) {
+    const candidate = storeCandidates.find(item => item.name === name);
+    if (candidate && !candidate.unavailable) storePick.selected.set(name, candidate.note || '');
+  }
+  renderPick();
+  if (preselect.length) $('store-pick-list').querySelector('input:checked')?.scrollIntoView({block: 'nearest'});
+  $('store-pick-search').focus();
+}
+
+function showPublishStep(step) {
+  $('store-pick').hidden = step !== 'pick';
+  $('store-review').hidden = step !== 'review';
+  $('store-publish-back').hidden = step !== 'review';
+  $('store-publish-next').hidden = step !== 'pick';
+  $('store-publish-apply').hidden = step !== 'review';
+  $('store-publish-title').textContent = step === 'pick' ? '上架技能' : '核对要上架的技能';
+}
+
+function storePickRowHtml(candidate) {
+  const checked = storePick.selected.has(candidate.name);
+  const name = candidate.title || candidate.name;
+  const state = candidate.listed ? candidate.changed ? '<span class="tag">改过，可上架新版</span>' : '<span class="tag tag-ok">已上架</span>' : '';
+  const kind = candidate.kind === 'files' ? `<span class="flag">${icon('file-kept')}连文件一起传</span>`
+    : candidate.kind === 'lark' ? '<span class="flag">飞书官方</span>' : '';
+  return `<div class="store-pick-row${checked ? ' is-checked' : ''}">
+    <label class="store-pick-main">
+      <input type="checkbox" data-store-pick="${escape(candidate.name)}"${checked ? ' checked' : ''}${candidate.unavailable ? ' disabled' : ''}>
+      <span class="store-pick-name"><span class="t">${escape(name)}</span>${candidate.title ? `<span class="skill-id">${escape(candidate.name)}</span>` : ''}</span>
+      <span class="store-pick-tags">${kind}${state}</span>
+    </label>
+    ${candidate.unavailable ? `<p class="row-note">${escape(candidate.unavailable)}</p>` : ''}
+    ${checked ? `<input class="input store-pick-note" data-store-note="${escape(candidate.name)}" maxlength="200"
+      placeholder="${escape(candidate.summary ? `推荐语（不写就用：${candidate.summary}）` : '推荐语：一句话说说它适合干什么（可不填）')}"
+      aria-label="${escape(`给「${name}」写推荐语`)}" value="${escape(storePick.selected.get(candidate.name))}">` : ''}
+  </div>`;
+}
+
+function renderPick() {
+  const query = $('store-pick-search').value.trim().toLowerCase();
+  const rows = (storeCandidates || []).filter(item => !query ||
+    [item.name, item.title, item.summary, item.group].some(value => String(value || '').toLowerCase().includes(query)));
+  $('store-pick-list').innerHTML = rows.map(storePickRowHtml).join('')
+    || `<div class="empty">${emptyInner('search', storeCandidates?.length ? '没找到，换个词试试' : '还没有在用的技能')}</div>`;
+  const count = storePick.selected.size;
+  $('store-publish-next').disabled = !count;
+  $('store-publish-next').textContent = count ? `下一步：核对 ${count} 个` : '下一步：核对';
+  $('store-publish-message').textContent = count ? '' : '挑出你觉得好用、值得推荐给同事的技能。';
+}
+
+$('store-pick-search').addEventListener('input', renderPick);
+
+$('store-pick-list').addEventListener('change', event => {
+  const box = event.target.closest('[data-store-pick]');
+  if (!box) return;
+  const name = box.dataset.storePick;
+  if (box.checked) storePick.selected.set(name, storeCandidates.find(item => item.name === name)?.note || '');
+  else storePick.selected.delete(name);
+  renderPick();
+  const again = $('store-pick-list').querySelector(`[data-store-pick="${CSS.escape(name)}"]`);
+  again?.focus();
 });
+
+$('store-pick-list').addEventListener('input', event => {
+  const note = event.target.closest('[data-store-note]');
+  if (note) storePick.selected.set(note.dataset.storeNote, note.value);
+});
+
+function storeReviewHtml(plan) {
+  const errors = plan.errors?.length ? `<div class="banner banner-warn">
+      <p>${icon('warning')} 这些暂时不能上架，不会上传：</p>
+      <ul class="confirm-items">${plan.errors.map(item => `<li>${escape(item.name)}：${escape(item.reason)}</li>`).join('')}</ul>
+    </div>` : '';
+  const rows = (plan.listings || []).map(item => {
+    const what = item.files ? `连文件一起传：${number(item.files.count)} 个文件，${sizeText(item.files.size)}`
+      : item.kind === 'lark' ? '飞书官方技能，只传名字和说明' : '网上的公开技能，只传名字和来源';
+    const blocked = item.files?.blocked || [];
+    return `<li class="store-review-row">
+      <p class="store-review-name"><strong>${escape(item.title || item.name)}</strong>${item.title ? ` <span class="skill-id">${escape(item.name)}</span>` : ''}</p>
+      <p class="row-note">${escape(what)}</p>
+      <p class="store-review-note">${item.note ? `“${escape(item.note)}”` : `<span class="muted">没写推荐语，同事看到的是技能自带的一句话。</span>`}</p>
+      ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.join('、'))} 需要它，一起上架</p>` : ''}
+      ${blocked.length ? `<details class="fold fold-inner store-blocked">
+        <summary>${icon('lock')} 拦下 ${blocked.length} 个疑似密钥或密码的文件，不会上传</summary>
+        <ul class="confirm-items">${blocked.map(file => `<li><span class="mono">${escape(file.path)}</span>：${escape(file.reason)}</li>`).join('')}</ul>
+      </details>` : ''}
+    </li>`;
+  }).join('');
+  return errors + (rows ? `<ul class="store-review-list">${rows}</ul>` : '');
+}
+
+$('store-publish-next').addEventListener('click', async () => {
+  const skills = [...storePick.selected].map(([name, note]) => ({name, ...(note.trim() ? {note: note.trim()} : {})}));
+  showPublishStep('review');
+  storePick.plan = null;
+  $('store-review').replaceChildren();
+  $('store-publish-message').textContent = '正在核对要传的文件…';
+  $('store-publish-apply').disabled = true;
+  $('store-publish-apply').textContent = '上架';
+  try {
+    const plan = await api('/api/team/listings/preview', {skills});
+    if ($('store-review').hidden) return;
+    storePick.plan = plan;
+    $('store-review').innerHTML = storeReviewHtml(plan);
+    const count = plan.listings?.length || 0;
+    $('store-publish-message').textContent = plan.message || '';
+    $('store-publish-apply').disabled = !count || !teamCanWrite();
+    $('store-publish-apply').textContent = count ? `上架 ${count} 个` : '上架';
+    $('store-publish-apply').focus();
+  } catch (error) {
+    $('store-publish-message').textContent = error.message;
+  }
+});
+
+$('store-publish-back').addEventListener('click', () => {
+  storePick.plan = null;
+  showPublishStep('pick');
+  renderPick();
+  $('store-pick-search').focus();
+});
+
+$('store-publish-apply').addEventListener('click', async event => {
+  const plan = storePick?.plan;
+  if (!plan || storePublishing) return;
+  storePublishing = true;
+  $('store-publish-back').disabled = $('store-publish-close').disabled = true;
+  await withBusy(event.currentTarget, '正在上架…', async () => {
+    try {
+      const result = await api('/api/team/listings/apply', {review: plan.review});
+      storePublishing = false;
+      $('store-publish-dialog').close();
+      toast({text: result.message || `已上架 ${plan.listings.length} 个技能，同事现在能看到了。`});
+      storeCandidates = null;
+      await loadStore();
+      if (state.storeMine) await loadCandidates().catch(() => {});
+      renderTeam();
+    } catch (error) {
+      $('store-publish-message').textContent = error.message;
+    }
+  });
+  storePublishing = false;
+  $('store-publish-back').disabled = $('store-publish-close').disabled = false;
+});
+
+$('store-publish-close').addEventListener('click', () => $('store-publish-dialog').close());
+$('store-publish-dialog').addEventListener('cancel', event => { if (storePublishing) event.preventDefault(); });
+$('store-publish-dialog').querySelector('form').addEventListener('submit', event => event.preventDefault());
 
 function llmBody() {
   return {provider: $('llm-provider').value, base_url: $('llm-base-url').value, model: $('llm-model').value};
