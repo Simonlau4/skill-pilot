@@ -139,6 +139,42 @@ def read_config(path):
         raise ValueError('配置文件没能读懂，请重新导出。') from None
 
 
+def _blocked(rows, registry, unavailable=()):
+    blocked = {n: '当前没有对应的 agent，请指定接收方。' for n in unavailable}
+    for name, row in rows.items():
+        if name not in blocked and name not in registry['skills']:
+            if row['local_modified']:
+                blocked[name] = '分享者的本机版本需要另行提供文件。'
+            elif row['source']['kind'] != 'github':
+                blocked[name] = '需要另行提供技能文件或通过原安装方式补齐。'
+    while True:
+        before = len(blocked)
+        for name, row in rows.items():
+            missing = [n for n in row['requires'] if n in blocked]
+            if name not in blocked and missing:
+                blocked[name] = '缺少所需技能：' + '、'.join(missing)
+        if len(blocked) == before:
+            break
+    return blocked
+
+
+def local_status(data, home=None):
+    """Skill availability without mapping the sharer's agents onto this computer."""
+    validate(data)
+    home, registry, agents = operations.load(home)
+    rows = {s['name']: s for s in data['skills']}
+    blocked = _blocked(rows, registry)
+    for name, row in rows.items():
+        if name not in registry['skills'] and not row['local_modified'] and row['source']['kind'] == 'manual':
+            reason = row['source'].get('reason')
+            blocked[name] = reason if isinstance(reason, str) and reason else '自制或来源不明，需要另行提供技能文件。'
+    return {name: {'status': 'needs_files' if name in blocked else
+                           'installed' if name in registry['skills'] else 'installable',
+                   'label': '需要另外补齐' if name in blocked else
+                            '本机已有' if name in registry['skills'] else '可以装',
+                   'reason': blocked.get(name, '')} for name in rows}
+
+
 def _plan(data, registry, agents, assigned):
     validate(data)
     if assigned is not None and (not isinstance(assigned, list) or not assigned or
@@ -159,23 +195,7 @@ def _plan(data, registry, agents, assigned):
                     pending.append(dependency)
         return targets
     targets = expand({n: set(a) for n, a in explicit.items()})
-    blocked = {}
-    for name, row in rows.items():
-        if not targets[name]:
-            blocked[name] = '当前没有对应的 agent，请指定接收方。'
-        elif name not in registry['skills']:
-            if row['local_modified']:
-                blocked[name] = '分享者的本机版本需要另行提供文件。'
-            elif row['source']['kind'] != 'github':
-                blocked[name] = '需要另行提供技能文件或通过原安装方式补齐。'
-    while True:
-        before = len(blocked)
-        for name, row in rows.items():
-            missing = [n for n in row['requires'] if n in blocked]
-            if name not in blocked and missing:
-                blocked[name] = '缺少所需技能：' + '、'.join(missing)
-        if len(blocked) == before:
-            break
+    blocked = _blocked(rows, registry, [n for n in rows if not targets[n]])
     # Do not install a dependency whose only requested parent is blocked.
     ready = roots - blocked.keys()
     pending = list(ready)
@@ -202,7 +222,7 @@ def preview_import(data, assigned=None, home=None):
     return {**_plan(data, registry, agents, assigned), 'revision': revision}
 
 
-def import_config(data, assigned=None, home=None, expected=None):
+def import_config(data, assigned=None, home=None, expected=None, member_name=None):
     home, registry, agents = operations.load(home)
     guard(home / '.skill-pilot', home)
     current = operations.revision(home, agents)
@@ -244,8 +264,9 @@ def import_config(data, assigned=None, home=None, expected=None):
             changed = sorted(set(plan['install']) | set(plan['dependencies']) | set(assignments['changed']))
             reconcile_assignments(current, home, checked, changed)
             return changed, plan['install'], result
+        prefix = f'从{member_name}的分享导入了技能' if member_name is not None else '导入了技能配置'
         return operations._run(home, registry, agents, expected,
-                               f'导入了技能配置：新装 {len(plan["install"])} 个，沿用本机 {len(plan["reuse"])} 个', mutate)
+                               f'{prefix}：新装 {len(plan["install"])} 个，沿用本机 {len(plan["reuse"])} 个', mutate)
     finally:
         for review in reviews.values():
             shutil.rmtree(review['temporary'], ignore_errors=True)

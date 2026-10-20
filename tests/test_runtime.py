@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import store
+from skill_pilot import store, team, team_hub
 from skill_pilot.web import runtime, server
 from tests import set_up_home
 
@@ -221,6 +221,42 @@ server.run(json_output=True)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(json.loads(second.stdout)['message'], '已打开正在运行的看板。')
         self.assertEqual(self.before, store.physical_state(self.home))
+
+    def test_refresh_preserves_team_upload_and_import_snapshots(self):
+        plan = store.preview(self.home, ['codex'])
+        store.apply(plan['plan_id'], self.home, ['codex'])
+        hub = team_hub.HubServer(self.root / 'Team share data', '127.0.0.1', 0)
+        thread = threading.Thread(target=hub.serve_forever, kwargs={'poll_interval': .01})
+        thread.start()
+        def stop_hub():
+            hub.shutdown()
+            thread.join(timeout=5)
+            hub.server_close()
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(stop_hub)
+        member = hub.store.add_member('示例成员')
+        team.save_settings(self.home, {'url': 'http://127.0.0.1:' + str(hub.server_port), 'key': member['token']})
+        team.upload(self.home, team.upload_preview(self.home)['config'])
+        before = store.physical_state(self.home)
+        self.start()
+        status, upload = self.request('/api/team/upload/preview', {})
+        self.assertEqual(status, 200, upload)
+        status, imported = self.request('/api/team/import/preview', {'member': member['id'], 'skills': ['sample']})
+        self.assertEqual(status, 200, imported)
+        self.change_backend()
+        path = self.code / 'skill_pilot/web/server.py'
+        source = path.read_text()
+        needle = "'test_marker': 'new-program', "
+        path.write_text(source.replace(needle, needle +
+            "'test_team_uploads': self.server.team_upload_reviews, 'test_team_imports': self.server.team_import_reviews, "))
+        self.request('/api/runtime/refresh', {})
+        current = self.wait_status(lambda s: s.get('test_marker') == 'new-program')
+        self.assertEqual(current['test_team_uploads'][upload['review']]['config'], upload['config'])
+        saved = current['test_team_imports'][imported['review']]
+        self.assertEqual(saved['config'], imported['config'])
+        self.assertEqual(saved['revision'], imported['revision'])
+        self.assertEqual(saved['member'], imported['member'])
+        self.assertEqual(store.physical_state(self.home), before)
 
     def test_unloadable_update_keeps_old_program_available_then_allows_retry(self):
         self.start()

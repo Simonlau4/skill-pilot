@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import SKIP_CONTENT, apply, backups, guard, preview, restore, target_home
-from .. import operations, updates, cleanup, labels, tags, sharing, self_update, extra_sources
+from .. import operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from . import runtime
@@ -41,6 +41,8 @@ class Dashboard(ThreadingHTTPServer):
         self.home = Path(inventory.get("home", target_home()))
         extra_sources.ensure(self.home)
         self.install_reviews = session.get('install_reviews', {})
+        self.team_upload_reviews = session.get('team_upload_reviews', {})
+        self.team_import_reviews = session.get('team_import_reviews', {})
         self.update_reviews = session.get('update_reviews', {})
         self.update_lock = threading.Lock()
         self.update_thread = None
@@ -332,6 +334,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, sharing.export_config(self.server.home, query.get('agent', [None])[0]))
             except (ValueError, OSError, KeyError) as error:
                 self.reply(409, {'error': str(error)})
+        elif path in {'/api/team', '/api/team/shares'} or path.startswith('/api/team/shares/'):
+            try:
+                result = (team.status(self.server.home, strict=False) if path == '/api/team' else
+                          team.shares(self.server.home) if path == '/api/team/shares' else
+                          team.detail(self.server.home, path.removeprefix('/api/team/shares/')))
+                self.reply(200, result)
+            except (ValueError, OSError) as error:
+                self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取团队分享，请稍后重试。'})
         elif path == '/api/updates/progress':
             with self.server.update_lock:
                 review = next(reversed(self.server.update_reviews.values()), None)
@@ -407,12 +417,13 @@ class Handler(BaseHTTPRequestHandler):
         read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan'}
+                       '/api/agents/scan', '/api/team/upload/preview', '/api/team/import/preview'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply','/api/withdrawn/restore',
-                        '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply'}
+                        '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
+                        '/api/team/upload/apply', '/api/team/withdraw', '/api/team/import/apply'}
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
-                           '/api/settings/extra-sources', '/api/tags'}
+                           '/api/settings/extra-sources', '/api/tags', '/api/team/settings'}
         program_routes = {'/api/program/check', '/api/program/apply'}
         if path not in {"/api/migration/apply", "/api/restore"} | read_routes | write_routes | settings_routes | program_routes:
             self.reply(405, {"error": "当前阶段没有这个操作。"})
@@ -424,6 +435,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError('请求内容格式不正确。')
+            if path.startswith('/api/team/'):
+                if path not in read_routes and not preview_allowed(self.server.home):
+                    self.reply(403, {'error': '当前处于只读模式，分享和本机文件没有改动。'})
+                    return
+                self.reply(200, self.team_post(path, body))
+                return
             if path == '/api/agents/scan':
                 self.reply(200, self.server.start_agents_scan(full=True))
                 return
@@ -599,8 +616,40 @@ class Handler(BaseHTTPRequestHandler):
             self.server.inventory = scan(self.server.home)
             self.reply(200, result)
         except (ValueError, OSError, KeyError, TypeError, StopIteration) as error:
-            message = '设置没能保存，请核对后再试。' if path in settings_routes and not isinstance(error, ValueError) else str(error)
+            message = ('团队操作没能完成，请重新预览后重试。' if path.startswith('/api/team/') and not isinstance(error, ValueError) else
+                       '设置没能保存，请核对后再试。' if path in settings_routes and not isinstance(error, ValueError) else str(error))
             self.reply(400 if path == '/api/cleanup/preview' else 409, {"error": message or "操作没能完成，请重新预览。"})
+
+    def team_post(self, path, body):
+        home = self.server.home
+        if path == '/api/team/settings':
+            return team.save_settings(home, body)
+        if path == '/api/team/upload/preview':
+            result = team.upload_preview(home, body.get('agent'), body.get('exclude', []))
+            review = secrets.token_urlsafe(16)
+            self.server.team_upload_reviews[review] = result
+            return {**result, 'review': review, 'skill_count': len(result['config']['skills'])}
+        if path == '/api/team/import/preview':
+            saved, plan = team.import_preview(home, body.get('member'), body.get('skills'), body.get('agents'))
+            review = secrets.token_urlsafe(16)
+            self.server.team_import_reviews[review] = saved
+            return {**plan, 'review': review, 'member': saved['member'], 'config': saved['config']}
+        if path == '/api/team/withdraw':
+            return team.withdraw(home)
+        reviews = self.server.team_upload_reviews if path == '/api/team/upload/apply' else self.server.team_import_reviews
+        identifier = body.get('review')
+        if not isinstance(identifier, str) or identifier not in reviews:
+            raise ValueError('这份预览已失效，请重新预览。')
+        review = reviews[identifier]
+        if path == '/api/team/upload/apply':
+            return team.upload(home, review['config'])
+        if not isinstance(body.get('revision'), str) or body['revision'] != review['revision']:
+            raise ValueError('请使用这份预览确认导入；本机技能有变化时需要重新预览。')
+        result = sharing.import_config(review['config'], review['agents'], home, review['revision'],
+                                       member_name=review['member']['name'])
+        self.server.invalidate_agents()
+        self.server.inventory = scan(home)
+        return result
 
 
 def preview_allowed(home):

@@ -22,7 +22,7 @@
 
 ## 真实数据与安全边界
 
-- 真实数据：`~/.skill-pilot/`（`store/`、`bases/`、`registry.json`、`agents.json`、`logs/`、`backups/`、`labels.json`、`tags.json`、含 API key 的 `settings.json`：不复制进模拟 home、不进备份和日志、不在回复、issue、PR 里出现），各 agent 的技能根目录（见 `skill_pilot/profiles/catalog.json`），以及 `~/.codex/config.toml` 的 `[skills] config`。
+- 真实数据：`~/.skill-pilot/`（`store/`、`bases/`、`registry.json`、`agents.json`、`logs/`、`backups/`、`labels.json`、`tags.json`、含 API key 的 `settings.json`、含分享站口令的 `team.json`：不复制进模拟 home、不进备份和日志、不在回复、issue、PR 里出现），各 agent 的技能根目录（见 `skill_pilot/profiles/catalog.json`），以及 `~/.codex/config.toml` 的 `[skills] config`。
 - 旧版留下的用量数据库只保留，不读取、改写、删除或复制进模拟 home。
 - 永远不碰：`~/.claude/skills/synced/`、`~/.codex/skills/.system/`、各家插件和内置目录、`~/.agents/.skill-lock.json`（只读）。
 - 开发和测试只用系统临时目录里的模拟 home（`scripts/make-fake-home.py`；`tests/__init__.py` 断言目标 home 在临时目录）。对真实 home 运行本工具一律带 `SKILL_PILOT_READ_ONLY=1`。
