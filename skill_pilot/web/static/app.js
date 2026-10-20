@@ -1237,7 +1237,7 @@ let filterGroupMotion = null;
 function renderSkillFilters(options) {
   const filters = $('skills-filters');
   const groupList = filters.querySelector('.filter-group-list');
-  const groupHeight = groupList?.getBoundingClientRect().height;
+  const groupCount = groupList?.childElementCount;
   filterGroupMotion?.cancel();
   const active = document.activeElement;
   const selector = filters.contains(active) && active.hasAttribute('data-chip') ? `[data-chip="${CSS.escape(active.dataset.chip)}"]`
@@ -1257,10 +1257,9 @@ function renderSkillFilters(options) {
   renderFilterLayout();
   for (const [name, top] of scrolls) filters.querySelector(`[data-filter-list="${name}"]`)?.scrollTo(0, top);
   const nextGroup = filters.querySelector('.filter-group-list');
-  const nextHeight = nextGroup?.getBoundingClientRect().height;
-  if (groupList && groupList === nextGroup && groupHeight !== nextHeight && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    filterGroupMotion = nextGroup.animate([{height: `${groupHeight}px`, flexShrink: 0}, {height: `${nextHeight}px`, flexShrink: 0}],
-      {duration: 260, easing: 'cubic-bezier(0.22, 1, 0.36, 1)'});
+  if (groupList && groupList === nextGroup && groupCount !== nextGroup.childElementCount && !prefersReducedMotion()) {
+    filterGroupMotion = nextGroup.animate([{opacity: 0.75, transform: 'translateY(-3px)'}, {opacity: 1, transform: 'none'}],
+      {duration: 260, easing: 'cubic-bezier(0.32, 0.72, 0, 1)'});
   }
   if (selector) {
     const target = filters.querySelector(selector);
@@ -1276,7 +1275,7 @@ function animateSkillResults(agent) {
   if (skillScope && skillScope !== scope && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
     skillListMotion = $('skills-list').animate([
       {opacity: 0.75, transform: 'translateY(3px)'}, {opacity: 1, transform: 'translateY(0)'},
-    ], {duration: 180, easing: 'cubic-bezier(0.22, 1, 0.36, 1)'});
+    ], {duration: 180, easing: 'cubic-bezier(0.32, 0.72, 0, 1)'});
   }
   skillScope = scope;
 }

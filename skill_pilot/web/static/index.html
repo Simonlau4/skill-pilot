@@ -201,7 +201,10 @@
         <div id="agent-head" class="agent-head"></div>
 
         <div class="toolbar">
-          <input id="skills-search" type="search" class="input input-search" placeholder="搜技能的名字或用途" aria-label="搜索技能" autocomplete="off" spellcheck="false">
+          <label class="search-field">
+            <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
+            <input id="skills-search" type="search" class="input input-search" placeholder="搜技能的名字或用途" aria-label="搜索技能" autocomplete="off" spellcheck="false">
+          </label>
           <div id="skills-tabs" class="segmented" role="group" aria-label="看哪些技能"></div>
           <span class="toolbar-end">
             <button id="updates-all" class="btn btn-update" hidden></button>
