@@ -17,8 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import operations, sharing, store, team, team_hub
-from skill_pilot.sources import github
+from skill_pilot import operations, sharing, store, team, team_hub, updates, research
+from skill_pilot.sources import github, normalize
+from tests.test_team_hub import listing, file as package_file
 from skill_pilot.web.server import Dashboard
 from tests import set_up_home
 
@@ -41,7 +42,7 @@ class TeamTests(unittest.TestCase):
         self.make_home(self.home, 'codex', ('acme-main', 'acme-base', 'acme-other', 'acme-extra', 'acme-local'))
         self.make_home(self.other, 'claude', ('acme-other',))
         self.registry(self.home, lambda skills: skills['acme-main'].update(requires=['acme-base']))
-        self.registry(self.home, lambda skills: skills['acme-local'].update(source={'source': '本机自制'}))
+        self.registry(self.home, lambda skills: skills['acme-local'].update(source={'source': '自制'}))
         self.hub = self.start(team_hub.HubServer(self.root / 'Share data', '127.0.0.1', 0))
         self.url = 'http://127.0.0.1:' + str(self.hub.server_port)
         self.first = self.hub.store.add_member('示例成员 A')
@@ -103,9 +104,11 @@ class TeamTests(unittest.TestCase):
         for server, member in ((self.a, self.first), (self.b, self.second)):
             self.ok(server, '/api/team/settings', {'url': self.url, 'key': member['token']})
 
-    def publish(self):
-        preview = self.ok(self.a, '/api/team/upload/preview', {'exclude': ['acme-extra', 'acme-base']})
-        self.ok(self.a, '/api/team/upload/apply', {'review': preview['review']})
+    def publish(self, names=('acme-main', 'acme-local'), notes=None):
+        preview = self.ok(self.a, '/api/team/listings/preview', {'skills': [
+            {'name': n, 'note': (notes or {}).get(n, '')} for n in names]})
+        self.assertEqual(preview['errors'], [])
+        self.ok(self.a, '/api/team/listings/apply', {'review': preview['review']})
         return preview
 
     def library(self, home):
@@ -113,62 +116,419 @@ class TeamTests(unittest.TestCase):
         return {path: store.physical_state(home / path) for path in paths} | {
             'store': operations.content_digest(home / '.skill-pilot/store')}
 
-    def test_two_users_upload_browse_import_saved_subset_and_undo_then_withdraw(self):
+    def cards(self, server=None):
+        return {c['name']: c for c in self.ok(server or self.b, '/api/team/catalog')['cards']}
+
+    def install(self, name='acme-local', apply=True):
+        card = self.cards()[name]
+        plan = self.ok(self.b, '/api/team/install/preview', {'key': card['key'], 'agents': ['claude']})
+        if not apply:
+            return plan
+        return self.ok(self.b, '/api/team/install/apply', {'review': plan['review']})
+
+    def raw_put(self, rows, member=None):
+        return team._request({'url': self.url, 'key': (member or self.first)['token']}, '/api/listings/me', 'PUT', {'listings': rows})
+
+    def local_github(self):
+        return patch.object(github, 'parse_url', return_value=(self.repository.as_uri(), 'acme/skills', self.commit))
+
+    def test_two_users_publish_install_files_and_github_with_dependencies_and_undo(self):
         self.configure()
-        preview = self.publish()
-        self.assertEqual(preview['retained'][0]['name'], 'acme-base')
-        self.assertEqual(preview['retained'][0]['required_by'], ['acme-main'])
-        self.assertNotIn('acme-extra', [row['name'] for row in preview['config']['skills']])
-        status = self.ok(self.a, '/api/team')
-        self.assertEqual(status['member']['id'], self.first['id'])
-        self.assertEqual(status['share']['skill_count'], 4)
-        listing = self.ok(self.b, '/api/team/shares')['shares']
-        self.assertEqual([row['member']['id'] for row in listing], [self.first['id']])
-        detail = self.ok(self.b, '/api/team/shares/' + self.first['id'])
-        states = {row['name']: row['local']['status'] for row in detail['config']['skills']}
-        self.assertEqual(states, {'acme-base': 'installable', 'acme-main': 'installable',
-                                  'acme-other': 'installed', 'acme-local': 'needs_files'})
-        # A's codex is absent on B, but availability above does not depend on it.
-        unmapped = self.ok(self.b, '/api/team/import/preview', {'member': self.first['id'], 'skills': ['acme-main']})
-        self.assertEqual(unmapped['unmapped_agents'], ['codex'])
-        plan = self.ok(self.b, '/api/team/import/preview', {
-            'member': self.first['id'], 'skills': ['acme-main', 'acme-other'], 'agents': ['claude']})
-        self.assertEqual(plan['install'], ['acme-base', 'acme-main'])
-        self.assertEqual(plan['reuse'], ['acme-other'])
-        sharing.validate(plan['config'])
-        subset = {row['name']: row for row in plan['config']['skills']}
-        self.assertEqual(subset['acme-base']['assigned_agents'], [])
-        self.assertEqual(subset['acme-main']['assigned_agents'], ['codex'])
-        original = (self.other / '.skill-pilot/store/acme-other/SKILL.md').read_bytes()
+        path = self.home / '.skill-pilot/store/acme-local'
+        (path / '.env').write_text('example private value')
+        (path / 'example.bin').write_bytes(b'\x00\xff\x01')
+        script = path / 'example.sh'
+        script.write_text('exit 9\n')
+        script.chmod(0o755)
+        labels = {'groups': [{'name': '示例分组', 'skills': {'acme-local': {
+            'title': '示例技能', 'summary': '示例用途', 'description': ''}}}]}
+        (self.home / '.skill-pilot/labels.json').write_text(json.dumps(labels))
+        published = self.publish(notes={'acme-local': '<b>示例推荐</b>'})
+        rows = {r['name']: r for r in published['listings']}
+        self.assertEqual(rows['acme-base']['auto'], ['acme-main'])
+        self.assertEqual(rows['acme-local']['files']['blocked'][0]['path'], '.env')
+        self.assertEqual(rows['acme-local']['files']['count'], 3)
+        self.assertNotIn('content', json.dumps(published))
+        self.assertEqual(self.cards(self.a)['acme-local']['local']['status'], 'mine')
+        card = self.cards()['acme-local']
+        self.assertEqual(card['local']['status'], 'installable')
+        self.assertFalse(card['can_rate'])
+        self.assertEqual(card['listings'][0]['note'], '<b>示例推荐</b>')
         before = self.library(self.other)
-        # Withdrawal and new remote data cannot change the reviewed installation.
-        self.ok(self.a, '/api/team/withdraw', {})
-        with patch.object(github, 'parse_url', return_value=(self.repository.as_uri(), 'acme/skills', self.commit)):
-            result = self.ok(self.b, '/api/team/import/apply', {'review': plan['review'], 'revision': plan['revision']})
-        self.assertTrue(result['complete'])
-        self.assertEqual(operations.load(self.other)[1]['skills']['acme-base']['assigned_agents'], ['claude'])
-        self.assertEqual((self.other / '.skill-pilot/store/acme-other/SKILL.md').read_bytes(), original)
-        self.assertEqual(result['message'], '从示例成员 A的分享导入了技能：新装 2 个，沿用本机 1 个')
-        history = self.ok(self.b, '/api/log')
-        self.assertIn(result['message'], json.dumps(history, ensure_ascii=False))
-        with tarfile.open(self.other / '.skill-pilot/backups' / result['backup_id'] / 'files.tar') as archive:
+        plan = self.install(apply=False)
+        self.assertGreater(plan['tokens']['claude'], 0)
+        installed = self.ok(self.b, '/api/team/install/apply', {'review': plan['review'], 'agents': ['codex'], 'key': 'ignored'})
+        self.assertEqual(installed['message'], '从团队商店装上了「示例技能」')
+        skill = operations.load(self.other)[1]['skills']['acme-local']
+        self.assertEqual(skill['assigned_agents'], ['claude'])
+        self.assertEqual(set(skill['source']), {'source', 'team'})
+        self.assertEqual(normalize(skill['source'])['label'], '团队商店 · 示例成员 A')
+        destination = self.other / '.skill-pilot/store/acme-local'
+        self.assertFalse((destination / '.env').exists())
+        self.assertEqual((destination / 'example.bin').read_bytes(), b'\x00\xff\x01')
+        self.assertTrue((destination / 'example.sh').stat().st_mode & 0o111)
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'installed')
+        self.assertTrue(self.cards()['acme-local']['can_rate'])
+        with tarfile.open(self.other / '.skill-pilot/backups' / installed['backup_id'] / 'files.tar') as archive:
             self.assertNotIn('.skill-pilot/team.json', archive.getnames())
-        self.ok(self.b, '/api/undo', {'id': result['id'], 'confirmed': True,
-                                    'revision': operations.table(self.other)['revision']})
+        self.ok(self.b, '/api/undo', {'id': installed['id'], 'confirmed': True, 'revision': operations.table(self.other)['revision']})
         self.assertEqual(self.library(self.other), before)
-        self.assertEqual(self.ok(self.b, '/api/team/shares'), {'shares': []})
+        with self.local_github():
+            plan = self.install('acme-main', apply=False)
+        self.assertEqual({r['name'] for r in plan['install']}, {'acme-main', 'acme-base'})
+        installed = self.ok(self.b, '/api/team/install/apply', {'review': plan['review']})
+        skills = operations.load(self.other)[1]['skills']
+        self.assertEqual(skills['acme-base']['assigned_agents'], ['claude'])
+        self.assertEqual(normalize(skills['acme-main']['source'])['kind'], 'github')
+        self.ok(self.b, '/api/undo', {'id': installed['id'], 'confirmed': True, 'revision': operations.table(self.other)['revision']})
+        self.assertEqual(self.library(self.other), before)
 
-    def test_upload_applies_the_exact_preview_even_after_local_changes(self):
+    def test_preview_keeps_downloaded_version_even_after_author_updates_or_removes_it(self):
         self.configure()
-        preview = self.ok(self.a, '/api/team/upload/preview', {})
-        path = self.home / '.skill-pilot/store/acme-main/SKILL.md'
-        path.write_text(path.read_text().replace('Acme 示例说明', '更改后的说明'))
-        self.ok(self.a, '/api/team/upload/apply', {'review': preview['review'], 'exclude': ['acme-main']})
-        self.assertEqual(team.share(self.other, self.first['id'])['config'], preview['config'])
+        self.publish(('acme-local',))
+        old = (self.home / '.skill-pilot/store/acme-local/SKILL.md').read_bytes()
+        plan = self.install(apply=False)
+        path = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+        path.write_bytes(old + b'\nnew version\n')
+        self.publish(('acme-local',))
+        self.ok(self.a, '/api/team/listings/remove', {'names': ['acme-local']})
+        with patch.object(github, 'inspect', side_effect=AssertionError('apply must use the preview')):
+            self.ok(self.b, '/api/team/install/apply', {'review': plan['review']})
+        self.assertEqual((self.other / '.skill-pilot/store/acme-local/SKILL.md').read_bytes(), old)
+        self.assertEqual(self.request(self.b, '/api/team/install/apply', {'review': plan['review']})[0], 409)
 
-    def test_settings_are_private_separate_and_tested_before_replacement(self):
-        self.assertEqual(self.ok(self.a, '/api/team'), {'url': '', 'has_key': False, 'configured': False,
-                                                     'member': None, 'share': None})
+    def test_all_local_states_and_dependency_blockers(self):
+        self.configure()
+        self.raw_put([listing('acme-other'), listing('missing-official', 'lark'),
+                      listing('needs-official', requires=['missing-official']), listing('acme-local', 'files')])
+        cards = self.cards()
+        self.assertEqual(cards['acme-other']['local']['status'], 'installed')
+        self.assertEqual(cards['acme-other']['local']['agents'], ['claude'])
+        self.assertEqual(cards['missing-official']['local']['status'], 'lark')
+        self.assertEqual(cards['needs-official']['local']['status'], 'blocked')
+        self.assertIn('missing-official', cards['needs-official']['local']['reason'])
+        self.registry(self.other, lambda skills: skills['acme-other'].update(source={'source': '自制'}))
+        self.assertEqual(self.cards()['acme-other']['local']['status'], 'conflict')
+        self.raw_put([listing('needs-conflict', requires=['acme-other'])])
+        # Dependencies with the same local name are reused, even with a different source.
+        self.assertEqual(self.cards()['needs-conflict']['local']['status'], 'installable')
+        self.raw_put([listing('acme-other', 'lark')])
+        self.assertEqual(self.cards()['acme-other']['local']['status'], 'installed')
+        self.raw_put([listing('acme-other', 'files')])
+        self.assertEqual(self.cards()['acme-other']['local']['status'], 'conflict')
+        # A faulty station may omit a dependency: report the missing author listing.
+        data = team._catalog(team._connection(self.home))
+        card = next(c for c in data if c['listings'][0]['name'] == 'needs-conflict')
+        card['listings'][0]['requires'] = ['not-listed']
+        with patch.object(team, '_catalog', return_value=data):
+            blocked = self.cards()['needs-conflict']
+            self.assertEqual(blocked['local']['status'], 'blocked')
+            self.assertIn('作者没有上架', blocked['local']['reason'])
+            plan = self.ok(self.b, '/api/team/install/preview', {'key': blocked['key'], 'agents': ['claude']})
+            self.assertEqual(plan['install'], [])
+            self.assertTrue(plan['skipped'])
+
+    def test_existing_dependencies_and_their_dependencies_are_assigned_without_replacing(self):
+        self.configure()
+        self.registry(self.home, lambda skills: skills['acme-local'].update(requires=['acme-other']))
+        self.publish(('acme-local',))
+        self.registry(self.other, lambda skills: skills['acme-other'].update(source={'source': '自制'}))
+        before = (self.other / '.skill-pilot/store/acme-other/SKILL.md').read_bytes()
+        plan = self.install(apply=False)
+        self.assertEqual(plan['reuse'], ['acme-other'])
+        self.assertEqual([r['name'] for r in plan['install']], ['acme-local'])
+        self.ok(self.b, '/api/team/install/apply', {'review': plan['review']})
+        self.assertEqual((self.other / '.skill-pilot/store/acme-other/SKILL.md').read_bytes(), before)
+        self.assertEqual(operations.load(self.other)[1]['skills']['acme-local']['requires'], ['acme-other'])
+
+    def test_install_revision_permissions_and_download_tampering_require_new_preview(self):
+        self.configure()
+        self.publish(('acme-local',))
+        plan = self.install(apply=False)
+        saved = self.b.team_import_reviews[plan['review']]
+        path = Path(saved['items'][0]['path']) / 'SKILL.md'
+        path.chmod(0o755)
+        before = self.library(self.other)
+        self.assertEqual(self.request(self.b, '/api/team/install/apply', {'review': plan['review']})[0], 409)
+        self.assertEqual(self.library(self.other), before)
+        plan = self.install(apply=False)
+        local = self.other / '.skill-pilot/store/acme-other/SKILL.md'
+        local.chmod(0o755)
+        changed = self.library(self.other)
+        status, result = self.request(self.b, '/api/team/install/apply', {'review': plan['review'], 'revision': operations.table(self.other)['revision']})
+        self.assertEqual(status, 409)
+        self.assertIn('重新预览', result['error'])
+        self.assertEqual(self.library(self.other), changed)
+
+    def test_candidates_kind_changed_in_use_and_foreign_team_skill(self):
+        self.configure()
+        self.publish(('acme-local',))
+        candidates = {r['name']: r for r in self.ok(self.a, '/api/team/listings/candidates')['skills']}
+        self.assertEqual(candidates['acme-main']['kind'], 'github')
+        self.assertEqual(candidates['acme-local']['kind'], 'files')
+        self.assertTrue(candidates['acme-local']['listed'])
+        self.assertFalse(candidates['acme-local']['changed'])
+        path = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+        path.write_text(path.read_text() + '\n新版\n')
+        self.assertTrue(next(r for r in self.ok(self.a, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-local')['changed'])
+        path = self.home / '.skill-pilot/store/acme-main/SKILL.md'
+        path.write_text(path.read_text() + '\n本机改过\n')
+        self.assertEqual(next(r for r in self.ok(self.a, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-main')['kind'], 'files')
+        self.install()
+        foreign = next(r for r in self.ok(self.b, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-local')
+        self.assertIn('别人的', foreign['unavailable'])
+        preview = self.ok(self.b, '/api/team/listings/preview', {'skills': [{'name': 'acme-local'}]})
+        self.assertEqual(len(preview['errors']), 1)
+        operations.apply_assign([{'skill': 'acme-extra', 'agent': 'codex', 'enabled': False}], home=self.home)
+        self.assertNotIn('acme-extra', [r['name'] for r in self.ok(self.a, '/api/team/listings/candidates')['skills']])
+
+    def test_secrets_are_excluded_internal_links_flattened_and_skipped_content_ignored(self):
+        self.configure()
+        root = self.home / '.skill-pilot/store/acme-local'
+        names = ('.env', '.env.production', 'test.pem', 'test.key', 'test.p12', 'id_rsa.pub', 'id_ed25519', '.npmrc', '.pypirc', 'credentials.json')
+        for name in names:
+            (root / name).write_text('example private content')
+        contents = ('-----BEGIN OPENSSH PRIVATE KEY-----', 'sk-' + 'a' * 32, 'ghp_' + 'b' * 36,
+                    'github_pat_' + 'c' * 40, 'AKIA' + 'D' * 16, 'xoxb-' + 'e' * 32,
+                    'api_key: "' + 'f' * 20 + '"', 'token = ' + 'g' * 20, 'secret: ' + 'h' * 20, 'password=' + 'i' * 20)
+        for i, text in enumerate(contents):
+            (root / f'secret-{i}.txt').write_text(text)
+        (root / 'alias.md').symlink_to('SKILL.md')
+        (root / 'refs').mkdir()
+        (root / 'refs/example.txt').write_text('Acme example')
+        (root / 'alias-dir').symlink_to('refs', target_is_directory=True)
+        (root / 'node_modules').mkdir()
+        (root / 'node_modules/private.txt').write_text('not uploaded')
+        preview = self.publish(('acme-local',))
+        row = preview['listings'][0]
+        self.assertEqual(len(row['files']['blocked']), len(names) + len(contents))
+        config = team._connection(self.home)
+        package = team._request(config, '/api/packages/' + self.first['id'] + '/acme-local')
+        self.assertEqual({f['path'] for f in package['files']}, {'SKILL.md', 'alias.md', 'refs/example.txt', 'alias-dir/example.txt'})
+        self.assertEqual(package['version'], row['version'])
+        self.assertNotIn('example private content', json.dumps(preview))
+
+    def test_external_link_and_foreign_dependency_block_parents(self):
+        self.configure()
+        root = self.home / '.skill-pilot/store/acme-local'
+        outside = self.root / 'outside example'
+        outside.write_text('example')
+        (root / 'outside.txt').symlink_to(outside)
+        self.registry(self.home, lambda skills: skills['acme-main'].update(requires=['acme-local']))
+        candidate = next(r for r in self.ok(self.a, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-local')
+        self.assertIn('文件夹外', candidate['unavailable'])
+        plan = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-main'}]})
+        self.assertEqual({r['name'] for r in plan['errors']}, {'acme-main', 'acme-local'})
+        self.assertEqual(plan['listings'], [])
+
+    def test_blocked_skill_manifest_and_size_count_limits_propagate_to_dependents(self):
+        self.configure()
+        root = self.home / '.skill-pilot/store/acme-local'
+        self.registry(self.home, lambda skills: skills['acme-main'].update(requires=['acme-local']))
+        manifest = root / 'SKILL.md'
+        original = manifest.read_text()
+        manifest.write_text(original + '\ntoken=' + 'x' * 32)
+        for scenario in ('secret', 'size', 'count'):
+            if scenario == 'size':
+                manifest.write_text(original)
+                (root / 'big.bin').write_bytes(b'\x00' * team_hub.MAX_SIZE)
+            if scenario == 'count':
+                (root / 'big.bin').unlink()
+                for i in range(300):
+                    (root / str(i)).touch()
+            preview = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-main'}]})
+            self.assertEqual({r['name'] for r in preview['errors']}, {'acme-main', 'acme-local'}, scenario)
+            self.assertEqual(preview['listings'], [])
+
+    def test_publication_requires_original_preview_and_no_local_changes(self):
+        self.configure()
+        plan = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-local'}]})
+        path = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+        path.write_text(path.read_text() + '\n本机变化\n')
+        status, result = self.request(self.a, '/api/team/listings/apply', {'review': plan['review'], 'skills': []})
+        self.assertEqual(status, 409)
+        self.assertIn('重新预览', result['error'])
+        self.assertEqual(self.cards(), {})
+        self.publish(('acme-local',))
+        plan = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-local', 'note': '核对后的推荐'}]})
+        self.ok(self.a, '/api/team/listings/apply', {'review': plan['review'], 'skills': [{'name': 'acme-extra'}]})
+        self.assertEqual(self.cards()['acme-local']['listings'][0]['note'], '核对后的推荐')
+        self.assertEqual(self.request(self.a, '/api/team/listings/apply', {'review': plan['review']})[0], 409)
+
+    def test_remove_preflights_all_dependencies_without_partial_changes(self):
+        self.configure()
+        self.publish(('acme-main', 'acme-local'))
+        before = store.physical_state(self.hub.store.data)
+        status, result = self.request(self.a, '/api/team/listings/remove', {'names': ['acme-base', 'acme-local']})
+        self.assertEqual(status, 409)
+        self.assertIn('acme-main', result['error'])
+        self.assertEqual(store.physical_state(self.hub.store.data), before)
+        self.ok(self.a, '/api/team/listings/remove', {'names': ['acme-base', 'acme-main', 'acme-local']})
+        self.assertEqual(self.cards(), {})
+
+    def test_remove_includes_entire_dependency_cycle(self):
+        self.configure()
+        self.registry(self.home, lambda skills: skills['acme-local'].update(requires=['acme-main']))
+        self.registry(self.home, lambda skills: skills['acme-main'].update(requires=['acme-local']))
+        self.publish(('acme-main',))
+        self.ok(self.a, '/api/team/listings/remove', {'names': ['acme-main', 'acme-local']})
+        self.assertEqual(self.cards(), {})
+
+    def test_catalog_uses_latest_metadata_and_accepts_same_source_name_aliases(self):
+        self.configure()
+        first = listing('acme-other', title='较早的中文名', description='较早的说明')
+        self.raw_put([first])
+        second = listing('acme-alias', summary='较新的用途')
+        second['source'] = first['source']
+        self.raw_put([second])
+        card = self.cards()['acme-alias']
+        self.assertEqual(card['title'], '较早的中文名')
+        self.assertEqual(card['summary'], '较新的用途')
+        self.assertEqual(card['description'], '较早的说明')
+        self.assertEqual(card['local']['status'], 'installed')
+        self.assertEqual(len(card['listings']), 2)
+        self.assertEqual(card['tokens'], operations.listing_tokens('acme-alias', {'description': '较早的说明'}))
+
+    def test_ratings_require_installation_prevent_own_rating_and_aggregate(self):
+        self.configure()
+        self.publish(('acme-local',))
+        key = self.cards()['acme-local']['key']
+        status, result = self.request(self.b, '/api/team/ratings', {'key': key, 'stars': 5})
+        self.assertEqual(status, 409)
+        self.assertEqual(result['error'], '装过才能评价。')
+        self.assertEqual(self.request(self.a, '/api/team/ratings', {'key': key, 'stars': 5})[1]['error'], '自己上架的不能评价。')
+        self.install()
+        for stars in (5, 4):
+            self.ok(self.b, '/api/team/ratings', {'key': key, 'stars': stars, 'text': '<b>有用的示例</b>'})
+        third = self.hub.store.add_member('Acme 示例成员 C')
+        team._request({'url': self.url, 'key': third['token']}, '/api/ratings', 'PUT', {'key': key, 'stars': 5})
+        card = self.cards()['acme-local']
+        self.assertEqual(card['rating'], {'average': 4.5, 'count': 2})
+        self.assertEqual(card['my_rating'], {'stars': 4, 'text': '<b>有用的示例</b>'})
+        self.assertEqual(card['reviews'][0]['member']['id'], third['id'])
+        self.ok(self.b, '/api/team/ratings/remove', {'key': key})
+        self.assertIsNone(self.cards()['acme-local']['my_rating'])
+        self.assertEqual(self.cards()['acme-local']['rating'], {'average': 5.0, 'count': 1})
+
+    def test_team_updates_read_catalog_once_merge_local_changes_undo_and_author_removal(self):
+        self.configure()
+        self.publish(('acme-local',))
+        installed = self.install()
+        author = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+        author.write_text(author.read_text() + '\n作者新版\n')
+        self.publish(('acme-local',))
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'update')
+        local = self.other / '.skill-pilot/store/acme-local/SKILL.md'
+        local.write_text(local.read_text() + '\n保留的本机修改\n')
+        with patch.object(team, '_catalog', wraps=team._catalog) as read:
+            review = updates.check(self.other)
+        self.addCleanup(lambda: shutil.rmtree(review['temporary'], ignore_errors=True))
+        read.assert_called_once()
+        row = next(r for r in review['skills'] if r['name'] == 'acme-local')
+        self.assertTrue(row['has_update'])
+        self.assertTrue(row['local_modified'])
+        self.assertIn('作者新版', row['comparison'])
+        merged = local.read_text() + '\n作者新版\n'
+        with patch.object(research, 'merge', return_value={'files': [{'path': 'SKILL.md', 'content': merged, 'executable': False}],
+                                                        'explanation': '保留两边的示例修改'}):
+            merge = updates.prepare_merge(review, 'acme-local')
+        result = updates.apply(review, ['acme-local'], choices={'acme-local': 'merge'}, confirmed=True,
+                               merge_ids={'acme-local': merge['merge_id']})
+        self.assertTrue(result['complete'])
+        self.assertEqual(local.read_text(), merged)
+        version = self.cards()['acme-local']['listings'][0]['version']
+        self.assertEqual(operations.load(self.other)[1]['skills']['acme-local']['source']['team']['version'], version)
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'installed')
+        operations.undo(result['id'], home=self.other)
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'update')
+        # Undo protects edits made outside the dashboard. Restore the original
+        # installed content before removing that installation.
+        local.write_bytes((self.other / '.skill-pilot/bases/acme-local/SKILL.md').read_bytes())
+        operations.undo(installed['id'], home=self.other)
+        self.assertNotIn('acme-local', operations.load(self.other)[1]['skills'])
+        self.install()
+        self.ok(self.a, '/api/team/listings/remove', {'names': ['acme-local']})
+        review = updates.check(self.other)
+        self.addCleanup(lambda: shutil.rmtree(review['temporary'], ignore_errors=True))
+        row = next(r for r in review['skills'] if r['name'] == 'acme-local')
+        self.assertEqual(row['status'], '作者已下架')
+        self.assertFalse(row['has_update'])
+        self.assertNotIn('error', row)
+
+    def test_updates_keep_choice_records_version_and_restores_local_version_when_undone(self):
+        self.configure()
+        self.publish(('acme-local',))
+        self.install()
+        author = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+        author.write_text(author.read_text() + '\n作者新版\n')
+        self.publish(('acme-local',))
+        before = (self.other / '.skill-pilot/store/acme-local/SKILL.md').read_bytes()
+        review = updates.check(self.other)
+        self.addCleanup(lambda: shutil.rmtree(review['temporary'], ignore_errors=True))
+        result = updates.apply(review, ['acme-local'], choices={'acme-local': 'keep'}, confirmed=True)
+        self.assertEqual((self.other / '.skill-pilot/store/acme-local/SKILL.md').read_bytes(), before)
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'installed')
+        operations.undo(result['id'], home=self.other)
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'update')
+
+    def test_readonly_browses_previews_and_rejects_every_write(self):
+        self.configure()
+        self.publish(('acme-local',))
+        installed = self.install(apply=False)
+        uploaded = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-local'}]})
+        before = [store.physical_state(h) for h in (self.home, self.other, self.hub.store.data)]
+        writes = [('/api/team/settings', {'url': self.url}),
+                  ('/api/team/listings/apply', {'review': uploaded['review']}),
+                  ('/api/team/listings/remove', {'names': ['acme-local']}),
+                  ('/api/team/install/apply', {'review': installed['review']}),
+                  ('/api/team/ratings', {'key': 'example', 'stars': 5}), ('/api/team/ratings/remove', {'key': 'example'})]
+        for readonly in (patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}),
+                         patch.object(store, 'write_allowed', return_value=False)):
+            with readonly:
+                self.ok(self.b, '/api/team')
+                self.ok(self.b, '/api/team/catalog')
+                self.ok(self.b, '/api/team/listings/candidates')
+                self.install(apply=False)
+                self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-local'}]})
+                for path, body in writes:
+                    self.assertEqual(self.request(self.b, path, body)[0], 403)
+        self.assertEqual([store.physical_state(h) for h in (self.home, self.other, self.hub.store.data)], before)
+
+    def test_all_routes_require_dashboard_identity_and_origin_legacy_routes_disappear(self):
+        gets = ['/api/team', '/api/team/catalog', '/api/team/listings/candidates']
+        posts = ['/api/team/settings', '/api/team/listings/preview', '/api/team/listings/apply', '/api/team/listings/remove',
+                 '/api/team/install/preview', '/api/team/install/apply', '/api/team/ratings', '/api/team/ratings/remove']
+        before = store.physical_state(self.home)
+        with patch.object(team, '_request') as network:
+            for path, body in [(p, None) for p in gets] + [(p, {}) for p in posts]:
+                for headers in ({'X-Skill-Pilot-Token': 'wrong'}, {'Origin': 'https://example.invalid'}, {'Sec-Fetch-Site': 'cross-site'}):
+                    self.assertEqual(self.request(self.a, path, body, headers)[0], 403)
+            network.assert_not_called()
+        self.assertEqual(store.physical_state(self.home), before)
+        for path in ('/api/team/shares', '/api/team/shares/' + self.first['id']):
+            self.assertEqual(self.request(self.a, path)[0], 404)
+        for path in ('/api/team/upload/preview', '/api/team/upload/apply', '/api/team/withdraw', '/api/team/import/preview', '/api/team/import/apply'):
+            self.assertEqual(self.request(self.a, path, {})[0], 404)
+
+    def test_invalid_selections_and_review_handles_never_write_or_download(self):
+        self.configure()
+        self.publish(('acme-local',))
+        before = [store.physical_state(h) for h in (self.home, self.other, self.hub.store.data)]
+        key = self.cards()['acme-local']['key']
+        with patch.object(github, 'inspect') as download:
+            for skills in (None, [], 'acme-local', ['acme-local'], [{'name': 'missing'}], [{'name': []}],
+                           [{'name': 'acme-local', 'note': 'bad\ntext'}], [{'name': 'acme-local'}, {'name': 'acme-local'}]):
+                self.assertEqual(self.request(self.a, '/api/team/listings/preview', {'skills': skills})[0], 409)
+            for agents in (None, [], 'claude', ['missing'], [[]]):
+                self.assertEqual(self.request(self.b, '/api/team/install/preview', {'key': key, 'agents': agents})[0], 409)
+            for review in (None, '', 'missing', []):
+                for route in ('/api/team/listings/apply', '/api/team/install/apply'):
+                    self.assertEqual(self.request(self.b, route, {'review': review})[0], 409)
+            download.assert_not_called()
+        self.assertEqual([store.physical_state(h) for h in (self.home, self.other, self.hub.store.data)], before)
+
+    def test_settings_are_private_separate_and_checked_before_replacement(self):
+        self.assertEqual(self.ok(self.a, '/api/team'), {'url': '', 'has_key': False, 'configured': False, 'member': None})
         self.configure()
         path = self.home / '.skill-pilot/team.json'
         original = path.read_bytes()
@@ -202,12 +562,17 @@ class TeamTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), original)
                 self.assertEqual(len(self.hub.store.members()), 3)
             public = self.ok(self.a, '/api/team')
-            self.assertEqual(set(public), {'url', 'has_key', 'configured', 'member', 'share'})
+            self.assertEqual(set(public), {'url', 'has_key', 'configured', 'member'})
             self.assertEqual(public['member'], result['member'])
             self.assertNotIn(saved['key'], json.dumps([result, public]) + stderr.getvalue())
         self.assertEqual(operations.history(self.home), history)
         self.ok(self.b, '/api/team/settings', {'url': self.url, 'name': '另一示例成员', 'key': ''})
         self.assertEqual(len(self.hub.store.members()), 4)
+
+        self.publish(('acme-local',))
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'installable')
+        self.install()
+        self.assertTrue(self.cards()['acme-local']['can_rate'])
 
     def test_damaged_settings_are_repaired_only_after_join_succeeds(self):
         path = self.home / '.skill-pilot/team.json'
@@ -233,6 +598,7 @@ class TeamTests(unittest.TestCase):
                 self.assertEqual(self.ok(self.a, '/api/team')['member'], connected['member'])
                 self.assertNotIn(saved['key'], json.dumps(connected))
 
+
     def test_closed_station_requires_admin_key_and_leaves_settings_unchanged(self):
         before = [store.physical_state(home) for home in (self.home, self.hub.store.data)]
         status, result = self.request(self.a, '/api/team/settings', {'url': self.url, 'name': '示例新成员'})
@@ -242,6 +608,7 @@ class TeamTests(unittest.TestCase):
         self.assertEqual([store.physical_state(home) for home in (self.home, self.hub.store.data)], before)
         connected = self.ok(self.a, '/api/team/settings', {'url': self.url, 'key': self.first['token'], 'name': []})
         self.assertEqual(connected['member']['id'], self.first['id'])
+
 
     def test_missing_or_invalid_join_name_never_contacts_station(self):
         before = store.physical_state(self.home)
@@ -261,6 +628,7 @@ class TeamTests(unittest.TestCase):
                 network.assert_not_called()
         self.assertEqual(store.physical_state(self.home), before)
 
+
     def test_removed_member_can_rejoin_by_name(self):
         self.hub.open = True
         connected = self.ok(self.a, '/api/team/settings', {'url': self.url, 'name': '示例新成员'})
@@ -276,6 +644,7 @@ class TeamTests(unittest.TestCase):
         self.assertNotEqual(rejoined['member']['id'], connected['member']['id'])
         self.assertNotEqual(json.loads(path.read_bytes())['key'], old_key)
         self.assertEqual(len(self.hub.store.members()), 3)
+
 
     def test_saved_key_is_tried_on_new_address_and_only_auth_rejection_allows_join(self):
         self.configure()
@@ -300,12 +669,13 @@ class TeamTests(unittest.TestCase):
             self.assertEqual([call.args[1] for call in network.call_args_list], ['/api/me'])
         self.assertEqual(store.physical_state(self.home), before)
 
+
     def test_invalid_join_responses_never_save_credentials_or_send_authorization(self):
         self.configure()
         before = store.physical_state(self.home)
-        joined = {'service': 'skill-pilot-team', 'api': 1,
+        joined = {'service': 'skill-pilot-team', 'api': 2,
                   'member': {'id': 'a' * 32, 'name': '示例成员'}, 'token': 'example-joined-token'}
-        invalid = [dict(joined, service='other'), dict(joined, api=2), dict(joined, api=True),
+        invalid = [dict(joined, service='other'), dict(joined, api=1), dict(joined, api=True),
                    dict(joined, member=None), dict(joined, member={'id': '../outside', 'name': '示例成员'}),
                    dict(joined, member={'id': 'a' * 32, 'name': ''}),
                    *(dict(joined, token=value) for value in (None, '', 'bad token', 'bad\ntoken', '非口令')),
@@ -325,6 +695,7 @@ class TeamTests(unittest.TestCase):
                 self.assertNotIn(joined['token'], json.dumps(result))
                 self.assertEqual(store.physical_state(self.home), before)
 
+
     def test_saved_key_403_can_join_and_new_token_is_verified_and_redacted(self):
         self.configure()
         new_key = 'example-joined-token'
@@ -332,12 +703,12 @@ class TeamTests(unittest.TestCase):
         def respond(path, headers):
             requests.append((path, headers.get('Authorization')))
             if path == '/api/join':
-                return 200, {'service': 'skill-pilot-team', 'api': 1,
+                return 200, {'service': 'skill-pilot-team', 'api': 2,
                              'member': {'id': 'a' * 32, 'name': '示例成员'}, 'token': new_key}, {}
             if headers.get('Authorization') != 'Bearer ' + new_key:
                 return 403, {}, {}
-            return 200, ({'service': 'skill-pilot-team', 'api': 1, 'member': {'id': 'a' * 32, 'name': new_key}}
-                         if path == '/api/me' else {'shares': []}), {}
+            return 200, ({'service': 'skill-pilot-team', 'api': 2, 'member': {'id': 'a' * 32, 'name': new_key}}
+                         if path == '/api/me' else {'cards': []}), {}
         service = self.faulty_service(respond)
         url = 'http://127.0.0.1:' + str(service.server_port)
         with contextlib.redirect_stderr(io.StringIO()) as stderr:
@@ -345,8 +716,9 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(result['member']['name'], '[已隐藏]')
             self.assertNotIn(new_key, json.dumps(result) + stderr.getvalue())
         self.assertEqual(requests, [('/api/me', 'Bearer ' + self.first['token']), ('/api/join', None),
-                                    ('/api/me', 'Bearer ' + new_key), ('/api/shares', 'Bearer ' + new_key)])
+                                    ('/api/me', 'Bearer ' + new_key)])
         self.assertEqual(team.settings(self.home), {'url': url, 'key': new_key})
+
 
     def test_joined_token_must_pass_status_before_replacing_settings(self):
         self.configure()
@@ -356,9 +728,9 @@ class TeamTests(unittest.TestCase):
         def respond(path, headers):
             requests.append(path)
             if path == '/api/join':
-                return 200, {'service': 'skill-pilot-team', 'api': 1,
+                return 200, {'service': 'skill-pilot-team', 'api': 2,
                              'member': {'id': 'a' * 32, 'name': '示例成员'}, 'token': new_key}, {}
-            return ((200, {'service': 'skill-pilot-team', 'api': 2}, {})
+            return ((200, {'service': 'skill-pilot-team', 'api': 1}, {})
                     if headers.get('Authorization') == 'Bearer ' + new_key else (401, {}, {}))
         service = self.faulty_service(respond)
         status, result = self.request(self.a, '/api/team/settings', {
@@ -369,237 +741,38 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(requests, ['/api/me', '/api/join', '/api/me'])
         self.assertEqual(store.physical_state(self.home), before)
 
-    def test_get_status_keeps_settings_while_station_is_offline_and_recovers(self):
-        self.configure()
-        self.publish()
-        path = self.home / '.skill-pilot/team.json'
-        with socket.socket() as unused:
-            unused.bind(('127.0.0.1', 0))
-            port = unused.getsockname()[1]
-            url = 'http://127.0.0.1:' + str(port)
-            path.write_text(json.dumps({'url': url, 'key': self.first['token']}))
-            before = store.physical_state(self.home)
-            result = self.ok(self.a, '/api/team')
-            self.assertEqual({key: value for key, value in result.items() if key != 'error'}, {
-                'url': url, 'has_key': True, 'configured': True, 'member': None, 'share': None})
-            self.assertIn('连不上分享站', result['error'])
-            self.assertEqual(self.request(self.a, '/api/team/settings', {'url': url})[0], 409)
-            self.assertEqual(store.physical_state(self.home), before)
-        self.start(team_hub.HubServer(self.hub.store.data, '127.0.0.1', port))
-        recovered = self.ok(self.a, '/api/team')
-        self.assertNotIn('error', recovered)
-        self.assertEqual(recovered['url'], url)
-        self.assertEqual(recovered['member']['id'], self.first['id'])
-        self.assertEqual(recovered['share']['skill_count'], 4)
-        self.assertEqual(store.physical_state(self.home), before)
 
-    def test_get_status_keeps_settings_with_wrong_key_and_recovers(self):
+    def test_status_keeps_address_and_has_key_offline_wrong_key_and_version_error(self):
         self.configure()
-        self.publish()
         path = self.home / '.skill-pilot/team.json'
         original = path.read_bytes()
-        path.write_text(json.dumps({'url': self.url, 'key': 'wrong'}))
-        before = store.physical_state(self.home)
-        result = self.ok(self.a, '/api/team')
-        self.assertEqual({key: value for key, value in result.items() if key != 'error'}, {
-            'url': self.url, 'has_key': True, 'configured': True, 'member': None, 'share': None})
-        self.assertIn('口令不对', result['error'])
-        self.assertEqual(self.request(self.a, '/api/team/settings', {'url': self.url})[0], 409)
-        self.assertEqual(self.request(self.a, '/api/team/shares')[0], 409)
-        self.assertEqual(store.physical_state(self.home), before)
-        path.write_bytes(original)
-        recovered = self.ok(self.a, '/api/team')
-        self.assertNotIn('error', recovered)
-        self.assertEqual(recovered['member']['id'], self.first['id'])
-        self.assertEqual(recovered['share']['skill_count'], 4)
-        self.assertEqual(path.read_bytes(), original)
-
-    def test_get_status_keeps_settings_on_version_and_list_errors_and_recovers(self):
-        self.configure()
-        self.publish()
-        normal = self.ok(self.a, '/api/team')
-        state = {'api': 2, 'list_status': 200}
-        def respond(path, headers):
-            return ((200, {'service': 'skill-pilot-team', 'api': state['api'], 'member': normal['member']}, {})
-                    if path == '/api/me' else (state['list_status'], {'shares': [normal['share']]}, {}))
-        service = self.faulty_service(respond)
-        url = 'http://127.0.0.1:' + str(service.server_port)
-        path = self.home / '.skill-pilot/team.json'
-        path.write_text(json.dumps({'url': url, 'key': self.first['token']}))
-        before = store.physical_state(self.home)
-        for api, list_status, message in ((2, 200, '版本不匹配'), (1, 401, '口令不对')):
-            state.update(api=api, list_status=list_status)
-            with self.subTest(api=api, list_status=list_status):
+        for key in ('wrong', self.first['token']):
+            with socket.socket() as unused:
+                unused.bind(('127.0.0.1', 0))
+                url = self.url if key == 'wrong' else 'http://127.0.0.1:' + str(unused.getsockname()[1])
+                path.write_text(json.dumps({'url': url, 'key': key}))
                 result = self.ok(self.a, '/api/team')
-                self.assertEqual({key: value for key, value in result.items() if key != 'error'}, {
-                    'url': url, 'has_key': True, 'configured': True, 'member': None, 'share': None})
-                self.assertIn(message, result['error'])
-                self.assertEqual(self.request(self.a, '/api/team/settings', {'url': url})[0], 409)
-                self.assertEqual(store.physical_state(self.home), before)
-        state.update(api=1, list_status=200)
-        self.assertEqual(self.ok(self.a, '/api/team'), {**normal, 'url': url})
-        self.assertEqual(store.physical_state(self.home), before)
+                self.assertEqual(result['url'], url)
+                self.assertTrue(result['has_key'])
+                self.assertTrue(result['configured'])
+                self.assertIsNone(result['member'])
+                self.assertIn('error', result)
+        path.write_text('{broken')
+        self.assertIn('设置没能读懂', self.ok(self.a, '/api/team')['error'])
+        path.write_bytes(original)
+        self.assertNotIn('error', self.ok(self.a, '/api/team'))
 
-    def test_get_status_returns_empty_settings_for_damaged_file_and_recovers(self):
-        self.configure()
-        self.publish()
-        normal = self.ok(self.a, '/api/team')
-        path = self.home / '.skill-pilot/team.json'
-        path.write_text('{"url":')
+    def test_invalid_addresses_and_keys_do_not_connect(self):
         before = store.physical_state(self.home)
-        result = self.ok(self.a, '/api/team')
-        self.assertEqual({key: value for key, value in result.items() if key != 'error'}, {
-            'url': '', 'has_key': False, 'configured': False, 'member': None, 'share': None})
-        self.assertEqual(result['error'], '分享站设置没能读懂，请在设置里重新连接。')
-        with patch.object(team, '_request') as network:
-            status, result = self.request(self.a, '/api/team/settings', {'url': self.url})
-            self.assertEqual(status, 409)
-            self.assertEqual(result['error'], '请填写你的名字，同事会看到它。')
-            network.assert_not_called()
-        self.assertEqual(store.physical_state(self.home), before)
-        self.ok(self.a, '/api/team/settings', {'url': self.url, 'key': self.first['token']})
-        self.assertEqual(self.ok(self.a, '/api/team'), normal)
-
-    def test_invalid_addresses_and_keys_never_connect_or_write(self):
-        before = store.physical_state(self.home)
-        addresses = [None, [], 1, 'ftp://example.invalid', 'file:///tmp/example', 'http://a:b@example.invalid',
-                     'http://@example.invalid', 'http://example.invalid?key=secret',
-                     'http://example.invalid?', 'http://example.invalid#fragment', 'http://example.invalid:bad',
-                     'http://example.invalid:65536', 'http://example.invalid:0', 'http://exa\nmple.invalid']
+        addresses = ['ftp://example.invalid', 'file:///tmp/example', 'http://a:b@example.invalid', 'http://@example.invalid',
+                     'http://example.invalid?key=secret', 'http://example.invalid?', 'http://example.invalid#fragment',
+                     'http://example.invalid:bad', 'http://example.invalid:65536', 'http://example.invalid:0', 'http://exa\nmple.invalid']
         with patch.object(team, '_request') as network:
             for url in addresses:
-                with self.subTest(url=url):
-                    status, result = self.request(self.a, '/api/team/settings', {'url': url, 'key': self.first['token']})
-                    self.assertEqual(status, 409)
-                    if not isinstance(url, str):
-                        self.assertEqual(result['error'], '请填写分享站地址。')
-            for key in (None, [], 1, 'invalid\nkey', 'not a token', '非口令'):
-                status, result = self.request(self.a, '/api/team/settings', {'url': self.url, 'key': key})
-                self.assertEqual(status, 409)
-                if not isinstance(key, str):
-                    self.assertEqual(result['error'], '请填写分享站地址。')
+                self.assertEqual(self.request(self.a, '/api/team/settings', {'url': url, 'key': self.first['token']})[0], 409)
+            for key in (None, [], 'invalid\nkey', 'not a token', '非口令'):
+                self.assertEqual(self.request(self.a, '/api/team/settings', {'url': self.url, 'key': key})[0], 409)
             network.assert_not_called()
-        self.assertEqual(store.physical_state(self.home), before)
-
-    def test_readonly_allows_browsing_previews_and_rejects_every_write(self):
-        self.configure()
-        uploaded = self.publish()
-        imported = self.ok(self.b, '/api/team/import/preview', {
-            'member': self.first['id'], 'skills': ['acme-main'], 'agents': ['claude']})
-        before = [store.physical_state(home) for home in (self.home, self.other, self.hub.store.data)]
-        writes = [('/api/team/settings', {'url': self.url, 'key': self.second['token']}),
-                  ('/api/team/settings', {'url': self.url, 'name': '示例成员'}),
-                  ('/api/team/upload/apply', {'review': uploaded['review']}), ('/api/team/withdraw', {}),
-                  ('/api/team/import/apply', {'review': imported['review'], 'revision': imported['revision']})]
-        for readonly in (patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}),
-                         patch.object(store, 'write_allowed', return_value=False)):
-            with readonly, patch.object(github, 'inspect') as download:
-                self.ok(self.b, '/api/team')
-                self.ok(self.b, '/api/team/shares/' + self.first['id'])
-                self.ok(self.b, '/api/team/upload/preview', {})
-                self.ok(self.b, '/api/team/import/preview', {'member': self.first['id'], 'skills': ['acme-main']})
-                for path, body in writes:
-                    self.assertEqual(self.request(self.b, path, body)[0], 403)
-                download.assert_not_called()
-        self.assertEqual([store.physical_state(home) for home in (self.home, self.other, self.hub.store.data)], before)
-
-    def test_all_team_routes_require_dashboard_token_and_origin(self):
-        routes = [('/api/team', None), ('/api/team/shares', None), ('/api/team/shares/' + self.first['id'], None),
-                  ('/api/team/settings', {}), ('/api/team/upload/preview', {}), ('/api/team/upload/apply', {}),
-                  ('/api/team/withdraw', {}), ('/api/team/import/preview', {}), ('/api/team/import/apply', {})]
-        before = store.physical_state(self.home)
-        with patch.object(team, '_request') as network:
-            for path, body in routes:
-                for header in ({'X-Skill-Pilot-Token': 'wrong'}, {'Origin': 'https://example.invalid'},
-                               {'Sec-Fetch-Site': 'cross-site'}):
-                    self.assertEqual(self.request(self.a, path, body, header)[0], 403)
-            network.assert_not_called()
-        self.assertEqual(store.physical_state(self.home), before)
-
-    def test_reviews_and_original_revision_cannot_be_replaced_by_request_data(self):
-        self.configure()
-        self.publish()
-        plan = self.ok(self.b, '/api/team/import/preview', {
-            'member': self.first['id'], 'skills': ['acme-main'], 'agents': ['claude']})
-        before = store.physical_state(self.other)
-        with patch.object(github, 'inspect') as download:
-            for review in (None, '', 'missing', []):
-                self.assertEqual(self.request(self.b, '/api/team/import/apply', {'review': review})[0], 409)
-                self.assertEqual(self.request(self.b, '/api/team/upload/apply', {'review': review})[0], 409)
-            for revision in (None, '', False, 'wrong'):
-                self.assertEqual(self.request(self.b, '/api/team/import/apply', {
-                    'review': plan['review'], 'revision': revision})[0], 409)
-            self.assertEqual(store.physical_state(self.other), before)
-            self.registry(self.other, lambda skills: skills['acme-other'].update(external='changed'))
-            changed = store.physical_state(self.other)
-            for revision in (plan['revision'], operations.table(self.other)['revision']):
-                self.assertEqual(self.request(self.b, '/api/team/import/apply', {
-                    'review': plan['review'], 'revision': revision})[0], 409)
-            download.assert_not_called()
-        self.assertEqual(store.physical_state(self.other), changed)
-
-    def test_manual_source_urls_are_data_and_only_https_is_returned(self):
-        self.configure()
-        data = sharing.export_config(self.home)
-        manual = next(row for row in data['skills'] if row['name'] == 'acme-local')
-        reason = '<script>example()</script> 请通过飞书官方方式补齐'
-        for url in ('javascript:example()', 'http://example.invalid', 'file:///tmp/example',
-                    'https://example.invalid/skills'):
-            manual['source'] = {'kind': 'manual', 'url': url, 'reason': reason}
-            team.upload(self.home, data)
-            result = self.ok(self.b, '/api/team/shares/' + self.first['id'])
-            row = next(row for row in result['config']['skills'] if row['name'] == 'acme-local')
-            self.assertEqual(row['source']['reason'], reason)
-            self.assertEqual(row['source'].get('url'), url if url.startswith('https://') else None)
-
-    def test_availability_covers_modified_manual_and_transitive_missing_dependencies(self):
-        data = sharing.export_config(self.home)
-        rows = {row['name']: row for row in data['skills']}
-        rows['acme-main']['requires'] = ['acme-local']
-        rows['acme-base']['local_modified'] = True
-        for row in rows.values():
-            row['assigned_agents'] = ['agent-absent-here']
-        before = store.physical_state(self.other)
-        with patch.object(github, 'inspect') as download:
-            states = sharing.local_status(data, self.other)
-            download.assert_not_called()
-        self.assertEqual(states['acme-other']['status'], 'installed')
-        self.assertIn('分享者', states['acme-base']['reason'])
-        self.assertIn('acme-local', states['acme-main']['reason'])
-        self.assertEqual(states['acme-local']['status'], 'needs_files')
-        self.assertEqual(states['acme-extra']['status'], 'installable')
-        self.assertEqual(store.physical_state(self.other), before)
-
-    def test_bad_selections_are_rejected_without_download_or_writes(self):
-        self.configure()
-        self.publish()
-        before = store.physical_state(self.other)
-        with patch.object(github, 'inspect') as download:
-            for skills in (None, [], 'acme-main', ['missing'], [[]]):
-                self.assertEqual(self.request(self.b, '/api/team/import/preview', {
-                    'member': self.first['id'], 'skills': skills})[0], 409)
-            for agents in ('claude', [], ['missing'], [[]]):
-                self.assertEqual(self.request(self.b, '/api/team/import/preview', {
-                    'member': self.first['id'], 'skills': ['acme-main'], 'agents': agents})[0], 409)
-            for exclude in ('acme-main', ['missing'], [[]]):
-                self.assertEqual(self.request(self.b, '/api/team/upload/preview', {'exclude': exclude})[0], 409)
-            for member in ('../example', '?key=example', None, []):
-                self.assertEqual(self.request(self.b, '/api/team/import/preview', {
-                    'member': member, 'skills': ['acme-main']})[0], 409)
-            download.assert_not_called()
-        self.assertEqual(store.physical_state(self.other), before)
-
-    def test_fake_home_skips_team_settings_even_via_links(self):
-        self.configure()
-        (self.home / '.skill-pilot/key-link').symlink_to(self.home / '.skill-pilot/team.json')
-        spec = importlib.util.spec_from_file_location('fake_home_team', store.PROJECT / 'scripts/make-fake-home.py')
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        destination = self.root / 'Another Example Home'
-        before = store.physical_state(self.home)
-        module.make_fake_home(self.home, destination)
-        self.assertFalse((destination / '.skill-pilot/team.json').exists())
-        self.assertFalse((destination / '.skill-pilot/key-link').exists())
         self.assertEqual(store.physical_state(self.home), before)
 
     def faulty_service(self, response):
@@ -622,13 +795,11 @@ class TeamTests(unittest.TestCase):
     def test_network_errors_version_format_and_size_leave_files_unchanged(self):
         self.configure()
         before = store.physical_state(self.home)
-        me = {'service': 'skill-pilot-team', 'api': 1, 'member': {'id': self.first['id'], 'name': '示例成员'}}
+        me = {'service': 'skill-pilot-team', 'api': 2, 'member': {'id': self.first['id'], 'name': '示例成员'}}
         responses = [(401, {'error': self.first['token']}, {}, '口令不对'),
-                     (200, dict(me, api=2), {}, '版本不匹配'),
-                     (200, dict(me, api=True), {}, '版本不匹配'),
-                     (200, b'invalid json', {}, '名单格式不对'),
-                     (200, b'\xff', {}, '名单格式不对'),
-                     (200, b'x' * (team.MAX_BODY + 1), {}, '超过 1 MB')]
+                     (200, dict(me, api=1), {}, '版本不匹配'), (200, dict(me, api=True), {}, '版本不匹配'),
+                     (200, b'invalid json', {}, '技能格式不对'), (200, b'\xff', {}, '技能格式不对'),
+                     (200, b'x' * (team.MAX_BODY + 1), {}, '超过 20 MB')]
         for status, body, headers, message in responses:
             service = self.faulty_service(lambda path, request_headers, s=status, b=body, h=headers: (s, b, h))
             with self.subTest(message=message), contextlib.redirect_stderr(io.StringIO()) as stderr:
@@ -638,15 +809,8 @@ class TeamTests(unittest.TestCase):
                 self.assertIn(message, result['error'])
                 self.assertNotIn(self.first['token'], json.dumps(result) + stderr.getvalue())
             self.assertEqual(store.physical_state(self.home), before)
-        with socket.socket() as unused:
-            unused.bind(('127.0.0.1', 0))
-            closed_url = 'http://127.0.0.1:' + str(unused.getsockname()[1])
-        code, result = self.request(self.a, '/api/team/settings', {'url': closed_url, 'key': self.first['token']})
-        self.assertEqual(code, 409)
-        self.assertIn('连不上分享站', result['error'])
-        self.assertEqual(store.physical_state(self.home), before)
 
-    def test_timeouts_and_incomplete_responses_are_plain_errors(self):
+    def test_timeouts_incomplete_responses_redirect_and_echo_cannot_leak_credentials(self):
         self.configure()
         before = store.physical_state(self.home)
         for error in (TimeoutError('example timeout'), IncompleteRead(b'example', 100)):
@@ -654,82 +818,62 @@ class TeamTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, '连不上分享站'):
                     team.status(self.home)
                 self.assertEqual(opened.call_args.kwargs['timeout'], 10)
+        hits = []
+        target = self.faulty_service(lambda path, headers: (hits.append(dict(headers)) or 200, {}, {}))
+        redirect = self.faulty_service(lambda path, headers: (302, {}, {'Location': 'http://127.0.0.1:' + str(target.server_port) + '/api/me'}))
+        self.assertIn('跳转', self.request(self.a, '/api/team/settings', {
+            'url': 'http://127.0.0.1:' + str(redirect.server_port), 'key': self.first['token']})[1]['error'])
+        self.assertEqual(hits, [])
         self.assertEqual(store.physical_state(self.home), before)
+        echo = self.faulty_service(lambda path, headers: (200, {'service': 'skill-pilot-team', 'api': 2,
+                     'member': {'id': self.first['id'], 'name': self.first['token']}}, {}))
+        result = self.ok(self.a, '/api/team/settings', {'url': 'http://127.0.0.1:' + str(echo.server_port), 'key': self.first['token']})
+        self.assertEqual(result['member']['name'], '[已隐藏]')
+        # Neither the HTTP responses nor operation records expose a credential.
+        self.assertNotIn(self.first['token'], json.dumps(self.ok(self.a, '/api/log')))
 
-    def test_oversized_upload_is_rejected_before_sending_the_list(self):
+    def test_invalid_remote_catalog_and_package_are_validated_before_install(self):
         self.configure()
-        data = sharing.export_config(self.home)
-        manual = next(row for row in data['skills'] if row['name'] == 'acme-local')
-        manual['source']['reason'] = 'x' * team.MAX_BODY
-        before = store.physical_state(self.home)
-        with self.assertRaisesRegex(ValueError, '超过 1 MB'):
-            team.upload(self.home, data)
-        self.assertEqual(team.shares(self.home), {'shares': []})
-        self.assertEqual(store.physical_state(self.home), before)
+        self.publish(('acme-local',))
+        real = team._request
+        def request(config, path, *args):
+            data = real(config, path, *args)
+            if path == '/api/catalog':
+                data['cards'][0]['listings'][0]['source']['version'] = '../invalid'
+            return data
+        before = self.library(self.other)
+        with patch.object(team, '_request', side_effect=request):
+            self.assertEqual(self.request(self.b, '/api/team/catalog')[0], 409)
+        def request(config, path, *args):
+            data = real(config, path, *args)
+            if path.startswith('/api/packages/'):
+                data['files'][0]['path'] = '../outside'
+            return data
+        key = self.cards()['acme-local']['key']
+        with patch.object(team, '_request', side_effect=request):
+            self.assertEqual(self.request(self.b, '/api/team/install/preview', {'key': key, 'agents': ['claude']})[0], 409)
+        self.assertEqual(self.library(self.other), before)
 
-    def test_service_cannot_echo_credentials_in_recognized_fields(self):
-        def respond(path, headers):
-            data = ({'service': 'skill-pilot-team', 'api': 1,
-                     'member': {'id': self.first['id'], 'name': self.first['token']}}
-                    if path == '/api/me' else {'shares': []})
-            # Escaped JSON characters must be redacted after decoding, too.
-            raw = json.dumps(data).replace(self.first['token'],
-                ''.join('\\u%04x' % ord(char) for char in self.first['token'])).encode()
-            return 200, raw, {}
-        service = self.faulty_service(respond)
-        with contextlib.redirect_stderr(io.StringIO()) as stderr:
-            result = self.ok(self.a, '/api/team/settings', {
-                'url': 'http://127.0.0.1:' + str(service.server_port), 'key': self.first['token']})
-            self.assertEqual(result['member']['name'], '[已隐藏]')
-            self.ok(self.a, '/api/team')
-            self.assertNotIn(self.first['token'], stderr.getvalue())
-
-    def test_saving_settings_cannot_write_through_an_outside_link(self):
+    def test_fake_home_skips_team_settings_and_saving_cannot_follow_outside_link(self):
+        self.configure()
+        (self.home / '.skill-pilot/key-link').symlink_to(self.home / '.skill-pilot/team.json')
+        spec = importlib.util.spec_from_file_location('fake_home_team', store.PROJECT / 'scripts/make-fake-home.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        destination = self.root / 'Another Example Home'
+        module.make_fake_home(self.home, destination)
+        self.assertFalse((destination / '.skill-pilot/team.json').exists())
+        self.assertFalse((destination / '.skill-pilot/key-link').exists())
         outside = self.root / 'Outside settings.json'
         outside.write_text('example private settings')
         path = self.home / '.skill-pilot/team.json'
+        path.unlink()
         path.symlink_to(outside)
         before = store.physical_state(self.root)
         status, result = self.request(self.a, '/api/team/settings', {'url': self.url, 'key': self.first['token']})
         self.assertEqual(status, 409)
         self.assertIn('之外', result['error'])
         self.assertEqual(store.physical_state(self.root), before)
-
-    def test_invalid_remote_configs_are_revalidated_locally(self):
-        invalid = sharing.export_config(self.home)
-        invalid['skills'][0]['requires'] = ['missing']
-        def respond(path, headers):
-            if path.startswith('/api/shares/'):
-                return 200, {'member': {'id': self.first['id'], 'name': '示例成员'},
-                             'updated_at': 'example', 'config': invalid}, {}
-            return 200, ({'service': 'skill-pilot-team', 'api': 1,
-                          'member': {'id': self.second['id'], 'name': '示例成员 B'}} if path == '/api/me' else
-                         {'shares': []}), {}
-        service = self.faulty_service(respond)
-        self.ok(self.b, '/api/team/settings', {'url': 'http://127.0.0.1:' + str(service.server_port),
-                                             'key': self.second['token']})
-        before = store.physical_state(self.other)
-        with patch.object(github, 'inspect') as download:
-            for path, body in [('/api/team/shares/' + self.first['id'], None),
-                               ('/api/team/import/preview', {'member': self.first['id'], 'skills': ['acme-main']})]:
-                status, result = self.request(self.b, path, body)
-                self.assertEqual(status, 409)
-                self.assertIn('名单格式不对', result['error'])
-            download.assert_not_called()
-        self.assertEqual(store.physical_state(self.other), before)
-
-    def test_redirects_never_forward_the_credential(self):
-        hits = []
-        target = self.faulty_service(lambda path, headers: (hits.append(dict(headers)) or 200, {}, {}))
-        redirect = self.faulty_service(lambda path, headers: (
-            302, {}, {'Location': 'http://127.0.0.1:' + str(target.server_port) + '/api/me'}))
-        before = store.physical_state(self.home)
-        status, result = self.request(self.a, '/api/team/settings', {
-            'url': 'http://127.0.0.1:' + str(redirect.server_port), 'key': self.first['token']})
-        self.assertEqual(status, 409)
-        self.assertIn('跳转', result['error'])
-        self.assertEqual(hits, [])
-        self.assertEqual(store.physical_state(self.home), before)
 
 
 if __name__ == '__main__':

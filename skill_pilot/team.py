@@ -1,20 +1,36 @@
-"""Explicit, authenticated exchanges with a team's skill-list service."""
+"""Dashboard backend for the authenticated team skill store."""
+import base64
 import copy
+import fnmatch
+import hashlib
 import json
+import os
 import re
+import shutil
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.client import HTTPException
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from . import labels, sharing
-from .store import guard
-from .team_hub import clean_config, member_name
+from . import labels, normalization, operations, sharing, team_hub
+from .scan import SKIP_CONTENT, metadata
+from .sources import github, normalize
+from .store import git_tree, guard
+from .sync import reconcile_assignments
 
-MAX_BODY = 1024 * 1024
+MAX_BODY = team_hub.MAX_BODY
 TIMEOUT = 10
-FORMAT_ERROR = '分享站的名单格式不对，请联系分享者重新上传。'
+FORMAT_ERROR = '分享站的技能格式不对，请联系管理员检查。'
+LOCAL_LABELS = {'mine': '我上架的', 'installed': '已装', 'update': '有新版', 'installable': '可以装',
+                'lark': '要用飞书官方方式装', 'conflict': '本机有同名技能', 'blocked': '暂时装不了'}
+SECRET_NAMES = ('.env', '.env.*', '*.pem', '*.key', '*.p12', 'id_rsa*', 'id_ed25519*',
+                '.npmrc', '.pypirc', 'credentials*')
+SECRET_CONTENT = re.compile(
+    r'-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----|'
+    r'(?:sk-|ghp_|github_pat_|AKIA|xoxb-)[A-Za-z0-9_-]{16,}|'
+    r'(?:api[_-]?key|token|secret|password)[\"\']?\s*[:=]\s*[\"\']?[^\s\"\',;\x00-\x1f]{16,}', re.I)
 
 
 class RequestError(ValueError):
@@ -57,54 +73,63 @@ def settings(home):
         raise ValueError('分享站设置没能读懂，请在设置里重新连接。') from None
 
 
+def _redact(value, key):
+    if not key:
+        return value
+    if isinstance(value, str):
+        return value.replace(key, '[已隐藏]')
+    if isinstance(value, list):
+        return [_redact(item, key) for item in value]
+    if isinstance(value, dict):
+        return {_redact(k, key): _redact(v, key) for k, v in value.items()}
+    return value
+
+
 def _request(config, path, method='GET', data=None):
     body = json.dumps(data, ensure_ascii=False).encode('utf-8') if data is not None else None
-    if body is not None and len(body) > MAX_BODY:
-        raise ValueError('名单超过 1 MB，请减少分享的技能后重试。')
+    limit = (team_hub.MAX_JOIN_BODY if path == '/api/join' else
+             team_hub.MAX_RATING_BODY if path == '/api/ratings' else MAX_BODY)
+    if body is not None and len(body) > limit:
+        raise ValueError('上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
+                         '评价内容超过 64 KB。' if limit == team_hub.MAX_RATING_BODY else
+                         '加入信息超过 4096 字节，请缩短后重试。')
     key = config.get('key', '')
     headers = {'Content-Type': 'application/json'}
     if key:
         headers['Authorization'] = 'Bearer ' + key
     try:
-        request = urllib.request.Request(config['url'] + path, data=body, method=method,
-                                         headers=headers)
+        request = urllib.request.Request(config['url'] + path, data=body, method=method, headers=headers)
         with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=TIMEOUT) as response:
             raw = response.read(MAX_BODY + 1)
         if len(raw) > MAX_BODY:
-            raise ValueError('分享站返回的内容超过 1 MB，请联系管理员检查。')
+            raise ValueError('分享站返回的内容超过 20 MB，请联系管理员检查。')
         def invalid_constant(value):
             raise ValueError
-        def redact(value):
-            if isinstance(value, str):
-                return value.replace(key, '[已隐藏]')
-            if isinstance(value, list):
-                return [redact(item) for item in value]
-            if isinstance(value, dict):
-                return {key: redact(item) for key, item in value.items()}
-            return value
         try:
             result = json.loads(raw.decode('utf-8'), parse_constant=invalid_constant)
             if not isinstance(result, dict):
                 raise ValueError
-            # Even a misconfigured service must not echo our credential to the page or history.
-            if key:
-                result = redact(result)
-        except (ValueError, RecursionError):
+            return _redact(result, key)
+        except (ValueError, UnicodeError, RecursionError):
             raise ValueError(FORMAT_ERROR) from None
-        return result
     except urllib.error.HTTPError as error:
         status = error.code
-        error.close()
+        try:
+            detail = json.loads(error.read(team_hub.MAX_RATING_BODY).decode('utf-8')).get('error')
+        except (ValueError, UnicodeError, AttributeError, HTTPException):
+            detail = None
+        finally:
+            error.close()
         message = ('这个分享站需要管理员发的口令，请点「管理员给了口令？」填上。'
                    if path == '/api/join' and status == 403 else
-                   '分享站没认出你（口令不对、已失效或已被移出），请到设置里重新连接。' if status in {401, 403} else
+                   '分享站没认出你（口令不对、已失效或已被移出），请到设置里重新连接。'
+                   if status == 401 or (path == '/api/me' and status == 403) else
                    '分享站地址发生了跳转，请填写最终地址后重试。' if 300 <= status < 400 else
-                   '这位成员还没有分享，或已经撤回。' if status == 404 else
-                   '名单超过 1 MB，请减少分享的技能后重试。' if status == 413 else
-                   '连不上分享站，请检查地址，或请管理员确认分享站已开启。')
+                   _redact(detail, key) if isinstance(detail, str) and detail else
+                   '这个技能已经下架，请刷新商店。' if status == 404 else
+                   '上架内容超过 20 MB，请分批上架。' if status == 413 else
+                   '分享站暂时没能完成操作，请稍后重试。')
         raise RequestError(status, message) from None
-    except UnicodeError:
-        raise ValueError(FORMAT_ERROR) from None
     except (OSError, HTTPException):
         raise ValueError('连不上分享站，请检查地址和网络，或请管理员确认分享站已开启。') from None
 
@@ -124,48 +149,31 @@ def _connection(home):
     return config
 
 
+def _connection_version(config):
+    return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+
+
 def _me(config):
     result = _request(config, '/api/me')
-    if type(result.get('api')) is not int or result['api'] != 1:
-        raise ValueError('分享站和你的 Skill Pilot 版本不匹配。')
+    if type(result.get('api')) is not int or result['api'] != 2:
+        raise ValueError('分享站和你的 Skill Pilot 版本不匹配，请一起换成新版。')
     if result.get('service') != 'skill-pilot-team':
         raise ValueError('这个地址不是 Skill Pilot 分享站，请核对地址。')
     return _member(result.get('member'))
 
 
-def _summary(row):
-    if (not isinstance(row, dict) or not isinstance(row.get('updated_at'), str) or
-            type(row.get('skill_count')) is not int or row['skill_count'] < 0 or
-            not isinstance(row.get('agents'), list) or
-            any(not isinstance(agent, dict) or
-                any(not isinstance(agent.get(key), str) for key in ('id', 'name')) for agent in row['agents'])):
-        raise ValueError(FORMAT_ERROR)
-    return {'member': _member(row.get('member')), 'updated_at': row['updated_at'],
-            'skill_count': row['skill_count'],
-            'agents': [{key: agent[key] for key in ('id', 'name')} for agent in row['agents']]}
-
-
-def _shares(config):
-    result = _request(config, '/api/shares')
-    if not isinstance(result.get('shares'), list):
-        raise ValueError(FORMAT_ERROR)
-    return [_summary(row) for row in result['shares']]
-
-
 def status(home, config=None, strict=True):
-    result = {'url': '', 'has_key': False, 'configured': False, 'member': None, 'share': None}
+    result = {'url': '', 'has_key': False, 'configured': False, 'member': None}
     try:
         config = settings(home) if config is None else config
         public_url = config.get('url', '').replace(config['key'], '[已隐藏]') if config else ''
         result.update(url=public_url, has_key=bool(config.get('key')), configured=bool(config))
         if config:
-            member = _me(config)
-            share = next((row for row in _shares(config) if row['member']['id'] == member['id']), None)
-            result.update(member=member, share=share)
+            result['member'] = _me(config)
     except (ValueError, OSError) as error:
         if strict:
             raise
-        result['error'] = str(error) if isinstance(error, ValueError) else '没能读取团队分享，请稍后重试。'
+        result['error'] = str(error) if isinstance(error, ValueError) else '没能读取团队商店，请稍后重试。'
     return result
 
 
@@ -189,10 +197,10 @@ def save_settings(home, body):
         name = body.get('name', '')
         if isinstance(name, str) and not name.strip():
             raise ValueError('请填写你的名字，同事会看到它。')
-        name = member_name(name)
+        name = team_hub.member_name(name)
         joined = _request({'url': config['url']}, '/api/join', 'POST', {'name': name})
         if (joined.get('service') != 'skill-pilot-team' or type(joined.get('api')) is not int or
-                joined['api'] != 1 or not isinstance(joined.get('token'), str) or
+                joined['api'] != 2 or not isinstance(joined.get('token'), str) or
                 not re.fullmatch(r'[A-Za-z0-9_-]+', joined['token'])):
             raise ValueError(FORMAT_ERROR)
         _member(joined.get('member'))
@@ -203,103 +211,478 @@ def save_settings(home, body):
     return {**result, 'message': '分享站已连接，设置已保存。'}
 
 
-def upload_preview(home, agent=None, exclude=None):
-    data = sharing.export_config(home, agent)
-    rows = {row['name']: row for row in data['skills']}
-    exclude = [] if exclude is None else exclude
-    if (not isinstance(exclude, list) or any(not isinstance(name, str) or name not in rows for name in exclude)):
-        raise ValueError('请从本次分享的名单里选择要取消的技能。')
-    selected = set(rows) - set(exclude)
-    retained = {}
-    pending = list(sorted(selected))
-    while pending:
-        name = pending.pop()
-        for dependency in rows[name]['requires']:
-            if dependency in exclude:
-                retained.setdefault(dependency, set()).add(name)
-            if dependency not in selected:
-                selected.add(dependency)
-                pending.append(dependency)
-    data['skills'] = [row for row in data['skills'] if row['name'] in selected]
-    return {'config': clean_config(data), 'retained': [
-        {'name': name, 'required_by': sorted(parents),
-         'reason': '这些技能需要它，已自动保留：' + '、'.join(sorted(parents))}
-        for name, parents in sorted(retained.items())]}
-
-
-def upload(home, data):
-    guard(Path(home) / '.skill-pilot', home)
-    config = _connection(home)
-    _me(config)
-    result = _request(config, '/api/shares/me', 'PUT', clean_config(data))
-    if (not isinstance(result.get('updated_at'), str) or type(result.get('skill_count')) is not int or
-            result['skill_count'] != len(data['skills'])):
-        raise ValueError(FORMAT_ERROR)
-    return {'updated_at': result['updated_at'], 'skill_count': result['skill_count'], 'message': '技能名单已分享。'}
-
-
-def withdraw(home):
-    guard(Path(home) / '.skill-pilot', home)
-    config = _connection(home)
-    _me(config)
-    _request(config, '/api/shares/me', 'DELETE')
-    return {'message': '已撤回自己的分享。'}
-
-
-def shares(home):
-    config = _connection(home)
-    _me(config)
-    return {'shares': _shares(config)}
-
-
-def share(home, member):
-    if not isinstance(member, str) or not re.fullmatch(r'[0-9a-f]{32}', member):
-        raise ValueError('请选择分享列表里的成员。')
-    config = _connection(home)
-    _me(config)
-    result = _request(config, '/api/shares/' + member)
-    identity = _member(result.get('member'))
-    if identity['id'] != member or not isinstance(result.get('updated_at'), str):
-        raise ValueError(FORMAT_ERROR)
+def _catalog(config):
+    data = _request(config, '/api/catalog')
     try:
-        data = clean_config(result.get('config'))
-        for row in data['skills']:
-            source = row['source']
-            if any(not isinstance(source[field], str) for field in ('url', 'reason') if field in source):
+        if not isinstance(data.get('cards'), list):
+            raise ValueError
+        result, seen = [], set()
+        for card in data['cards']:
+            if (not isinstance(card, dict) or not isinstance(card.get('key'), str) or card['key'] in seen or
+                    not isinstance(card.get('listings'), list) or not card['listings'] or
+                    not isinstance(card.get('ratings'), list)):
                 raise ValueError
-            if not source.get('url', '').startswith('https://'):
-                source.pop('url', None)
-    except (ValueError, TypeError, KeyError):
+            rows, members, ratings, raters = [], set(), [], set()
+            for row in card['listings']:
+                member = _member(row.get('member'))
+                identity = (member['id'], row.get('name'))
+                if (not isinstance(row.get('updated_at'), str) or identity in members or
+                        team_hub.listing_key(member['id'], team_hub.clean_listing(row, packaged=True)) != card['key']):
+                    raise ValueError
+                members.add(identity)
+                rows.append({**team_hub.clean_listing(row, packaged=True), 'member': member, 'updated_at': row['updated_at']})
+            for row in card['ratings']:
+                member = _member(row.get('member'))
+                if (type(row.get('stars')) is not int or not 1 <= row['stars'] <= 5 or
+                        not isinstance(row.get('updated_at'), str) or member['id'] in raters):
+                    raise ValueError
+                rating = {'member': member, 'stars': row['stars'], 'updated_at': row['updated_at']}
+                if 'text' in row:
+                    rating['text'] = team_hub.short_text(row['text'], '评价')
+                ratings.append(rating)
+                raters.add(member['id'])
+            result.append({'key': card['key'], 'listings': sorted(rows, key=lambda r: r['updated_at'], reverse=True),
+                           'ratings': sorted(ratings, key=lambda r: r['updated_at'], reverse=True)})
+            seen.add(card['key'])
+        return sorted(result, key=lambda c: c['listings'][0]['updated_at'], reverse=True)
+    except (ValueError, TypeError, KeyError, AttributeError):
         raise ValueError(FORMAT_ERROR) from None
-    return {'member': identity, 'updated_at': result['updated_at'], 'config': data}
 
 
-def detail(home, member):
-    result = share(home, member)
-    statuses = sharing.local_status(result['config'], home)
-    for row in result['config']['skills']:
-        row['local'] = statuses[row['name']]
+def _fetch(home):
+    config = _connection(home)
+    return config, _me(config), _catalog(config)
+
+
+def _owned(cards, member):
+    return {row['name']: row for card in cards for row in card['listings'] if row['member']['id'] == member}
+
+
+def _origin(skill):
+    try:
+        return normalize(skill.get('source', {}))
+    except (ValueError, TypeError, AttributeError):
+        return {'kind': 'skip'}
+
+
+def _local(row, registry):
+    name, source = row['name'], row['source']
+    skills = registry['skills']
+    if source['kind'] == 'github':
+        for local_name, skill in skills.items():
+            origin = _origin(skill)
+            if (origin['kind'] == 'github' and origin['repository'].lower() == source['repository'].lower() and
+                    PurePosixPath(origin['path']) == PurePosixPath(source['path'])):
+                return 'installed', local_name
+    if name not in skills:
+        return ('lark' if source['kind'] == 'lark' else 'installable'), name
+    origin = _origin(skills[name])
+    if source['kind'] == 'lark':
+        return 'installed', name
+    if (source['kind'] == 'files' and origin['kind'] == 'team' and
+            origin['member'] == row['member']['id'] and origin['name'] == name):
+        return ('installed' if origin['version'] == source['version'] else 'update'), name
+    return 'conflict', name
+
+
+def _plan(card, cards, registry):
+    root = card['listings'][0]
+    rows = _owned(cards, root['member']['id'])
+    install, reuse, errors = {}, set(), {}
+    visiting = set()
+    def visit(name, first=False):
+        if name in visiting:
+            return
+        visiting.add(name)
+        if not first and name in registry['skills']:
+            reuse.add(name)
+            return
+        row = root if first else rows.get(name)
+        if row is None:
+            errors[name] = '作者没有上架这个所需技能。'
+            return
+        state, local_name = _local(row, registry)
+        if state in {'installed', 'update'}:
+            reuse.add(local_name)
+            return
+        if state in {'lark', 'conflict'}:
+            errors[name] = LOCAL_LABELS[state] + '。'
+            return
+        install[name] = row
+        for dependency in row['requires']:
+            visit(dependency)
+    visit(root['name'], True)
+    if errors:
+        reason = '所需技能装不了：' + '；'.join(n + '（' + r + '）' for n, r in sorted(errors.items()))
+        errors.setdefault(root['name'], reason)
+        return {}, set(), [{'name': n, 'reason': r} for n, r in sorted(errors.items())]
+    return install, reuse, []
+
+
+def catalog(home):
+    _, member, cards = _fetch(home)
+    _, registry, _ = operations.load(home)
+    result = []
+    for card in cards:
+        row = card['listings'][0]
+        state, local_name = _local(row, registry)
+        mine = any(r['member']['id'] == member['id'] for r in card['listings'])
+        reason = ''
+        if mine:
+            state = 'mine'
+        elif state == 'installable':
+            _, _, skipped = _plan(card, cards, registry)
+            if skipped:
+                state = 'blocked'
+                reason = next(r['reason'] for r in skipped if r['name'] == row['name'])
+        if state in {'lark', 'conflict'}:
+            reason = LOCAL_LABELS[state] + '。'
+        local = {'status': state, 'label': LOCAL_LABELS[state], 'reason': reason,
+                 'agents': registry['skills'].get(local_name, {}).get('assigned_agents', [])}
+        details = {}
+        for field in team_hub.TEXT_FIELDS[:-1]:
+            value = next((r[field] for r in card['listings'] if field in r), None)
+            if value is not None:
+                details[field] = value
+        my_rating = next(({k: r[k] for k in ('stars', 'text') if k in r} for r in card['ratings']
+                          if r['member']['id'] == member['id']), None)
+        reviews = card['ratings']
+        result.append({'key': card['key'], 'kind': row['source']['kind'], 'name': row['name'], **details,
+            'requires': row['requires'], 'updated_at': row['updated_at'],
+            'listings': [{**{k: r[k] for k in ('member', 'note', 'updated_at') if k in r},
+                          **{k: r['source'][k] for k in ('version', 'file_count', 'size') if k in r['source']}}
+                         for r in card['listings']],
+            'rating': {'average': round(sum(r['stars'] for r in reviews) / len(reviews), 1) if reviews else None,
+                       'count': len(reviews)}, 'reviews': reviews, 'my_rating': my_rating,
+            'can_rate': not mine and state in {'installed', 'update'}, 'local': local,
+            'tokens': operations.listing_tokens(row['name'], details)})
+    return {'member': member, 'cards': result}
+
+
+def package(config, member, name, version, destination):
+    data = _request(config, '/api/packages/' + member + '/' + name + '?version=' + version)
+    try:
+        files = team_hub.clean_files(data.get('files'))
+        if data.get('name') != name or data.get('version') != version or team_hub.package_version(files) != version:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise ValueError(FORMAT_ERROR) from None
+    destination = Path(destination)
+    destination.mkdir(parents=True)
+    for row in files:
+        path = destination / row['path']
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(base64.b64decode(row['content']))
+        path.chmod(0o755 if row['executable'] else 0o644)
+    github.safe_skill(destination)
+    if metadata((destination / 'SKILL.md').read_text(encoding='utf-8')).get('name') != name:
+        raise ValueError('技能文件里的名称和上架的名称不一致，请联系作者。')
+    return destination
+
+
+def install_preview(home, key, assigned):
+    home, registry, agents = operations.load(home)
+    if (not isinstance(assigned, list) or not assigned or
+            any(not isinstance(a, str) or a not in agents for a in assigned)):
+        raise ValueError('请至少选择一个本机已经接入的 agent。')
+    revision = operations.revision(home, agents)
+    config, _, cards = _fetch(home)
+    card = next((c for c in cards if c['key'] == key), None)
+    if card is None:
+        raise ValueError('这个技能已经下架，请刷新商店。')
+    rows, reuse, skipped = _plan(card, cards, registry)
+    temporary = Path(tempfile.mkdtemp(prefix='skill-pilot-team-install-'))
+    items, downloads = [], {}
+    try:
+        for name, row in sorted(rows.items()):
+            source = row['source']
+            if source['kind'] == 'files':
+                path = package(config, row['member']['id'], name, source['version'], temporary / name)
+                origin = {'source': '团队商店', 'team': {'member': row['member']['id'],
+                    'member_name': row['member']['name'], 'name': name, 'version': source['version'],
+                    'key': team_hub.listing_key(row['member']['id'], row)}}
+                item = {'name': name, 'path': str(path), 'source': origin}
+            else:
+                identity = (source['repository'], source.get('commit', ''))
+                if identity not in downloads:
+                    url = 'https://github.com/' + identity[0] + ('/tree/' + identity[1] if identity[1] else '')
+                    downloads[identity] = github.inspect(url)
+                found = next((s for s in downloads[identity]['skills'] if s['name'] == name and
+                              PurePosixPath(s['repository_path']) == PurePosixPath(source['path'])), None)
+                if found is None:
+                    raise ValueError(name + ' 的来源里没有找到指定的技能，请联系上架的同事。')
+                github.safe_skill(Path(found['path']))
+                path = temporary / name
+                shutil.copytree(found['path'], path, symlinks=True, ignore=shutil.ignore_patterns(*SKIP_CONTENT))
+                item = {**found, 'path': str(path)}
+            item['tree'] = git_tree(Path(item['path']))
+            items.append(item)
+        virtual = copy.deepcopy(registry)
+        for item in items:
+            virtual['skills'][item['name']] = {'assigned_agents': [], 'requires': rows[item['name']]['requires'], 'entries': []}
+        changes = [{'skill': n, 'agent': a, 'enabled': True} for n in sorted(set(rows) | reuse) for a in sorted(set(assigned))]
+        plan = operations.assignment_plan(virtual, agents, changes, home)
+        tokens = {a: 0 for a in sorted(set(assigned))}
+        for name, skill in plan['registry']['skills'].items():
+            added = set(skill['assigned_agents']) - set(registry['skills'].get(name, {}).get('assigned_agents', []))
+            if not added:
+                continue
+            path = temporary / name if name in rows else home / '.skill-pilot/store' / name
+            cost = operations.listing_tokens(name, metadata((path / 'SKILL.md').read_text()))
+            for agent in added:
+                if agent in tokens:
+                    tokens[agent] += cost
+        title = next((r['title'] for r in card['listings'] if 'title' in r), card['listings'][0]['name'])
+        saved = {'temporary': str(temporary), 'items': items, 'rows': rows, 'reuse': sorted(reuse),
+                 'agents': sorted(set(assigned)), 'revision': revision, 'connection': _connection_version(config),
+                 'title': title, 'changes': changes, 'skipped': skipped}
+        public = {'install': [{'name': n, **({'title': r['title']} if 'title' in r else {})} for n, r in sorted(rows.items())],
+                  'reuse': sorted(reuse), 'skipped': skipped, 'agents': saved['agents'], 'tokens': tokens,
+                  'message': f'将装上 {len(rows)} 个，沿用本机 {len(reuse)} 个' + ('，有所需技能装不了。' if skipped else '。')}
+        return saved, public
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    finally:
+        for download in downloads.values():
+            shutil.rmtree(download['temporary'], ignore_errors=True)
+
+
+def install_apply(home, review):
+    home, registry, agents = operations.load(home)
+    guard(home / '.skill-pilot', home)
+    if operations.revision(home, agents) != review['revision']:
+        raise ValueError('本机技能已经变了，请重新预览后再装上。')
+    if _connection_version(_connection(home)) != review['connection']:
+        raise ValueError('分享站设置已经变了，请重新预览。')
+    for item in review['items']:
+        github.safe_skill(Path(item['path']))
+        if git_tree(Path(item['path'])) != item['tree']:
+            raise ValueError('预览里的技能文件已经变了，请重新预览。')
+    if review['skipped']:
+        return {'skipped': review['skipped'], 'message': '所需技能暂时装不了，本机没有改动。'}
+    if not review['items'] and not operations.assignment_plan(registry, agents, review['changes'], home)['changed']:
+        return {'message': '本机已经装好，分配没有变化。'}
+    def mutate(current, checked):
+        for item in review['items']:
+            operations._put(home, current, item, [], [], checked)
+            current['skills'][item['name']]['requires'] = review['rows'][item['name']]['requires']
+        assignments = operations.assignment_plan(current, agents, review['changes'], home)
+        current.update(assignments['registry'])
+        names = sorted({s['name'] for s in review['items']} | set(assignments['changed']))
+        reconcile_assignments(current, home, checked, names)
+        return names, [s['name'] for s in review['items']], {'installed': [s['name'] for s in review['items']], 'reuse': review['reuse']}
+    return operations._run(home, registry, agents, review['revision'], '从团队商店装上了「' + review['title'] + '」', mutate)
+
+
+def _files(root):
+    root = Path(root)
+    github.safe_skill(root)
+    files, blocked, size = [], [], 0
+    def walk(folder, ancestors):
+        nonlocal size
+        resolved = folder.resolve()
+        if not resolved.is_relative_to(root.resolve()):
+            raise ValueError('这个技能引用了技能文件夹外的文件，不能上架。')
+        if resolved in ancestors:
+            raise ValueError('这个技能的文件夹相互引用，无法完整读取。')
+        for path in sorted(folder.iterdir()):
+            if path.name in SKIP_CONTENT:
+                continue
+            if not path.resolve().is_relative_to(root.resolve()):
+                raise ValueError('这个技能引用了技能文件夹外的文件，不能上架。')
+            relative = path.relative_to(root).as_posix()
+            if path.is_dir():
+                walk(path, ancestors | {resolved})
+                continue
+            if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in SECRET_NAMES):
+                blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
+                continue
+            if not path.is_file():
+                raise ValueError('技能里有不能读取的文件，不能上架。')
+            with path.open('rb') as stream:
+                raw = stream.read(team_hub.MAX_SIZE + 1)
+            if SECRET_CONTENT.search(raw.decode('utf-8', errors='replace')):
+                blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
+                continue
+            size += len(raw)
+            if size > team_hub.MAX_SIZE:
+                raise ValueError('单个技能的文件合计不能超过 5 MB。')
+            files.append({'path': relative, 'content': base64.b64encode(raw).decode('ascii'),
+                          'executable': bool(path.stat().st_mode & 0o111)})
+            if len(files) > team_hub.MAX_FILES:
+                raise ValueError('单个技能不能超过 300 个文件。')
+    walk(root, set())
+    if not any(f['path'] == 'SKILL.md' for f in files):
+        raise ValueError('SKILL.md 缺失或疑似含有密钥，整个技能不能上架。')
+    return team_hub.clean_files(files), {'count': len(files), 'size': size, 'blocked': blocked}
+
+
+def _candidates(home, registry, member, cards):
+    shared = _owned(cards, member['id'])
+    result = {}
+    for row in sharing.export_config(home)['skills']:
+        name = row['name']
+        skill = registry['skills'][name]
+        origin = _origin(skill)
+        kind = ('github' if origin['kind'] == 'github' and row['source']['kind'] == 'github' and not row['local_modified'] else
+                'lark' if origin['kind'] == 'lark' else 'files')
+        unavailable, version = '', None
+        if origin['kind'] == 'team' and origin['member'] != member['id']:
+            unavailable = '从团队商店装的别人的技能，不能作为自己的技能上架。'
+        try:
+            github.safe_skill(home / '.skill-pilot/store' / name)
+        except ValueError:
+            unavailable = '这个技能引用了技能文件夹外的文件，不能上架。'
+        listed = shared.get(name)
+        if kind == 'files' and not unavailable and listed and listed['source']['kind'] == 'files':
+            try:
+                version = team_hub.package_version(_files(home / '.skill-pilot/store' / name)[0])
+            except (ValueError, OSError):
+                version = ''
+        result[name] = {**{k: row[k] for k in ('name', 'title', 'summary', 'group', 'description', 'requires') if k in row},
+            'kind': kind, 'listed': bool(listed), 'note': listed.get('note', '') if listed else '',
+            'changed': bool(listed and listed['source']['kind'] == 'files' and version != listed['source']['version']),
+            'unavailable': unavailable, '_source': row['source']}
     return result
 
 
-def import_preview(home, member, skills, agents=None):
-    result = share(home, member)
-    data = result['config']
-    rows = {row['name']: row for row in data['skills']}
+def listing_candidates(home):
+    _, member, cards = _fetch(home)
+    _, registry, _ = operations.load(home)
+    rows = _candidates(home, registry, member, cards)
+    return {'skills': [{k: v for k, v in row.items() if not k.startswith('_')} for name, row in rows.items()
+                       if registry['skills'][name]['assigned_agents']]}
+
+
+def listings_preview(home, skills):
+    home, registry, agents = operations.load(home)
+    revision = operations.revision(home, agents)
+    config, member, cards = _fetch(home)
+    candidates = _candidates(home, registry, member, cards)
     if (not isinstance(skills, list) or not skills or
-            any(not isinstance(name, str) or name not in rows for name in skills)):
-        raise ValueError('请先从这位同事的分享里选择技能。')
-    selected = set(skills)
-    pending = list(skills)
+            any(not isinstance(s, dict) or not isinstance(s.get('name'), str) or s['name'] not in candidates or
+                not registry['skills'][s['name']]['assigned_agents'] for s in skills) or
+            len({s['name'] for s in skills}) != len(skills)):
+        raise ValueError('请从本机在用的技能里选择要上架的技能。')
+    notes = {s['name']: team_hub.short_text(s.get('note', ''), '推荐语') for s in skills}
+    shared, auto = _owned(cards, member['id']), {}
+    selected = set(notes)
+    pending = list(sorted(selected))
     while pending:
-        for dependency in rows[pending.pop()]['requires']:
+        parent = pending.pop()
+        for dependency in registry['skills'].get(parent, {}).get('requires', []):
+            if dependency in shared and dependency not in selected:
+                continue
+            auto.setdefault(dependency, set()).add(parent)
             if dependency not in selected:
                 selected.add(dependency)
                 pending.append(dependency)
-    data = copy.deepcopy(data)
-    data['skills'] = [row for row in data['skills'] if row['name'] in selected]
-    for row in data['skills']:
-        if row['name'] not in skills:
-            row['assigned_agents'] = []
-    plan = sharing.preview_import(data, agents, home)
-    return {'config': data, 'agents': copy.deepcopy(agents), 'member': result['member'], 'revision': plan['revision']}, plan
+    payload, public, errors = {}, {}, {}
+    for name in sorted(selected):
+        row = candidates.get(name)
+        if row is None:
+            errors[name] = '本机缺少这个所需技能。'
+            continue
+        if row['unavailable']:
+            errors[name] = row['unavailable']
+            continue
+        listing = {k: row[k] for k in ('name', 'title', 'summary', 'group', 'description', 'requires') if k in row}
+        listing['note'] = notes.get(name, '')
+        files_info = {'count': 0, 'size': 0, 'blocked': []}
+        version = None
+        try:
+            if row['kind'] == 'files':
+                files, files_info = _files(home / '.skill-pilot/store' / name)
+                listing['source'] = {'kind': 'files', 'files': files}
+                version = team_hub.package_version(files)
+            else:
+                listing['source'] = row['_source'] if row['kind'] == 'github' else {'kind': 'lark'}
+            listing = team_hub.clean_listing(listing)
+            payload[name] = listing
+            public[name] = {**{k: v for k, v in listing.items() if k != 'source'},
+                            'title': listing.get('title', name), 'kind': row['kind'],
+                            'auto': sorted(auto.get(name, set())), 'files': files_info, 'version': version}
+        except (ValueError, OSError) as error:
+            errors[name] = str(error) if isinstance(error, ValueError) else '技能文件没能完整读取，请检查后重试。'
+    while True:
+        before = len(errors)
+        for name in selected - errors.keys():
+            missing = set(registry['skills'].get(name, {}).get('requires', [])) & errors.keys()
+            if missing:
+                errors[name] = '所需技能不能上架：' + '、'.join(sorted(missing))
+        if len(errors) == before:
+            break
+    valid = sorted(selected - errors.keys())
+    saved = {'listings': [payload[n] for n in valid], 'revision': revision, 'connection': _connection_version(config)}
+    result = {'listings': [public[n] for n in valid], 'errors': [{'name': n, 'reason': r} for n, r in sorted(errors.items())],
+              'message': f'可上架 {len(valid)} 个，不能上架 {len(errors)} 个。'}
+    return saved, result
+
+
+def listings_apply(home, review):
+    home, _, agents = operations.load(home)
+    guard(home / '.skill-pilot', home)
+    if operations.revision(home, agents) != review['revision']:
+        raise ValueError('本机技能文件已经变了，请重新预览后再上架。')
+    config = _connection(home)
+    if _connection_version(config) != review['connection']:
+        raise ValueError('分享站设置已经变了，请重新预览。')
+    if not review['listings']:
+        raise ValueError('没有可以上架的技能，请先处理预览里的原因。')
+    _me(config)
+    result = _request(config, '/api/listings/me', 'PUT', {'listings': review['listings']})
+    return {**result, 'message': '技能已上架。'}
+
+
+def listings_remove(home, names):
+    guard(Path(home) / '.skill-pilot', home)
+    config, member, cards = _fetch(home)
+    rows = _owned(cards, member['id'])
+    if (not isinstance(names, list) or not names or
+            any(not isinstance(n, str) or n not in rows for n in names)):
+        raise ValueError('请从自己上架的技能里选择要下架的技能。')
+    pending, order = set(names), []
+    parents = [n for n, row in rows.items() if n not in pending and set(row['requires']) & pending]
+    if parents:
+        raise ValueError('这些上架的技能仍需要它们：' + '、'.join(sorted(parents)))
+    while pending:
+        ready = sorted(n for n in pending if not any(n in rows[p]['requires'] for p in pending - {n}))
+        if not ready:
+            # The hub deletes one listing at a time. Break only the internal
+            # edges of a cycle whose entire membership is being removed.
+            replacements = []
+            for name in sorted(pending):
+                row = copy.deepcopy(rows[name])
+                row['requires'] = [n for n in row['requires'] if n not in pending]
+                if row['source']['kind'] == 'files':
+                    data = _request(config, '/api/packages/' + member['id'] + '/' + name + '?version=' + row['source']['version'])
+                    files = team_hub.clean_files(data.get('files'))
+                    if team_hub.package_version(files) != row['source']['version']:
+                        raise ValueError(FORMAT_ERROR)
+                    row['source'] = {'kind': 'files', 'files': files}
+                replacements.append(team_hub.clean_listing(row))
+            _request(config, '/api/listings/me', 'PUT', {'listings': replacements})
+            order.extend(sorted(pending))
+            break
+        order.extend(ready)
+        pending.difference_update(ready)
+    for name in order:
+        _request(config, '/api/listings/me/' + name, 'DELETE')
+    return {'message': '技能已下架。'}
+
+
+def rate(home, body, remove=False):
+    guard(Path(home) / '.skill-pilot', home)
+    card = next((c for c in catalog(home)['cards'] if c['key'] == body.get('key')), None)
+    if card is None:
+        raise ValueError('这个技能已经下架，请刷新商店。')
+    if card['local']['status'] == 'mine':
+        raise ValueError('自己上架的不能评价。')
+    if not card['can_rate']:
+        raise ValueError('装过才能评价。')
+    data = {'key': card['key']}
+    if not remove:
+        data.update({k: body[k] for k in ('stars', 'text') if k in body})
+    result = _request(_connection(home), '/api/ratings', 'DELETE' if remove else 'PUT', data)
+    return {**result, 'message': '评价已删除。' if remove else '评价已保存。'}
