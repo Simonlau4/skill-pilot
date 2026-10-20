@@ -2390,10 +2390,11 @@ function storeRowHtml(card) {
 
 /* ---------- 商店首页：几排推荐 + 全部技能 ---------- */
 
+/* 几排推荐按这个顺序挑卡片；同一张卡片只出现在第一排挑中它的地方，免得几排看起来一样。 */
 const STORE_SHELVES = [
   {sort: 'rating', title: '最受好评', pick: cards => cards.filter(card => card.rating?.count)},
-  {sort: 'latest', title: '最新上架', pick: cards => cards},
   {sort: 'popular', title: '同事推荐最多', pick: cards => cards.filter(card => card.listings.length > 1)},
+  {sort: 'latest', title: '最新上架', pick: cards => cards},
 ];
 const SHELF_SIZE = 4;
 const SHELF_MIN = 8;   // 技能少于这个数时不分几排，直接看全部
@@ -2441,8 +2442,10 @@ function renderStoreShelves(cards) {
     box.innerHTML = '';
     return;
   }
+  const shown = new Set();
   box.innerHTML = STORE_SHELVES.map(shelf => {
-    const picked = [...shelf.pick(cards)].sort(STORE_SORTS[shelf.sort]).slice(0, SHELF_SIZE);
+    const picked = shelf.pick(cards).filter(card => !shown.has(card.key)).sort(STORE_SORTS[shelf.sort]).slice(0, SHELF_SIZE);
+    for (const card of picked) shown.add(card.key);
     return picked.length ? `<section class="shelf" aria-labelledby="shelf-${shelf.sort}">
       <div class="shelf-head">
         <h2 id="shelf-${shelf.sort}">${shelf.title}</h2>
