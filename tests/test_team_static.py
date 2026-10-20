@@ -56,6 +56,7 @@ class TeamStaticTests(unittest.TestCase):
             line(source, 'const starIcon = '),
             extract_function(source, 'function storeRatingHtml('),
             extract_function(source, 'function storeStatusTag('),
+            extract_function(source, 'function storeSummary('),
             extract_function(source, 'function storeRecommenders('),
             extract_function(source, 'function storeCardHtml('),
             line(source, 'const storeTime = '),
@@ -81,6 +82,7 @@ if (html.includes('<b>示例') || !html.includes('&lt;b&gt;示例')) fail('同�
 if (html.includes('<img') || !html.includes('&lt;img')) fail('推荐语没有转成纯文字：' + html);
 if (!html.includes('data-store-open="a"')) fail('卡片要能打开详情');
 if (!storeCardHtml(cards[1]).includes('Acme 乙 等 3 人推荐')) fail('多人推荐要写成“某某等 N 人推荐”');
+if (storeSummary({description: '把周报整理好。再发出去'}) !== '把周报整理好') fail('没有一句话时应取说明的第一句');
 
 const names = list => list.map(card => card.name).join(',');
 if (names(storeFilter(cards, {group: '写作'})) !== 'acme-a,acme-c') fail('按分组筛选不对');

@@ -2326,6 +2326,13 @@ function storeGroups(cards) {
   return [...counts].sort((a, b) => (a[0] === '-') - (b[0] === '-') || b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'));
 }
 
+/* 一句话：没整理过中文名的技能没有，就用技能自带说明的第一句。 */
+function storeSummary(card) {
+  if (card.summary) return card.summary;
+  const first = String(card.description || '').split(/[\n。！？!?]/).map(part => part.trim()).find(Boolean) || '';
+  return first.length > 60 ? first.slice(0, 60) + '…' : first;
+}
+
 /* 谁推荐的：两个人以内写全名，多了写“某某等 N 人”。 */
 function storeRecommenders(card) {
   const names = card.listings.map(item => item.member.name);
@@ -2354,7 +2361,7 @@ function storeCardHtml(card) {
   const people = card.listings.length > 1 ? `<span>${card.listings.length} 人推荐</span>` : '';
   return `<button class="store-card" type="button" data-store-open="${escape(card.key)}">
     <span class="store-card-top"><span class="store-card-title">${escape(storeTitle(card))}</span>${storeStatusTag(card)}</span>
-    <span class="store-card-sum">${escape(card.summary || '')}</span>
+    <span class="store-card-sum">${escape(storeSummary(card))}</span>
     <span class="store-card-quote">${quote
       ? `“${escape(quote.note)}”<span class="by"> — ${escape(quote.member.name)}</span>`
       : `<span class="by">${escape(storeRecommenders(card))}</span>`}</span>
@@ -2373,7 +2380,7 @@ function storeRowHtml(card) {
   return `<div class="store-row">
     <button class="store-row-main" type="button" data-store-open="${escape(card.key)}">
       <span class="store-row-name"><span class="t">${escape(storeTitle(card))}</span>${card.title ? `<span class="skill-id">${escape(card.name)}</span>` : ''}</span>
-      <span class="store-row-sub">${escape(card.summary || card.listings.find(item => item.note)?.note || '')}</span>
+      <span class="store-row-sub">${escape(storeSummary(card) || card.listings.find(item => item.note)?.note || '')}</span>
     </button>
     <span class="store-row-rating">${storeRatingHtml(card.rating)}</span>
     <span class="store-row-by">${escape(mine ? `${friendlyDate(storeMyListing(card)?.updated_at)}上架` : storeRecommenders(card))}</span>
@@ -2532,26 +2539,41 @@ $('page-team').addEventListener('click', event => {
 });
 
 async function unlistStore(name, button) {
-  const card = state.store?.cards.find(item => item.local?.status === 'mine' && item.name === name);
+  const cards = (state.store?.cards || []).filter(item => item.local?.status === 'mine');
+  const card = cards.find(item => item.name === name);
+  // 自己上架的别的技能需要它时，一起下架，先在确认框里说清楚。
+  const names = [name];
+  for (let index = 0; index < names.length; index++) {
+    for (const item of cards) if (item.requires?.includes(names[index]) && !names.includes(item.name)) names.push(item.name);
+  }
+  const extra = cards.filter(item => names.slice(1).includes(item.name)).map(storeTitle);
   const ok = await confirmDialog({
     title: `下架「${card ? storeTitle(card) : name}」`,
-    lines: ['同事在商店里将看不到它。', '已经装上的同事不受影响；你随时可以重新上架。'],
-    okText: '下架',
+    lines: [extra.length ? `${extra.join('、')} 需要它，会一起下架。` : '', '同事在商店里将看不到它。',
+      '已经装上的同事不受影响；你随时可以重新上架。'],
+    okText: extra.length ? `下架 ${names.length} 个` : '下架',
   });
   if (!ok) return;
+  const rows = [...$('store-list').querySelectorAll('.store-row-main')];
+  const place = rows.findIndex(row => row.closest('.store-row')?.contains(button));
   await withBusy(button, '正在下架…', async () => {
     try {
-      const result = await api('/api/team/listings/remove', {names: [name]});
+      await api('/api/team/listings/remove', {names});
       if (state.storeDetail === card?.key) closeDetail();
       storeCandidates = null;
       await loadStore();
       if (state.storeMine) await loadCandidates().catch(() => {});
       renderTeam();
-      toast({text: result.message || '已下架。'});
+      toast({text: `已下架「${card ? storeTitle(card) : name}」${extra.length ? `等 ${names.length} 个技能` : ''}。`});
     } catch (error) {
       toast({text: error.message, tone: 'error', sticky: true});
     }
   });
+  // 这一行没了：焦点交给顶上来的那一行，没有就交给列表标题。
+  if (!button.isConnected) {
+    const next = $('store-list').querySelectorAll('.store-row-main')[Math.max(0, place)];
+    (next || $('store-all-title')).focus();
+  }
 }
 
 /* ---------- 详情：沿用技能页右侧的详情面板 ---------- */
@@ -2586,8 +2608,8 @@ function renderStoreDetail(fresh = false) {
   const scroll = fresh ? 0 : body.scrollTop;
   $('detail-title').textContent = storeTitle(card);
   body.innerHTML = `
-    <p class="detail-id">${escape(card.name)}</p>
-    ${card.summary ? `<p class="detail-summary">${escape(card.summary)}</p>` : ''}
+    ${card.title ? `<p class="detail-id">${escape(card.name)}</p>` : ''}
+    ${storeSummary(card) ? `<p class="detail-summary">${escape(storeSummary(card))}</p>` : ''}
     <p class="store-facts">${storeRatingHtml(card.rating)}<span>${escape(storeRecommenders(card))}</span>${card.group ? `<span>${escape(card.group)}</span>` : ''}</p>
     ${storeGetHtml(card)}
     <h3 class="sub-title">谁推荐的</h3>
@@ -2632,7 +2654,7 @@ function storeGetHtml(card) {
   }
   if (local.status === 'update') {
     return box('info', `${icon('update-up')}<span><strong>有新版</strong>${users ? `，${escape(users)} 在用` : ''}</span>`,
-      `<button class="btn btn-small btn-update" type="button" data-store-goto="${escape(card.name)}">去技能页更新</button>`);
+      `<button class="btn btn-small btn-update" type="button" data-store-goto="${escape(card.name)}" data-store-check>去技能页更新</button>`);
   }
   if (local.status === 'mine') {
     const candidate = storeCandidates?.find(item => item.name === card.name);
@@ -2666,7 +2688,7 @@ function storeInstallHtml(card) {
       ${plan.install?.length ? `<p>会装上 ${plan.install.length} 个：${names(plan.install)}</p>` : ''}
       ${plan.reuse?.length ? `<p>本机已有，直接用：${names(plan.reuse)}</p>` : ''}
       ${plan.skipped?.length ? `<p class="is-warn">${icon('warning')}跳过 ${plan.skipped.length} 个：${plan.skipped.map(item => `${escape(item.name)}（${escape(item.reason)}）`).join('、')}</p>` : ''}
-      <p class="muted">${escape(plan.message || '')}</p>
+      <p class="muted">给 ${escape((plan.agents || []).map(nameOf).join('、'))} 用</p>
     </div>`;
     const empty = !plan.install?.length && !plan.reuse?.length;
     actions = `<button class="btn" type="button" data-store-plan-cancel>改一改</button>
@@ -2686,9 +2708,11 @@ function storeInstallHtml(card) {
 function storeReviewsHtml(card) {
   const me = state.store?.member?.id;
   const reviews = card.reviews || [];
-  const others = card.can_rate ? reviews.filter(review => review.member.id !== me) : reviews;
-  const editor = card.can_rate ? storeRateHtml(card)
-    : `<p class="store-rate-note">${icon('info')}${card.local?.status === 'mine' ? '自己上架的不能评价' : '装上以后可以打分'}</p>`;
+  const others = card.can_rate && !(state.table ? !state.table.write_allowed : !state.writeAllowed) ? reviews.filter(review => review.member.id !== me) : reviews;
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  const editor = card.can_rate && !readOnly ? storeRateHtml(card)
+    : `<p class="store-rate-note">${icon('info')}${card.local?.status === 'mine' ? '自己上架的不能评价'
+      : readOnly ? '只读预览，不能评价' : '装上以后可以打分'}</p>`;
   const summary = card.rating?.count ? `<span class="sub-note">· ${card.rating.average.toFixed(1)} 分，${card.rating.count} 人</span>` : '';
   return `<h3 class="sub-title">评价 ${summary}</h3>
     ${editor}
@@ -2735,10 +2759,13 @@ $('detail-body').addEventListener('click', async event => {
     $('detail-body').querySelector('[data-store-agent]')?.focus();
   } else if (target.closest('[data-store-install-apply]')) applyStoreInstall(target.closest('[data-store-install-apply]'));
   else if (target.closest('[data-store-goto]')) {
-    const name = target.closest('[data-store-goto]').dataset.storeGoto;
+    const button = target.closest('[data-store-goto]');
+    const name = button.dataset.storeGoto;
     closeDetail();
     showPage('skills');
     if (state.table?.skills.some(skill => skill.name === name)) openDetail(name);
+    // 有新版时顺便检查更新，详情里随后出现“有新版”和更新按钮。
+    if (button.hasAttribute('data-store-check') && !updateState.review?.running && !updateState.starting) checkUpdates();
   } else if (target.closest('[data-store-republish]')) {
     const name = target.closest('[data-store-republish]').dataset.storeRepublish;
     closeDetail();
@@ -2883,7 +2910,7 @@ function storePickRowHtml(candidate) {
   const checked = storePick.selected.has(candidate.name);
   const name = candidate.title || candidate.name;
   const state = candidate.listed ? candidate.changed ? '<span class="tag">改过，可上架新版</span>' : '<span class="tag tag-ok">已上架</span>' : '';
-  const kind = candidate.kind === 'files' ? `<span class="flag">${icon('file-kept')}连文件一起传</span>`
+  const kind = candidate.unavailable ? '' : candidate.kind === 'files' ? `<span class="flag">${icon('file-kept')}连文件一起传</span>`
     : candidate.kind === 'lark' ? '<span class="flag">飞书官方</span>' : '';
   return `<div class="store-pick-row${checked ? ' is-checked' : ''}">
     <label class="store-pick-main">
@@ -2941,7 +2968,7 @@ function storeReviewHtml(plan) {
       <p class="store-review-name"><strong>${escape(item.title || item.name)}</strong>${item.title && item.title !== item.name ? ` <span class="skill-id">${escape(item.name)}</span>` : ''}</p>
       <p class="row-note">${escape(what)}</p>
       <p class="store-review-note">${item.note ? `“${escape(item.note)}”` : `<span class="muted">没写推荐语，同事看到的是技能自带的一句话。</span>`}</p>
-      ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.join('、'))} 需要它，一起上架</p>` : ''}
+      ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.map(name => storeCandidates?.find(row => row.name === name)?.title || name).join('、'))} 需要它，一起上架</p>` : ''}
       ${blocked.length ? `<details class="fold fold-inner store-blocked">
         <summary>${icon('lock')} 拦下 ${blocked.length} 个疑似密钥或密码的文件，不会上传</summary>
         <ul class="confirm-items">${blocked.map(file => `<li><span class="mono">${escape(file.path)}</span>：${escape(file.reason)}</li>`).join('')}</ul>
@@ -2988,10 +3015,10 @@ $('store-publish-apply').addEventListener('click', async event => {
   $('store-publish-back').disabled = $('store-publish-close').disabled = true;
   await withBusy(event.currentTarget, '正在上架…', async () => {
     try {
-      const result = await api('/api/team/listings/apply', {review: plan.review});
+      await api('/api/team/listings/apply', {review: plan.review});
       storePublishing = false;
       $('store-publish-dialog').close();
-      toast({text: result.message || `已上架 ${plan.listings.length} 个技能，同事现在能看到了。`});
+      toast({text: `已上架 ${plan.listings.length} 个技能，同事现在能看到了。`});
       storeCandidates = null;
       await loadStore();
       if (state.storeMine) await loadCandidates().catch(() => {});
