@@ -16,7 +16,7 @@ const clone = value => JSON.parse(JSON.stringify(value));
 function renderButtons(container, markup, key) {
   const template = document.createElement('template');
   template.innerHTML = markup;
-  const existing = new Map([...container.children].map(button => [button.getAttribute(key), button]));
+  const existing = new Map([...container.children].filter(button => !button.classList.contains('selection-plate')).map(button => [button.getAttribute(key), button]));
   for (const [index, next] of [...template.content.children].entries()) {
     const value = next.getAttribute(key);
     const button = existing.get(value) || next;
@@ -29,6 +29,55 @@ function renderButtons(container, markup, key) {
     if (container.children[index] !== button) container.insertBefore(button, container.children[index] || null);
   }
   for (const button of existing.values()) button.remove();
+  if (container.matches('#agent-rail, #skills-tabs, .filter-group-list, .filter-tag-list')) glideSelection(container);
+}
+
+const selectionMotions = new WeakMap();
+
+/* 同一块选中底色在按钮之间移动。连点时从屏幕上正在经过的位置接着走。 */
+function glideSelection(container) {
+  let motion = selectionMotions.get(container);
+  if (!motion) {
+    const plate = document.createElement('span');
+    plate.className = 'selection-plate';
+    plate.setAttribute('aria-hidden', 'true');
+    container.append(plate);
+    container.classList.add('selection-track');
+    motion = {plate, animation: null, target: null};
+    selectionMotions.set(container, motion);
+    const observer = new ResizeObserver(() => {
+      if (!container.isConnected) { observer.disconnect(); return; }
+      glideSelection(container);
+    });
+    observer.observe(container);
+  }
+  const selected = container.querySelector('button[aria-current="page"], button[aria-current="true"], button[aria-pressed="true"]');
+  const {plate} = motion;
+  if (!selected || !selected.offsetWidth || !container.offsetWidth) {
+    motion.animation?.cancel();
+    motion.target = null;
+    plate.hidden = true;
+    return;
+  }
+  const target = {x: selected.offsetLeft, y: selected.offsetTop, w: selected.offsetWidth, h: selected.offsetHeight};
+  if (motion.target && Object.keys(target).every(key => target[key] === motion.target[key])) return;
+  const before = motion.target && !plate.hidden ? plate.getBoundingClientRect() : null;
+  const bounds = container.getBoundingClientRect();
+  motion.animation?.cancel();
+  plate.hidden = false;
+  plate.style.width = `${target.w}px`;
+  plate.style.height = `${target.h}px`;
+  const finish = `translate(${target.x}px, ${target.y}px)`;
+  plate.style.transform = finish;
+  motion.target = target;
+  if (before && !prefersReducedMotion()) {
+    const x = before.left - bounds.left - container.clientLeft + container.scrollLeft;
+    const y = before.top - bounds.top - container.clientTop + container.scrollTop;
+    motion.animation = plate.animate([
+      {transform: `translate(${x}px, ${y}px) scale(${before.width / target.w}, ${before.height / target.h})`},
+      {transform: finish},
+    ], {duration: 360, easing: 'cubic-bezier(0.22, 1.1, 0.36, 1)'});
+  }
 }
 
 /* 图标加几个字：图标来自 index.html 顶部的 <symbol>，只用来配文字，读屏不读。 */
@@ -597,6 +646,7 @@ function showPage(page) {
     if (button.dataset.page === page) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   }
+  glideSelection(document.querySelector('.nav'));
   if (page === 'cleanup') { renderCleanup(); loadCleanup(); }
   if (page === 'settings') renderSettings();
   if (page === 'team') enterTeam();
@@ -620,6 +670,13 @@ function gotoPlace(place) {
 
 const SETTINGS_BLOCKS = ['ai', 'agents', 'share', 'team', 'log', 'diagnostics', 'version'];
 const prefersReducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', event => {
+  if (event.matches) {
+    for (const plate of document.querySelectorAll('.selection-plate')) plate.getAnimations().forEach(animation => animation.cancel());
+    skillListMotion?.cancel();
+    filterLayoutMotion?.cancel();
+  }
+});
 
 function highlightSettingsBlock(name) {
   for (const button of document.querySelectorAll('#settings-nav [data-block]')) {
@@ -914,7 +971,7 @@ function skillRowHtml(skill, agent) {
   ].join('');
   const tags = (skill.tags || []).map(tag => tagPickHtml(tag)).join('');
   const sum = skill.summary || skill.description;
-  return `<div class="skill-row${pending ? ' is-pending' : ''}">
+  return `<div class="skill-row${pending ? ' is-pending' : ''}" data-row="${escape(skill.name)}">
     <div class="skill-cell">
       <button class="skill-name" data-open="${escape(skill.name)}"><span class="t">${escape(skill.title || skill.name)}</span>${skill.title ? `<span class="skill-id">${escape(skill.name)}</span>` : ''}${flags}</button>
       <span class="skill-sub"><span class="skill-sum" title="${escape(sum)}">${escape(sum)}</span>${tags ? `<span class="row-tags">${tags}</span>` : ''}</span>
@@ -1210,15 +1267,27 @@ function filtersHtml({skills, inTab, withUpdate, scope, hasTag, inChip}) {
   return several || withUpdate.length || state.chip || tagRow ? groupRow + tagRow : '';
 }
 
+let filterLayoutMotion = null;
+
 function renderFilterLayout() {
   const available = Boolean($('skills-filters').innerHTML);
   const collapsed = !available || state.filtersCollapsed;
+  const browser = $('skills-browser');
+  const results = browser.querySelector('.skills-results');
+  const changing = browser.classList.contains('without-filters') !== collapsed;
+  const before = changing ? results.getBoundingClientRect() : null;
+  if (changing) filterLayoutMotion?.cancel();
   $('skills-filter-slot').hidden = !available;
   $('skills-filter-rail').hidden = !available;
   $('skills-filter-rail').inert = collapsed;
   $('skills-filter-rail').setAttribute('aria-hidden', String(collapsed));
   $('filters-show').hidden = !available || !state.filtersCollapsed;
-  $('skills-browser').classList.toggle('without-filters', collapsed);
+  browser.classList.toggle('without-filters', collapsed);
+  if (before && !prefersReducedMotion()) {
+    const distance = before.left - results.getBoundingClientRect().left;
+    filterLayoutMotion = results.animate([{transform: `translateX(${distance}px)`}, {transform: 'none'}],
+      {duration: 300, easing: 'cubic-bezier(0.2, 0.65, 0.3, 1)'});
+  }
 }
 
 function fitFilterRail() {
@@ -1231,14 +1300,9 @@ function fitFilterRail() {
 addEventListener('scroll', fitFilterRail, {passive: true});
 addEventListener('resize', fitFilterRail);
 
-let filterGroupMotion = null;
-
 /* 重画筛选时保留焦点和目录滚动位置。 */
 function renderSkillFilters(options) {
   const filters = $('skills-filters');
-  const groupList = filters.querySelector('.filter-group-list');
-  const groupCount = groupList?.childElementCount;
-  filterGroupMotion?.cancel();
   const active = document.activeElement;
   const selector = filters.contains(active) && active.hasAttribute('data-chip') ? `[data-chip="${CSS.escape(active.dataset.chip)}"]`
     : filters.contains(active) && active.hasAttribute('data-tag-chip') ? `[data-tag-chip="${CSS.escape(active.dataset.tagChip)}"]` : null;
@@ -1252,15 +1316,11 @@ function renderSkillFilters(options) {
       renderButtons(list, next.innerHTML, next.dataset.filterList === 'groups' ? 'data-chip' : 'data-tag-chip');
     }
   } else filters.replaceChildren(template.content);
+  for (const list of filters.querySelectorAll('[data-filter-list]')) glideSelection(list);
   const empty = $('filter-tags-empty');
   if (empty) empty.hidden = Boolean(filters.querySelector('[data-tag-chip]:not([data-tag-chip=""])'));
   renderFilterLayout();
   for (const [name, top] of scrolls) filters.querySelector(`[data-filter-list="${name}"]`)?.scrollTo(0, top);
-  const nextGroup = filters.querySelector('.filter-group-list');
-  if (groupList && groupList === nextGroup && groupCount !== nextGroup.childElementCount && !prefersReducedMotion()) {
-    filterGroupMotion = nextGroup.animate([{opacity: 0.75, transform: 'translateY(-3px)'}, {opacity: 1, transform: 'none'}],
-      {duration: 260, easing: 'cubic-bezier(0.32, 0.72, 0, 1)'});
-  }
   if (selector) {
     const target = filters.querySelector(selector);
     target?.focus({preventScroll: true});
@@ -1270,14 +1330,41 @@ function renderSkillFilters(options) {
 let skillScope = '', skillListMotion = null;
 
 function animateSkillResults(agent) {
-  const scope = JSON.stringify([agent.id, state.tab, state.chip, state.tag]);
+  const scope = JSON.stringify([agent.id, state.tab, state.chip, state.tag, $('skills-search').value]);
+  if (skillScope === scope) return;
+  const list = $('skills-list');
+  const opacity = getComputedStyle(list).opacity;
+  const transform = getComputedStyle(list).transform;
   skillListMotion?.cancel();
   if (skillScope && skillScope !== scope && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    skillListMotion = $('skills-list').animate([
-      {opacity: 0.75, transform: 'translateY(3px)'}, {opacity: 1, transform: 'translateY(0)'},
-    ], {duration: 180, easing: 'cubic-bezier(0.32, 0.72, 0, 1)'});
+    skillListMotion = list.animate([
+      {opacity: Math.min(Number(opacity), 0.88), transform: transform === 'none' ? 'translateY(5px)' : transform},
+      {opacity: 1, transform: 'none'},
+    ], {duration: 240, easing: 'cubic-bezier(0.2, 0.65, 0.3, 1)'});
   }
   skillScope = scope;
+}
+
+/* 同一批技能只更新变动的格子，保留开关节点，滑块才能走完过渡。 */
+function renderSkillList(markup) {
+  const list = $('skills-list');
+  const template = document.createElement('template');
+  template.innerHTML = markup;
+  const current = [...list.children], next = [...template.content.children];
+  const key = node => node.dataset.row ? `skill:${node.dataset.row}` : `group:${node.querySelector('strong')?.textContent}`;
+  if (current.length !== next.length || current.some((node, index) => key(node) !== key(next[index]))) {
+    list.replaceChildren(template.content);
+    return;
+  }
+  current.forEach((row, index) => {
+    const updated = next[index];
+    row.className = updated.className;
+    if (!row.dataset.row) { if (row.innerHTML !== updated.innerHTML) row.innerHTML = updated.innerHTML; return; }
+    for (let cell = 0; cell < 2; cell++) {
+      if (row.children[cell].innerHTML !== updated.children[cell].innerHTML) row.children[cell].innerHTML = updated.children[cell].innerHTML;
+    }
+    renderButtons(row.querySelector('.row-end'), updated.querySelector('.row-end').innerHTML, 'data-skill');
+  });
 }
 
 /* 右边顶部：agent 名字、技能数和生效方式、占用条。
@@ -1342,9 +1429,9 @@ function renderSkillTable() {
     : state.chip || state.tag ? emptyInner('skills', '这一类里没有技能', '<button class="link-btn" data-empty="all">看全部</button>')
     : state.tab === 'on' ? emptyInner('skills', `${agent.name} 还没有技能`, '<button class="link-btn" data-empty="off">去「可以加的」</button>')
     : emptyInner('check-circle', '都已经加上了');
-  $('skills-list').innerHTML = groupedRows(rows).map(group =>
+  renderSkillList(groupedRows(rows).map(group =>
     `<div class="list-group-head"><strong>${escape(group.name)}</strong><span>${group.skills.length} 个</span></div>`
-    + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`;
+    + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`);
   listedSkillNames = rows.map(skill => skill.name);
   $('tags-batch').hidden = !state.table.write_allowed || listedSkillNames.length < 2;
   $('tags-batch').disabled = Boolean(writeBusy);
@@ -1425,7 +1512,7 @@ function renderAssignmentViews() {
   renderSkillTable();
   renderAgentSummary();
   renderSkillsActionBar();
-  if (state.detail) renderDetail();
+  if (state.detail) renderDetail(true);
 }
 
 async function runPreview() {
@@ -3057,7 +3144,7 @@ function entriesFor(name) {
   return rows;
 }
 
-function renderDetail() {
+function renderDetail(assignmentsOnly = false) {
   const skill = state.table?.skills.find(s => s.name === state.detail);
   if (!skill) { closeDetail(); return; }
   $('detail-title').textContent = skill.title || skill.name;
@@ -3077,6 +3164,25 @@ function renderDetail() {
       ${switchHtml(skill, agent, on, pending, locked)}
     </div>`;
   }).join('');
+
+  // 拨动详情里的开关时，只更新状态和说明，保留正在滑动的按钮。
+  if (assignmentsOnly) {
+    const rows = [...$('detail-body').querySelectorAll('.who-row')];
+    const template = document.createElement('template');
+    template.innerHTML = who;
+    const next = [...template.content.children];
+    if (rows.length === next.length && rows.every((row, index) => row.querySelector('.switch').dataset.agent === next[index].querySelector('.switch').dataset.agent)) {
+      rows.forEach((row, index) => {
+        row.className = next[index].className;
+        row.querySelector('p').replaceWith(next[index].querySelector('p'));
+        const button = row.querySelector('.switch'), updated = next[index].querySelector('.switch');
+        button.className = updated.className;
+        button.setAttribute('aria-checked', updated.getAttribute('aria-checked'));
+        button.disabled = updated.disabled;
+      });
+      return;
+    }
+  }
 
   const requires = skill.requires.map(name => `<span class="chip"><button data-open="${escape(name)}">${escape(titleOf(name))}</button>
       <button class="chip-x" data-dep-remove="${escape(skill.name)}" data-dep-name="${escape(name)}"

@@ -59,9 +59,10 @@
   --z-dialog: 50;
   --z-toast: 60;
 
-  --speed: 160ms;
-  --motion-speed: 260ms;
-  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --speed: 220ms;
+  --motion-speed: 300ms;
+  --ease: cubic-bezier(0.2, 0.65, 0.3, 1);
+  --ease-spring: cubic-bezier(0.22, 1.1, 0.36, 1);
 }
 
 /* ---------- 基础 ---------- */
@@ -101,9 +102,9 @@ dl, dd, dt { margin: 0; }
   padding: var(--sp-6) var(--sp-6) 160px;
 }
 
-.page-section { display: block; animation: page-enter 640ms var(--ease); }
+.page-section { display: block; animation: page-enter 280ms var(--ease); }
 @keyframes page-enter {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0.8; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
 }
 
@@ -455,10 +456,10 @@ input[type="checkbox"]:disabled { cursor: default; }
 
 /* 分组和标签常驻列表左侧，各自滚动；收起后把空间留给技能。 */
 .skills-main, .skills-results { min-width: 0; }
-.skills-browser { display: grid; grid-template-columns: minmax(0, 164px) minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
+.skills-browser { position: relative; display: grid; grid-template-columns: minmax(0, 164px) minmax(0, 1fr); gap: var(--sp-4); align-items: start; overflow: clip; }
 .skills-browser.without-filters { grid-template-columns: minmax(0, 0px) minmax(0, 1fr); column-gap: 0; }
 .filter-slot { position: sticky; top: var(--sp-4); min-width: 0; overflow: clip; transition: opacity 180ms var(--ease), transform var(--motion-speed) var(--ease), visibility 0s; }
-.without-filters .filter-slot { opacity: 0; transform: translateX(-8px); visibility: hidden; transition-delay: 0s, 0s, var(--motion-speed); }
+.without-filters .filter-slot { position: absolute; top: 0; left: 0; width: 164px; opacity: 0; transform: translateX(-8px); visibility: hidden; transition-delay: 0s, 0s, var(--motion-speed); }
 .filter-rail { display: flex; flex-direction: column; width: 164px; max-height: var(--filter-space, calc(100vh - 32px)); overflow-y: auto; padding-right: var(--sp-3); border-right: 1px solid var(--line); scrollbar-width: thin; }
 .filter-rail-head { flex-shrink: 0; }
 .filters { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
@@ -491,14 +492,14 @@ input[type="checkbox"]:disabled { cursor: default; }
 .filter-option .n { flex: none; margin-left: auto; color: var(--muted); font-size: var(--fs-tiny); }
 .filter-option:hover { background: var(--panel-soft); color: var(--ink); }
 .filter-option[aria-pressed="true"] { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-1); }
-.filter-group-list .filter-option[aria-pressed="true"]::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2px; background: var(--c); border-radius: 2px; }
+.filter-group-list > .selection-plate::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2px; background: var(--c); border-radius: 2px; }
 .filter-update { color: var(--info-ink); }
 .filter-update .n { color: var(--info-ink); }
 .filter-tags { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; margin-top: var(--sp-4); padding-top: var(--sp-4); padding-bottom: var(--sp-3); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line-strong); }
 .filter-tags h3 { flex-shrink: 0; font-size: var(--fs-small); margin-bottom: var(--sp-2); }
-.filter-tag-option::before { content: ""; width: 14px; height: 14px; flex: none; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--panel); transition: background-color var(--speed) var(--ease), border-color var(--speed) var(--ease); }
+.filter-tag-option::before { content: ""; width: 14px; height: 14px; flex: none; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--panel); transform: scale(0.86); transition: background-color var(--speed) var(--ease), border-color var(--speed) var(--ease), transform 300ms var(--ease-spring); }
 .filter-tag-option[aria-pressed="true"] { font-weight: 400; }
-.filter-tag-option[aria-pressed="true"]::before { background: var(--c); border-color: var(--c); }
+.filter-tag-option[aria-pressed="true"]::before { background: var(--c); border-color: var(--c); transform: scale(1); }
 .filter-empty { font-size: var(--fs-small); color: var(--muted); margin: var(--sp-2); }
 .skills-results-head { min-height: 36px; gap: var(--sp-3); margin: 0 var(--sp-3) 6px; }
 .skills-results-head h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 var(--fs-body)/20px var(--font-sans); letter-spacing: 0; }
@@ -866,10 +867,18 @@ input[type="checkbox"]:disabled { cursor: default; }
 
 /* 轻按反馈；保留按钮节点时，选中底色也能自然过渡。 */
 :is(.btn, .nav-item, .rail-item, .seg, .filter-option, .tag-pick) {
-  transition: background-color var(--speed) var(--ease), border-color var(--speed) var(--ease), color var(--speed) var(--ease), box-shadow var(--speed) var(--ease), transform 120ms var(--ease);
+  transition: background-color var(--speed) var(--ease), border-color var(--speed) var(--ease), color var(--speed) var(--ease), box-shadow var(--speed) var(--ease), transform 300ms var(--ease-spring);
 }
-:is(.btn, .nav-item, .seg, .filter-option, .tag-pick):active:not(:disabled) { transform: scale(0.98); transition-duration: 80ms; }
-.rail-item:active { transform: scale(0.995); transition-duration: 80ms; }
+:is(.btn, .nav-item, .seg, .filter-option, .tag-pick):active:not(:disabled) { transform: translateY(1px) scale(0.975); transition-duration: 90ms; }
+.rail-item:active { transform: scale(0.99); transition-duration: 90ms; }
+
+/* 选中底色独立于按钮，横向导航和纵向目录共用一块连续移动的底板。 */
+.selection-track { position: relative; isolation: isolate; }
+.selection-track > button { position: relative; z-index: 1; }
+.selection-plate { position: absolute; top: 0; left: 0; z-index: 0; pointer-events: none; transform-origin: 0 0; background: var(--panel); border-radius: inherit; box-shadow: var(--shadow-1); }
+.filter-group-list > .selection-plate, .filter-tag-list > .selection-plate { border-radius: 6px; }
+#agent-rail > .selection-plate { border-radius: var(--radius-lg); }
+.selection-track > :is(.nav-item[aria-current="page"], .rail-item[aria-current="true"], .seg[aria-pressed="true"], .filter-option[aria-pressed="true"]) { background: transparent; box-shadow: none; }
 
 /* 开关：开着是这个 agent 的颜色；改了没应用时外面多一圈黄。 */
 .switch {
@@ -883,7 +892,7 @@ input[type="checkbox"]:disabled { cursor: default; }
   cursor: pointer;
   justify-self: end;
   flex: none;
-  transition: background-color var(--speed) var(--ease);
+  transition: background-color 240ms var(--ease), box-shadow 240ms var(--ease);
 }
 .switch::after {
   content: "";
@@ -895,8 +904,9 @@ input[type="checkbox"]:disabled { cursor: default; }
   border-radius: 50%;
   background: #FFFFFF;
   box-shadow: 0 1px 3px rgba(24, 32, 46, 0.14);
-  transition: transform var(--speed) var(--ease);
+  transition: transform 320ms var(--ease-spring), scale 180ms var(--ease);
 }
+.switch:active:not(:disabled)::after { scale: 1.08 0.94; }
 .switch[aria-checked="true"] { background: var(--c, var(--ink)); }
 .switch[aria-checked="true"]::after { transform: translateX(16px); }
 .switch.is-pending { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--pending); }
