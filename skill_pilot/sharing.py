@@ -2,10 +2,12 @@
 import json
 import re
 import shutil
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from . import normalization, operations, profiles
+from . import labels, normalization, operations, profiles
+from .scan import metadata
 from .sources import github, normalize
 from .store import guard
 from .sync import reconcile_assignments
@@ -33,6 +35,8 @@ def export_config(home=None, agent=None):
         raise ValueError('请选择已经接入的 agent。')
     selected_agents = [agent] if agent else agents
     skills = registry['skills']
+    display = {name: {'title': label['title'], 'summary': label['summary'], 'group': group['name']}
+               for group in labels.read(home) for name, label in group['skills'].items()}
     selected = {n for n, s in skills.items() if set(s['assigned_agents']) & set(selected_agents)}
     pending = list(selected)
     while pending:
@@ -58,10 +62,27 @@ def export_config(home=None, agent=None):
             source = {'kind': 'manual', 'url': 'https://open.feishu.cn/lark-cli/skills/',
                       'reason': '飞书官方技能，请通过官方安装方式补齐。'}
         path, base = (home / '.skill-pilot' / folder / name for folder in ('store', 'bases'))
-        modified = (not (path / 'SKILL.md').is_file() or not (base / 'SKILL.md').is_file() or
-                    normalization.tree(path) != normalization.tree(base))
-        rows.append({'name': name, 'assigned_agents': sorted(set(skill.get('assigned_agents', [])) & set(selected_agents)),
-                     'requires': sorted(set(skill.get('requires', []))), 'source': source, 'local_modified': modified})
+        try:
+            modified = (not (path / 'SKILL.md').is_file() or not (base / 'SKILL.md').is_file() or
+                        normalization.tree(path) != normalization.tree(base))
+        except OSError:
+            modified = True
+        row = {'name': name, 'assigned_agents': sorted(set(skill.get('assigned_agents', [])) & set(selected_agents)),
+               'requires': sorted(set(skill.get('requires', []))), 'source': source, 'local_modified': modified}
+        try:
+            description = metadata((path / 'SKILL.md').read_text()).get('description', '')
+        except (OSError, UnicodeError):
+            description = ''
+        details = {**display.get(name, {}), 'description': description}
+        for field, limit in (('title', 40), ('summary', 120), ('group', 20), ('description', 1500)):
+            value = details.get(field, '').replace('\t', ' ')
+            if field != 'description':
+                value = value.replace('\n', ' ').replace('\r', ' ')
+            value = ''.join(char for char in value if unicodedata.category(char) not in {'Cc', 'Cf', 'Zl', 'Zp'} or
+                            (field == 'description' and char == '\n')).strip()[:limit].rstrip()
+            if value:
+                row[field] = value
+        rows.append(row)
     catalog = profiles.by_id(home)
     return validate({'format': FORMAT, 'version': 1, 'created_at': datetime.now(timezone.utc).isoformat(),
             'instructions': INSTRUCTIONS,
@@ -83,6 +104,15 @@ def validate(data):
                 type(row.get('local_modified')) is not bool or not isinstance(row.get('source'), dict)):
             raise ValueError('配置里的技能名称、分配或依赖格式不正确。')
         seen.add(row['name'])
+        for field, limit, label in (('title', 40, '中文名'), ('summary', 120, '一句话说明'),
+                                    ('group', 20, '分组'), ('description', 1500, '原说明')):
+            if field not in row:
+                continue
+            value = row[field]
+            if (not isinstance(value, str) or not value.strip() or len(value) > limit or
+                    any(unicodedata.category(char) in {'Cc', 'Cf', 'Zl', 'Zp'} and
+                        not (field == 'description' and char == '\n') for char in value)):
+                raise ValueError(f'配置里的技能{label}不符合要求，请检查内容、长度和看不见的字符。')
         source = row['source']
         if source.get('kind') == 'manual':
             continue
