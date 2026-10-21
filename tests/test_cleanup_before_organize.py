@@ -101,6 +101,7 @@ function $(id) {
 }
 const state = {page: 'cleanup', table: null, cleanup: null, saved: {}, cleanupSelected: new Set(), agentsView: null};
 let writeBusy = null;
+let homeVisible = false;
 const calls = [];
 const toasts = [];
 function toast(item) { toasts.push(item.text); }

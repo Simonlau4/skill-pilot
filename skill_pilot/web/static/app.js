@@ -522,7 +522,7 @@ async function undoOperation(id, {skills = [], message = '', button = null} = {}
 /* agent 的一切都来自接口：/api/table 给当前表里的 agent（顺序就是显示顺序），
    /api/agents 补齐名字、目录、生效方式、用量和接入建议。页面不认识任何具体 agent。 */
 const state = {
-  page: 'skills',
+  page: 'home',
   writeAllowed: false,
   inventory: null,
   table: null,
@@ -554,6 +554,9 @@ const state = {
   storeMine: false,    // 只看我上架的
   storeDetail: null,   // 详情面板里正在看的卡片编号
 };
+
+/* 首页是否正显示着。数据刷新只在首页可见时重画，避免在别的页面做无用功。 */
+let homeVisible = false;
 
 /* 编号翻名字：先看接口给的目录（操作记录、已撤下的技能不在当前表里，也从这里兜底），
    再退回表里的名字，都查不到就直接显示编号。 */
@@ -640,6 +643,7 @@ function rememberPlace() {
 
 function showPage(page) {
   state.page = page;
+  homeVisible = page === 'home';
   rememberPlace();
   for (const section of document.querySelectorAll('.page-section')) {
     section.hidden = section.id !== 'page-' + page;
@@ -652,9 +656,21 @@ function showPage(page) {
   if (page === 'cleanup') { renderCleanup(); loadCleanup(); }
   if (page === 'settings') renderSettings();
   if (page === 'team') enterTeam();
+  if (page === 'home') {
+    // 先回到顶部再量下面两栏的位置，免得从别页滚下来时误以为它们已经在眼前。
+    window.scrollTo({top: 0, behavior: 'auto'});
+    renderHome({animate: homeIntroPlayed ? 'fade' : 'intro'});
+    homeSetScrollEnabled(true);
+    ensureHomeCleanup();
+  } else {
+    // 首页藏着时别让 ScrollTrigger 把下面两栏提前放出来，回来时还要滚到眼前才出现。
+    homeSetScrollEnabled(false);
+    homeHideTip();
+  }
   renderActionBar();
   window.scrollTo({top: 0, behavior: 'auto'});
   if (page === 'skills') fitFilterRail();
+  if (page === 'home') requestAnimationFrame(() => refreshHomeScroll());
 }
 
 /* 跳到某一页；设置页还可以点名去哪一块（data-goto="settings/agents"）。 */
@@ -1821,6 +1837,7 @@ async function refreshTable(preserveDraft = false) {
     startLabels('missing');
   }
   renderFooter();
+  if (homeVisible) renderHome();
 }
 
 /* agent 目录与接入建议。页面里翻名字、设置页那一栏、新 agent 横幅都看它。 */
@@ -1832,11 +1849,13 @@ async function refreshAgents() {
   renderAgentHead();
   renderAgents();
   if (!state.table) renderMigrationStatus();
+  if (homeVisible) renderHome();
   clearTimeout(agentsPollTimer);
   if (state.agentsView?.discovery?.running) {
     agentsPollTimer = setTimeout(() => refreshAgents().catch(error => {
       state.agentsView.discovery = {...state.agentsView.discovery, running: false, error: error.message + '，请重新扫描。'};
       renderAgents();
+      if (homeVisible) renderHome();
     }), 500);
   }
 }
@@ -1871,6 +1890,7 @@ function renderProgram() {
   if (progress.running && !quiet && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: progress.message});
   else clearTask('self-update');
   renderRailNotes();
+  if (homeVisible) renderHomeTodos();
 }
 
 async function refreshProgramUpdate() {
@@ -2211,6 +2231,7 @@ async function refreshTeam() {
   document.querySelector('.nav-item[data-page="team"]').hidden = !state.team.configured;
   renderTeamSettings();
   renderTeam();
+  if (homeVisible) renderHomeTodos();
 }
 
 function renderTeamSettings() {
@@ -4272,6 +4293,7 @@ function showReview(review) {
     renderSkillTable();
     if (state.detail) renderDetail();
   }
+  if (homeVisible) renderHomeTodos();
 }
 
 /* 这次没查的技能和原因。名单在开始检查时已经记下，这里只读。 */
@@ -4364,6 +4386,7 @@ $('updates-status').addEventListener('click', event => {
 async function checkUpdates() {
   updateState.starting = true;
   renderUpdateBar();
+  if (homeVisible) renderHomeTodos();
   setTask('updates', {text: '正在准备检查名单…'});
   try {
     showReview(await api('/api/updates/check', {}));
@@ -4372,6 +4395,7 @@ async function checkUpdates() {
   } finally {
     updateState.starting = false;
     renderUpdateBar();
+    if (homeVisible) renderHomeTodos();
   }
 }
 
@@ -4658,6 +4682,7 @@ async function loadCleanup() {
   if (awaitingFirstOrganization()) {
     state.cleanup = null;
     renderCleanup();
+    if (homeVisible) renderHomeTodos();
     return;
   }
   try {
@@ -4666,6 +4691,7 @@ async function loadCleanup() {
     toast({text: '已撤下的技能没能读出来：' + error.message, tone: 'error'});
   }
   renderCleanup();
+  if (homeVisible) renderHomeTodos();
 }
 
 /* 先请后台核对一遍（依赖、你的文件里提到的位置），确认后再撤下。 */
@@ -4753,7 +4779,10 @@ $('withdrawn-list').addEventListener('click', async event => {
 /* ==================== 操作记录页 ==================== */
 
 function renderLog() {
-  if (state.page !== 'settings') return;
+  if (state.page !== 'settings') {
+    if (homeVisible) renderHomeLog();
+    return;
+  }
   $('log-list').innerHTML = state.logs.slice(0, 10).map(record => `<li class="${record.undone ? 'is-undone' : ''}">
     <span class="log-time">${escape(new Date(record.time).toLocaleString('zh-CN'))}</span>
     <div class="log-body">
@@ -5144,6 +5173,784 @@ async function refreshMigrationStatus() {
   }
 }
 
+/* ==================== 首页：技能总数、技能星图、各 agent、要处理的事 ==================== */
+
+/* 首页只用看板已经读到的数据，不新增接口。所有规则都在这一节里，
+   下面「需要你看一眼」的 homeTodos() 只读输入、不改页面，方便用 node 单独测试。 */
+
+const HOME_WHO_DEFAULT = '鼠标移到下面的 agent 上，看它用了哪些';
+const HOME_GLOW = 'rgba(47, 91, 211, 0.34)';
+const HOME_DOT_BASE = {
+  on: ['rgba(242, 244, 248, 0.9)', '0 0 0 0 rgba(255, 255, 255, 0)'],
+  n1: ['rgba(242, 244, 248, 0.55)', '0 0 0 0 rgba(255, 255, 255, 0)'],
+  idle: ['rgba(242, 244, 248, 0)', 'inset 0 0 0 1.5px rgba(242, 244, 248, 0.38)'],
+};
+
+let homeIntroPlayed = false;    // 这次打开看板后，开场是否已经播过
+let homeIntroDone = false;      // 开场是否播完；鼠标效果等它播完才生效
+let homeIntroPending = false;
+let homeIntroTimeline = null;
+let homeFadeTimeline = null;
+let homeMotionMedia = null;
+let homeMotionOn = false;
+let homeScrollBuilt = false;
+let homeScrollTriggers = [];
+let homeDotSwell = [];
+let homeDots = [];
+let homeDotCenters = [];
+let homeAgents = [];
+let homeAgentCards = [];
+let homeClusters = [];
+let homeFocusedAgent = null;
+let homeCleanupAsked = false;
+
+const homeDur = value => homeMotionOn ? value : 0;
+const homeNumber = value => Number(value || 0).toLocaleString('zh-CN');
+const homeRgba = (hex, alpha) => `rgba(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)}, ${alpha})`;
+
+function homeSkillCount() {
+  return (state.table?.skills || []).length;
+}
+
+function homeInUseCount() {
+  return (state.table?.skills || []).filter(skill => (state.saved[skill.name] || []).length).length;
+}
+
+function homeAgentInfo() {
+  return state.agents.map(agent => {
+    const load = agentLoad(agent.id);
+    const catalog = state.catalog.get(agent.id);
+    return {
+      id: agent.id,
+      name: agent.name,
+      activation: catalog?.activation_text || agent.activation_text || agent.activation || '',
+      count: load.countNow,
+      tokens: load.now,
+      color: agentColor(agent.id),
+      shared: (catalog?.shared_with || []).map(nameOf).filter(Boolean),
+    };
+  });
+}
+
+/* 分组顺序跟技能表一致，没分组的放最后；同名只出现一次。 */
+function homeGroupNames() {
+  const names = [];
+  const seen = new Set();
+  for (const group of state.table?.groups || []) {
+    if (!group.name || seen.has(group.name)) continue;
+    seen.add(group.name);
+    names.push(group.name);
+  }
+  if ((state.table?.skills || []).some(skill => groupOf(skill.name) === '未分组') && !seen.has('未分组')) names.push('未分组');
+  return names;
+}
+
+/* 「需要你看一眼」的纯函数：输入是只读快照，返回按顺序排好的条目。
+   条目里的 action 是直接动作（目前只有现在检查），target 是跳转位置。 */
+function homeTodos(input) {
+  const data = input || {};
+  const program = data.program || {};
+  const updates = data.updates || {};
+  const items = [];
+
+  const programDue = Boolean(program.write_allowed) && (
+    program.phase === 'ready'
+    || (program.running && program.phase === 'apply')
+    || Boolean(program.available)
+    || (program.phase === 'error' && program.failedAction === 'apply'));
+  if (programDue) {
+    const ready = program.phase === 'ready';
+    const applying = Boolean(program.running && program.phase === 'apply');
+    const failed = program.phase === 'error' && program.failedAction === 'apply';
+    items.push({
+      key: 'program',
+      icon: 'update-up',
+      tone: ready || failed ? 'warm' : 'calm',
+      title: ready ? 'SP 升级好了，刷新后生效' : applying ? 'SP 正在升级' : failed ? 'SP 升级没完成' : 'SP 有新版',
+      text: ready ? '刷新页面就能用新版，技能和设置都会保留。'
+        : applying ? '等当前操作完成后会自动继续，可以先做别的。'
+        : failed ? '刚才的升级没完成，可以到版本里再试一次。'
+        : '到设置 → 版本里看看新版，升级不用先关看板。',
+      label: ready ? '去刷新' : '去看看',
+      target: 'settings/version',
+    });
+  }
+
+  const review = updates.review;
+  const checking = Boolean(updates.starting || review?.running);
+  if (checking) {
+    items.push({
+      key: 'updates-checking',
+      icon: 'updates',
+      tone: 'calm',
+      title: '正在检查更新',
+      text: review?.total
+        ? `已经查了 ${homeNumber(review.done)} / ${homeNumber(review.total)} 个，可以接着做别的。`
+        : '正在查装的技能有没有新版，可以接着做别的。',
+      label: '',
+    });
+  } else if (!review) {
+    items.push({
+      key: 'updates-unchecked',
+      icon: 'updates',
+      tone: 'warm',
+      title: '还没检查过更新',
+      text: '查一下装的技能有没有新版，查的时候可以接着干别的。',
+      label: '现在检查',
+      action: 'check-updates',
+      disabled: Boolean(updates.locked),
+    });
+  } else if (Number(updates.count || 0) > 0) {
+    items.push({
+      key: 'updates-found',
+      icon: 'update-up',
+      tone: 'warm',
+      title: `${homeNumber(updates.count)} 个技能有新版`,
+      text: '看看哪些能直接更新；拿不准的会先让你看改了什么。',
+      label: '去看看',
+      target: 'skills/updates',
+    });
+  }
+
+  const suggested = data.suggested || [];
+  if (suggested.length) {
+    items.push({
+      key: 'suggested',
+      icon: 'plus',
+      tone: 'calm',
+      title: `发现 ${homeNumber(suggested.length)} 个新 agent`,
+      text: `${suggested.join('、')} 装在这台电脑上，还没交给 Skill Pilot 管。`,
+      label: '去接入',
+      target: 'settings/agents',
+    });
+  }
+
+  if (!data.llm_configured) {
+    const pending = Number(data.labels_pending || 0);
+    items.push({
+      key: 'ai',
+      icon: 'sparkle',
+      tone: 'calm',
+      title: '还没设置 AI 服务',
+      text: pending > 0
+        ? `${homeNumber(pending)} 个技能还没有中文名，填上 AI 服务后会自动起中文名、分好组`
+        : '填上后，新装的英文技能会自动起中文名、分好组',
+      label: '去设置',
+      target: 'settings/ai',
+    });
+  }
+
+  const withdrawn = Number(data.withdrawn || 0);
+  if (withdrawn > 0) {
+    items.push({
+      key: 'withdrawn',
+      icon: 'undo',
+      tone: 'calm',
+      title: `撤下过 ${homeNumber(withdrawn)} 个技能`,
+      text: '不占任何 agent 的 Token，想用时可以随时恢复。',
+      label: '去看看',
+      target: 'cleanup',
+    });
+  }
+
+  // 连上团队后不再占一条：团队页在导航里本来就看得到，不算要处理的事。
+  if (data.team && !data.team.member) {
+    items.push({
+      key: 'team',
+      icon: 'team',
+      tone: 'calm',
+      title: '还没连上团队分享站',
+      text: '连上后能看到同事在用什么技能，一键装上。',
+      label: '去连接',
+      target: 'settings/team',
+    });
+  }
+  return items;
+}
+
+function homeTodosInput() {
+  const ignored = new Set((state.agentsView?.ignored || []).map(item => (item && typeof item === 'object') ? item.id : item));
+  const suggested = (state.agentsView?.suggested || [])
+    .filter(item => !ignored.has(item.id))
+    .map(item => item.name);
+  const updatesCount = (state.table?.skills || []).filter(skill => updateRow(skill.name)).length;
+  return {
+    program: {...programUpdate, failedAction: programFailedAction},
+    updates: {review: updateState.review, count: updatesCount, starting: updateState.starting, locked: Boolean(writeBusy)},
+    suggested,
+    llm_configured: Boolean(state.table?.llm_configured),
+    labels_pending: Number(state.table?.labels_pending || 0),
+    withdrawn: (state.cleanup?.withdrawn || []).length,
+    team: state.team,
+  };
+}
+
+function renderHomeGuide() {
+  const fresh = awaitingFirstOrganization();
+  $('home-guide-title').textContent = fresh ? '先把这台电脑上的技能整理一遍' : '技能名单还没读出来';
+  $('home-guide-text').textContent = fresh
+    ? '整理以后，这里会显示有多少技能、各 agent 用了哪些、有什么要处理。整理前会先备份，完成后能还原。'
+    : '技能名单暂时没读到。可以到技能页重新看看，或者关掉页面重新打开看板。';
+  $('home-organize').textContent = fresh ? '去技能页做首次整理 →' : '去技能页看看 →';
+}
+
+function homeSetNumbersNow() {
+  if (!state.table) return;
+  $('home-total').textContent = homeNumber(homeSkillCount());
+  $('home-in-use').textContent = homeNumber(homeInUseCount());
+  $('home-idle').textContent = homeNumber(homeSkillCount() - homeInUseCount());
+  $('home-agents-n').textContent = homeNumber(state.agents.length);
+}
+
+function homeSetNumbersZero() {
+  for (const id of ['home-total', 'home-in-use', 'home-idle', 'home-agents-n']) $(id).textContent = '0';
+}
+
+function homeCountTo(element, to, duration = 0.6, ease = 'expo.out') {
+  if (!element) return;
+  if (!window.gsap || !homeMotionOn) { element.textContent = homeNumber(to); return; }
+  element._homeCount = element._homeCount || {value: 0};
+  const proxy = element._homeCount;
+  window.gsap.to(proxy, {
+    value: Number(to || 0), duration: homeDur(duration), ease, snap: {value: 1}, overwrite: true,
+    onUpdate: () => { element.textContent = homeNumber(proxy.value); },
+  });
+}
+
+function renderHomeHero() {
+  homeSetNumbersNow();
+  $('home-who').textContent = HOME_WHO_DEFAULT;
+  const agents = homeAgentInfo();
+  const heaviest = agents.reduce((best, agent) => !best || agent.tokens > best.tokens ? agent : best, null);
+  $('home-note').innerHTML = heaviest
+    ? `每开一次新对话，agent 都要先读一遍分给它的技能说明。读得最多的是 <b>${escape(heaviest.name)}</b>，约 <b>${tokenText(heaviest.tokens)} Token</b>。`
+    : '还没有 agent 交给 Skill Pilot 管理。';
+}
+
+function renderHomeMap() {
+  const box = $('home-map');
+  const skills = state.table?.skills || [];
+  const inUse = homeInUseCount();
+  box.innerHTML = homeGroupNames().map(group => {
+    const list = skills
+      .filter(skill => groupOf(skill.name) === group)
+      .sort((a, b) => (state.saved[b.name] || []).length - (state.saved[a.name] || []).length);
+    if (!list.length) return '';
+    const dots = list.map(skill => {
+      const using = state.saved[skill.name] || [];
+      const kind = using.length >= 2 ? 'on' : using.length === 1 ? 'n1' : 'idle';
+      const label = titleOf(skill.name);
+      const who = using.length ? `${using.map(nameOf).join('、')} 在用` : '暂时没有 agent 在用';
+      return `<button type="button" class="home-dot ${kind}" tabindex="-1" data-home-skill="${escape(skill.name)}" data-kind="${kind}" aria-label="${escape(`${label}：${who}`)}"></button>`;
+    }).join('');
+    return `<div class="home-cluster">
+      <button type="button" class="home-cluster-name" data-home-group="${escape(group)}"><span>${escape(group)}</span><em>${homeNumber(list.length)}</em></button>
+      <div class="home-dots">${dots}</div>
+    </div>`;
+  }).join('');
+  box.setAttribute('aria-label', `${homeNumber(skills.length)} 个技能按分组排列，${homeNumber(inUse)} 个有 agent 在用`);
+  homeClusters = [...box.querySelectorAll('.home-cluster')];
+  homeDots = [...box.querySelectorAll('.home-dot')];
+  homeFocusedAgent = null;
+}
+
+function renderHomeAgents() {
+  const box = $('home-agents');
+  homeAgents = homeAgentInfo();
+  if (!homeAgents.length) {
+    box.innerHTML = '<p class="home-empty">还没有 agent 交给 Skill Pilot 管理。</p>';
+    homeAgentCards = [];
+    return;
+  }
+  const max = Math.max(1, ...homeAgents.map(agent => agent.tokens));
+  box.innerHTML = homeAgents.map(agent => {
+    const width = Math.max(agent.tokens ? 2 : 0, agent.tokens / max * 100).toFixed(1);
+    return `<button type="button" class="home-agent" data-home-agent="${escape(agent.id)}" style="--c:${agent.color}">
+      <span class="home-agent-top"><span class="home-agent-name"><span class="swatch" aria-hidden="true"></span>${escape(agent.name)}</span><span class="home-agent-act">${escape(agent.activation)}</span></span>
+      <span class="home-agent-n">${homeNumber(agent.count)}<small>个技能</small></span>
+      <span class="home-bar"><i style="--w:${width}%"></i></span>
+      <span class="home-agent-tok">每次新对话约 <b>${tokenText(agent.tokens)} Token</b></span>
+      ${agent.shared.length ? `<span class="home-agent-share">和 ${escape(agent.shared.join('、'))} 共用</span>` : ''}
+    </button>`;
+  }).join('');
+  homeAgentCards = [...box.querySelectorAll('.home-agent')];
+  homeFocusedAgent = null;
+}
+
+const HOME_ARROW = '<span class="home-arrow" aria-hidden="true">→</span>';
+
+function renderHomeTodos() {
+  if (!homeVisible) return;
+  const box = $('home-todos');
+  const items = homeTodos(homeTodosInput());
+  box.innerHTML = items.map(item => {
+    const action = item.action
+      ? `<button type="button" class="home-todo-go" data-home-action="${escape(item.action)}"${item.disabled ? ' disabled' : ''}>${escape(item.label)}${HOME_ARROW}</button>`
+      : item.target
+        ? `<button type="button" class="home-todo-go" data-home-target="${escape(item.target)}">${escape(item.label)}${HOME_ARROW}</button>`
+        : '';
+    return `<div class="home-todo${item.target ? ' is-link' : ''}" data-key="${escape(item.key)}">
+      <span class="home-todo-ico ${escape(item.tone || '')}" aria-hidden="true">${icon(item.icon)}</span>
+      <span class="home-todo-text"><b>${escape(item.title)}</b><span>${escape(item.text)}</span></span>
+      ${action}
+    </div>`;
+  }).join('') || `<div class="home-done">${icon('check-circle')}<span>都处理好了</span></div>`;
+}
+
+function homeLogTime(value) {
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) return String(value || '');
+  const date = new Date(time);
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function renderHomeLog() {
+  if (!homeVisible) return;
+  const rows = (state.logs || []).slice(0, 4);
+  $('home-log').innerHTML = rows.map(record => `<li>
+    <time>${escape(homeLogTime(record.time))}</time>
+    <span class="${record.undone ? 'is-undone' : ''}">${escape(pastTense(record.message))}${record.undone ? '（已撤销）' : ''}</span>
+  </li>`).join('') || '<li class="home-log-empty">还没有操作记录</li>';
+}
+
+function renderHome({animate = 'none'} = {}) {
+  if (!homeVisible) return;
+  const ready = Boolean(state.table);
+  $('home-guide').hidden = ready;
+  $('home-main').hidden = !ready;
+  if (!ready) {
+    renderHomeGuide();
+    return;
+  }
+  if (homeIntroTimeline) { killHomeIntro(); homeSetNumbersNow(); }
+  renderHomeHero();
+  renderHomeMap();
+  renderHomeAgents();
+  renderHomeTodos();
+  renderHomeLog();
+  bindHomePointer();
+  bindHomeAgents();
+  ensureHomeMotion();
+  if (homeMotionOn) buildHomeScrollReveal();
+  homePlaceGlow();
+  if (animate === 'intro' && !homeIntroPlayed) homeIntroPending = true;
+  if (homeIntroPending) {
+    homeIntroPending = false;
+    if (homeMotionOn) playHomeIntro();
+    else { homeIntroPlayed = true; homeIntroDone = true; homeSetNumbersNow(); }
+  } else if (animate === 'fade') {
+    playHomeFade();
+  }
+  requestAnimationFrame(() => { homeMeasureDots(); refreshHomeScroll(); });
+}
+
+/* 这次打开看板后第一次显示首页：播一次总长不到 2 秒的开场。 */
+function ensureHomeMotion() {
+  if (homeMotionMedia || !window.gsap) return;
+  const gsap = window.gsap;
+  if (window.ScrollTrigger) gsap.registerPlugin(window.ScrollTrigger);
+  homeMotionMedia = gsap.matchMedia();
+  homeMotionMedia.add('(prefers-reduced-motion: no-preference)', () => {
+    homeMotionOn = true;
+    buildHomeScrollReveal();
+    return () => {
+      homeMotionOn = false;
+      killHomeScrollReveal();
+    };
+  });
+  homeMotionMedia.add('(prefers-reduced-motion: reduce)', () => {
+    homeMotionOn = false;
+    homeIntroPlayed = true;
+    homeIntroDone = true;
+    killHomeIntro();
+    killHomeScrollReveal();
+    homeSetNumbersNow();
+  });
+}
+
+function playHomeIntro() {
+  if (!window.gsap || !homeMotionOn || !state.table) {
+    homeIntroPlayed = true;
+    homeIntroDone = true;
+    homeSetNumbersNow();
+    return;
+  }
+  homeIntroPlayed = true;
+  homeIntroDone = false;
+  homeSetNumbersZero();
+  const gsap = window.gsap;
+  const hero = $('home-hero');
+  const glow = hero.querySelector('.home-glow');
+  const skills = state.table.skills || [];
+  const inUse = homeInUseCount();
+  const idle = skills.length - inUse;
+  const agents = state.agents.length;
+  const labels = [hero.querySelector('.home-eyebrow'), hero.querySelector('.home-big'), $('home-who')].filter(Boolean);
+  const stats = [...hero.querySelectorAll('.home-stat')];
+  const names = [...hero.querySelectorAll('.home-cluster-name')];
+  const bars = homeAgentCards.map(card => card.querySelector('.home-bar i')).filter(Boolean);
+  const timeline = gsap.timeline({
+    defaults: {ease: 'power3.out'},
+    onComplete: () => { homeIntroDone = true; homeIntroTimeline = null; },
+  });
+  homeIntroTimeline = timeline;
+  // 空数组会让 GSAP 在控制台报“target 找不到”，所以先滤掉空的目标。
+  const addFrom = (targets, vars, position) => {
+    const list = (Array.isArray(targets) ? targets : [targets]).filter(Boolean);
+    if (list.length) timeline.from(list, vars, position);
+  };
+  addFrom(hero, {y: 30, scale: 0.98, autoAlpha: 0, duration: 0.55, ease: 'expo.out'});
+  addFrom(glow, {scale: 0.6, autoAlpha: 0, duration: 0.8, ease: 'power2.out'}, '<0.05');
+  addFrom(labels, {y: 18, autoAlpha: 0, stagger: 0.05, duration: 0.36}, '<0.1');
+  timeline.add(() => homeCountTo($('home-total'), skills.length, 0.8), '<0.05');
+  addFrom(stats, {y: 10, autoAlpha: 0, stagger: 0.04, duration: 0.3}, '<0.12');
+  timeline.add(() => {
+    homeCountTo($('home-in-use'), inUse, 0.6);
+    homeCountTo($('home-idle'), idle, 0.6);
+    homeCountTo($('home-agents-n'), agents, 0.6);
+  }, '<0.03');
+  addFrom([hero.querySelector('.home-map-head'), ...names], {y: 10, autoAlpha: 0, stagger: 0.02, duration: 0.28}, '<0.04');
+  addFrom(homeDots, {scale: 0, autoAlpha: 0, duration: 0.4, ease: 'back.out(2.2)', stagger: {amount: 0.55, from: 'random'}}, '<0.03');
+  addFrom([$('home-note'), $('home-manage')], {y: 12, autoAlpha: 0, stagger: 0.05, duration: 0.3}, '<0.5');
+  addFrom(document.querySelector('#home-agents-sec .home-section-head'), {y: 12, autoAlpha: 0, duration: 0.3}, '<0');
+  addFrom(homeAgentCards, {y: 24, rotationX: -10, transformPerspective: 700, transformOrigin: '50% 0%', autoAlpha: 0, stagger: 0.05, duration: 0.42, ease: 'expo.out'}, '<0.05');
+  addFrom(bars, {scaleX: 0, transformOrigin: 'left center', stagger: 0.05, duration: 0.5, ease: 'power2.inOut'}, '<0.1');
+}
+
+function killHomeIntro() {
+  const timeline = homeIntroTimeline;
+  homeIntroTimeline = null;
+  // 直接把还没播完的画面推到终点，别留下半透明或隐藏的元素；不触发中途的数字回调。
+  if (timeline) { timeline.progress(1, true); timeline.kill(); }
+  homeIntroDone = true;
+}
+
+/* 从别的页面回首页：整体淡入上移 0.35 秒，不重播开场。 */
+function playHomeFade() {
+  if (!window.gsap || !homeMotionOn) return;
+  homeFadeTimeline?.kill();
+  const lower = document.querySelector('#page-home .home-lower');
+  // 下面两栏如果还在屏幕外，交给 ScrollTrigger；否则淡入会让它提前出现，滚到时再闪一下。
+  const targets = [$('home-hero'), $('home-agents-sec'),
+    lower && lower.getBoundingClientRect().top < innerHeight ? lower : null].filter(Boolean);
+  homeFadeTimeline = window.gsap.fromTo(targets,
+    {y: 12, autoAlpha: 0},
+    {y: 0, autoAlpha: 1, duration: 0.35, stagger: 0.02, ease: 'power2.out', overwrite: 'auto'});
+}
+
+/* 下面两栏滚到眼前才出现。只建一次；窗口够高、本来就在眼前时直接显示。 */
+function buildHomeScrollReveal() {
+  if (!homeVisible || homeScrollBuilt || !homeMotionOn || !window.gsap || !window.ScrollTrigger) return;
+  const lower = document.querySelector('#page-home .home-lower');
+  if (!lower) return;
+  homeScrollBuilt = true;
+  if (lower.getBoundingClientRect().top < innerHeight * 0.88) return;
+  const gsap = window.gsap;
+  const trigger = {trigger: lower, start: 'top 88%'};
+  homeScrollTriggers.push(gsap.from([...lower.querySelectorAll('.home-section-head'), ...lower.querySelectorAll('.home-panel')],
+    {y: 28, autoAlpha: 0, stagger: 0.08, duration: 0.45, ease: 'expo.out', scrollTrigger: trigger}));
+  homeScrollTriggers.push(gsap.from(lower.querySelectorAll('.home-todo'),
+    {x: -18, autoAlpha: 0, stagger: 0.06, duration: 0.4, delay: 0.05, scrollTrigger: trigger}));
+  homeScrollTriggers.push(gsap.from(lower.querySelectorAll('.home-log li'),
+    {x: 18, autoAlpha: 0, stagger: 0.06, duration: 0.4, delay: 0.08, scrollTrigger: trigger}));
+}
+
+function killHomeScrollReveal() {
+  for (const tween of homeScrollTriggers) {
+    tween.scrollTrigger?.kill();
+    tween.kill();
+  }
+  homeScrollTriggers = [];
+  homeScrollBuilt = false;
+}
+
+function homeSetScrollEnabled(enabled) {
+  for (const tween of homeScrollTriggers) {
+    const trigger = tween.scrollTrigger;
+    if (!trigger) continue;
+    if (enabled) trigger.enable();
+    else trigger.disable(false);
+  }
+}
+
+function refreshHomeScroll() {
+  if (!homeVisible || !window.ScrollTrigger) return;
+  window.ScrollTrigger.refresh();
+}
+
+/* ---------- 首页的鼠标效果：光斑、鼓起的点、agent 高亮、卡片微倾、按钮吸附 ---------- */
+
+function homePlaceGlow() {
+  const hero = $('home-hero');
+  const glow = hero?.querySelector('.home-glow');
+  if (!hero || !glow || !window.gsap || !hero.offsetWidth) return;
+  window.gsap.set(glow, {
+    left: 0, top: 0, xPercent: -50, yPercent: -50,
+    x: hero.offsetWidth * 0.72, y: hero.offsetHeight * 0.3,
+  });
+  window.gsap.set(hero, {'--glow': HOME_GLOW});
+}
+
+function homeMeasureDots() {
+  if (!homeDots.length) { homeDotCenters = []; return; }
+  homeDotCenters = homeDots.map(dot => {
+    const rect = dot.getBoundingClientRect();
+    return [rect.left + rect.width / 2, rect.top + rect.height / 2];
+  });
+}
+
+function homeDotField(distance) {
+  return 1 + 0.75 * Math.max(0, 1 - distance / 120);
+}
+
+function bindHomePointer() {
+  if (!window.gsap) { homeDotSwell = []; return; }
+  const gsap = window.gsap;
+  homeDotSwell = homeDots.map(dot => {
+    // quickTo 只认单个属性，scale 要拆成横竖两个。
+    const scaleX = gsap.quickTo(dot, 'scaleX', {duration: 0.4, ease: 'power3'});
+    const scaleY = gsap.quickTo(dot, 'scaleY', {duration: 0.4, ease: 'power3'});
+    return value => { scaleX(value); scaleY(value); };
+  });
+}
+
+function bindHomeAgents() {
+  if (!window.gsap) return;
+  const gsap = window.gsap;
+  for (const card of homeAgentCards) {
+    const rotateX = gsap.quickTo(card, 'rotationX', {duration: 0.5, ease: 'power3'});
+    const rotateY = gsap.quickTo(card, 'rotationY', {duration: 0.5, ease: 'power3'});
+    const lift = gsap.quickTo(card, 'y', {duration: 0.5, ease: 'power3'});
+    card.addEventListener('pointermove', event => {
+      if (!homeMotionOn || !homeIntroDone) return;
+      const rect = card.getBoundingClientRect();
+      gsap.set(card, {transformPerspective: 700});
+      rotateY(((event.clientX - rect.left) / rect.width - 0.5) * 10);
+      rotateX(-((event.clientY - rect.top) / rect.height - 0.5) * 10);
+      lift(-5);
+    });
+    card.addEventListener('pointerleave', () => {
+      if (!homeIntroDone) return;
+      rotateX(0); rotateY(0); lift(0);
+    });
+  }
+}
+
+function homeShowTip(dot) {
+  const name = dot.dataset.homeSkill || '';
+  const skill = state.skillIndex.get(name);
+  const using = (state.saved[name] || []).map(nameOf);
+  const tip = $('home-tip');
+  if (!tip) return;
+  tip.innerHTML = `<b>${escape(skill?.title || name)}</b><span>${escape(using.length ? `${using.join('、')} 在用` : '暂时没有 agent 在用')}</span>`;
+  const box = dot.getBoundingClientRect();
+  const width = Math.min(280, innerWidth - 16);
+  tip.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, box.left + box.width / 2 - width / 2))}px`;
+  tip.style.top = `${box.bottom + 10}px`;
+  tip.classList.add('show');
+  tip.setAttribute('aria-hidden', 'false');
+}
+
+function homeHideTip() {
+  const tip = $('home-tip');
+  if (!tip) return;
+  tip.classList.remove('show');
+  tip.setAttribute('aria-hidden', 'true');
+}
+
+function homeFocusAgent(id) {
+  if (id === homeFocusedAgent) return;
+  homeFocusedAgent = id;
+  const agent = id ? homeAgents.find(item => item.id === id) : null;
+  if (!window.gsap) {
+    $('home-who').textContent = agent
+      ? `${agent.name} 在用 · 每次新对话约 ${tokenText(agent.tokens)} Token`
+      : HOME_WHO_DEFAULT;
+    return;
+  }
+  const gsap = window.gsap;
+  const total = homeSkillCount();
+  if (!agent) {
+    if (homeDots.length) gsap.to(homeDots, {
+      opacity: 1, y: 0,
+      backgroundColor: (index, element) => HOME_DOT_BASE[element.dataset.kind]?.[0] || HOME_DOT_BASE.on[0],
+      boxShadow: (index, element) => HOME_DOT_BASE[element.dataset.kind]?.[1] || HOME_DOT_BASE.on[1],
+      duration: homeDur(0.45), stagger: {amount: homeDur(0.2), from: 'end'}, overwrite: 'auto',
+    });
+    gsap.to($('home-hero'), {'--glow': HOME_GLOW, duration: homeDur(0.6), overwrite: 'auto'});
+    homeCountTo($('home-total'), total, 0.7);
+    $('home-who').textContent = HOME_WHO_DEFAULT;
+    return;
+  }
+  const using = new Set((state.table?.skills || [])
+    .filter(skill => (state.saved[skill.name] || []).includes(agent.id))
+    .map(skill => skill.name));
+  const hits = homeDots.filter(dot => using.has(dot.dataset.homeSkill));
+  const rest = homeDots.filter(dot => !using.has(dot.dataset.homeSkill));
+  if (rest.length) gsap.to(rest, {
+    opacity: 0.14, y: 0,
+    backgroundColor: (index, element) => HOME_DOT_BASE[element.dataset.kind]?.[0] || HOME_DOT_BASE.on[0],
+    boxShadow: (index, element) => HOME_DOT_BASE[element.dataset.kind]?.[1] || HOME_DOT_BASE.on[1],
+    duration: homeDur(0.35), overwrite: 'auto',
+  });
+  if (hits.length) gsap.to(hits, {
+    opacity: 1, backgroundColor: agent.color,
+    boxShadow: `0 0 0 1px rgba(255, 255, 255, 0.25), 0 0 14px ${homeRgba(agent.color, 0.75)}`,
+    duration: homeDur(0.5), ease: 'power2.out', stagger: {amount: homeDur(0.45)}, overwrite: 'auto',
+  });
+  if (homeMotionOn && hits.length) {
+    gsap.fromTo(hits, {y: 0}, {y: -4, duration: 0.16, ease: 'sine.out', yoyo: true, repeat: 1, stagger: {amount: 0.45}, overwrite: false});
+  }
+  gsap.to($('home-hero'), {'--glow': homeRgba(agent.color, 0.42), duration: homeDur(0.6), overwrite: 'auto'});
+  homeCountTo($('home-total'), agent.count, 0.7);
+  $('home-who').innerHTML = `<b>${escape(agent.name)}</b> 在用 · 每次新对话约 ${tokenText(agent.tokens)} Token`;
+}
+
+function homeOpenGroup(group) {
+  state.chip = group;
+  state.tag = '';
+  const agent = currentAgent();
+  const has = Boolean(agent) && (state.table?.skills || [])
+    .some(skill => groupOf(skill.name) === group && assignedNow(skill.name, agent.id));
+  state.tab = has ? 'on' : 'off';
+  showPage('skills');
+  renderSkillTable();
+}
+
+function homeOpenSkill(name) {
+  if (!state.skillIndex.get(name)) return;
+  state.chip = '';
+  state.tag = '';
+  homeHideTip();
+  showPage('skills');
+  openDetail(name);
+}
+
+function homeOpenAgent(id) {
+  showPage('skills');
+  pickAgent(id);
+}
+
+function homeGoto(target) {
+  if (target === 'skills/updates') {
+    state.chip = UPDATES_CHIP;
+    state.tag = '';
+    showPage('skills');
+    renderSkillTable();
+    return;
+  }
+  gotoPlace(target);
+}
+
+async function ensureHomeCleanup() {
+  if (state.cleanup || homeCleanupAsked || !state.table || awaitingFirstOrganization()) return;
+  homeCleanupAsked = true;
+  try { await loadCleanup(); } finally { homeCleanupAsked = false; }
+}
+
+/* ---------- 首页的一次性事件：容器不换，里面重画也不用重新绑 ---------- */
+
+$('brand-home').addEventListener('click', () => showPage('home'));
+$('home-manage').addEventListener('click', () => showPage('skills'));
+$('home-organize').addEventListener('click', () => showPage('skills'));
+$('home-log-all').addEventListener('click', () => gotoPlace('settings/log'));
+
+$('home-map').addEventListener('click', event => {
+  const group = event.target.closest('[data-home-group]');
+  if (group) { homeOpenGroup(group.dataset.homeGroup); return; }
+  const dot = event.target.closest('[data-home-skill]');
+  if (dot) homeOpenSkill(dot.dataset.homeSkill);
+});
+
+$('home-agents').addEventListener('click', event => {
+  const card = event.target.closest('[data-home-agent]');
+  if (card) homeOpenAgent(card.dataset.homeAgent);
+});
+
+$('home-todos').addEventListener('click', event => {
+  const action = event.target.closest('[data-home-action]');
+  if (action) {
+    if (action.dataset.homeAction === 'check-updates') checkUpdates();
+    return;
+  }
+  const target = event.target.closest('[data-home-target]');
+  if (target) { homeGoto(target.dataset.homeTarget); return; }
+  // 整行也能点：文字区域没有单独的按钮，点到行里就去它对应的那一页。
+  const row = event.target.closest('.home-todo');
+  const rowTarget = row?.querySelector('[data-home-target]');
+  if (rowTarget) homeGoto(rowTarget.dataset.homeTarget);
+});
+
+$('home-map').addEventListener('pointerover', event => {
+  const dot = event.target.closest('[data-home-skill]');
+  if (dot) homeShowTip(dot);
+  if (!window.gsap || !homeMotionOn) return;
+  const heading = event.target.closest('.home-cluster-name');
+  if (!heading || !homeClusters.length) return;
+  window.gsap.to(homeClusters, {
+    opacity: (index, element) => !heading || element.contains(heading) ? 1 : 0.3,
+    duration: homeDur(0.3), overwrite: 'auto',
+  });
+});
+$('home-map').addEventListener('pointerout', event => {
+  const dot = event.target.closest('[data-home-skill]');
+  if (dot && !dot.contains(event.relatedTarget)) homeHideTip();
+  if (!event.target.closest('.home-cluster-name')) return;
+  if (!window.gsap || !homeMotionOn || !homeClusters.length) return;
+  window.gsap.to(homeClusters, {opacity: 1, duration: homeDur(0.3), overwrite: 'auto'});
+});
+$('home-agents').addEventListener('pointerover', event => {
+  const card = event.target.closest('[data-home-agent]');
+  if (card) homeFocusAgent(card.dataset.homeAgent);
+});
+$('home-agents').addEventListener('pointerleave', () => homeFocusAgent(null));
+$('home-agents').addEventListener('focusin', event => {
+  const card = event.target.closest('[data-home-agent]');
+  if (card) homeFocusAgent(card.dataset.homeAgent);
+});
+$('home-agents').addEventListener('focusout', event => {
+  if (!$('home-agents').contains(event.relatedTarget)) homeFocusAgent(null);
+});
+
+$('home-map-wrap').addEventListener('pointerenter', homeMeasureDots);
+$('home-map-wrap').addEventListener('pointermove', event => {
+  if (!homeMotionOn || !homeIntroDone) return;
+  if (!homeDotCenters.length) homeMeasureDots();
+  for (let index = 0; index < homeDots.length; index++) {
+    const center = homeDotCenters[index];
+    if (!center) continue;
+    homeDotSwell[index]?.(homeDotField(Math.hypot(event.clientX - center[0], event.clientY - center[1])));
+  }
+});
+$('home-map-wrap').addEventListener('pointerleave', () => {
+  if (homeIntroDone) for (const swell of homeDotSwell) swell(1);
+});
+addEventListener('scroll', homeMeasureDots, {passive: true});
+addEventListener('resize', homeMeasureDots);
+
+if (window.gsap) {
+  const glow = $('home-hero').querySelector('.home-glow');
+  const glowX = window.gsap.quickTo(glow, 'x', {duration: 1.1, ease: 'power3'});
+  const glowY = window.gsap.quickTo(glow, 'y', {duration: 1.1, ease: 'power3'});
+  $('home-hero').addEventListener('pointermove', event => {
+    if (!homeMotionOn) return;
+    const rect = $('home-hero').getBoundingClientRect();
+    glowX(event.clientX - rect.left);
+    glowY(event.clientY - rect.top);
+  });
+
+  const cta = $('home-manage');
+  const ctaX = window.gsap.quickTo(cta, 'x', {duration: 0.4, ease: 'power3'});
+  const ctaY = window.gsap.quickTo(cta, 'y', {duration: 0.4, ease: 'power3'});
+  cta.addEventListener('pointermove', event => {
+    if (!homeMotionOn) return;
+    const rect = cta.getBoundingClientRect();
+    ctaX((event.clientX - rect.left - rect.width / 2) * 0.35);
+    ctaY((event.clientY - rect.top - rect.height / 2) * 0.35);
+  });
+  cta.addEventListener('pointerleave', () => { ctaX(0); ctaY(0); });
+}
+
 /* ==================== 启动 ==================== */
 
 function renderFooter() {
@@ -5175,22 +5982,7 @@ async function refreshProgram() {
   }
 }
 
-/* 地址里记着在哪一页、技能页看哪个 agent、设置页看哪一块。
-   旧地址 #log、#diagnostics 也认，换成设置页对应的那一块。 */
-function placeFromHash() {
-  const [page, arg] = location.hash.slice(1).split('/');
-  if (page === 'settings') return {page: 'settings', block: SETTINGS_BLOCKS.includes(arg) ? arg : 'ai'};
-  if (page === 'log' || page === 'diagnostics') return {page: 'settings', block: page};
-  if (page === 'cleanup') return {page: 'cleanup'};
-  if (page === 'team') return {page: 'team'};
-  if (page === 'skills' && arg) return {page: 'skills', agent: decodeURIComponent(arg)};
-  return {page: 'skills'};
-}
-
 async function start() {
-  const startPlace = placeFromHash();
-  if (startPlace.agent) state.agent = startPlace.agent;
-  if (startPlace.block) state.settingsBlock = startPlace.block;
   heartbeat();
   setInterval(heartbeat, 10000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
@@ -5220,10 +6012,9 @@ async function start() {
   refreshMigrationStatus();
   refreshUpdates();
   // 连没连上分享站决定页头有没有「团队」；分享站慢也不挡页面。
-  if (startPlace.page !== 'team') refreshTeam();
-  showPage(startPlace.page);
-  // 地址点名了设置页的哪一块，等内容都画完再滚过去。
-  if (startPlace.page === 'settings') setTimeout(() => showSettingsBlock(state.settingsBlock), 300);
+  refreshTeam();
+  // 打开看板和刷新页面都先到首页，不再看地址栏停在哪一页。
+  showPage('home');
 }
 
 start();

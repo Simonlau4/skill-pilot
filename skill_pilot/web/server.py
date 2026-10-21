@@ -384,7 +384,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, {"comparison": "\n".join(texts)})
             except (ValueError, OSError, StopIteration) as error:
                 self.reply(409, {"error": str(error) or "这个技能已不在预览里，请重新预览。"})
-        elif path in ("/", "/app.js", "/app.css", "/favicon.svg"):
+        elif path in ("/", "/app.js", "/app.css", "/favicon.svg",
+                      "/vendor/gsap.min.js", "/vendor/ScrollTrigger.min.js"):
             file = STATIC / ("index.html" if path == "/" else path.removeprefix("/"))
             body = file.read_bytes().replace(b"__SESSION_TOKEN__", self.server.token.encode())
             kind = {"html": "text/html", "js": "text/javascript", "css": "text/css", "svg": "image/svg+xml"}[file.suffix.removeprefix(".")]

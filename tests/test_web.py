@@ -88,11 +88,25 @@ class WebTests(unittest.TestCase):
         headers = {"X-Skill-Pilot-Token": self.server.token}
         self.assertEqual(self.request('/brand/../favicon.svg', headers)[0], 404)
 
+    def test_gsap_assets_require_session_and_use_javascript_type(self):
+        for path in ("/vendor/gsap.min.js", "/vendor/ScrollTrigger.min.js"):
+            self.assertEqual(self.request(path)[0], 403, path)
+            with urllib.request.urlopen(self.server.origin + path + '?token=' + self.server.token) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers.get_content_type(), 'text/javascript')
+                body = response.read()
+                self.assertTrue(body.startswith(b'/*!'), path + ' 的开头版权说明不见了')
+                self.assertIn(b'@license', body[:400])
+        headers = {"X-Skill-Pilot-Token": self.server.token}
+        for path in ("/vendor/", "/vendor/README.md", "/vendor/gsap.min.js.map", "/vendor/other.js"):
+            self.assertEqual(self.request(path, headers)[0], 404, path)
+
     def test_browser_favicon_ico_needs_no_token(self):
         status, body = self.request("/favicon.ico")
         self.assertEqual(status, 204)
         self.assertEqual(body, b"")
-        for path in ("/", "/app.js", "/app.css", "/favicon.svg", "/api/scan", "/favicon.ico/../"):
+        for path in ("/", "/app.js", "/app.css", "/favicon.svg", "/vendor/gsap.min.js",
+                     "/vendor/ScrollTrigger.min.js", "/api/scan", "/favicon.ico/../"):
             self.assertEqual(self.request(path)[0], 403, path)
 
 
