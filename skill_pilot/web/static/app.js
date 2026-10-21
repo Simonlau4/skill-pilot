@@ -505,7 +505,7 @@ async function undoOperation(id, {skills = [], message = '', button = null} = {}
           done++;
         }
       } catch (error) {
-        if (done) error.message = `已撤销 ${done} 项，其余还没撤销：${error.message}`;
+        if (done) error.message = `已撤销 ${done} 项，其余尚未撤销：${error.message}`;
         throw error;
       } finally {
         await refreshEverything();
@@ -835,7 +835,7 @@ function agentLoad(agentId) {
   return {groups, now, after, plus, minus, countNow, countAfter};
 }
 
-const TOKEN_HINT = '每开一次新对话，agent 都要先读一遍分给它的技能说明，大约占这么多 Token。按说明长度粗算，只用来互相比较。';
+const TOKEN_HINT = 'Agent 启动新对话时会加载已分配技能的说明。Token 按说明长度估算，用于比较上下文占用。';
 
 /* 条的长度取各 agent 里最长的，向上取到 2k 的整数倍；每 5k 一条刻度。 */
 function loadMax(loads) {
@@ -848,15 +848,15 @@ function loadHtml(agentId, load, max, big = false) {
   const pct = value => `${(value / max * 100).toFixed(2)}%`;
   const segs = [...load.groups].sort((a, b) => b[1] - a[1]).map(([group, cost]) =>
     `<span class="load-seg" style="width:${pct(cost)}" title="${escape(group)}：${tokenText(cost)} Token"></span>`).join('');
-  const minus = load.minus ? `<span class="load-minus" style="width:${pct(load.minus)}" title="会撤下 ${tokenText(load.minus)} Token"></span>` : '';
-  const plus = load.plus ? `<span class="load-plus" style="width:${pct(load.plus)}" title="会加上 ${tokenText(load.plus)} Token"></span>` : '';
+  const minus = load.minus ? `<span class="load-minus" style="width:${pct(load.minus)}" title="撤下后释放约 ${tokenText(load.minus)} Token"></span>` : '';
+  const plus = load.plus ? `<span class="load-plus" style="width:${pct(load.plus)}" title="启用后增加约 ${tokenText(load.plus)} Token"></span>` : '';
   const ticks = [];
   for (let at = 5000; at < max; at += 5000) ticks.push(`<i style="left:${pct(at)}"></i>`);
   const delta = load.after - load.now;
   const deltaText = delta ? ` → <span class="delta">${tokenText(load.after)}（${delta > 0 ? '+' : '−'}${tokenText(Math.abs(delta))}）</span>` : '';
   return `<div class="load${big ? ' load-big' : ''}" style="--c:${agentColor(agentId)}">
-    <div class="load-track" role="img" aria-label="现在占用 ${tokenText(load.now)} Token${delta ? `，应用后 ${tokenText(load.after)} Token` : ''}">${segs}${minus}${plus}<span class="load-ticks">${ticks.join('')}</span></div>
-    <span class="load-text"${big ? '' : ` title="${escape(TOKEN_HINT)}"`}>${big ? '每次新对话占用约' : '占用'} <b>${tokenText(load.now)} Token</b>${deltaText}${big ? hint(TOKEN_HINT) : ''}</span>
+    <div class="load-track" role="img" aria-label="当前占用约 ${tokenText(load.now)} Token${delta ? `，应用后 ${tokenText(load.after)} Token` : ''}">${segs}${minus}${plus}<span class="load-ticks">${ticks.join('')}</span></div>
+    <span class="load-text"${big ? '' : ` title="${escape(TOKEN_HINT)}"`}>${big ? '单次对话预占约' : '占用'} <b>${tokenText(load.now)} Token</b>${deltaText}${big ? hint(TOKEN_HINT) : ''}</span>
   </div>`;
 }
 
@@ -864,7 +864,7 @@ function loadHtml(agentId, load, max, big = false) {
 function renderAgentSummary() {
   const rail = $('agent-rail');
   if (!state.table || !state.agents.length) {
-    rail.innerHTML = '<p class="item-note">正在读取各 agent…</p>';
+    rail.innerHTML = '<p class="item-note">正在读取 Agent…</p>';
     return;
   }
   const loads = Object.fromEntries(state.agents.map(agent => [agent.id, agentLoad(agent.id)]));
@@ -897,27 +897,27 @@ function railUpdateNote() {
   const button = (action, label) => `<button class="btn btn-small btn-primary" data-program-rail="${action}"${lock}>${label}</button>`;
   if (progress.phase === 'ready') {
     return `<div class="rail-note">
-      <p class="rail-note-title">${icon('check-circle')}<strong>升级好了</strong></p>
-      <div class="rail-note-row"><small>刷新页面就能用新版</small>${button('refresh', '刷新生效')}</div>
+      <p class="rail-note-title">${icon('check-circle')}<strong>升级完成</strong></p>
+      <div class="rail-note-row"><small>刷新页面即可启用新版</small>${button('refresh', '刷新生效')}</div>
     </div>`;
   }
   if (progress.running && progress.phase === 'apply') {
     return `<div class="rail-note">
       <p class="rail-note-title">${icon('update-up')}<strong>正在升级…</strong></p>
-      <div class="rail-note-row"><small>等当前操作完成后自动继续</small><button class="btn btn-small" disabled>升级</button></div>
+      <div class="rail-note-row"><small>当前操作完成后自动继续</small><button class="btn btn-small" disabled>升级</button></div>
     </div>`;
   }
   if (progress.available) {
     const latest = progress.latest ? new Date(progress.latest).toLocaleDateString('zh-CN') : '';
     return `<div class="rail-note">
-      <p class="rail-note-title">${icon('update-up')}<strong>SP 有新版</strong></p>
+      <p class="rail-note-title">${icon('update-up')}<strong>Skill Pilot 发现新版本</strong></p>
       <div class="rail-note-row">${latest ? `<small>新版 ${escape(latest)}</small>` : ''}${button('apply', '升级')}</div>
     </div>`;
   }
   if (progress.phase === 'error' && programFailedAction === 'apply') {
     return `<div class="rail-note">
-      <p class="rail-note-title">${icon('warning')}<strong>升级没完成</strong></p>
-      <div class="rail-note-row"><small>${escape(progress.error || '稍后再试一次')}</small>${button('apply', '升级')}</div>
+      <p class="rail-note-title">${icon('warning')}<strong>升级未完成</strong></p>
+      <div class="rail-note-row"><small>${escape(progress.error || '请稍后重试')}</small>${button('apply', '升级')}</div>
     </div>`;
   }
   return '';
@@ -937,9 +937,9 @@ function renderRailNotes() {
   const ignored = new Set((state.agentsView?.ignored || []).map(item => (item && typeof item === 'object') ? item.id : item));
   const suggested = (state.agentsView?.suggested || []).filter(item => !ignored.has(item.id));
   const notes = [railUpdateNote(), ...suggested.map(item => `<div class="rail-note">
-      <p class="rail-note-title">${icon('plus')}<strong>发现新 agent：${escape(item.name)}</strong></p>
+      <p class="rail-note-title">${icon('plus')}<strong>发现新 Agent：${escape(item.name)}</strong></p>
       <div class="rail-note-row">
-        ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后一起管理技能；同名内容沿用统一仓库里的版本，完成后可以撤销。')}
+        ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后统一管理技能；同名技能沿用当前技能库的内容，支持撤销。')}
         ${agentJoinButton(item)}
       </div>
     </div>`)];
@@ -963,8 +963,8 @@ function autoAddedBy(skillName, agentId) {
 
 function pendingNote(name, agentId) {
   const because = autoAddedBy(name, agentId);
-  if (!assignedAfter(name, agentId)) return '待应用：会撤下，文件还留着';
-  return because ? `待应用：自动带上，因为「${titleOf(because)}」要用它` : '待应用：会加上';
+  if (!assignedAfter(name, agentId)) return '待应用：即将撤下（保留本地文件）';
+  return because ? `待应用：关联依赖，因「${titleOf(because)}」需要已自动勾选` : '待应用：即将启用';
 }
 
 function switchHtml(skill, agent, on, pending, locked) {
@@ -985,8 +985,8 @@ function skillRowHtml(skill, agent) {
   // 小标记：图标加两三个字，完整的意思在鼠标移上去的提示里；详情里也有同样的信息。
   const needs = skill.requires.length;
   const flags = [
-    skill.local_modified ? `<span class="flag" data-hint="你在这台电脑上改过它，更新时会问你保留哪一份。">${icon('edit')}你改过</span>` : '',
-    needs ? `<span class="flag" role="img" aria-label="${escape(`会一起带上 ${needs} 个别的技能`)}" data-hint="${escape(`给 agent 加上它时，会自动一起加上 ${needs} 个别的技能。`)}">${icon('link')}${needs}</span>` : '',
+    skill.local_modified ? `<span class="flag" data-hint="此技能已有本地修改，更新前需选择保留的内容。">${icon('edit')}已本地修改</span>` : '',
+    needs ? `<span class="flag" role="img" aria-label="${escape(`包含 ${needs} 个依赖项`)}" data-hint="${escape(`启用此技能时，将一并启用 ${needs} 个前置依赖。`)}">${icon('link')}${needs}</span>` : '',
   ].join('');
   const tags = (skill.tags || []).map(tag => tagPickHtml(tag)).join('');
   const sum = skill.summary || skill.description;
@@ -998,7 +998,7 @@ function skillRowHtml(skill, agent) {
     </div>
     <span class="meta num" data-hint="${escape(TOKEN_HINT)}">${tokenText(skill.description_tokens)} Token</span>
     <span class="row-end">
-      ${updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有新版，点一下更新"
+      ${updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有可用更新"
         aria-label="${escape('更新「' + titleOf(skill.name) + '」')}" ${writeBusy ? 'disabled' : ''}><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg></button>` : ''}
       ${switchHtml(skill, agent, on, pending, locked)}
     </span>
@@ -1092,9 +1092,9 @@ function detailTagsHtml(skill, locked) {
   return `${tagList}
     <form id="detail-tag-form" class="tag-editor" novalidate>
       <div class="tag-editor-row">
-        <input id="detail-tag-input" class="input" list="used-tags" autocomplete="off" placeholder="加个标签，比如项目名" aria-label="新标签"${locked ? ' disabled' : ''}>
-        <button id="detail-tag-add" class="btn btn-small" type="submit" disabled>加上</button>
-        ${hint('标签由你自己打，用来按项目、客户这类事找技能，可以不打。')}
+        <input id="detail-tag-input" class="input" list="used-tags" autocomplete="off" placeholder="添加自定义标签（如项目、领域）" aria-label="新标签"${locked ? ' disabled' : ''}>
+        <button id="detail-tag-add" class="btn btn-small" type="submit" disabled>添加</button>
+        ${hint('添加标签后可快速筛选技能，留空则不设标签。')}
       </div>
       <p id="detail-tag-error" class="row-note is-error" role="alert" hidden></p>
     </form>`;
@@ -1209,7 +1209,7 @@ async function applyBatchTag(action) {
     $('tag-dialog').close();
     applyTagResult(result);
     toast({text: action === 'add'
-      ? `已给 ${names.length} 个技能加上「${canonical}」`
+      ? `已给 ${names.length} 个技能添加标签「${canonical}」`
       : `已从 ${names.length} 个技能去掉「${canonical}」`});
   } catch (error) {
     tagDialogBusy = false;
@@ -1266,7 +1266,7 @@ function filtersHtml({skills, inTab, withUpdate, scope, hasTag, inChip}) {
   const groups = count(inTab.filter(hasTag), skill => [groupOf(skill.name)]);
   if (state.chip && state.chip !== UPDATES_CHIP && !groups.has(state.chip)) groups.set(state.chip, 0);
   const several = new Set(skills.map(skill => groupOf(skill.name))).size > 1;
-  const groupRow = `<div class="filter-group-list" data-filter-list="groups" role="group" aria-label="按分组看">
+  const groupRow = `<div class="filter-group-list" data-filter-list="groups" role="group" aria-label="按分组筛选">
       ${option('data-chip', '', '全部技能', inTab.filter(hasTag).length, !state.chip)}
       ${withUpdate.length || state.chip === UPDATES_CHIP ? option('data-chip', UPDATES_CHIP, '有新版', withUpdate.filter(hasTag).length, state.chip === UPDATES_CHIP, ' filter-update') : ''}
       ${several ? [...groups].sort(([a, x], [b, y]) => (a === '未分组') - (b === '未分组') || y - x)
@@ -1423,9 +1423,9 @@ function renderSkillTable() {
 
   const skills = state.table.skills;
   const nOn = skills.filter(skill => assignedNow(skill.name, agent.id)).length;
-  renderButtons($('skills-tabs'), `<button class="seg" data-tab="on" aria-pressed="${state.tab === 'on'}">在用<span class="n">${nOn}</span></button>
-    <button class="seg" data-tab="off" aria-pressed="${state.tab === 'off'}">可以加的<span class="n">${skills.length - nOn}</span></button>`, 'data-tab');
-  $('skills-search').placeholder = `在 ${agent.name} 的技能里搜`;
+  renderButtons($('skills-tabs'), `<button class="seg" data-tab="on" aria-pressed="${state.tab === 'on'}">已启用<span class="n">${nOn}</span></button>
+    <button class="seg" data-tab="off" aria-pressed="${state.tab === 'off'}">可添加<span class="n">${skills.length - nOn}</span></button>`, 'data-tab');
+  $('skills-search').placeholder = `搜索 ${agent.name} 的技能`;
 
   const query = $('skills-search').value.trim().toLowerCase();
   const matches = skill => matchesQuery(skill, query);
@@ -1444,10 +1444,10 @@ function renderSkillTable() {
   $('skills-clear-filters').hidden = !state.chip && !state.tag;
 
   // 空的时候只说一句话，需要下一步的给一个按钮，不写操作说明
-  const empty = query ? emptyInner('search', '没找到，换个词试试')
-    : state.chip || state.tag ? emptyInner('skills', '这一类里没有技能', '<button class="link-btn" data-empty="all">看全部</button>')
-    : state.tab === 'on' ? emptyInner('skills', `${agent.name} 还没有技能`, '<button class="link-btn" data-empty="off">去「可以加的」</button>')
-    : emptyInner('check-circle', '都已经加上了');
+  const empty = query ? emptyInner('search', '未找到匹配技能')
+    : state.chip || state.tag ? emptyInner('skills', '该分类下暂无技能', '<button class="link-btn" data-empty="all">查看全部</button>')
+    : state.tab === 'on' ? emptyInner('skills', `${agent.name} 暂未启用技能`, '<button class="link-btn" data-empty="off">前往「可添加」</button>')
+    : emptyInner('check-circle', '全部技能已在此启用');
   renderSkillList(groupedRows(rows).map(group =>
     `<div class="list-group-head"><strong>${escape(group.name)}</strong><span>${group.skills.length} 个</span></div>`
     + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`);
@@ -1480,7 +1480,7 @@ function changeSummary(changes) {
   for (const agent of state.agents) {
     const added = changes.filter(c => c.agent === agent.id && c.enabled).length;
     const removed = changes.filter(c => c.agent === agent.id && !c.enabled).length;
-    if (added) parts.push(`给 ${agent.name} 加 ${added} 个`);
+    if (added) parts.push(`将为 ${agent.name} 启用 ${added} 个`);
     if (removed) parts.push(`从 ${agent.name} 撤下 ${removed} 个`);
   }
   return parts.join('、');
@@ -1503,25 +1503,25 @@ function renderSkillsActionBar() {
       .map(skill => `「${titleOf(skill.name)}」`);
     const conflict = state.pending?.conflicts?.find(c => c.skill === change.skill && c.agent === change.agent);
     const why = conflict ? `<small class="warn">${escape(conflict.message)}</small>`
-      : because ? `<small>自动带上：「${escape(titleOf(because))}」要用它</small>`
-      : users.length ? `<small class="warn">注意：${escape(users.join(''))}还要用它</small>` : '';
+      : because ? `<small>依赖关联：「${escape(titleOf(because))}」需要此技能，已自动勾选</small>`
+      : users.length ? `<small class="warn">注意：${escape(users.join(''))}仍依赖此技能</small>` : '';
     return `<li><span class="action-agent">${swatch(change.agent)}${escape(agent?.name || change.agent)}</span>
-      <p>${change.enabled ? '加上' : '<span class="verb-off">撤下</span>'}「${escape(titleOf(change.skill))}」${why}</p>
-      ${because && !conflict ? '' : `<button class="btn btn-quiet btn-small" data-revert-skill="${escape(change.skill)}" data-revert-agent="${escape(change.agent)}">不改这处</button>`}</li>`;
+      <p>${change.enabled ? '启用' : '<span class="verb-off">撤下</span>'}「${escape(titleOf(change.skill))}」${why}</p>
+      ${because && !conflict ? '' : `<button class="btn btn-quiet btn-small" data-revert-skill="${escape(change.skill)}" data-revert-agent="${escape(change.agent)}">放弃此项</button>`}</li>`;
   }).join('');
   const paths = state.pending?.path_warnings || [];
-  const extra = paths.length ? `<details><summary>有 ${paths.length} 份你的文件里写着这些技能现在的位置，应用后位置会变，那些文件里的说法可能要改</summary>
+  const extra = paths.length ? `<details><summary>有 ${paths.length} 份文件引用了当前技能位置，应用后可能需要调整引用</summary>
       <ul>${paths.map(warning => `<li class="mono">${pathLabel(warning.file)}</li>`).join('')}</ul></details>` : '';
   const removing = changes.some(change => !change.enabled);
   showActionBar({
-    text: `改了 ${changes.length} 处，还没生效`,
-    note: state.pending?.conflicts?.length ? '需要处理的原因写在对应改动下，其他选择已保留。'
-      : changeSummary(changes) + (removing ? '。撤下的技能文件还留着，随时能加回来' : ''),
+    text: `有 ${changes.length} 处待应用的改动`,
+    note: state.pending?.conflicts?.length ? '请处理对应改动下的冲突，其他选择已保留。'
+      : changeSummary(changes) + (removing ? '（撤下的技能保留在本地，随时可恢复）' : ''),
     items,
     extra,
     buttons: [
-      {label: '全部不改', kind: 'btn btn-quiet', action: () => discardPending()},
-      {label: `应用这 ${changes.length} 处`, kind: 'btn btn-primary', disabled: previewBusy || Boolean(writeBusy) || !state.table.write_allowed, action: button => applyAssignment(button)},
+      {label: '全部放弃', kind: 'btn btn-quiet', action: () => discardPending()},
+      {label: `应用更改 (${changes.length})`, kind: 'btn btn-primary', disabled: previewBusy || Boolean(writeBusy) || !state.table.write_allowed, action: button => applyAssignment(button)},
     ],
   });
 }
@@ -1667,8 +1667,8 @@ async function applyAssignment(button) {
           if (changes.length && review !== consent && (removed.length || newImpact)) {
             const ok = await confirmDialog({
               title: newImpact ? '最新状态里有新的影响' : '撤下这些技能',
-              lines: [changeSummary(changes) + (removed.length ? '。撤下的技能文件还留着，随时能加回来。' : ''), ...(plan.dependency_warnings || []), ...(newPaths.length ? ['新发现有文件引用会受影响，位置提示已保留在改动托盘里。'] : [])],
-              groups: [...assignmentGroups(removed), ...(extra.filter(c => c.enabled).length ? [{label: '需要一起加上', items: extra.filter(c => c.enabled).map(c => ({name: c.skill, note: nameOf(c.agent)}))}] : [])],
+              lines: [changeSummary(changes) + (removed.length ? '（撤下的技能保留在本地，随时可恢复）。' : ''), ...(plan.dependency_warnings || []), ...(newPaths.length ? ['新发现有文件引用会受影响，位置提示已保留在改动托盘里。'] : [])],
+              groups: [...assignmentGroups(removed), ...(extra.filter(c => c.enabled).length ? [{label: '需要一并启用的依赖', items: extra.filter(c => c.enabled).map(c => ({name: c.skill, note: nameOf(c.agent)}))}] : [])],
               note: '你的选择已保留；取消也不用重选。应用后仍可撤销。',
               okText: newImpact ? '继续应用' : '撤下',
             });
@@ -1786,7 +1786,7 @@ function renderNewSkills() {
   const list = state.table?.new_skills || [];
   $('new-banner').hidden = !list.length;
   if (!list.length) return;
-  $('new-text').innerHTML = `发现 ${list.length} 个新装的技能${hint('它们还没交给 Skill Pilot 管。收编后，就能在这里统一分配、检查更新。')}`;
+  $('new-text').innerHTML = `发现 ${list.length} 个新安装的技能${hint('这些技能尚未纳入统一管理。收编后可分配给不同 Agent、检查更新。')}`;
   $('new-list').innerHTML = list.map(s => `<p>${escape(s.name)} <span class="mono muted">${pathLabel(s.relative)}</span></p>`).join('');
 }
 
@@ -1841,7 +1841,7 @@ async function refreshInventory() {
       renderDiagnostics();
       renderFooter();
     } catch (error) {
-      toast({text: '技能清单没能读出来：' + error.message, tone: 'error', sticky: true});
+      toast({text: '技能清单读取失败：' + error.message, tone: 'error', sticky: true});
     } finally {
       clearTask('inventory');
       inventoryRequest = null;
@@ -1924,7 +1924,7 @@ function renderProgram() {
   $('program-version').hidden = !progress.current && !progress.latest;
   $('program-version').textContent = `已安装：${date(progress.current)}`
     + (progress.available ? ` · 新版：${date(progress.latest)}` : '');
-  $('program-message').textContent = progress.message || '从 GitHub 官方项目获取新版';
+  $('program-message').textContent = progress.message || '从 Skill Pilot 官方项目获取新版';
   $('program-error').textContent = progress.error || '';
   $('program-error').hidden = !progress.error;
   $('program-check').disabled = progress.running || Boolean(writeBusy);
@@ -1959,7 +1959,7 @@ async function programAction(action) {
   if (programUpdate.running || writeBusy) return;
   programFailedAction = '';
   programUpdate = {...programUpdate, running: true, phase: action, error: '',
-    message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等当前操作完成…'};
+    message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等待当前操作完成…'};
   programActionRunning = true;
   renderProgram();
   const fail = error => {
@@ -1980,7 +1980,7 @@ async function programAction(action) {
   };
   try {
     if (action === 'apply') {
-      await runWrite({button: $('program-apply'), busyText: '正在升级 SP…', work, onError: fail});
+      await runWrite({button: $('program-apply'), busyText: '正在升级 Skill Pilot…', work, onError: fail});
     } else await work();
   } catch (error) {
     fail(error);
@@ -2023,10 +2023,10 @@ function renderLabelCounts() {
   const remaining = table.labels_pending;
   const done = table.skills.length - remaining;
   $('labels-count').innerHTML = remaining
-    ? `${icon('warning')}<span>已整理 ${done} 个，还差 ${remaining} 个</span>${hint('还差的是缺中文名或中文说明的技能。')}`
-    : `${icon('check-circle')}<span>已整理 ${done} 个，都齐了</span>`;
+    ? `${icon('warning')}<span>已整理 ${done} 个，${remaining} 个待处理</span>${hint('待处理技能尚缺少中文名称或中文说明。')}`
+    : `${icon('check-circle')}<span>全部 ${done} 个技能已整理完成</span>`;
   $('labels-missing').hidden = !remaining;
-  $('labels-missing').querySelector('span').textContent = `整理剩下的 ${remaining} 个`;
+  $('labels-missing').querySelector('span').textContent = `整理待处理技能 (${remaining})`;
   for (const id of ['labels-missing', 'labels-all']) {
     $(id).disabled = !table.write_allowed || !table.llm_configured || labelsRunning;
   }
@@ -2060,7 +2060,7 @@ async function refreshSettings() {
     const defaults = LLM_DEFAULTS[$('llm-provider').value];
     $('llm-base-url').value = llmSettings.base_url || defaults[0];
     $('llm-model').value = llmSettings.model || defaults[1];
-    $('llm-key').placeholder = llmSettings.has_key ? `已保存，末尾 ${llmSettings.key_tail}；不改就留空` : '粘贴服务商提供的 key';
+    $('llm-key').placeholder = llmSettings.has_key ? `已保存，末尾 ${llmSettings.key_tail}；不改就留空` : '粘贴服务商提供的 API 密钥';
     $('llm-clear').hidden = !llmSettings.has_key;
     for (const input of $('llm-form').querySelectorAll('input, select, button')) input.disabled = !state.table?.write_allowed;
     renderLabelCounts();
@@ -2071,8 +2071,8 @@ async function refreshSettings() {
 
 function renderConfigExport() {
   const selected = $('config-agent').value;
-  $('config-agent').innerHTML = '<option value="">全部在用技能</option>' + state.agents.map(agent =>
-    `<option value="${escape(agent.id)}">${escape(agent.name)} 在用的技能</option>`).join('');
+  $('config-agent').innerHTML = '<option value="">全部已启用技能</option>' + state.agents.map(agent =>
+    `<option value="${escape(agent.id)}">${escape(agent.name)} 已启用的技能</option>`).join('');
   $('config-agent').value = state.agents.some(agent => agent.id === selected) ? selected : '';
   $('config-export').disabled = !state.table || Boolean(writeBusy);
   $('config-agent').disabled = !state.table || Boolean(writeBusy);
@@ -2094,7 +2094,7 @@ $('config-export').addEventListener('click', async () => {
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       const manual = config.skills.filter(skill => skill.local_modified || skill.source.kind === 'manual').length;
-      toast({text: `已导出 ${config.skills.length} 个技能的配置。${manual ? `其中 ${manual} 个需要对方另行补齐，文件里已标明。` : '把文件交给对方的 agent 即可。'}`});
+      toast({text: `已导出 ${config.skills.length} 个技能的配置。${manual ? `其中 ${manual} 个需要对方另行补齐，文件里已标明。` : '可将文件交给对方的 Agent 导入。'}`});
     });
   } catch (error) {
     toast({text: error.message, tone: 'error'});
@@ -2133,14 +2133,14 @@ function importReviewHtml(plan, done, unmappedTip, html = () => '') {
     plan.dependencies[name]?.length ? `补上所需技能：${plan.dependencies[name].join('、')}` : '',
   ].filter(Boolean).join('；')}));
   return [
-    [done ? '新装好了' : '将安装', items(plan.install)],
+    [done ? '安装完成' : '将安装', items(plan.install)],
     ['沿用本机', items(plan.reuse)],
     ['待补齐，本次跳过', plan.skipped.map(row => ({name: row.name, html: html(row.name), note: row.reason}))],
   ].filter(([, rows]) => rows.length).map(([label, rows]) =>
     `<details class="fold fold-inner" ${rows.length <= CONFIRM_FOLD ? 'open' : ''}>
       <summary>${escape(label)} ${rows.length} 个</summary><ul class="confirm-items">${confirmItems(rows)}</ul>
     </details>`).join('') + (plan.unmapped_agents.length
-      ? `<p class="muted">这些 agent 还没接入，${done ? '相应分配未导入' : unmappedTip}：${escape(plan.unmapped_agents.map(nameOf).join('、'))}。</p>` : '');
+      ? `<p class="muted">以下 Agent 尚未接入，${done ? '相应分配未导入' : unmappedTip}：${escape(plan.unmapped_agents.map(nameOf).join('、'))}。</p>` : '');
 }
 
 function renderConfigImportReview(plan, done = false) {
@@ -2182,7 +2182,7 @@ $('config-import').addEventListener('click', () => {
   $('config-import-file').value = '';
   $('config-import-agent').innerHTML = '<option value="">按配置中的分配</option>' + state.agents.map(agent =>
     `<option value="${escape(agent.id)}">全部给 ${escape(agent.name)}</option>`).join('');
-  $('config-import-message').textContent = '选好文件后，先核对可导入和待补齐的技能。';
+  $('config-import-message').textContent = '选择配置文件后，即可核对可导入和待补齐的技能。';
   $('config-import-review').replaceChildren();
   $('config-import-retry').hidden = true;
   renderConfigImportControls();
@@ -2264,9 +2264,9 @@ $('config-import-apply').addEventListener('click', async event => {
 /* 商店里的名字、说明、推荐语和评价都是同事写的：一律当纯文字转义。
    技能可能本机还没有，所以名字用上架者给的中文名，不查本机的整理结果。 */
 const STORE_STATUS = {
-  installed: ['tag-ok', '已装'], update: ['tag', '有新版'], installable: ['tag-quiet', '可以装'],
-  lark: ['tag-quiet', '飞书官方'], conflict: ['tag-warn', '本机有同名技能'], blocked: ['tag-warn', '暂时装不了'],
-  mine: ['tag-quiet', '我上架的'],
+  installed: ['tag-ok', '已安装'], update: ['tag', '有新版'], installable: ['tag-quiet', '可安装'],
+  lark: ['tag-quiet', '飞书官方'], conflict: ['tag-warn', '本机有同名技能'], blocked: ['tag-warn', '暂不可装'],
+  mine: ['tag-quiet', '我的上架'],
 };
 const storeTitle = card => card.title || card.name;
 const teamReadOnly = () => state.table ? !state.table.write_allowed : !state.writeAllowed;
@@ -2509,14 +2509,14 @@ const starIcon = on => `<svg class="star${on ? ' is-on' : ''}" aria-hidden="true
 const starsHtml = stars => `<span class="stars" role="img" aria-label="${stars} 星">${[1, 2, 3, 4, 5].map(n => starIcon(n <= stars)).join('')}</span>`;
 
 function storeRatingHtml(rating) {
-  if (!rating?.count) return '<span class="rating is-empty">还没有评价</span>';
+  if (!rating?.count) return '<span class="rating is-empty">暂无评价</span>';
   return `<span class="rating" aria-label="${rating.average.toFixed(1)} 分，${rating.count} 人评价">${starIcon(true)}<b>${rating.average.toFixed(1)}</b><span>${rating.count} 人评</span></span>`;
 }
 
 function storeStatusTag(card) {
   const queued = storeQueueItem(card.key);
   if (queued?.status === 'waiting') return '<span class="tag tag-quiet">排队中</span>';
-  if (queued?.status === 'running') return '<span class="tag">正在装</span>';
+  if (queued?.status === 'running') return '<span class="tag">正在安装</span>';
   const [tone, label] = STORE_STATUS[card.local?.status] || ['tag-quiet', card.local?.label || ''];
   return label ? `<span class="tag ${tone}">${escape(label)}</span>` : '';
 }
@@ -2562,14 +2562,14 @@ function storeQueueRowHtml(item, locked = false) {
     ? (item.installed || []).filter(name => name !== item.name).length
     : 0;
   const status = item.status === 'done'
-    ? `<span class="tag tag-ok">装好了</span>${extra ? `<small class="item-note">连同 ${extra} 个所需技能</small>` : ''}`
+    ? `<span class="tag tag-ok">安装完成</span>${extra ? `<small class="item-note">含 ${extra} 个前置依赖</small>` : ''}`
     : item.status === 'failed'
-      ? `<span class="tag tag-danger">没装上：${escape(item.message || '不知道原因')}</span>`
+      ? `<span class="tag tag-danger">安装失败：${escape(item.message || '原因未知')}</span>`
       : item.status === 'running'
-        ? '<span class="tag">正在装</span>'
+        ? '<span class="tag">正在安装</span>'
         : '<span class="tag tag-quiet">排队中</span>';
   const action = item.status === 'done'
-    ? `<button class="link-btn" type="button" data-store-goto="${escape(item.name)}">去技能页启用</button>`
+    ? `<button class="link-btn" type="button" data-store-goto="${escape(item.name)}">前往分配</button>`
     : item.status === 'failed'
       ? `<button class="btn btn-small btn-quiet" type="button" data-store-queue-retry="${escape(item.key)}"${locked ? ' disabled' : ''}>重试</button>`
       : '';
@@ -2591,7 +2591,7 @@ function renderStoreQueue() {
   const wasHidden = box.hidden;
   box.hidden = !items.length;
   const active = items.filter(queueActive).length;
-  $('store-queue-left').textContent = active ? `还剩 ${active} 个` : '';
+  $('store-queue-left').textContent = active ? `待安装 ${active} 个` : '';
   $('store-queue-clear').hidden = !items.some(item => item.status === 'done' || item.status === 'failed');
   $('store-queue-clear').disabled = teamReadOnly();
   const html = items.map(item => storeQueueRowHtml(item, teamReadOnly())).join('');
@@ -2652,7 +2652,7 @@ function renderStoreShelves(cards) {
     return;
   }
   if (!cards.length) {
-    box.innerHTML = `<div class="empty store-empty">${emptyInner('team', '还没有人上架技能')}
+    box.innerHTML = `<div class="empty store-empty">${emptyInner('team', '暂无团队技能')}
       <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>`;
     return;
   }
@@ -2684,17 +2684,17 @@ function renderStoreAll(cards) {
   if (state.storeGroup && !groups.some(([name]) => name === state.storeGroup)) groups.push([state.storeGroup, 0]);
   renderButtons($('store-groups'), [['', base.length], ...groups].map(([name, count]) =>
     `<button class="store-group" type="button" data-store-group="${escape(name)}" aria-pressed="${name === state.storeGroup}">${
-      escape(name === '' ? '全部' : name === '-' ? '没分组' : name)}<span class="n">${number(count)}</span></button>`).join(''), 'data-store-group');
+      escape(name === '' ? '全部' : name === '-' ? '未分组' : name)}<span class="n">${number(count)}</span></button>`).join(''), 'data-store-group');
   $('store-groups').hidden = groups.length < 2 && !state.storeGroup;
   const rows = storeFilter(base, {group: state.storeGroup}).sort(STORE_SORTS[state.storeSort]);
-  $('store-all-title').textContent = state.storeMine ? '我上架的' : query ? '搜索结果' : '全部技能';
+  $('store-all-title').textContent = state.storeMine ? '我的上架' : query ? '搜索结果' : '全部技能';
   $('store-count').textContent = `${number(rows.length)} 个`;
   for (const button of $('store-sort').querySelectorAll('[data-store-sort]')) {
     button.setAttribute('aria-pressed', String(button.dataset.storeSort === state.storeSort));
   }
   const empty = state.storeMine && !base.length
-    ? emptyInner('team', '你还没上架技能', `<button type="button" class="link-btn" data-store-publish${teamCanWrite() ? '' : ' disabled'}>上架技能</button>`)
-    : emptyInner('search', '没找到，换个词试试');
+    ? emptyInner('team', '暂无上架技能', `<button type="button" class="link-btn" data-store-publish${teamCanWrite() ? '' : ' disabled'}>上架技能</button>`)
+    : emptyInner('search', '未找到匹配技能');
   $('store-list').innerHTML = rows.length
     ? `<div class="store-list-inner${state.storeMine ? ' is-mine' : ''}">${rows.map(storeRowHtml).join('')}</div>`
     : `<div class="empty">${empty}</div>`;
@@ -2779,7 +2779,7 @@ async function gotoStoreSkill(button) {
     }
   }
   if (state.table?.skills.some(skill => skill.name === name)) openDetail(name);
-  else toast({text: '技能页里还没看到这个技能，稍等一下再试。', tone: 'error'});
+  else toast({text: '技能清单尚未刷新，请稍后重试。', tone: 'error'});
   // 有新版时顺便检查更新，详情里随后出现“有新版”和更新按钮。
   if (button.hasAttribute('data-store-check') && !updateState.review?.running && !updateState.starting) checkUpdates();
 }
@@ -2796,7 +2796,7 @@ async function unlistStore(name, button) {
   const ok = await confirmDialog({
     title: `下架「${card ? storeTitle(card) : name}」`,
     lines: [extra.length ? `${extra.join('、')} 需要它，会一起下架。` : '', '同事在商店里将看不到它。',
-      '已经装上的同事不受影响；你随时可以重新上架。'],
+      '已安装的同事不受影响，之后仍可重新上架。'],
     okText: extra.length ? `下架 ${names.length} 个` : '下架',
   });
   if (!ok) return;
@@ -2858,14 +2858,14 @@ function renderStoreDetail(fresh = false) {
     ${storeSummary(card) ? `<p class="detail-summary">${escape(storeSummary(card))}</p>` : ''}
     <p class="store-facts">${storeRatingHtml(card.rating)}<span>${escape(storeRecommenders(card))}</span>${card.group ? `<span>${escape(card.group)}</span>` : ''}</p>
     ${storeGetHtml(card)}
-    <h3 class="sub-title">谁推荐的</h3>
+    <h3 class="sub-title">推荐人</h3>
     <ul class="store-recs">${card.listings.map(item => `<li>
       <p class="store-rec-head"><strong>${escape(item.member.name)}</strong><span>${escape(friendlyDate(item.updated_at))}上架</span></p>
       ${item.note ? `<p class="store-rec-note">“${escape(item.note)}”</p>` : ''}
     </li>`).join('')}</ul>
     ${storeReviewsHtml(card)}
     ${card.description ? `<h3 class="sub-title">说明</h3><p class="detail-desc">${escape(card.description)}</p>` : ''}
-    ${card.requires?.length ? `<h3 class="sub-title">所需技能${hint('装上它时，这些技能会一起带上；本机已有同名的就直接用本机的。')}</h3>
+    ${card.requires?.length ? `<h3 class="sub-title">前置依赖${hint('安装此技能时将一并安装前置依赖；本机已有同名技能时沿用现有内容。')}</h3>
       <p class="store-requires">${card.requires.map(name => escape(storeRequireTitle(card, name))).join('、')}</p>` : ''}
     <h3 class="sub-title">来源</h3>
     <p class="store-source">${escape(storeSourceText(card))}</p>`;
@@ -2884,8 +2884,8 @@ function storeSourceText(card) {
   const latest = card.listings?.[0];
   if (card.kind === 'github') {
     return latest?.file_count
-      ? '网上的公开技能，上架时连文件存到了分享站，装的时候从分享站下载。'
-      : '网上的公开技能，装的时候从原作者那里下载。';
+      ? '公开技能，文件已随上架保存至分享站，安装时从分享站下载。'
+      : '公开技能，安装时从原作者的来源下载。';
   }
   if (card.kind === 'lark') return '飞书官方技能。';
   return `${latest.member.name} 上传的文件${latest.file_count ? `，共 ${number(latest.file_count)} 个、${sizeText(latest.size || 0)}` : ''}。`;
@@ -2900,27 +2900,27 @@ function storeGetHtml(card) {
   const locked = teamCanWrite() ? '' : ' disabled';
   if (local.status === 'installed') {
     if (!local.agents?.length) {
-      return box('ok', `${icon('check-circle')}<span><strong>已装进技能库，还没给 agent 启用</strong></span>`,
-        `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">去技能页启用</button>`);
+      return box('ok', `${icon('check-circle')}<span><strong>已在技能库中，尚未分配给 Agent</strong></span>`,
+        `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">前往分配</button>`);
     }
-    return box('ok', `${icon('check-circle')}<span><strong>已装</strong>，${escape(users)} 在用</span>`,
-      `<button class="link-btn" type="button" data-store-goto="${escape(card.name)}">在技能页看看</button>`);
+    return box('ok', `${icon('check-circle')}<span><strong>已安装</strong>，使用中：${escape(users)}</span>`,
+      `<button class="link-btn" type="button" data-store-goto="${escape(card.name)}">查看技能</button>`);
   }
   if (local.status === 'update') {
-    return box('info', `${icon('update-up')}<span><strong>有新版</strong>${users ? `，${escape(users)} 在用` : ''}</span>`,
-      `<button class="btn btn-small btn-update" type="button" data-store-goto="${escape(card.name)}" data-store-check>去技能页更新</button>`);
+    return box('info', `${icon('update-up')}<span><strong>有新版</strong>${users ? `，使用中：${escape(users)}` : ''}</span>`,
+      `<button class="btn btn-small btn-update" type="button" data-store-goto="${escape(card.name)}" data-store-check>前往更新</button>`);
   }
   if (local.status === 'mine') {
     const candidate = storeCandidates?.find(item => item.name === card.name);
-    return box('quiet', `${icon('team')}<span><strong>这是你上架的</strong>${candidate?.changed ? '，本机改过，可以上架新版' : ''}</span>`,
+    return box('quiet', `${icon('team')}<span><strong>我的上架</strong>${candidate?.changed ? '，已有本地修改，可上架新版' : ''}</span>`,
       `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>` : ''}
        <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`);
   }
   if (local.status === 'lark') {
-    return box('quiet', `${icon('info')}<span><strong>要用飞书官方方式装</strong>${local.reason ? hint(local.reason) : ''}</span>`);
+    return box('quiet', `${icon('info')}<span><strong>请通过飞书官方渠道安装</strong>${local.reason ? hint(local.reason) : ''}</span>`);
   }
   if (local.status !== 'installable') {
-    return box('warn', `${icon('warning')}<span><strong>${escape(local.label || '暂时装不了')}</strong>${local.reason ? `：${escape(local.reason)}` : ''}</span>`);
+    return box('warn', `${icon('warning')}<span><strong>${escape(local.label || '暂不可装')}</strong>${local.reason ? `：${escape(local.reason)}` : ''}</span>`);
   }
   return storeInstallHtml(card);
 }
@@ -2929,29 +2929,29 @@ function storeInstallHtml(card) {
   const get = storeGet;
   const readOnly = teamReadOnly();
   const queued = storeQueueItem(card.key);
-  const cost = `启用后每个 agent 每次新对话多占约 <b>${tokenText(card.tokens)} Token</b>${hint(TOKEN_HINT)}`;
+  const cost = `启用后，每个 Agent 的单次对话预占增加约 <b>${tokenText(card.tokens)} Token</b>${hint(TOKEN_HINT)}`;
   let status = '';
-  let action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>装上</button>`;
+  let action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>安装技能</button>`;
   if (queued?.status === 'waiting') {
     status = '<p class="store-queue-state" role="status">已加入安装队列</p>';
     action = '';
   } else if (queued?.status === 'running') {
-    status = '<p class="store-queue-state" role="status">正在装…</p>';
+    status = '<p class="store-queue-state" role="status">正在安装…</p>';
     action = '';
   } else if (queued?.status === 'failed') {
-    status = `<p class="store-get-error" role="alert">没装上：${escape(queued.message || '不知道原因')}</p>`;
+    status = `<p class="store-get-error" role="alert">安装失败：${escape(queued.message || '原因未知')}</p>`;
     action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>重试</button>`;
   } else if (queued?.status === 'done') {
-    status = '<p class="store-queue-state" role="status">装好了</p>';
-    action = `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">去技能页启用</button>`;
+    status = '<p class="store-queue-state" role="status">安装完成</p>';
+    action = `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">前往分配</button>`;
   }
   return `<section class="store-get store-get-install">
-    <p class="store-get-line">装进技能库，到技能页给 agent 启用后才生效。</p>
+    <p class="store-get-line">安装后保存至技能库，分配给 Agent 后生效。</p>
     <p class="store-cost">${cost}</p>
     ${status}
     ${!queued && get?.error ? `<p class="store-get-error" role="alert">${escape(get.error)}</p>` : ''}
     ${action ? `<div class="store-get-actions">${action}</div>` : ''}
-    ${readOnly && action ? '<p class="row-note">只读预览，不能装上。</p>' : ''}
+    ${readOnly && action ? '<p class="row-note">只读预览，无法安装技能。</p>' : ''}
   </section>`;
 }
 
@@ -2961,15 +2961,15 @@ function storeReviewsHtml(card) {
   const others = card.can_rate && !(state.table ? !state.table.write_allowed : !state.writeAllowed) ? reviews.filter(review => review.member.id !== me) : reviews;
   const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
   const editor = card.can_rate && !readOnly ? storeRateHtml(card)
-    : `<p class="store-rate-note">${icon('info')}${card.local?.status === 'mine' ? '自己上架的不能评价'
-      : readOnly ? '只读预览，不能评价' : '装上以后可以打分'}</p>`;
+    : `<p class="store-rate-note">${icon('info')}${card.local?.status === 'mine' ? '无法评价自己上架的技能'
+      : readOnly ? '只读预览，无法发表评价' : '安装后即可发表评价'}</p>`;
   const summary = card.rating?.count ? `<span class="sub-note">· ${card.rating.average.toFixed(1)} 分，${card.rating.count} 人</span>` : '';
   return `<h3 class="sub-title">评价 ${summary}</h3>
     ${editor}
     ${others.length ? `<ul class="store-reviews">${others.map(review => `<li>
       <p class="store-review-head"><strong>${escape(review.member.name)}</strong>${starsHtml(review.stars)}<span>${escape(friendlyDate(review.updated_at))}</span></p>
       ${review.text ? `<p class="store-review-text">${escape(review.text)}</p>` : ''}
-    </li>`).join('')}</ul>` : card.can_rate ? '' : '<p class="muted store-rate-empty">还没有人评价。</p>'}`;
+    </li>`).join('')}</ul>` : card.can_rate ? '' : '<p class="muted store-rate-empty">暂无评价。</p>'}`;
 }
 
 /* 打分：五颗星是一组单选，倒着排再用 CSS 反过来，鼠标移到哪颗，它和左边的都亮。 */
@@ -2978,8 +2978,8 @@ function storeRateHtml(card) {
   const stars = [5, 4, 3, 2, 1].map(n => `<input class="sr-only" type="radio" name="store-stars" id="store-star-${n}" value="${n}"${mine?.stars === n ? ' checked' : ''}>
     <label for="store-star-${n}" title="${n} 星">${starIcon(false)}<span class="sr-only">${n} 星</span></label>`).join('');
   return `<form class="store-rate" data-store-rate>
-    <fieldset class="star-input"><legend>${mine ? '我的评价' : '给它打分'}</legend><span class="star-input-row">${stars}</span></fieldset>
-    <input class="input store-rate-text" name="text" maxlength="200" placeholder="一句话说说好不好用（可不填）" aria-label="一句话评价" value="${escape(mine?.text || '')}">
+    <fieldset class="star-input"><legend>${mine ? '我的评价' : '评价技能'}</legend><span class="star-input-row">${stars}</span></fieldset>
+    <input class="input store-rate-text" name="text" maxlength="200" placeholder="分享使用心得（选填）" aria-label="使用评价" value="${escape(mine?.text || '')}">
     <span class="store-rate-actions">
       <button class="btn btn-small btn-primary" type="submit">${mine ? '保存' : '提交评价'}</button>
       ${mine ? '<button class="btn btn-small btn-quiet" type="button" data-store-rate-remove>删除</button>' : ''}
@@ -3071,7 +3071,7 @@ async function openPublish(preselect = []) {
   storePick = {selected: new Map(), plan: null};
   $('store-pick-search').value = '';
   showPublishStep('pick');
-  $('store-pick-list').innerHTML = '<p class="muted store-pick-loading">正在读取你在用的技能…</p>';
+  $('store-pick-list').innerHTML = '<p class="muted store-pick-loading">正在读取已启用技能…</p>';
   $('store-publish-message').textContent = '';
   $('store-publish-dialog').showModal();
   try {
@@ -3102,8 +3102,8 @@ function showPublishStep(step) {
 function storePickRowHtml(candidate) {
   const checked = storePick.selected.has(candidate.name);
   const name = candidate.title || candidate.name;
-  const state = candidate.listed ? candidate.changed ? '<span class="tag">改过，可上架新版</span>' : '<span class="tag tag-ok">已上架</span>' : '';
-  const kind = candidate.unavailable ? '' : candidate.kind === 'files' ? `<span class="flag">${icon('file-kept')}连文件一起传</span>`
+  const state = candidate.listed ? candidate.changed ? '<span class="tag">已修改，可上架新版</span>' : '<span class="tag tag-ok">已上架</span>' : '';
+  const kind = candidate.unavailable ? '' : candidate.kind === 'files' ? `<span class="flag">${icon('file-kept')}包含技能文件</span>`
     : candidate.kind === 'lark' ? '<span class="flag">飞书官方</span>' : '';
   return `<div class="store-pick-row${checked ? ' is-checked' : ''}">
     <label class="store-pick-main">
@@ -3113,7 +3113,7 @@ function storePickRowHtml(candidate) {
     </label>
     ${candidate.unavailable ? `<p class="row-note">${escape(candidate.unavailable)}</p>` : ''}
     ${checked ? `<input class="input store-pick-note" data-store-note="${escape(candidate.name)}" maxlength="200"
-      placeholder="${escape(candidate.summary ? `推荐语（不写就用：${candidate.summary}）` : '推荐语：一句话说说它适合干什么（可不填）')}"
+      placeholder="${escape(candidate.summary ? `推荐语（留空将使用：${candidate.summary}）` : '推荐语：简述适用场景（选填）')}"
       aria-label="${escape(`给「${name}」写推荐语`)}" value="${escape(storePick.selected.get(candidate.name))}">` : ''}
   </div>`;
 }
@@ -3123,11 +3123,11 @@ function renderPick() {
   const rows = (storeCandidates || []).filter(item => !query ||
     [item.name, item.title, item.summary, item.group].some(value => String(value || '').toLowerCase().includes(query)));
   $('store-pick-list').innerHTML = rows.map(storePickRowHtml).join('')
-    || `<div class="empty">${emptyInner('search', storeCandidates?.length ? '没找到，换个词试试' : '还没有在用的技能')}</div>`;
+    || `<div class="empty">${emptyInner('search', storeCandidates?.length ? '未找到匹配技能' : '暂无已启用技能')}</div>`;
   const count = storePick.selected.size;
   $('store-publish-next').disabled = !count;
   $('store-publish-next').textContent = count ? `下一步：核对 ${count} 个` : '下一步：核对';
-  $('store-publish-message').textContent = count ? '' : '挑出你觉得好用、值得推荐给同事的技能。';
+  $('store-publish-message').textContent = count ? '' : '选择要推荐给同事的技能。';
 }
 
 $('store-pick-search').addEventListener('input', renderPick);
@@ -3150,29 +3150,29 @@ $('store-pick-list').addEventListener('input', event => {
 
 function storeReviewHtml(plan) {
   const errors = plan.errors?.length ? `<div class="banner banner-warn">
-      <p>${icon('warning')} 这些暂时不能上架，不会上传：</p>
+      <p>${icon('warning')} 以下技能暂不可上架，将跳过上传：</p>
       <ul class="confirm-items">${plan.errors.map(item => `<li>${escape(item.name)}：${escape(item.reason)}</li>`).join('')}</ul>
     </div>` : '';
   const rows = (plan.listings || []).map(item => {
     let what;
     if (item.kind === 'files') {
-      what = `连文件一起传：${number(item.files?.count || 0)} 个文件，${sizeText(item.files?.size || 0)}`;
+      what = `包含技能文件：共 ${number(item.files?.count || 0)} 个文件 (${sizeText(item.files?.size || 0)})`;
     } else if (item.kind === 'lark') {
-      what = '飞书官方技能，只传名字和说明';
+      what = '飞书官方技能，仅上传名称与说明';
     } else if (item.version != null) {
-      what = `网上的公开技能，连文件一起传：${number(item.files?.count || 0)} 个文件，${sizeText(item.files?.size || 0)}；同事装的时候不用连 GitHub`;
+      what = `公开技能，包含技能文件：共 ${number(item.files?.count || 0)} 个文件 (${sizeText(item.files?.size || 0)})；同事安装时从分享站下载`;
     } else {
-      what = `网上的公开技能，只传名字和来源${item.download_note ? `。${item.download_note}` : ''}`;
+      what = `公开技能，仅上传名称与来源${item.download_note ? `。${item.download_note}` : ''}`;
     }
     const blocked = item.files?.blocked || [];
     const blockedTitle = item.kind === 'github'
-      ? `拦下 ${blocked.length} 个疑似密钥或密码的文件，所以这个技能不传文件`
-      : `拦下 ${blocked.length} 个疑似密钥或密码的文件，不会上传`;
+      ? `已拦截 ${blocked.length} 个疑似敏感凭据文件（此技能仅上传名称与来源）`
+      : `已拦截 ${blocked.length} 个疑似敏感凭据文件（不予上传）`;
     return `<li class="store-review-row">
       <p class="store-review-name"><strong>${escape(item.title || item.name)}</strong>${item.title && item.title !== item.name ? ` <span class="skill-id">${escape(item.name)}</span>` : ''}</p>
       <p class="row-note">${escape(what)}</p>
-      <p class="store-review-note">${item.note ? `“${escape(item.note)}”` : `<span class="muted">没写推荐语，同事看到的是技能自带的一句话。</span>`}</p>
-      ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.map(name => storeCandidates?.find(row => row.name === name)?.title || name).join('、'))} 需要它，一起上架</p>` : ''}
+      <p class="store-review-note">${item.note ? `“${escape(item.note)}”` : `<span class="muted">未填写推荐语，将使用技能自带的简短说明。</span>`}</p>
+      ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.map(name => storeCandidates?.find(row => row.name === name)?.title || name).join('、'))} 依赖此技能，将一并上架</p>` : ''}
       ${blocked.length ? `<details class="fold fold-inner store-blocked">
         <summary>${icon('lock')} ${blockedTitle}</summary>
         <ul class="confirm-items">${blocked.map(file => `<li><span class="mono">${escape(file.path)}</span>：${escape(file.reason)}</li>`).join('')}</ul>
@@ -3187,7 +3187,7 @@ $('store-publish-next').addEventListener('click', async () => {
   showPublishStep('review');
   storePick.plan = null;
   $('store-review').replaceChildren();
-  $('store-publish-message').textContent = '正在核对要传的文件…';
+  $('store-publish-message').textContent = '正在核对上传文件…';
   $('store-publish-apply').disabled = true;
   $('store-publish-apply').textContent = '上架';
   try {
@@ -3246,7 +3246,7 @@ function llmBody() {
 $('extra-source-form').addEventListener('submit', event => {
   event.preventDefault();
   const path = $('extra-source-path').value.trim();
-  withBusy($('extra-source-add'), '正在记下…', async () => {
+  withBusy($('extra-source-add'), '正在保存目录…', async () => {
     try {
       await saveExtraSource(path, false);
       $('extra-source-path').value = '';
@@ -3262,7 +3262,7 @@ $('extra-sources').addEventListener('click', event => {
   if (!button) return;
   const path = extraSourcePaths[Number(button.dataset.extraIndex)];
   if (!path) return;
-  withBusy(button, '正在去掉…', async () => {
+  withBusy(button, '正在移除…', async () => {
     try {
       await saveExtraSource(path, true);
     } catch (error) {
@@ -3304,9 +3304,9 @@ $('llm-form').addEventListener('submit', event => {
 
 $('llm-clear').addEventListener('click', async event => {
   const ok = await confirmDialog({
-    title: '删除已保存的 key？',
+    title: '删除已保存的密钥？',
     lines: ['删除后不会再自动整理技能的中文名、说明和分组，已经整理好的会保留。'],
-    okText: '删除 key',
+    okText: '删除密钥',
   });
   if (!ok) return;
   await withBusy(event.currentTarget, '正在删除…', async () => {
@@ -3315,7 +3315,7 @@ $('llm-clear').addEventListener('click', async event => {
       $('llm-key').value = '';
       await refreshTable(true);
       await refreshSettings();
-      toast({text: '已删除 key。'});
+      toast({text: '已删除密钥。'});
     } catch (error) {
       toast({text: error.message, tone: 'error'});
     }
@@ -3411,10 +3411,10 @@ function renderAgents() {
   const locked = writeBusy || !state.table?.write_allowed ? ' disabled' : '';
   $('agents-scan').disabled = Boolean(discovery.running || writeBusy);
   $('agents-scan').setAttribute('aria-busy', String(Boolean(discovery.running)));
-  $('agents-scan').querySelector('span').textContent = discovery.running ? '正在扫描…' : '重新扫描 agent';
+  $('agents-scan').querySelector('span').textContent = discovery.running ? '正在扫描…' : '重新扫描 Agent';
   const checked = discovery.checked_at ? `上次检查：${new Date(discovery.checked_at).toLocaleString('zh-CN')}` : '';
   $('agents-scan-status').textContent = discovery.error || [discovery.message, checked].filter(Boolean).join(' · ')
-    || '打开时会检查新安装的软件；新装 agent 后，也可以在这里重新扫描。';
+    || '打开看板时自动检查新安装的 Agent，也可手动重新扫描。';
   const managed = view?.managed || [];
   const suggested = view?.suggested || [];
   const ignored = ignoredAgents(view);
@@ -3427,7 +3427,7 @@ function renderAgents() {
     ].filter(Boolean).join(' · ');
     const leave = agent.can_leave
       ? `<button class="btn btn-small btn-quiet" data-agent-leave="${escape(agent.id)}"${locked}>不再管理…</button>`
-      : `<span class="item-note agent-share">${icon('lock')}至少留一个</span>`;
+      : `<span class="item-note agent-share">${icon('lock')}至少保留一个</span>`;
     return `<div class="item-row">
       <div>
         <div class="item-title">${swatch(agent.id)} ${escape(agent.name)}</div>
@@ -3460,7 +3460,7 @@ function renderAgents() {
 $('agents-scan').addEventListener('click', async () => {
   if (state.agentsView?.discovery?.running || writeBusy) return;
   $('agents-scan').disabled = true;
-  $('agents-scan-status').textContent = '正在扫描 agent…';
+  $('agents-scan-status').textContent = '正在扫描 Agent…';
   try {
     await api('/api/agents/scan', {});
     await refreshAgents();
@@ -3562,7 +3562,7 @@ async function joinAgent(id, button) {
     success: result => {
       if (!result) return null;
       const missing = sharedNames.filter(name => !(result.message || '').includes(name));
-      const text = result.message || '新 agent 已经接入';
+      const text = result.message || '新 Agent 已接入';
       return {
         text: missing.length ? `${text}，一并接入 ${missing.join('、')}` : text,
         undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
@@ -3619,7 +3619,7 @@ for (const id of ['rail-notes', 'agents-suggested', 'agents-ignored']) {
 const JOIN_ACTIONS = [
   ['linked', '已经在用统一仓库', '直接登记分配。'],
   ['link', '内容一致，改成统一管理', '改为使用仓库里的那份。'],
-  ['import', '收进统一仓库', '仓库里还没有，收进来。'],
+  ['import', '收进统一仓库', '技能库中尚未收录，将添加至技能库。'],
   ['choose', '内容不同，需要你选', '每一条单独选，默认保留仓库里的版本。'],
   ['skipped', '原样留着', '这些内容不动。'],
 ];
@@ -3631,21 +3631,21 @@ function joinRows(plan, action) {
 function joinChoiceRow(skill) {
   const options = skill.options.map(option => `<p class="join-option"><label class="check">
     <input type="radio" name="join-choice-${escape(skill.name)}" data-join-choice="${escape(skill.name)}" value="${escape(option.id)}" ${option.id === skill.default ? 'checked' : ''}>
-    ${option.origin === 'store' ? '用统一仓库里的（默认）' : '用这个 agent 里的'}</label>
+    ${option.origin === 'store' ? '用统一仓库里的（默认）' : '用这个 Agent 里的'}</label>
     <span class="mono">${pathLabel(option.path)}</span></p>`).join('');
   return `<details class="fold fold-inner join-choice" data-join-row="${escape(skill.name)}">
     <summary>${escape(skill.name)} <span class="tag tag-quiet">内容不同</span></summary>
     <p class="item-note">${escape(skill.reason)}</p>
     ${options}
     ${skill.comparison ? `<details class="fold fold-inner"><summary data-join-compare="${escape(skill.name)}">看看差别</summary><pre></pre></details>` : ''}
-    <p class="item-note" data-join-warn hidden>选了这一份，会更新所有 agent 用的这份技能。</p>
+    <p class="item-note" data-join-warn hidden>选择此版本后，所有已分配的 Agent 将统一使用此内容。</p>
     <p class="item-note">${(skill.entries || []).map(pathLabel).join('、')}</p>
   </details>`;
 }
 
 function renderJoin(plan) {
   $('join-summary').textContent = (plan.profiles || []).map(profile => `${profile.name}（${rootsLabel(profile.skill_roots)}）`).join('；')
-    || '这次没有要接入的 agent。';
+    || '本次没有待接入的 Agent。';
   $('join-counts').innerHTML = JOIN_ACTIONS.map(([action, label, note]) => {
     const count = joinRows(plan, action).length;
     return count ? `<p><strong>${escape(label)}：${count} 个</strong>${hint(note)}</p>` : '';
@@ -3691,7 +3691,7 @@ $('join-apply').addEventListener('click', async event => {
       return result;
     },
     success: result => ({
-      text: result.message || '新 agent 已经接入',
+      text: result.message || '新 Agent 已接入',
       undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
     }),
   });
@@ -3722,8 +3722,8 @@ function renderDetail(assignmentsOnly = false) {
     const pending = on !== assignedNow(skill.name, agent.id);
     let text;
     if (pending) text = pendingNote(skill.name, agent.id);
-    else if (!on) text = cellNote(skill, agent) || (disabledFor.has(agent.id) ? `${agent.name} 里停用了` : '没用');
-    else text = '在用';
+    else if (!on) text = cellNote(skill, agent) || (disabledFor.has(agent.id) ? `${agent.name} 中已停用` : '未启用');
+    else text = '已启用';
     return `<div class="who-row${pending ? ' is-pending' : ''}">
       <span class="who-name">${swatch(agent.id)}${escape(agent.name)}</span>
       <p${pending ? ' class="is-pending"' : ''}>${escape(text)}</p>
@@ -3752,7 +3752,7 @@ function renderDetail(assignmentsOnly = false) {
 
   const requires = skill.requires.map(name => `<span class="chip"><button data-open="${escape(name)}">${escape(titleOf(name))}</button>
       <button class="chip-x" data-dep-remove="${escape(skill.name)}" data-dep-name="${escape(name)}"
-        aria-label="${escape('不再一起带上 ' + titleOf(name))}" ${locked ? 'disabled' : ''}>移除</button></span>`).join('');
+        aria-label="${escape('移除依赖项 ' + titleOf(name))}" ${locked ? 'disabled' : ''}>移除</button></span>`).join('');
   const requiredBy = (state.table?.skills || []).filter(s => s.requires.includes(skill.name))
     .map(s => `<span class="chip chip-solo"><button data-open="${escape(s.name)}">${escape(titleOf(s.name))}</button></span>`).join('');
   const options = (state.table?.skills || [])
@@ -3777,7 +3777,7 @@ function renderDetail(assignmentsOnly = false) {
   const tags = detailTagsHtml(skill, locked || detailTagBusy);
   const zh = skill.description_zh;
   // 有些说明本来就是中文，这时没有“英文原文”可说
-  const original = /[\u4e00-\u9fff]/.test(skill.description) ? '看原文' : '看英文原文';
+  const original = /[\u4e00-\u9fff]/.test(skill.description) ? '查看原文' : '查看英文原文';
 
   $('detail-body').innerHTML = `
     ${skill.title ? `<p class="detail-id">${escape(skill.name)}</p>` : ''}
@@ -3785,32 +3785,32 @@ function renderDetail(assignmentsOnly = false) {
     ${skill.summary ? `<p class="detail-summary">${escape(skill.summary)}</p>` : ''}
     ${tags}
 
-    <h3 class="sub-title">谁在用</h3>
+    <h3 class="sub-title">Agent 分配情况</h3>
     <div class="who">${who}</div>
 
-    <h3 class="sub-title">会一起带上${hint('给某个 agent 加上它时，这些技能会自动一起加上。')}</h3>
-    ${requires ? `<div class="chips">${requires}</div>` : `<p class="item-note">${icon('link')} 不需要别的技能</p>`}
+    <h3 class="sub-title">前置依赖${hint('启用此技能时，所依赖的技能将一并启用。')}</h3>
+    ${requires ? `<div class="chips">${requires}</div>` : `<p class="item-note">${icon('link')} 无前置依赖</p>`}
     <details class="fold fold-inner">
-      <summary>加一个要一起带上的技能</summary>
+      <summary>添加依赖项</summary>
       <p class="row-wrap">
-        <select id="dep-select" class="input" aria-label="选择要一起带上的技能"><option value="">选一个技能…</option>${options}</select>
-        <button class="btn btn-small" id="dep-add" data-dep-add="${escape(skill.name)}" disabled>${icon('plus')}<span>加上</span></button>
-        ${hint(`加上后，用「${titleOf(skill.name)}」的 agent 会自动一起分到它。可以撤销。`)}
+        <select id="dep-select" class="input" aria-label="选择前置依赖"><option value="">选择技能…</option>${options}</select>
+        <button class="btn btn-small" id="dep-add" data-dep-add="${escape(skill.name)}" disabled>${icon('plus')}<span>添加依赖</span></button>
+        ${hint(`添加后，已启用「${titleOf(skill.name)}」的 Agent 将一并启用此依赖，支持撤销。`)}
       </p>
     </details>
-    ${requiredBy ? `<h3 class="sub-title">谁要用它</h3><div class="chips">${requiredBy}</div>` : ''}
+    ${requiredBy ? `<h3 class="sub-title">被以下技能依赖</h3><div class="chips">${requiredBy}</div>` : ''}
 
-    <h3 class="sub-title">${zh ? '说明' : 'agent 实际读到的说明'} <span class="sub-note">· 约 ${tokenText(skill.description_tokens)} Token</span>${hint('每次开新对话，agent 都要先读一遍这段说明，大约占这么多 Token。')}</h3>
+    <h3 class="sub-title">${zh ? '说明' : 'Agent 实际读取的说明'} <span class="sub-note">· 约 ${tokenText(skill.description_tokens)} Token</span>${hint('Agent 启动新对话时会加载此说明，Token 按文本长度估算。')}</h3>
     ${zh ? `<p class="detail-desc">${escape(zh)}</p>
-      <details class="fold fold-inner"><summary>${original}（agent 实际读到的）</summary><p class="detail-desc">${escape(skill.description)}</p></details>`
+      <details class="fold fold-inner"><summary>${original}（Agent 实际读取的文本）</summary><p class="detail-desc">${escape(skill.description)}</p></details>`
       : `<p class="detail-desc">${escape(skill.description)}</p>`}
 
     <h3 class="sub-title">其他</h3>
     <dl class="detail-list">
-      <dt>从哪来</dt><dd>${escape(skill.source_label || '没记录')}</dd>
-      <dt>改过没有</dt><dd>${skill.local_modified ? `${icon('edit')} 你改过${hint('你在这台电脑上改过它，更新时会问你要哪一份。')}` : `${icon('check-circle')} 没改过`}</dd>
+      <dt>来源</dt><dd>${escape(skill.source_label || '未记录')}</dd>
+      <dt>本地修改</dt><dd>${skill.local_modified ? `${icon('edit')} 已修改${hint('此技能已有本地修改，更新前需选择保留的内容。')}` : `${icon('check-circle')} 未修改`}</dd>
       <dt>更新提醒</dt><dd class="row-wrap">${['all', 'description', 'off'].map(mode => {
-        const label = {all: '照常提醒', description: '只看说明有没有变', off: '先不提醒'}[mode];
+        const label = {all: '全部提醒', description: '仅说明变动时提醒', off: '暂不提醒'}[mode];
         const on = (skill.update_watch || 'all') === mode;
         return `<button class="btn btn-small${on ? '' : ' btn-quiet'}" data-watch="${mode}" data-watch-skill="${escape(skill.name)}" ${on || locked ? 'disabled' : ''}>${escape(label)}</button>`;
       }).join('')}</dd>
@@ -3818,11 +3818,11 @@ function renderDetail(assignmentsOnly = false) {
     </dl>
 
     <details class="fold fold-inner">
-      <summary data-hint="排查问题时用，平时不用看。">技术细节</summary>
+      <summary data-hint="包含本地文件路径与入口状态，供排查参考。">技术细节</summary>
       <dl class="detail-list">
         <dt>存放位置</dt><dd class="mono">${pathLabel(homePath() + '/.skill-pilot/store/' + skill.name)}</dd>
       </dl>
-      ${entries ? `<ul class="entry-list">${entries}</ul>` : '<p class="item-note">没找到这个技能在 agent 文件夹里的入口。</p>'}
+      ${entries ? `<ul class="entry-list">${entries}</ul>` : '<p class="item-note">未找到此技能在 Agent 目录中的入口。</p>'}
     </details>`;
 }
 
@@ -4011,9 +4011,9 @@ $('detail-body').addEventListener('click', async event => {
     const mode = button.dataset.watch;
     const name = button.dataset.watchSkill;
     const words = {
-      all: '以后照常提醒有新版',
-      description: '以后只看技能说明有没有变，旁边的资料变了不提醒',
-      off: '以后检查更新时先不提醒',
+      all: '提醒全部更新',
+      description: '仅在技能说明变动时提醒，辅助资料变动不提醒',
+      off: '暂停更新提醒',
     };
     const ok = await confirmDialog({
       title: '更新提醒',
@@ -4041,16 +4041,16 @@ $('detail-body').addEventListener('click', async event => {
     const requires = $('dep-select')?.value;
     if (!requires) return;
     const ok = await confirmDialog({
-      title: '加一个要一起带上的技能',
-      lines: [`以后给 agent 加上「${titleOf(addName)}」时，会自动一起加上「${titleOf(requires)}」。现在用着「${titleOf(addName)}」的 agent 也会一起分到它。`],
-      note: '可以撤销。', okText: '加上',
+      title: '添加依赖项',
+      lines: [`启用「${titleOf(addName)}」时，将一并启用「${titleOf(requires)}」。当前已启用「${titleOf(addName)}」的 Agent 也将分配该依赖。`],
+      note: '支持撤销。', okText: '添加依赖',
     });
     if (!ok) return;
     await decideDependency(addName, requires, true, button);
   } else if (removeName) {
     const ok = await confirmDialog({
-      title: '不再一起带上',
-      lines: [`以后给 agent 加上「${titleOf(removeName)}」时，不再自动带上「${titleOf(button.dataset.depName)}」。现在的分配保持不变。`],
+      title: '移除依赖项',
+      lines: [`启用「${titleOf(removeName)}」时，将不再自动启用「${titleOf(button.dataset.depName)}」。当前分配保持不变。`],
       note: '可以撤销。', okText: '移除',
     });
     if (!ok) return;
@@ -4067,7 +4067,7 @@ async function decideDependency(skill, requires, confirmed, button) {
       await refreshEverything();
       return true;
     },
-    success: () => ({text: confirmed ? '以后会一起带上这个技能' : '以后不再一起带上它'}),
+    success: () => ({text: confirmed ? '已添加前置依赖' : '已移除前置依赖'}),
   });
 }
 
@@ -4105,18 +4105,18 @@ function installSummary(review) {
   const installed = conflicts.filter(item => item.same_content).length;
   const compare = conflicts.length - installed;
   const ready = installReadyNames(review).length;
-  if (!skills.length) return {title: '这个链接里没找到技能', notes: [], items: []};
+  if (!skills.length) return {title: '未在此链接中找到技能', notes: [], items: []};
   const notes = [];
-  if (ready) notes.push(`${ready} 个可以直接装`);
-  if (installed) notes.push(`${installed} 个已经装过`);
-  if (compare) notes.push(`${compare} 个同名，要先对比`);
+  if (ready) notes.push(`${ready} 个可直接安装`);
+  if (installed) notes.push(`${installed} 个已安装`);
+  if (compare) notes.push(`${compare} 个存在同名内容，需核对`);
   const byName = new Map(conflicts.map(item => [item.name, item]));
   const items = skills.map(skill => {
     const conflict = byName.get(skill.name);
-    const status = conflict ? (conflict.same_content ? '已经装过' : '要先对比') : '';
+    const status = conflict ? (conflict.same_content ? '已安装' : '需核对') : '';
     return {name: skill.name, purpose: installPurpose(skill.description), status};
   });
-  return {title: `读到 ${skills.length} 个技能`, notes, items};
+  return {title: `已获取 ${skills.length} 个技能`, notes, items};
 }
 
 /* 左栏卡片：不另开窗口就能看到装什么、有什么用、给谁。多于三个先显示前三个。 */
@@ -4131,7 +4131,7 @@ function installSummaryCard(review, agentName, expanded, writable) {
   const showTarget = Boolean(agentName) && (ready.length > 0 || conflicts.some(item => !item.same_content));
   const items = shown.map(item => {
     const tag = item.status
-      ? `<span class="tag ${item.status === '要先对比' ? 'tag-warn' : 'tag-quiet'}">${escape(item.status)}</span>`
+      ? `<span class="tag ${item.status === '需核对' ? 'tag-warn' : 'tag-quiet'}">${escape(item.status)}</span>`
       : '';
     const purpose = item.purpose ? `<span class="install-summary-purpose">${escape(item.purpose)}</span>` : '';
     const detail = purpose || tag ? `<p class="item-note install-summary-detail">${purpose}${tag}</p>` : '';
@@ -4141,23 +4141,23 @@ function installSummaryCard(review, agentName, expanded, writable) {
     ? '<button type="button" class="link-btn" data-install-more>查看全部</button>'
     : (expanded && summary.items.length > preview ? '<button type="button" class="link-btn" data-install-more="open">收起</button>' : '');
   const facts = [];
-  if (showTarget) facts.push(`装给 ${agentName}`);
+  if (showTarget) facts.push(`添加至 ${agentName}`);
   if (summary.notes.length) facts.push(summary.notes.join('，'));
   return `<p class="rail-note-title">${icon('plus')}<strong>${escape(summary.title)}</strong></p>
     ${items ? `<ul class="install-summary">${items}</ul>` : ''}
     ${more}
     ${facts.length ? `<p class="item-note">${escape(facts.join(' · '))}。</p>` : ''}
     <div class="install-actions">
-      ${ready.length && agentName ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>全部装给 ${escape(agentName)}</button>` : ''}
+      ${ready.length && agentName ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>全部添加给 ${escape(agentName)}</button>` : ''}
       <div class="install-actions-row">
-        ${pickable ? '<button class="btn btn-small" data-install-pick>挑一挑</button>' : ''}
+        ${pickable ? '<button class="btn btn-small" data-install-pick>挑选安装</button>' : ''}
         ${installDismissButton()}
       </div>
     </div>`;
 }
 
 const installDismissButton = () =>
-  `<button class="btn btn-quiet btn-iconic" data-install-dismiss aria-label="关闭这张卡片" title="关闭">${icon('close')}</button>`;
+  `<button class="btn btn-quiet btn-iconic" data-install-dismiss aria-label="关闭安装摘要" title="关闭">${icon('close')}</button>`;
 
 /* 左栏安装区：粘贴框下面按状态显示一张卡片（正在读取 / 概要 / 没读成），读取不挡住页面。 */
 function renderInstallRail() {
@@ -4167,12 +4167,12 @@ function renderInstallRail() {
   if (installReadingUrl) {
     card.hidden = false;
     card.innerHTML = `<p class="rail-note-title"><strong>正在读取…</strong></p>
-      <p class="item-note">页面照常能用，读完这里显示概要。</p>`;
+      <p class="item-note">正在解析技能名称、用途与安装状态。</p>`;
     return;
   }
   if (installReadError) {
     card.hidden = false;
-    card.innerHTML = `<p class="rail-note-title">${icon('warning')}<strong>没读成</strong></p>
+    card.innerHTML = `<p class="rail-note-title">${icon('warning')}<strong>解析未完成</strong></p>
       <p class="item-note">${escape(installReadError)}</p>
       <div class="install-actions-row">
         <button class="btn btn-small" data-install-retry${writable ? '' : ' disabled'}>重试</button>
@@ -4324,9 +4324,9 @@ function renderInstallSkills(review) {
       <p class="item-note">${escape((skill.description || '').slice(0, 160))}</p>
       ${conflict ? `<p class="item-note"><span class="tag tag-warn">${icon('warning')}已有同名技能</span>${hint('安装时会先让你对比两份内容。')}</p>` : ''}
     </div>`;
-  }).join('') || '<p class="item-note">这个链接里没找到技能。</p>';
+  }).join('') || '<p class="item-note">未在此链接中找到技能。</p>';
   const allInstalled = skills.length > 0 && skills.every(skill => conflicts.get(skill.name)?.same_content);
-  $('install-message').textContent = !skills.length ? '这个链接里没找到技能。'
+  $('install-message').textContent = !skills.length ? '未在此链接中找到技能。'
     : allInstalled ? '这些技能都已经装过了'
     : `找到 ${skills.length} 个技能。`;
   renderInstallApply();
@@ -4367,8 +4367,8 @@ async function showIncomingConflicts(result, reviewId) {
 
 /* 完成提示：一个技能写名字，多个写数量；给谁用照 agent 的名字写。 */
 function installDoneText(skills, agents) {
-  const what = skills.length === 1 ? `装好了 ${skills[0]}` : `装好了 ${skills.length} 个技能`;
-  return what + (agents.length ? `，给了 ${agents.map(nameOf).join('、')}` : '，还没给 agent 用');
+  const what = skills.length === 1 ? `已安装 ${skills[0]}` : `已安装 ${skills.length} 个技能`;
+  return what + (agents.length ? `，已分配给 ${agents.map(nameOf).join('、')}` : '，尚未分配给 Agent');
 }
 
 /* 只点一次安装：不再弹确认框，装完直接关窗、刷新列表，中文名在后台补。 */
@@ -4502,22 +4502,22 @@ function updateResultSentence(review) {
   const failed = rows.filter(row => row.error).length;
   const skipped = uncheckedReasons(review);
   const when = updateCheckedAtText(review.checked_at);
-  const finish = text => when ? `${text}。${when} 检查` : `${text}。`;
+  const finish = text => when ? `${text}（${when} 检查）。` : `${text}。`;
   if (!review.total) {
-    let why = '还没有技能';
-    if (!skipped.known) why = '暂时说不清为什么没查';
+    let why = '暂无技能';
+    if (!skipped.known) why = '本次未记录检查范围';
     else if (skipped.count) {
-      const detail = skipped.single ? `这 ${number(skipped.count)} 个${skipped.text}` : skipped.text;
-      why = `${detail}，所以没检查`;
+      const detail = skipped.single ? `${number(skipped.count)} 个技能${skipped.text}` : skipped.text;
+      why = `${detail}，已跳过检查`;
     }
-    return finish(`没有可查的技能：${why}`);
+    return finish(`暂无可检查的技能：${why}`);
   }
-  const outcome = waiting ? `${number(waiting)} 个有新版`
-    : (failed || skipped.count || !skipped.known) ? '没发现新版'
-    : '都是最新的';
-  const lead = `查了 ${number(review.total)} 个，${outcome}`;
+  const outcome = waiting ? `${number(waiting)} 个有可用更新`
+    : (failed || skipped.count || !skipped.known) ? '未发现可用更新'
+    : '均为最新版本';
+  const lead = `已检查 ${number(review.total)} 个技能，${outcome}`;
   if (!skipped.count) return finish(lead);
-  return finish(`${lead}。另外 ${number(skipped.count)} 个没查：${skipped.text}`);
+  return finish(`${lead}；其余 ${number(skipped.count)} 个未检查：${skipped.text}`);
 }
 
 /* 工具栏：检查按钮（带进度）和“全部更新”。
@@ -4531,8 +4531,8 @@ function renderUpdateBar() {
   const failed = rows.filter(row => row.error);
   const notUpdated = rows.filter(row => row.update_error || (row.has_update && row.blocked_reason));
   const problems = [...failed, ...notUpdated];
-  const failureCounts = [failed.length ? `${failed.length} 个没查成` : '',
-    notUpdated.length ? `${notUpdated.length} 个没更新` : ''].filter(Boolean).join('，');
+  const failureCounts = [failed.length ? `${failed.length} 个检查失败` : '',
+    notUpdated.length ? `${notUpdated.length} 个更新未完成` : ''].filter(Boolean).join('，');
 
   const check = $('updates-check');
   check.disabled = checking || Boolean(writeBusy);
@@ -4610,21 +4610,21 @@ function detailUpdateHtml(row) {
     <p class="update-summary">${row.file_count ? `${number(row.file_count)} 个文件有变化，新增 ${number(row.added_lines)} 行，删除 ${number(row.removed_lines)} 行` : escape(row.status)}${row.updated_at ? ' · 上游 ' + escape(friendlyDate(row.updated_at)) + '更新' : ''}</p>
     ${row.blocked_reason ? `<div class="risk-block"><p>${escape(row.blocked_reason)}</p></div>` : ''}
     ${row.script_files?.length ? `<div class="risk-block">
-      <p><strong>脚本或执行权限有变化，请先看</strong></p>
+      <p><strong>脚本或执行权限发生变化，请先核对</strong></p>
       <p>${row.script_files.map(escape).join('、')}</p>
       ${(row.risk_hits || []).map(hit => `<p class="risk-line">${escape(hit.file)}：${escape(hit.line)}</p>`).join('')}
     </div>` : ''}
-    ${row.baseline_uncertain ? '<p class="item-note">无法判断你是否改过这个技能，默认用新版。</p>' : ''}
+    ${row.baseline_uncertain ? '<p class="item-note">无法确认此技能是否有本地修改，默认使用新版。</p>' : ''}
     <div class="update-links">
-      <button class="link-btn" data-update-diff="${escape(row.name)}">${updateState.open.has(row.name) ? '收起完整对比' : '看完整对比'}</button>
+      <button class="link-btn" data-update-diff="${escape(row.name)}">${updateState.open.has(row.name) ? '收起完整对比' : '查看完整对比'}</button>
       <button class="link-btn" data-update-explain="${escape(row.name)}" ${canAct ? '' : 'disabled'}>让 Codex 解释</button>
       ${asks ? `<button class="link-btn" data-update-merge="${escape(row.name)}" ${canAct ? '' : 'disabled'}>交给 Codex 合并</button>` : ''}
     </div>
     <div class="update-actions">
-      ${asks ? `<label class="update-choice">${row.baseline_uncertain ? '不确定你改没改过' : '你改过这个技能'}，更新时
+      ${asks ? `<label class="update-choice">${row.baseline_uncertain ? '本地修改状态未确认' : '此技能已有本地修改'}，更新时
         <select class="input" data-update-choice="${escape(row.name)}" ${canAct ? '' : 'disabled'}>
-          <option value="upstream" ${choice === 'upstream' ? 'selected' : ''}>用新版</option>
-          <option value="keep" ${choice === 'keep' ? 'selected' : ''}>保留我的</option>
+          <option value="upstream" ${choice === 'upstream' ? 'selected' : ''}>使用新版</option>
+          <option value="keep" ${choice === 'keep' ? 'selected' : ''}>保留本地版本</option>
           ${merge ? `<option value="merge" ${choice === 'merge' ? 'selected' : ''}>采用已核对的合并结果</option>` : ''}
         </select></label>` : '<span></span>'}
       <button class="btn btn-primary btn-small" data-update-one="${escape(row.name)}" ${canAct ? '' : 'disabled'}>${row.source?.kind === 'lark' ? '更新整组飞书技能' : '更新'}</button>
@@ -4654,11 +4654,11 @@ async function chooseUpdate(select) {
   updateState.choices.set(name, select.value);
   if (select.value !== 'keep') return;
   updateState.busy = true;
-  updateState.notices.set(name, {text: '正在找你改过的地方…'});
+  updateState.notices.set(name, {text: '正在检查本地修改…'});
   renderDetail();
   try {
     const result = await api('/api/updates/calibrate', {review_id: updateState.review.id, name});
-    updateState.notices.set(name, result.comparison ? {pre: result.comparison} : {text: '没有发现你改过的地方。'});
+    updateState.notices.set(name, result.comparison ? {pre: result.comparison} : {text: '未发现本地修改。'});
   } catch (error) {
     updateState.choices.set(name, 'upstream');
     updateState.notices.set(name, {text: error.message});
@@ -4736,7 +4736,7 @@ async function applyUpdates(names, button = null) {
       const notes = [
         choices[name] === 'keep' ? '保留我的' : choices[name] === 'merge'
           ? mergeIds[name] ? '用已核对的合并结果' : '合并结果尚未确认，本次会跳过'
-          : row.local_modified ? '你改过，会换成新版' : row.baseline_uncertain ? '不确定你改没改过，会换成新版' : '',
+          : row.local_modified ? '已有本地修改，将替换为新版' : row.baseline_uncertain ? '本地修改状态未确认，将替换为新版' : '',
         row.script_files?.length ? '脚本有变化' : '',
         row.source?.kind === 'lark' ? '飞书技能，整组一起更新' : '',
       ].filter(Boolean);
@@ -4818,18 +4818,18 @@ function renderCleanup() {
       <td><strong>${nameHtml(skill.name)}</strong>${skill.summary ? `<p class="skill-desc">${escape(skill.summary)}</p>` : ''}</td>
       <td>${(state.saved[skill.name] || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('')}</td>
       <td class="col-num">${tokenText(skill.description_tokens)}</td>
-    </tr>`).join('') || `<tr><td class="empty" colspan="4">${searching ? emptyInner('search', '没找到，换个词试试') : emptyInner('check-circle', '没有可撤下的技能')}</td></tr>`;
+    </tr>`).join('') || `<tr><td class="empty" colspan="4">${searching ? emptyInner('search', '未找到匹配技能') : emptyInner('check-circle', '没有可撤下的技能')}</td></tr>`;
 
   // 已撤下的：原来给了谁用颜色块和名字，和上面“现在给了谁”一个样子
   const view = state.cleanup;
-  const was = row => (row.previous_agents || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('') || '没有记录';
+  const was = row => (row.previous_agents || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('') || '未记录';
   $('withdrawn-list').innerHTML = !view ? '<p class="item-note">正在读取…</p>' : view.withdrawn.map(row => `<div class="item-row">
     <div>
       <div class="item-title">${nameHtml(row.name)}</div>
-      <div class="item-note">原来给 ${was(row)}${row.withdrawn_at ? ` · ${escape(friendlyDate(row.withdrawn_at))}撤下` : ''}</div>
+      <div class="item-note">曾分配给 ${was(row)}${row.withdrawn_at ? ` · 撤下于 ${escape(friendlyDate(row.withdrawn_at))}` : ''}</div>
     </div>
     <span class="item-end"><button class="btn btn-small" data-restore-withdrawn="${escape(row.name)}" ${view.write_allowed && !writeBusy ? '' : 'disabled'}>${icon('undo')}<span>恢复…</span></button></span>
-  </div>`).join('') || `<div class="empty">${emptyInner('cleanup', '还没有撤下过技能')}</div>`;
+  </div>`).join('') || `<div class="empty">${emptyInner('cleanup', '暂无已撤下技能')}</div>`;
   renderCleanupActionBar();
 }
 
@@ -4841,16 +4841,16 @@ function renderCleanupActionBar() {
   const savings = state.agents.map(agent => {
     const cost = names.filter(name => (state.saved[name] || []).includes(agent.id))
       .reduce((sum, name) => sum + (state.skillIndex.get(name)?.description_tokens || 0), 0);
-    return cost ? `${agent.name} 少占 ${tokenText(cost)} Token` : '';
+    return cost ? `${agent.name} 可释放约 ${tokenText(cost)} Token 开销` : '';
   }).filter(Boolean);
   showActionBar({
-    text: `选了 ${names.length} 个，还没撤下`,
-    note: [savings.join('、'), '撤下只是不给 agent 用，文件还留着，随时能恢复'].filter(Boolean).join('。'),
+    text: `已选 ${names.length} 个待撤下技能`,
+    note: [savings.join('、'), '保留本地文件，随时可恢复'].filter(Boolean).join('。'),
     items: names.map(name => `<li><p>「${escape(titleOf(name))}」<small>${escape((state.saved[name] || []).map(nameOf).join('、'))}</small></p>
-      <button class="btn btn-quiet btn-small" data-cleanup-unpick="${escape(name)}">不撤这个</button></li>`).join(''),
+      <button class="btn btn-quiet btn-small" data-cleanup-unpick="${escape(name)}">取消选择</button></li>`).join(''),
     buttons: [
-      {label: '全部不选', kind: 'btn btn-quiet', action: () => { state.cleanupSelected.clear(); renderCleanup(); }},
-      {label: `撤下这 ${names.length} 个`, kind: 'btn btn-primary', disabled: !state.table?.write_allowed || Boolean(writeBusy), action: button => applyCleanup(button)},
+      {label: '全部取消', kind: 'btn btn-quiet', action: () => { state.cleanupSelected.clear(); renderCleanup(); }},
+      {label: `确认撤下 (${names.length})`, kind: 'btn btn-primary', disabled: !state.table?.write_allowed || Boolean(writeBusy), action: button => applyCleanup(button)},
     ],
   });
 }
@@ -4868,7 +4868,7 @@ async function loadCleanup() {
   try {
     state.cleanup = await api('/api/cleanup');
   } catch (error) {
-    toast({text: '已撤下的技能没能读出来：' + error.message, tone: 'error'});
+    toast({text: '已撤下技能读取失败：' + error.message, tone: 'error'});
   }
   renderCleanup();
   if (homeVisible) renderHomeTodos();
@@ -4888,11 +4888,11 @@ async function applyCleanup(button) {
   const files = new Set((plan.path_warnings || []).map(warning => warning.file));
   const ok = await confirmDialog({
     title: '撤下这些技能',
-    lines: [`从所有 agent 撤下这 ${skills.length} 个技能，文件还留着，随时能恢复。`,
+    lines: [`将从全部 Agent 撤下这 ${skills.length} 个技能，保留本地文件，随时可恢复。`,
             ...(plan.dependency_warnings || []),
-            files.size ? `有 ${files.size} 份你的文件里写着这些技能现在的位置，撤下后那些说法可能要改。` : ''],
+            files.size ? `有 ${files.size} 份文件引用了当前技能位置，撤下后可能需要调整引用。` : ''],
     groups: [{label: '要撤下的技能', items: skills.map(name => ({name}))}],
-    note: '撤下后也能在提示条或操作记录里撤销。', okText: '撤下',
+    note: '可通过提示条或操作记录撤销本次操作。', okText: '撤下',
   });
   if (!ok) return;
   await runWrite({
@@ -4933,10 +4933,10 @@ $('withdrawn-list').addEventListener('click', async event => {
   const name = button?.dataset.restoreWithdrawn;
   if (!name) return;
   const row = state.cleanup.withdrawn.find(item => item.name === name);
-  const back = (row?.previous_agents || []).map(nameOf).join('、') || '原来的 agent';
+  const back = (row?.previous_agents || []).map(nameOf).join('、') || '原 Agent';
   const ok = await confirmDialog({
     title: '恢复这个技能',
-    lines: [`会把它重新给 ${back} 用。`],
+    lines: [`将重新分配给 ${back}。`],
     groups: [{label: '要恢复的技能', items: [{name}]}],
     note: '可以在操作记录里撤销。', okText: '恢复',
   });
@@ -4950,7 +4950,7 @@ $('withdrawn-list').addEventListener('click', async event => {
       return written;
     },
     success: written => ({
-      text: '已经恢复原来的分配',
+      text: '已恢复原分配',
       undo: undoButton => undoOperation(written.id, {skills: [name], message: written.message, button: undoButton}),
     }),
   });
@@ -4973,7 +4973,7 @@ function renderLog() {
     </div>
     <span class="log-end">${record.undone || record.undo_of || !state.table?.write_allowed || writeBusy ? ''
       : `<button class="btn btn-small btn-quiet" data-undo="${escape(record.id)}">${icon('undo')}<span>撤销…</span></button>`}</span>
-  </li>`).join('') || `<li><div class="empty">${emptyInner('log', '还没有操作记录', hint('做过分配、更新、清理之后，都会记在这里。'))}</div></li>`;
+  </li>`).join('') || `<li><div class="empty">${emptyInner('log', '暂无操作记录', hint('做过分配、更新、清理之后，都会记在这里。'))}</div></li>`;
 }
 
 $('log-refresh').addEventListener('click', event => withBusy(event.currentTarget, '正在刷新…', refreshLog));
@@ -5008,7 +5008,7 @@ $('log-list').addEventListener('click', async event => {
 /* ==================== 诊断与备份页 ==================== */
 
 const CATEGORIES = {user: '用户技能', builtin: '软件内置', plugin: '插件技能', plugin_cache: '插件或市场缓存',
-                    vendor: '下载的候选库', unknown_agent: '疑似新 agent', ignored: '已忽略',
+                    vendor: '下载的候选库', unknown_agent: '疑似新 Agent', ignored: '已忽略',
                     backup_temp: '备份或临时目录', reference: '参考资料'};
 
 /* 扫描条目里的 agent 编号翻成名字，再写成一句给人看的话。 */
@@ -5074,7 +5074,7 @@ function renderDiagnostics() {
 
   $('agent-list').innerHTML = data.agents.map(agent => `<details class="fold fold-inner">
     <summary>${escape(agent.name)}
-      <span class="tag tag-quiet">${agent.status === 'ignored' ? '已忽略' : agent.status === 'discovered' ? '已发现，还没接入' : '有盘点档案'}</span></summary>
+      <span class="tag tag-quiet">${agent.status === 'ignored' ? '已忽略' : agent.status === 'discovered' ? '已发现，尚未接入' : '已登记'}</span></summary>
     <p>${escape(agent.visibility_note || '')}</p>
     ${(agent.skill_roots?.length ? agent.skill_roots : agent.evidence || []).map(path => `<p class="mono">${pathLabel(path)}</p>`).join('')}
   </details>`).join('');
@@ -5184,7 +5184,7 @@ function renderMigrationStatus() {
   if (migrated) {
     for (const id of ['select', 'review', 'complete']) $('migration-' + id).hidden = true;
     $('migration-restore').hidden = !backupId;
-    $('migration-done-text').innerHTML = `${icon('check-circle')}<span>已经整理好了</span>${hint('以后接入新 agent，请到设置里的 agent 一栏。')}`;
+    $('migration-done-text').innerHTML = `${icon('check-circle')}<span>整理完成</span>${hint('可在设置的 Agent 页面接入新 Agent。')}`;
   } else {
     renderMigrationChoices();
     migrationStep('select');
@@ -5195,7 +5195,7 @@ function renderMigrationStatus() {
 $('migration-preview').addEventListener('click', event => withBusy(event.currentTarget, '正在核对…', async () => {
   try {
     const agents = [...document.querySelectorAll('[data-migration-agent]:checked')].map(input => input.dataset.migrationAgent);
-    if (!agents.length) throw new Error('请至少选择一个 agent。');
+    if (!agents.length) throw new Error('请至少选择一个 Agent。');
     migrationPlan = await api('/api/migration/plan?agents=' + agents.join(','));
     renderMigrationReview(migrationPlan);
     migrationStep('review');
@@ -5220,7 +5220,7 @@ function renderMigrationReview(plan) {
     return `<details class="fold fold-inner"><summary>${escape(nameOf(id))}：可调用 ${before.available.length} → ${after.available.length} 个；自动可用 ${before.automatic.length} → ${after.automatic.length} 个</summary>
       <p class="item-note">整理前：${escape(before.available.join('、'))}</p>
       <p class="item-note">整理后：${escape(after.available.join('、'))}</p></details>`;
-  }).join('') || '<p class="item-note">没有需要核对的 agent。</p>';
+  }).join('') || '<p class="item-note">没有需要核对的 Agent。</p>';
   $('migration-versions').innerHTML = plan.conflicts.map(skill => `<details class="fold fold-inner" open>
     <summary>${escape(skill.name)}<span class="tag tag-quiet">${escape(skill.reason)}</span></summary>
     ${skill.options.map((option, index) => `<p><label class="check">
@@ -5264,7 +5264,7 @@ async function finishMigration(title, result) {
     try {
       await refreshTable();
     } catch (error) {
-      toast({text: '技能清单没能读出来：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
+      toast({text: '技能清单读取失败：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
     }
     await loadCleanup();
   } else {
@@ -5280,7 +5280,7 @@ $('migration-apply').addEventListener('click', async event => {
   if (!migrationPlan?.write_allowed) return;
   const ok = await confirmDialog({
     title: '开始整理',
-    lines: ['会先备份，再把各 agent 现在用的技能收进一份技能库。每个 agent 原来能用的技能名单会保留。'],
+    lines: ['将先创建备份，再统一整理各 Agent 的技能库，保留现有技能分配。'],
     note: '完成后可以还原成现在这样。', okText: '开始整理',
   });
   if (!ok) return;
@@ -5302,7 +5302,7 @@ $('migration-apply').addEventListener('click', async event => {
 async function restoreBackup(id, button = null) {
   const ok = await confirmDialog({
     title: '还原到整理前？',
-    lines: ['会把各 agent 的技能恢复成整理前的样子。'],
+    lines: ['将各 Agent 的技能恢复至整理前的状态。'],
     note: '还原本身也会记在操作记录里。', okText: '还原',
   });
   if (!ok) return false;
@@ -5327,7 +5327,7 @@ $('migration-backups').addEventListener('click', event => withBusy(event.current
     $('migration-backup-list').innerHTML = saved.map(backup => `<div class="item-row">
       <span class="mono">${escape(backup.backup_id)}</span>
       <span class="item-end"><button class="btn btn-small" data-restore-backup="${escape(backup.backup_id)}" ${state.writeAllowed ? '' : 'disabled'}>还原这份备份</button></span>
-    </div>`).join('') || '<p class="item-note">还没有整理备份。</p>';
+    </div>`).join('') || '<p class="item-note">暂无整理备份。</p>';
   } catch (error) {
     migrationError(error);
   }
@@ -5358,7 +5358,7 @@ async function refreshMigrationStatus() {
 /* 首页只用看板已经读到的数据，不新增接口。所有规则都在这一节里，
    下面「需要你看一眼」的 homeTodos() 只读输入、不改页面，方便用 node 单独测试。 */
 
-const HOME_WHO_DEFAULT = '鼠标移到下面的 agent 上，看它用了哪些';
+const HOME_WHO_DEFAULT = '悬停或点击下方 Agent，查看其启用的技能';
 const HOME_GLOW = 'rgba(47, 91, 211, 0.34)';
 const HOME_DOT_BASE = {
   on: ['rgba(242, 244, 248, 0.9)', '0 0 0 0 rgba(255, 255, 255, 0)'],
@@ -5446,12 +5446,12 @@ function homeTodos(input) {
       key: 'program',
       icon: 'update-up',
       tone: ready || failed ? 'warm' : 'calm',
-      title: ready ? 'SP 升级好了，刷新后生效' : applying ? 'SP 正在升级' : failed ? 'SP 升级没完成' : 'SP 有新版',
-      text: ready ? '刷新页面就能用新版，技能和设置都会保留。'
-        : applying ? '等当前操作完成后会自动继续，可以先做别的。'
-        : failed ? '刚才的升级没完成，可以到版本里再试一次。'
-        : '到设置 → 版本里看看新版，升级不用先关看板。',
-      label: ready ? '去刷新' : '去看看',
+      title: ready ? '新版本已安装，刷新后生效' : applying ? 'Skill Pilot 正在后台升级' : failed ? '程序升级未完成' : 'Skill Pilot 发现新版本',
+      text: ready ? 'Skill Pilot 已更新完毕，刷新页面即可启用新版，数据与设置完整保留。'
+        : applying ? '等待当前任务完成后将自动继续。'
+        : failed ? '升级遇到问题，可前往版本设置查看原因并重试。'
+        : '发现新版 Skill Pilot，支持在看板内一键升级。',
+      label: ready ? '前往刷新' : '查看版本',
       target: 'settings/version',
     });
   }
@@ -5463,10 +5463,10 @@ function homeTodos(input) {
       key: 'updates-checking',
       icon: 'updates',
       tone: 'calm',
-      title: '正在检查更新',
+      title: '正在检查技能更新',
       text: review?.total
-        ? `已经查了 ${homeNumber(review.done)} / ${homeNumber(review.total)} 个，可以接着做别的。`
-        : '正在查装的技能有没有新版，可以接着做别的。',
+        ? `正在比对各技能的最新版本（已完成 ${homeNumber(review.done)} / ${homeNumber(review.total)} 项）。`
+        : '正在比对已启用技能的最新版本。',
       label: '',
     });
   } else if (!review) {
@@ -5474,9 +5474,9 @@ function homeTodos(input) {
       key: 'updates-unchecked',
       icon: 'updates',
       tone: 'warm',
-      title: '还没检查过更新',
-      text: '查一下装的技能有没有新版，查的时候可以接着干别的。',
-      label: '现在检查',
+      title: '尚未检查技能更新',
+      text: '检查已启用且有远程来源的技能是否有可用更新。',
+      label: '立即检查',
       action: 'check-updates',
       disabled: Boolean(updates.locked),
     });
@@ -5485,9 +5485,9 @@ function homeTodos(input) {
       key: 'updates-found',
       icon: 'update-up',
       tone: 'warm',
-      title: `${homeNumber(updates.count)} 个技能有新版`,
-      text: '看看哪些能直接更新；拿不准的会先让你看改了什么。',
-      label: '去看看',
+      title: `${homeNumber(updates.count)} 个技能有可用更新`,
+      text: '检测到新版本，可查看变动详情或一键更新。',
+      label: '查看更新',
       target: 'skills/updates',
     });
   }
@@ -5498,9 +5498,9 @@ function homeTodos(input) {
       key: 'suggested',
       icon: 'plus',
       tone: 'calm',
-      title: `发现 ${homeNumber(suggested.length)} 个新 agent`,
-      text: `${suggested.join('、')} 装在这台电脑上，还没交给 Skill Pilot 管。`,
-      label: '去接入',
+      title: `检测到 ${homeNumber(suggested.length)} 个新 Agent`,
+      text: `${suggested.join('、')} 已安装，可接入 Skill Pilot 统一管理。`,
+      label: '前往接入',
       target: 'settings/agents',
     });
   }
@@ -5511,11 +5511,11 @@ function homeTodos(input) {
       key: 'ai',
       icon: 'sparkle',
       tone: 'calm',
-      title: '还没设置 AI 服务',
+      title: '未配置 AI 整理服务',
       text: pending > 0
-        ? `${homeNumber(pending)} 个技能还没有中文名，填上 AI 服务后会自动起中文名、分好组`
-        : '填上后，新装的英文技能会自动起中文名、分好组',
-      label: '去设置',
+        ? `尚有 ${homeNumber(pending)} 个技能缺少中文名称或说明。配置 AI 服务后将自动整理。`
+        : '配置 AI 服务后，将自动为新技能生成中文名称、说明与用途分组。',
+      label: '前往配置',
       target: 'settings/ai',
     });
   }
@@ -5526,9 +5526,9 @@ function homeTodos(input) {
       key: 'withdrawn',
       icon: 'undo',
       tone: 'calm',
-      title: `撤下过 ${homeNumber(withdrawn)} 个技能`,
-      text: '不占任何 agent 的 Token，想用时可以随时恢复。',
-      label: '去看看',
+      title: `已有 ${homeNumber(withdrawn)} 个技能处于闲置状态`,
+      text: '已从所有 Agent 中撤下，不再占用上下文，随时可恢复。',
+      label: '查看闲置技能',
       target: 'cleanup',
     });
   }
@@ -5539,9 +5539,9 @@ function homeTodos(input) {
       key: 'team',
       icon: 'team',
       tone: 'calm',
-      title: '还没连上团队分享站',
-      text: '连上后能看到同事在用什么技能，一键装上。',
-      label: '去连接',
+      title: '未连接团队分享站',
+      text: '连接团队分享站后，可浏览同事推荐的技能并一键安装。',
+      label: '前往连接',
       target: 'settings/team',
     });
   }
@@ -5567,11 +5567,11 @@ function homeTodosInput() {
 
 function renderHomeGuide() {
   const fresh = awaitingFirstOrganization();
-  $('home-guide-title').textContent = fresh ? '先把这台电脑上的技能整理一遍' : '技能名单还没读出来';
+  $('home-guide-title').textContent = fresh ? '首次启动：整理本地技能库' : '技能清单尚未读取';
   $('home-guide-text').textContent = fresh
-    ? '整理以后，这里会显示有多少技能、各 agent 用了哪些、有什么要处理。整理前会先备份，完成后能还原。'
-    : '技能名单暂时没读到。可以到技能页重新看看，或者关掉页面重新打开看板。';
-  $('home-organize').textContent = fresh ? '去技能页做首次整理 →' : '去技能页看看 →';
+    ? '将本机已有的分散技能统一归集，一站式管理分配与更新。整理前将自动创建完整备份，随时可一键还原。'
+    : '暂时无法读取技能清单。请前往技能页重试，或重新打开看板。';
+  $('home-organize').textContent = fresh ? '开始整理技能库 →' : '前往技能管理 →';
 }
 
 function homeSetNumbersNow() {
@@ -5603,8 +5603,8 @@ function renderHomeHero() {
   const agents = homeAgentInfo();
   const heaviest = agents.reduce((best, agent) => !best || agent.tokens > best.tokens ? agent : best, null);
   $('home-note').innerHTML = heaviest
-    ? `每开一次新对话，agent 都要先读一遍分给它的技能说明。读得最多的是 <b>${escape(heaviest.name)}</b>，约 <b>${tokenText(heaviest.tokens)} Token</b>。`
-    : '还没有 agent 交给 Skill Pilot 管理。';
+    ? `Agent 启动新对话时会预先加载技能说明。当前上下文占用最大的是 <b>${escape(heaviest.name)}</b>（约 <b>${tokenText(heaviest.tokens)} Token</b>）。`
+    : '尚未接入任何 Agent。';
 }
 
 function renderHomeMap() {
@@ -5620,7 +5620,7 @@ function renderHomeMap() {
       const using = state.saved[skill.name] || [];
       const kind = using.length >= 2 ? 'on' : using.length === 1 ? 'n1' : 'idle';
       const label = titleOf(skill.name);
-      const who = using.length ? `${using.map(nameOf).join('、')} 在用` : '暂时没有 agent 在用';
+      const who = using.length ? `使用中：${using.map(nameOf).join('、')}` : '暂未分配给任何 Agent';
       return `<button type="button" class="home-dot ${kind}" tabindex="-1" data-home-skill="${escape(skill.name)}" data-kind="${kind}" aria-label="${escape(`${label}：${who}`)}"></button>`;
     }).join('');
     return `<div class="home-cluster">
@@ -5628,7 +5628,7 @@ function renderHomeMap() {
       <div class="home-dots">${dots}</div>
     </div>`;
   }).join('');
-  box.setAttribute('aria-label', `${homeNumber(skills.length)} 个技能按分组排列，${homeNumber(inUse)} 个有 agent 在用`);
+  box.setAttribute('aria-label', `${homeNumber(skills.length)} 个技能按分组排列，${homeNumber(inUse)} 个已分配使用`);
   homeClusters = [...box.querySelectorAll('.home-cluster')];
   homeDots = [...box.querySelectorAll('.home-dot')];
   homeFocusedAgent = null;
@@ -5638,7 +5638,7 @@ function renderHomeAgents() {
   const box = $('home-agents');
   homeAgents = homeAgentInfo();
   if (!homeAgents.length) {
-    box.innerHTML = '<p class="home-empty">还没有 agent 交给 Skill Pilot 管理。</p>';
+    box.innerHTML = '<p class="home-empty">尚未接入任何 Agent。</p>';
     homeAgentCards = [];
     return;
   }
@@ -5649,7 +5649,7 @@ function renderHomeAgents() {
       <span class="home-agent-top"><span class="home-agent-name"><span class="swatch" aria-hidden="true"></span>${escape(agent.name)}</span><span class="home-agent-act">${escape(agent.activation)}</span></span>
       <span class="home-agent-n">${homeNumber(agent.count)}<small>个技能</small></span>
       <span class="home-bar"><i style="--w:${width}%"></i></span>
-      <span class="home-agent-tok">每次新对话约 <b>${tokenText(agent.tokens)} Token</b></span>
+      <span class="home-agent-tok">单次对话开销约 <b>${tokenText(agent.tokens)} Token</b></span>
       ${agent.shared.length ? `<span class="home-agent-share">和 ${escape(agent.shared.join('、'))} 共用</span>` : ''}
     </button>`;
   }).join('');
@@ -5674,7 +5674,7 @@ function renderHomeTodos() {
       <span class="home-todo-text"><b>${escape(item.title)}</b><span>${escape(item.text)}</span></span>
       ${action}
     </div>`;
-  }).join('') || `<div class="home-done">${icon('check-circle')}<span>都处理好了</span></div>`;
+  }).join('') || `<div class="home-done">${icon('check-circle')}<span>所有事项均已处理完毕</span></div>`;
 }
 
 function homeLogTime(value) {
@@ -5690,7 +5690,7 @@ function renderHomeLog() {
   $('home-log').innerHTML = rows.map(record => `<li>
     <time>${escape(homeLogTime(record.time))}</time>
     <span class="${record.undone ? 'is-undone' : ''}">${escape(pastTense(record.message))}${record.undone ? '（已撤销）' : ''}</span>
-  </li>`).join('') || '<li class="home-log-empty">还没有操作记录</li>';
+  </li>`).join('') || '<li class="home-log-empty">暂无操作记录</li>';
 }
 
 function renderHome({animate = 'none'} = {}) {
@@ -5923,7 +5923,7 @@ function homeShowTip(dot) {
   const using = (state.saved[name] || []).map(nameOf);
   const tip = $('home-tip');
   if (!tip) return;
-  tip.innerHTML = `<b>${escape(skill?.title || name)}</b><span>${escape(using.length ? `${using.join('、')} 在用` : '暂时没有 agent 在用')}</span>`;
+  tip.innerHTML = `<b>${escape(skill?.title || name)}</b><span>${escape(using.length ? `使用中：${using.join('、')}` : '暂未分配给任何 Agent')}</span>`;
   const box = dot.getBoundingClientRect();
   const width = Math.min(280, innerWidth - 16);
   tip.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, box.left + box.width / 2 - width / 2))}px`;
@@ -5945,7 +5945,7 @@ function homeFocusAgent(id) {
   const agent = id ? homeAgents.find(item => item.id === id) : null;
   if (!window.gsap) {
     $('home-who').textContent = agent
-      ? `${agent.name} 在用 · 每次新对话约 ${tokenText(agent.tokens)} Token`
+      ? `${agent.name} 已启用 · 单次对话预占约 ${tokenText(agent.tokens)} Token`
       : HOME_WHO_DEFAULT;
     return;
   }
@@ -5984,7 +5984,7 @@ function homeFocusAgent(id) {
   }
   gsap.to($('home-hero'), {'--glow': homeRgba(agent.color, 0.42), duration: homeDur(0.6), overwrite: 'auto'});
   homeCountTo($('home-total'), agent.count, 0.7);
-  $('home-who').innerHTML = `<b>${escape(agent.name)}</b> 在用 · 每次新对话约 ${tokenText(agent.tokens)} Token`;
+  $('home-who').innerHTML = `<b>${escape(agent.name)}</b> 已启用 · 单次对话预占约 ${tokenText(agent.tokens)} Token`;
 }
 
 function homeOpenGroup(group) {
@@ -6187,7 +6187,7 @@ async function start() {
   try {
     if (renderMigrationStatus()) await refreshTable();
   } catch (error) {
-    toast({text: '技能清单没能读出来：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
+    toast({text: '技能清单读取失败：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
   }
   await refreshLog();
   refreshMigrationStatus();

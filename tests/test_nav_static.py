@@ -113,8 +113,8 @@ function only(items, key) { return items.length === 1 && items[0].key === key; }
 const checked = extra => homeTodos({llm_configured: true, updates: {review: {update_count: 0}, count: 0}, ...extra});
 
 const never = checked({updates: {review: null, starting: false}});
-if (!only(never, 'updates-unchecked')) fail('从没检查过时应只有「还没检查过更新」：' + keys(never));
-if (never[0].label !== '现在检查' || never[0].action !== 'check-updates') fail('没检查过时应给「现在检查」按钮');
+if (!only(never, 'updates-unchecked')) fail('从没检查过时应只有「尚未检查技能更新」：' + keys(never));
+if (never[0].label !== '立即检查' || never[0].action !== 'check-updates') fail('没检查过时应给「立即检查」按钮');
 
 const checking = checked({updates: {starting: true, review: null}});
 if (!only(checking, 'updates-checking')) fail('正在检查时应只有「正在检查更新」：' + keys(checking));
@@ -123,7 +123,7 @@ if (checking[0].action || checking[0].target) fail('正在检查时不应放按�
 // 数量用当前技能表里还有新版的个数，不用 review.update_count（更新完一个以后它会变少）。
 const found = checked({updates: {review: {running: false, total: 3, done: 3, update_count: 2}, count: 1}});
 if (keys(found) !== 'updates-found') fail('有新版时应显示新版条：' + keys(found));
-if (found[0].title !== '1 个技能有新版' || found[0].target !== 'skills/updates') fail('新版条应按当前表里的数量写：' + found[0].title);
+if (found[0].title !== '1 个技能有可用更新' || found[0].target !== 'skills/updates') fail('新版条应按当前表里的数量写：' + found[0].title);
 
 const latest = checked({updates: {review: {running: false, total: 3, done: 3, update_count: 3}, count: 0}});
 if (latest.length) fail('检查后没有新版时不应显示更新条：' + keys(latest));
@@ -135,11 +135,11 @@ if (suggested[0].target !== 'settings/agents') fail('新 agent 条应去设置�
 
 const aiPending = homeTodos({llm_configured: false, labels_pending: 4, updates: {review: {update_count: 0}}});
 if (keys(aiPending) !== 'ai') fail('没设 AI 服务时应提醒：' + keys(aiPending));
-if (aiPending[0].title !== '还没设置 AI 服务' || aiPending[0].target !== 'settings/ai') fail('AI 提醒的标题或去处不对：' + JSON.stringify(aiPending[0]));
-if (!aiPending[0].text.includes('4 个技能还没有中文名')) fail('有缺中文名的技能时应写数量：' + aiPending[0].text);
+if (aiPending[0].title !== '未配置 AI 整理服务' || aiPending[0].target !== 'settings/ai') fail('AI 提醒的标题或去处不对：' + JSON.stringify(aiPending[0]));
+if (!aiPending[0].text.includes('4 个技能缺少中文名称或说明')) fail('有缺中文名的技能时应写数量：' + aiPending[0].text);
 const aiNoPending = homeTodos({llm_configured: false, labels_pending: 0, updates: {review: {update_count: 0}}});
 if (keys(aiNoPending) !== 'ai') fail('没设 AI 服务时应提醒：' + keys(aiNoPending));
-if (aiNoPending[0].text !== '填上后，新装的英文技能会自动起中文名、分好组') fail('没有缺中文名的技能时说明不对：' + aiNoPending[0].text);
+if (aiNoPending[0].text !== '配置 AI 服务后，将自动为新技能生成中文名称、说明与用途分组。') fail('没有缺中文名的技能时说明不对：' + aiNoPending[0].text);
 const aiConfigured = homeTodos({llm_configured: true, labels_pending: 5, updates: {review: {update_count: 0}}});
 if (aiConfigured.length) fail('已经设置 AI 服务时不应提醒：' + keys(aiConfigured));
 
@@ -148,7 +148,7 @@ if (keys(withdrawn) !== 'withdrawn' || !withdrawn[0].title.includes('3')) fail('
 if (withdrawn[0].target !== 'cleanup') fail('撤下过的技能应去清理页');
 
 const unset = checked({team: {configured: false, member: null}});
-if (keys(unset) !== 'team' || unset[0].title !== '还没连上团队分享站') fail('没连分享站时应提醒连接：' + JSON.stringify(unset));
+if (keys(unset) !== 'team' || unset[0].title !== '未连接团队分享站') fail('没连分享站时应提醒连接：' + JSON.stringify(unset));
 if (unset[0].target !== 'settings/team') fail('没连分享站时应去设置的团队分享一块');
 const connected = checked({team: {configured: true, member: {name: 'Acme'}}});
 if (connected.length) fail('连上分享站后不应再占一条团队提醒：' + keys(connected));

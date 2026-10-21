@@ -134,11 +134,11 @@ if (waiting.includes('<b>') || !waiting.includes('&lt;b&gt;示例')) fail('队�
 if (!waiting.includes('排队中')) fail('排队中的技能应写“排队中”');
 const failed = storeQueueRowHtml(state.queue.items[1]);
 if (failed.includes('<img') || !failed.includes('&lt;img')) fail('队列里的失败原因没有转成纯文字：' + failed);
-if (!failed.includes('没装上：') || !failed.includes('data-store-queue-retry="b"')) fail('失败的行要写原因并能重试：' + failed);
+if (!failed.includes('安装失败：') || !failed.includes('data-store-queue-retry="b"')) fail('失败的行要写原因并能重试：' + failed);
 const tag = storeStatusTag({key: 'a', local: {status: 'installable'}});
-if (!tag.includes('排队中') || tag.includes('可以装')) fail('排队中的卡片标签应盖过“可以装”：' + tag);
+if (!tag.includes('排队中') || tag.includes('可安装')) fail('排队中的卡片标签应盖过“可安装”：' + tag);
 state.queue = {items: [{key: 'a', status: 'running'}]};
-if (!storeStatusTag({key: 'a', local: {status: 'installable'}}).includes('正在装')) fail('正在装时应写“正在装”');
+if (!storeStatusTag({key: 'a', local: {status: 'installable'}}).includes('正在安装')) fail('正在安装时应写“正在安装”');
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -166,18 +166,18 @@ const html = storeReviewHtml({listings: [
    download_note: '同事装的时候从 GitHub 下载。', files: {blocked: [{path: 'secret.txt', reason: '像密钥'}]}, note: ''},
 ]});
 for (const text of [
-  '网上的公开技能，连文件一起传：3 个文件，2 KB；同事装的时候不用连 GitHub',
-  '网上的公开技能，只传名字和来源。同事装的时候从 GitHub 下载。',
-  '连文件一起传：2 个文件，1 KB',
-  '拦下 2 个疑似密钥或密码的文件，不会上传',
-  '拦下 1 个疑似密钥或密码的文件，所以这个技能不传文件',
+  '公开技能，包含技能文件：共 3 个文件 (2 KB)；同事安装时从分享站下载',
+  '公开技能，仅上传名称与来源。同事装的时候从 GitHub 下载。',
+  '包含技能文件：共 2 个文件 (1 KB)',
+  '已拦截 2 个疑似敏感凭据文件（不予上传）',
+  '已拦截 1 个疑似敏感凭据文件（此技能仅上传名称与来源）',
 ]) {
   if (!html.includes(text)) fail('上架核对缺了：' + text);
 }
 const shared = storeSourceText({kind: 'github', listings: [{file_count: 3, size: 2048}]});
-if (shared !== '网上的公开技能，上架时连文件存到了分享站，装的时候从分享站下载。') fail('来源说明不对：' + shared);
+if (shared !== '公开技能，文件已随上架保存至分享站，安装时从分享站下载。') fail('来源说明不对：' + shared);
 const online = storeSourceText({kind: 'github', listings: [{}]});
-if (online !== '网上的公开技能，装的时候从原作者那里下载。') fail('没有文件时来源说明不对：' + online);
+if (online !== '公开技能，安装时从原作者的来源下载。') fail('没有文件时来源说明不对：' + online);
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

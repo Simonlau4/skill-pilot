@@ -139,9 +139,9 @@
     <div id="home-guide" class="home-guide" hidden>
       <div class="home-guide-card">
         <p class="home-eyebrow">欢迎使用 Skill Pilot</p>
-        <h2 id="home-guide-title">先把这台电脑上的技能整理一遍</h2>
-        <p id="home-guide-text">整理以后，这里会显示有多少技能、各 agent 用了哪些、有什么要处理。整理前会先备份，完成后能还原。</p>
-        <button id="home-organize" class="home-cta" type="button">去技能页做首次整理 <span aria-hidden="true">→</span></button>
+        <h2 id="home-guide-title">首次启动：整理本地技能库</h2>
+        <p id="home-guide-text">将本机已有的分散技能统一归集，一站式管理分配与更新。整理前将自动创建完整备份，随时可一键还原。</p>
+        <button id="home-organize" class="home-cta" type="button">开始整理技能库 <span aria-hidden="true">→</span></button>
       </div>
     </div>
 
@@ -149,41 +149,41 @@
       <section id="home-hero" class="home-hero" aria-labelledby="home-hero-title">
         <div class="home-glow" aria-hidden="true"></div>
         <div class="home-hero-copy">
-          <p class="home-eyebrow" id="home-hero-title">你的技能库</p>
+          <p class="home-eyebrow" id="home-hero-title">技能库总览</p>
           <div class="home-big"><span id="home-total" class="home-big-n">0</span><span class="home-big-unit">个技能</span></div>
-          <p id="home-who" class="home-who">鼠标移到下面的 agent 上，看它用了哪些</p>
+          <p id="home-who" class="home-who">悬停或点击下方 Agent，查看其启用的技能</p>
           <div class="home-stats">
-            <div class="home-stat"><b id="home-in-use">0</b><span>有 agent 在用</span></div>
-            <div class="home-stat"><b id="home-idle">0</b><span>暂时没人用</span></div>
-            <div class="home-stat"><b id="home-agents-n">0</b><span>个 agent</span></div>
+            <div class="home-stat"><b id="home-in-use">0</b><span>已分配使用</span></div>
+            <div class="home-stat"><b id="home-idle">0</b><span>暂未分配</span></div>
+            <div class="home-stat"><b id="home-agents-n">0</b><span>个 Agent</span></div>
           </div>
           <p id="home-note" class="home-note"></p>
-          <button id="home-manage" class="home-cta" type="button">去管理技能 <span aria-hidden="true">→</span></button>
+          <button id="home-manage" class="home-cta" type="button">管理技能分配 <span aria-hidden="true">→</span></button>
         </div>
         <div id="home-map-wrap" class="home-map-wrap">
           <div class="home-map-head">
-            <h2>技能星图 <span>· 一个点是一个技能</span></h2>
-            <div class="home-legend" aria-hidden="true"><span><i class="is-on"></i>有 agent 在用</span><span><i class="is-off"></i>暂时没人用</span></div>
+            <h2>技能分布星图 <span>· 按用途分组展示</span></h2>
+            <div class="home-legend" aria-hidden="true"><span><i class="is-on"></i>已分配</span><span><i class="is-off"></i>暂未分配</span></div>
           </div>
-          <div id="home-map" class="home-map" role="group" aria-label="技能星图"></div>
+          <div id="home-map" class="home-map" role="group" aria-label="技能分布星图"></div>
         </div>
       </section>
 
       <section id="home-agents-sec" aria-labelledby="home-agents-title">
-        <div class="home-section-head"><h2 id="home-agents-title">各 agent</h2><p>点开看它装了哪些、开关哪个</p></div>
+        <div class="home-section-head"><h2 id="home-agents-title">各 Agent 状态</h2><p>点击卡片可直接调整该 Agent 的技能分配</p></div>
         <div id="home-agents" class="home-agents"></div>
       </section>
 
       <div class="home-lower">
         <section aria-labelledby="home-todo-title">
-          <div class="home-section-head"><h2 id="home-todo-title">需要你看一眼</h2></div>
+          <div class="home-section-head"><h2 id="home-todo-title">待处理事项</h2></div>
           <div id="home-todos" class="home-panel"></div>
         </section>
         <section aria-labelledby="home-log-title">
-          <div class="home-section-head"><h2 id="home-log-title">最近的改动</h2></div>
+          <div class="home-section-head"><h2 id="home-log-title">近期改动记录</h2></div>
           <div class="home-panel">
             <ul id="home-log" class="home-log"></ul>
-            <div class="home-log-more"><button id="home-log-all" class="home-link" type="button">全部操作记录 →</button></div>
+            <div class="home-log-more"><button id="home-log-all" class="home-link" type="button">查看全部记录 →</button></div>
           </div>
         </section>
       </div>
@@ -198,7 +198,7 @@
         <span id="new-text" class="note-line"></span>
         <span class="banner-actions">
           <button id="new-absorb" class="btn btn-small">一键收编</button>
-          <button id="new-toggle" class="btn btn-small btn-quiet" aria-expanded="false">看看是哪些</button>
+          <button id="new-toggle" class="btn btn-small btn-quiet" aria-expanded="false">查看明细</button>
         </span>
       </div>
       <div id="new-list" class="banner-list" hidden></div>
@@ -210,14 +210,14 @@
       <h2>首次整理</h2>
       <p class="note-line">
         <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
-        <span>把各 agent 现在用的技能收进一份技能库，以后在一处管理。整理前会先备份，完成后能还原。</span>
-        <button type="button" class="hint" data-hint="整理只动技能文件：每个 agent 原来能用的技能名单保持不变，只是以后由 SP 统一管。"></button>
+        <span>统一整理各 Agent 的本地技能，集中管理分配与更新。整理前自动备份，完成后可还原。</span>
+        <button type="button" class="hint" data-hint="整理仅涉及技能文件，保留各 Agent 当前的技能分配，之后由 Skill Pilot 统一管理。"></button>
       </p>
       <div id="migration-error" class="banner banner-warn" role="alert" hidden></div>
       <p id="migration-mode" class="muted"></p>
 
       <div id="migration-select">
-        <h3 class="sub-title">1. 选要一起整理的 agent</h3>
+        <h3 class="sub-title">1. 选择要整理的 Agent</h3>
         <div id="migration-agents" class="row-wrap"></div>
         <p id="migration-groups" class="muted"></p>
         <button id="migration-preview" class="btn btn-primary">下一步：核对</button>
@@ -238,25 +238,25 @@
           <div id="migration-skipped"></div>
         </details>
         <p class="row-wrap">
-          <button id="migration-back" class="btn">返回选择 agent</button>
+          <button id="migration-back" class="btn">返回选择 Agent</button>
           <button id="migration-apply" class="btn btn-primary">确认整理</button>
         </p>
       </div>
 
       <div id="migration-complete" hidden>
-        <h3 id="migration-result" class="sub-title">整理好了</h3>
+        <h3 id="migration-result" class="sub-title">整理完成</h3>
         <p id="migration-result-detail"></p>
-        <p class="note-line">要还原到整理前，去设置 → 诊断与备份 → 整理与还原。</p>
+        <p class="note-line">可在设置 → 诊断与备份 → 整理与还原中恢复至整理前。</p>
       </div>
     </div>
 
     <div id="skills-split" class="skills-split">
       <aside class="rail">
-        <nav id="agent-rail" class="rail-list" aria-label="选择 agent"></nav>
+        <nav id="agent-rail" class="rail-list" aria-label="选择 Agent"></nav>
         <div id="install-rail" class="install-rail">
           <div class="install-box">
-            <input id="install-url" type="url" class="input" placeholder="粘贴 GitHub 技能链接" aria-label="技能链接" autocomplete="off" spellcheck="false">
-            <button type="button" class="hint" data-hint="只读取文件，不运行里面的程序。读完在下面显示概要，读取时不挡着页面。"></button>
+            <input id="install-url" type="url" class="input" placeholder="粘贴 GitHub 技能链接并回车" aria-label="技能链接" autocomplete="off" spellcheck="false">
+            <button type="button" class="hint" data-hint="仅解析技能文件，不执行外部脚本。"></button>
           </div>
           <div id="install-card" class="rail-note" role="status" aria-live="polite" hidden></div>
         </div>
@@ -269,13 +269,13 @@
         <div class="toolbar">
           <label class="search-field">
             <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
-            <input id="skills-search" type="search" class="input input-search" placeholder="搜技能的名字或用途" aria-label="搜索技能" autocomplete="off" spellcheck="false">
+            <input id="skills-search" type="search" class="input input-search" placeholder="搜索技能名称或用途" aria-label="搜索技能" autocomplete="off" spellcheck="false">
           </label>
-          <div id="skills-tabs" class="segmented" role="group" aria-label="看哪些技能"></div>
+          <div id="skills-tabs" class="segmented" role="group" aria-label="技能状态筛选"></div>
           <span class="toolbar-end">
             <button id="updates-all" class="btn btn-update" hidden></button>
             <button id="updates-check" class="btn"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-updates"/></svg><span>检查更新</span></button>
-            <button id="skills-refresh" class="btn btn-quiet btn-iconic" aria-label="重新盘点" title="重新盘点：重新读一遍各 agent 里装了哪些技能"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-scan"/></svg></button>
+            <button id="skills-refresh" class="btn btn-quiet btn-iconic" aria-label="重新盘点" title="重新盘点：读取各 Agent 的当前技能清单"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-scan"/></svg></button>
           </span>
         </div>
 
@@ -283,9 +283,9 @@
         <div id="updates-failed" class="failed-list" role="region" aria-label="更新未完成的技能和原因" tabindex="0" hidden></div>
         <p id="labels-hint" class="note-line" hidden>
           <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-sparkle"/></svg>
-          <span>还没设置 AI 服务</span>
+          <span>未配置 AI 服务</span>
           <button id="labels-settings" class="link-btn">去设置</button>
-          <button type="button" class="hint" data-hint="设置好以后，技能会自动有中文名、中文说明和分组。"></button>
+          <button type="button" class="hint" data-hint="配置后将自动生成中文名称、说明及用途分组。"></button>
         </p>
 
         <div id="skills-browser" class="skills-browser without-filters">
@@ -316,25 +316,25 @@
   <!-- ========== 清理页 ========== -->
   <section id="page-cleanup" class="page-section" hidden>
     <div id="cleanup-pending" hidden>
-      <p class="muted">还没整理过，整理后这里会列出可以清理的技能。</p>
-      <button id="cleanup-organize" class="link-btn" type="button">去技能页做首次整理</button>
+      <p class="muted">完成首次整理后，即可查看和清理已启用的技能。</p>
+      <button id="cleanup-organize" class="link-btn" type="button">开始整理技能库</button>
     </div>
     <div id="cleanup-ready">
     <div class="toolbar">
-      <input id="cleanup-search" type="search" class="input input-search" placeholder="搜技能的名字或用途" aria-label="搜索要撤下的技能" autocomplete="off" spellcheck="false">
+      <input id="cleanup-search" type="search" class="input input-search" placeholder="搜索技能名称或用途" aria-label="搜索要撤下的技能" autocomplete="off" spellcheck="false">
       <span class="page-note">
-        <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg>撤下后文件还留着，随时能恢复
-        <button type="button" class="hint" data-hint="挑出不想再给任何 agent 用的技能，一次从所有 agent 撤下。占用 Token 多的排在前面。撤下只是不给 agent 用，文件还留着，随时能恢复。"></button>
+        <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg>撤下后释放上下文占用，保留本地文件，可随时恢复。
+        <button type="button" class="hint" data-hint="按 Token 占用由高到低排列，便于从全部 Agent 中撤下长期不用的技能。"></button>
       </span>
     </div>
     <div class="table-wrap">
       <table class="grid">
         <thead>
           <tr>
-            <th class="col-check">撤下</th>
+            <th class="col-check">选择</th>
             <th>技能</th>
-            <th>现在给了谁</th>
-            <th class="col-num" aria-sort="descending" title="占用多的排在前面">占用 Token <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-sort"/></svg></th>
+            <th>当前使用 Agent</th>
+            <th class="col-num" aria-sort="descending" title="按 Token 占用从高到低排列">占用 Token <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-sort"/></svg></th>
           </tr>
         </thead>
         <tbody id="cleanup-rows"></tbody>
@@ -343,7 +343,7 @@
 
     <div class="section-head">
       <h2>已撤下的技能</h2>
-      <button type="button" class="hint" data-hint="文件都还在。恢复会重新给原来的 agent 用，可以撤销。"></button>
+      <button type="button" class="hint" data-hint="恢复后将重新分配给原 Agent，支持撤销。"></button>
       <button id="withdrawn-refresh" class="btn btn-small btn-quiet"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg><span>刷新</span></button>
     </div>
     <div id="withdrawn-list" class="list"></div>
@@ -357,7 +357,7 @@
         <div class="set-nav-group" role="group" aria-labelledby="set-nav-common">
           <p class="set-nav-title" id="set-nav-common">常用</p>
           <button class="rail-item set-nav-item" type="button" data-block="ai" aria-current="true">AI 整理</button>
-          <button class="rail-item set-nav-item" type="button" data-block="agents">agent</button>
+          <button class="rail-item set-nav-item" type="button" data-block="agents">Agent</button>
           <button class="rail-item set-nav-item" type="button" data-block="share">分享配置</button>
           <button class="rail-item set-nav-item" type="button" data-block="team">团队分享</button>
         </div>
@@ -377,7 +377,7 @@
           <div class="set-head">
             <div class="set-head-text">
               <h2 id="set-ai-title">AI 整理</h2>
-              <p class="set-lead">让 AI 给技能起中文名、写中文说明、按用途分组。</p>
+              <p class="set-lead">配置 AI 服务，自动为技能生成中文名称、简短说明与用途分类。</p>
             </div>
           </div>
 
@@ -386,25 +386,25 @@
             <select id="llm-provider" class="input">
               <option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option>
               <option value="kimi">Kimi</option><option value="glm">智谱</option>
-              <option value="openai">OpenAI</option><option value="other">其他（自己填）</option>
+              <option value="openai">OpenAI</option><option value="other">其他（自定义）</option>
             </select>
             <label for="llm-base-url">服务地址</label><input id="llm-base-url" type="url" class="input" required>
             <label for="llm-model">模型</label><input id="llm-model" class="input" required>
-            <label for="llm-key">API key</label><input id="llm-key" type="password" class="input" autocomplete="off" aria-describedby="llm-note">
+            <label for="llm-key">API 密钥</label><input id="llm-key" type="password" class="input" autocomplete="off" aria-describedby="llm-note">
             <p id="llm-note" class="note-line">
               <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
-              <span>只发技能的名字和说明，不发其他文件；key 只存在这台电脑上。</span>
-              <button type="button" class="hint" data-hint="技能的名字和说明会发给你选的这家 AI 服务，用来起中文名、翻译说明和按用途分组。"></button>
+              <span>仅向所选 AI 服务发送技能名称与说明；其他文件不上传，密钥仅保存在本机。</span>
+              <button type="button" class="hint" data-hint="所选 AI 服务将根据技能名称和说明生成中文名称、翻译说明并按用途分组。"></button>
             </p>
-            <p class="row-wrap"><button id="llm-save" class="btn btn-primary">保存并试一下</button>
-              <button id="llm-clear" type="button" class="link-btn" hidden>删除 key</button></p>
+            <p class="row-wrap"><button id="llm-save" class="btn btn-primary">保存并测试连接</button>
+              <button id="llm-clear" type="button" class="link-btn" hidden>删除密钥</button></p>
             <p id="llm-message" class="muted" role="status"></p>
           </form>
 
           <hr class="set-divider">
 
           <p id="labels-count" class="note-line" role="status"></p>
-          <p class="row-wrap"><button id="labels-missing" class="btn" hidden><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-sparkle"/></svg><span>整理剩下的技能</span></button>
+          <p class="row-wrap"><button id="labels-missing" class="btn" hidden><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-sparkle"/></svg><span>整理待处理技能</span></button>
             <button id="labels-all" class="btn"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-sparkle"/></svg><span>重新整理全部</span></button></p>
         </section>
 
@@ -412,41 +412,41 @@
         <section class="set-block" id="block-agents" data-block="agents" aria-labelledby="set-agents-title">
           <div class="set-head">
             <div class="set-head-text">
-              <h2 id="set-agents-title">agent</h2>
-              <p class="set-lead">看看有哪些 agent 在用技能，也能接入新的。</p>
+              <h2 id="set-agents-title">Agent</h2>
+              <p class="set-lead">查看已接入的 Agent 及其技能目录，或接入新发现的 Agent。</p>
             </div>
-            <button id="agents-scan" class="btn" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-scan"/></svg><span>重新扫描 agent</span></button>
+            <button id="agents-scan" class="btn" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-scan"/></svg><span>重新扫描 Agent</span></button>
           </div>
           <p id="agents-scan-status" class="note-line" role="status" aria-live="polite"></p>
 
           <p id="agents-empty" class="note-line" hidden>
             <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-info"/></svg>
-            <span>还没有接手管理任何 agent</span>
-            <button id="agents-migration-link" class="link-btn">去技能页做首次整理</button>
-            <button type="button" class="hint" data-hint="整理以后，这里会列出正在管理的 agent。"></button>
+            <span>尚未接入任何 Agent</span>
+            <button id="agents-migration-link" class="link-btn">开始整理技能库</button>
+            <button type="button" class="hint" data-hint="完成首次整理后，此处将列出已接入的 Agent。"></button>
           </p>
           <div id="agents-managed" class="list"></div>
           <h3 class="sub-title">按文件夹接入</h3>
           <p class="row-wrap">
-            <input id="agent-add-name" class="input" aria-label="agent 名字" placeholder="名字">
+            <input id="agent-add-name" class="input" aria-label="Agent 名称" placeholder="名字">
             <input id="agent-add-folder" class="input" aria-label="技能文件夹" placeholder="技能文件夹">
             <button id="agent-add-submit" class="btn" type="button">接入</button>
           </p>
           <div id="agents-suggested-box" hidden>
-            <h3 class="sub-title">发现的新 agent</h3>
+            <h3 class="sub-title">新发现的 Agent</h3>
             <div id="agents-suggested" class="list"></div>
           </div>
           <div id="agents-ignored-box" hidden>
-            <h3 class="sub-title">没在管理的 agent</h3>
+            <h3 class="sub-title">未接入的 Agent</h3>
             <div id="agents-ignored" class="list"></div>
           </div>
 
           <h3 class="sub-title">其他技能文件夹</h3>
-          <p class="note-line">SP 也会到这些文件夹里找技能。不填就不额外找。</p>
+          <p class="note-line">Skill Pilot 会同时扫描以下技能文件夹。留空则仅扫描 Agent 的默认目录。</p>
           <div id="extra-sources" class="list"></div>
           <form id="extra-source-form" class="row-wrap">
             <input id="extra-source-path" class="input" aria-label="其他技能文件夹" placeholder="例如「我的笔记/示例技能」">
-            <button id="extra-source-add" class="btn" type="submit">记下</button>
+            <button id="extra-source-add" class="btn" type="submit">保存目录</button>
           </form>
           <p id="extra-source-message" class="muted" role="status"></p>
         </section>
@@ -456,16 +456,16 @@
           <div class="set-head">
             <div class="set-head-text">
               <h2 id="set-share-title">分享配置</h2>
-              <p class="set-lead">把技能清单和分配关系交给别人，或者收下别人给的清单。</p>
+              <p class="set-lead">导出技能清单与分配方案以供分享，或导入已有配置文件。</p>
             </div>
           </div>
 
           <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
             <span>不含技能正文、账号密钥和本机目录；文件内附使用说明。</span>
-            <button type="button" class="hint" data-hint="只包含已应用的在用技能、来源、分配和依赖。已撤下的技能默认不带；仍被需要的依赖会带上。自制、来源缺失或本机改过的技能会标明待补齐。对方已有同名技能的内容会保留。"></button>
+            <button type="button" class="hint" data-hint="包含已启用技能的清单、来源、分配与依赖关系。默认不含已撤下的技能，但保留必要依赖。自制、来源缺失或本地修改过的技能会标记为待补齐；导入时保留本机已有的同名技能。"></button>
           </p>
           <p class="row-wrap">
-            <select id="config-agent" class="input" aria-label="导出哪些技能"><option value="">全部在用技能</option></select>
+            <select id="config-agent" class="input" aria-label="导出哪些技能"><option value="">全部已启用技能</option></select>
             <button id="config-export" class="btn" disabled><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg><span>导出配置</span></button>
             <button id="config-import" class="btn" disabled><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-inbox"/></svg><span>导入配置</span></button>
           </p>
@@ -476,27 +476,27 @@
           <div class="set-head">
             <div class="set-head-text">
               <h2 id="set-team-title">团队分享</h2>
-              <p class="set-lead">连上团队的分享站，看同事在用的技能，挑适合的装上。</p>
+              <p class="set-lead">连接团队分享站，浏览并安装同事推荐的技能。</p>
             </div>
           </div>
 
           <form id="team-form" class="settings-form">
             <label for="team-url">分享站地址</label>
             <input id="team-url" type="url" class="input" placeholder="分享站地址，例如 http://192.168.1.20:8765" autocomplete="off" spellcheck="false" required>
-            <label for="team-name" id="team-name-label" hidden>你的名字</label>
-            <input id="team-name" type="text" class="input" placeholder="同事看到的称呼，第一次连接时填" maxlength="40" autocomplete="off" hidden>
-            <p class="row-wrap"><button id="team-key-toggle" type="button" class="link-btn" aria-expanded="false" aria-controls="team-key-box">管理员给了口令？</button></p>
+            <label for="team-name" id="team-name-label" hidden>显示名称</label>
+            <input id="team-name" type="text" class="input" placeholder="首次连接时填写，供同事识别" maxlength="40" autocomplete="off" hidden>
+            <p class="row-wrap"><button id="team-key-toggle" type="button" class="link-btn" aria-expanded="false" aria-controls="team-key-box">填写管理员口令</button></p>
             <div id="team-key-box" hidden>
-              <label for="team-key">管理员给的口令</label>
+              <label for="team-key">管理员口令</label>
               <input id="team-key" type="password" class="input" autocomplete="off" aria-describedby="team-note">
             </div>
             <p id="team-note" class="note-line">
               <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
-              <span>连接信息只存在这台电脑上；只有你点“上架”时才上传技能。</span>
-              <button type="button" class="hint" data-hint="分享站只收你挑着上架的技能：名字、说明和推荐语；自制或改过的连同技能文件，疑似密钥、密码的文件会被拦下。不收 AI 服务的 key 和本机目录。名字是同事看到的称呼；分享站要求口令时，向管理员要。"></button>
+              <span>连接信息仅保存在本机；技能仅在点击“上架”后上传。</span>
+              <button type="button" class="hint" data-hint="分享站仅接收所选技能的名称、说明与推荐语；自制或修改过的技能将包含文件，疑似含密钥或密码的文件会被拦截。AI 服务密钥与本机目录不上传。显示名称供同事识别；连接口令由管理员提供。"></button>
             </p>
             <p class="row-wrap"><button id="team-save" class="btn btn-primary">保存并连接</button>
-              <button id="team-goto" type="button" class="link-btn" hidden>去团队页</button></p>
+              <button id="team-goto" type="button" class="link-btn" hidden>前往团队</button></p>
             <p id="team-message" class="muted" role="status"></p>
           </form>
         </section>
@@ -508,7 +508,7 @@
           <div class="set-head">
             <div class="set-head-text">
               <h2 id="set-log-title">操作记录</h2>
-              <p class="set-lead">完整记录保存在本机，需要时可导出。</p>
+              <p class="set-lead">查看本地操作历史，支持撤销近期操作或导出全部记录。</p>
             </div>
             <button id="log-export" class="btn btn-small btn-quiet"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg><span>导出全部记录</span></button>
           </div>
@@ -526,21 +526,21 @@
           <div class="set-head">
             <div class="set-head-text">
               <h2 id="set-diagnostics-title">诊断与备份</h2>
-              <p class="set-lead">排查问题、恢复备份用，平时不用管。</p>
+              <p class="set-lead">检查技能版本冲突与目录状态，管理整理前的备份。</p>
             </div>
           </div>
 
           <details class="fold" id="diag-conflicts-box">
             <summary>版本差异 <span id="conflict-count" class="tag tag-quiet"></span></summary>
-            <p class="muted">同名技能在不同位置内容不一样。相同内容已经归在一起。</p>
+            <p class="muted">同名技能在不同位置存在内容差异；相同内容已合并显示。</p>
             <div id="conflict-list" class="list"></div>
           </details>
 
           <details class="fold" id="diag-inventory-box">
-            <summary>agent 与目录</summary>
+            <summary>Agent 与目录</summary>
             <div class="toolbar">
               <input id="inventory-search" type="search" class="input input-search" placeholder="搜索技能名称或说明" aria-label="搜索技能">
-              <label class="check"><input id="include-readonly" type="checkbox"> 同时看内置和插件</label>
+              <label class="check"><input id="include-readonly" type="checkbox"> 包含内置和插件技能</label>
               <select id="root-filter" class="input" aria-label="选择目录">
                 <option value="">全部用户技能目录</option>
               </select>
@@ -549,7 +549,7 @@
             <div class="table-wrap table-wrap-mid">
               <table class="grid">
                 <thead>
-                  <tr><th>技能</th><th>放在哪里</th><th>文件状态</th><th class="col-num">说明字数</th></tr>
+                  <tr><th>技能</th><th>存放位置</th><th>文件状态</th><th class="col-num">说明字数</th></tr>
                 </thead>
                 <tbody id="inventory-rows"></tbody>
               </table>
@@ -563,7 +563,7 @@
                 <tbody id="root-list"></tbody>
               </table>
             </div>
-            <h3 class="sub-title">agent</h3>
+            <h3 class="sub-title">Agent</h3>
             <div id="agent-list" class="list"></div>
           </details>
 
@@ -575,7 +575,7 @@
 
           <details class="fold" id="diag-migration-box">
             <summary>整理与还原</summary>
-            <p id="migration-pointer" class="muted" hidden>还没有整理过。回到技能页的「首次整理」，整理完在这里还原或看备份。</p>
+            <p id="migration-pointer" class="muted" hidden>请先前往技能页完成首次整理，再在此查看备份或还原。</p>
             <div id="migration-error-settings" class="banner banner-warn" role="alert" hidden></div>
 
             <div id="migration-done" class="fold-note" hidden>
@@ -596,15 +596,15 @@
           <div class="set-head">
             <div class="set-head-text">
               <h2 id="set-version-title">版本</h2>
-              <p class="set-lead">更新 Skill Pilot 程序本身。</p>
+              <p class="set-lead">检查并升级 Skill Pilot。</p>
             </div>
           </div>
 
           <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
-            <span>只更新 SP 程序，技能、分配和个人设置保留。</span>
+            <span>升级 Skill Pilot，保留技能、分配和个人设置。</span>
           </p>
           <p id="program-version" class="note-line" hidden></p>
-          <p id="program-message" class="note-line" role="status" aria-live="polite">从 GitHub 官方项目获取新版</p>
+          <p id="program-message" class="note-line" role="status" aria-live="polite">从 Skill Pilot 官方项目获取新版</p>
           <p id="program-error" class="program-error" role="alert" hidden></p>
           <p class="row-wrap">
             <button id="program-check" class="btn"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-updates"/></svg><span>检查更新</span></button>
@@ -618,17 +618,17 @@
   <!-- ========== 团队页：团队技能商店。上面几排推荐，下面是全部技能；点开在右侧详情里装上、评价 ========== -->
   <section id="page-team" class="page-section" hidden>
     <div id="team-unset" hidden>
-      <div class="empty"><svg class="ico ico-lg" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>还没连上团队的分享站</span><button id="team-setup" type="button" class="link-btn">去设置</button></div>
+      <div class="empty"><svg class="ico ico-lg" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>尚未连接团队分享站</span><button id="team-setup" type="button" class="link-btn">去设置</button></div>
     </div>
     <div id="team-ready">
       <div class="toolbar store-bar">
         <label class="search-field">
           <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
-          <input id="store-search" type="search" class="input input-search" placeholder="搜技能的名字、用途或推荐语" aria-label="搜索团队技能" autocomplete="off" spellcheck="false">
+          <input id="store-search" type="search" class="input input-search" placeholder="搜索技能名称、用途或推荐语" aria-label="搜索团队技能" autocomplete="off" spellcheck="false">
         </label>
         <span class="toolbar-end">
           <button id="store-refresh" class="btn btn-iconic btn-quiet" type="button" aria-label="刷新" title="刷新"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg></button>
-          <button id="store-mine" class="btn" type="button" aria-pressed="false"><span>我上架的</span><span id="store-mine-count" class="n"></span></button>
+          <button id="store-mine" class="btn" type="button" aria-pressed="false"><span>我的上架</span><span id="store-mine-count" class="n"></span></button>
           <button id="store-publish" class="btn btn-primary" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-plus"/></svg><span>上架技能</span></button>
         </span>
       </div>
@@ -655,7 +655,7 @@
             <button class="seg" type="button" data-store-sort="popular" aria-pressed="false">推荐最多</button>
           </div>
         </div>
-        <div id="store-groups" class="store-groups" role="group" aria-label="按分组看"></div>
+        <div id="store-groups" class="store-groups" role="group" aria-label="按分组筛选"></div>
         <div id="store-list" class="store-list"></div>
       </section>
     </div>
@@ -665,8 +665,8 @@
 
 <footer class="footer">
   <p id="footer-note" class="note-line">
-    <span>关掉所有看板页面，程序会自动退出</span>
-    <button type="button" class="hint" data-hint="关掉全部看板页面后，程序会在 30 秒内退出；正在检查更新或整理中文名时，会等任务完成。"></button>
+    <span>关闭全部看板页面后，Skill Pilot 将自动退出</span>
+    <button type="button" class="hint" data-hint="关闭全部看板页面后，Skill Pilot 将在 30 秒内退出；后台任务会先完成。"></button>
     <span id="footer-time"></span>
   </p>
 </footer>
@@ -681,7 +681,7 @@
   <div id="detail-body" class="side-panel-body"></div>
 </aside>
 
-<section id="action-bar" class="action-bar" aria-label="还没生效的改动" hidden>
+<section id="action-bar" class="action-bar" aria-label="待应用的改动" hidden>
   <div class="action-head">
     <div class="action-text">
       <p id="action-summary"></p>
@@ -717,12 +717,12 @@
 
 <dialog id="agents-join-dialog" class="dialog dialog-wide">
   <form method="dialog" class="dialog-form">
-    <h2>接入新 agent</h2>
+    <h2>接入新 Agent</h2>
     <p id="join-summary" class="muted"></p>
     <div id="join-counts" class="list"></div>
     <div id="join-choices"></div>
     <div id="join-skipped-box" hidden>
-      <h3 class="sub-title">这些内容会原样留着</h3>
+      <h3 class="sub-title">以下内容将保持原样</h3>
       <div id="join-skipped"></div>
     </div>
     <p id="join-message" class="muted" role="status"></p>
@@ -739,11 +739,11 @@
     <div class="settings-form">
       <label for="config-import-file">选择收到的配置文件</label>
       <input id="config-import-file" type="file" class="input" accept=".json,application/json">
-      <label for="config-import-agent">给谁使用</label>
+      <label for="config-import-agent">分配方式</label>
       <select id="config-import-agent" class="input"><option value="">按配置中的分配</option></select>
     </div>
-    <p class="muted">已有同名技能会保留，只补上分配和所需技能。导入后可整批撤销。</p>
-    <p id="config-import-message" role="status">选好文件后，先核对可导入和待补齐的技能。</p>
+    <p class="muted">保留已有同名技能，补齐分配与前置依赖。导入后可整批撤销。</p>
+    <p id="config-import-message" role="status">选择配置文件后，即可核对可导入和待补齐的技能。</p>
     <div id="config-import-review" class="dialog-body"></div>
     <div class="dialog-actions">
       <button id="config-import-close" type="button" class="btn">关闭</button>
@@ -758,11 +758,11 @@
   <form class="dialog-form">
     <h2 id="store-publish-title">上架技能</h2>
     <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>
-      <span>自制或改过的技能会连文件一起传，疑似密钥、密码的文件会被拦下。</span></p>
+      <span>自制或修改过的技能将连同文件上传；系统会拦截疑似包含密钥、凭证的文件。</span></p>
     <div id="store-pick">
       <label class="search-field">
         <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
-        <input id="store-pick-search" type="search" class="input input-search" placeholder="搜自己的技能" aria-label="搜索自己的技能" autocomplete="off" spellcheck="false">
+        <input id="store-pick-search" type="search" class="input input-search" placeholder="搜索本机技能" aria-label="搜索自己的技能" autocomplete="off" spellcheck="false">
       </label>
       <div id="store-pick-list" class="dialog-body store-pick-list"></div>
     </div>
@@ -780,13 +780,13 @@
 <dialog id="install-dialog" class="dialog dialog-wide">
   <form method="dialog" class="dialog-form">
     <h2>安装技能</h2>
-    <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>只读取文件，不运行里面的程序</p>
+    <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>仅解析技能文件，不执行外部脚本</p>
     <p id="install-message" role="status"></p>
     <div id="install-skills" class="list"></div>
-    <h3 class="sub-title">给哪些 agent 使用<button type="button" class="hint" data-hint="默认给你正在看的 agent；装完也可以在技能页里调"></button></h3>
+    <h3 class="sub-title">分配给 Agent<button type="button" class="hint" data-hint="默认分配给当前 Agent，安装后仍可在技能页调整。"></button></h3>
     <div id="install-agents" class="row-wrap"></div>
     <div id="incoming-conflicts" hidden>
-      <h3 class="sub-title"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-warning"/></svg>同名技能，先对比<button type="button" class="hint" data-hint="现有内容会保留。请先看两份内容的差别。"></button></h3>
+      <h3 class="sub-title"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-warning"/></svg>同名技能需核对<button type="button" class="hint" data-hint="保留现有内容，请先核对两份内容的差异。"></button></h3>
       <div id="incoming-comparisons" class="list"></div>
     </div>
     <div class="dialog-actions">
@@ -800,16 +800,16 @@
   <form class="dialog-form">
     <h2 id="tag-dialog-title">批量打标签</h2>
     <div class="tag-editor-row">
-      <input id="tag-dialog-input" class="input input-grow" list="used-tags" autocomplete="off" placeholder="加个标签，比如项目名" aria-label="标签">
-      <button type="button" class="hint" data-hint="标签由你自己打，用来按项目、客户这类事找技能，可以不打。"></button>
+      <input id="tag-dialog-input" class="input input-grow" list="used-tags" autocomplete="off" placeholder="添加自定义标签（如项目、领域）" aria-label="标签">
+      <button type="button" class="hint" data-hint="添加标签后可快速筛选技能，留空则不设标签。"></button>
     </div>
     <p id="tag-dialog-count" class="muted" role="status" aria-live="polite">已选 0 个</p>
     <div id="tag-dialog-skills" class="tag-skill-list" role="group" aria-label="要打标签的技能"></div>
     <p id="tag-dialog-error" class="row-note is-error" role="alert" hidden></p>
     <div class="dialog-actions">
       <button id="tag-dialog-close" type="button" class="btn">关闭</button>
-      <button id="tag-dialog-remove" type="button" class="btn" disabled>去掉这个标签</button>
-      <button id="tag-dialog-add" type="button" class="btn btn-primary" disabled>加上</button>
+      <button id="tag-dialog-remove" type="button" class="btn" disabled>移除标签</button>
+      <button id="tag-dialog-add" type="button" class="btn btn-primary" disabled>添加</button>
     </div>
   </form>
 </dialog>

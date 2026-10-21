@@ -82,8 +82,8 @@ class CleanupBeforeOrganizeTests(unittest.TestCase):
         html = (STATIC / 'index.html').read_text()
         source = (STATIC / 'app.js').read_text()
         page = html.split('id="page-cleanup"', 1)[1].split('id="page-settings"', 1)[0]
-        self.assertIn('还没整理过，整理后这里会列出可以清理的技能', page)
-        self.assertIn('去技能页做首次整理', page)
+        self.assertIn('完成首次整理后，即可查看和清理已启用的技能', page)
+        self.assertIn('开始整理技能库', page)
         self.assertIn("$('cleanup-organize').addEventListener('click', () => showPage('skills'));", source)
         self.assertNotIn('首次迁移', page)
         self.assertNotIn('正在读取', page)
