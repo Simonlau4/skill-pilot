@@ -245,7 +245,7 @@ def write_json(path, value, checked):
 
 
 def backup_kind(manifest):
-    if manifest.get("kind"):
+    if "kind" in manifest:
         return manifest["kind"]
     paths = manifest["paths"]
     if ".skill-pilot/store" in paths and ".skill-pilot/logs" not in paths:

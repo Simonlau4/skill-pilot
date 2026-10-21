@@ -210,7 +210,13 @@ class BackupRetentionTests(unittest.TestCase):
         iterdir = type(self.root).iterdir
         for index, content in enumerate(('{"paths":', '{}',
                 '{"kind":"future-kind","paths":[".skill-pilot/logs"]}',
-                '{"kind":"operation","paths":".skill-pilot/logs"}')):
+                '{"kind":"operation","paths":".skill-pilot/logs"}',
+                '{"kind":null,"paths":[".skill-pilot/logs"]}',
+                '{"kind":"","paths":[".skill-pilot/logs"]}',
+                '{"kind":false,"paths":[".skill-pilot/logs"]}',
+                '{"kind":0,"paths":[".skill-pilot/logs"]}',
+                '{"kind":[],"paths":[".skill-pilot/logs"]}',
+                '{"kind":{},"paths":[".skill-pilot/logs"]}')):
             with self.subTest(manifest=content):
                 damaged = self.legacy(f'20000101T{index * 2 + 1:012}', ['.skill-pilot/logs'])
                 (damaged / 'manifest.json').write_text(content)
