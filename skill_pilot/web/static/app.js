@@ -5695,6 +5695,7 @@ function renderHomeLog() {
 
 function renderHome({animate = 'none'} = {}) {
   if (!homeVisible) return;
+  $('home-loading').hidden = true;
   const ready = Boolean(state.table);
   $('home-guide').hidden = ready;
   $('home-main').hidden = !ready;
@@ -5789,12 +5790,12 @@ function playHomeIntro() {
     homeCountTo($('home-idle'), idle, 0.6);
     homeCountTo($('home-agents-n'), agents, 0.6);
   }, '<0.03');
-  addFrom([hero.querySelector('.home-map-head'), ...names], {y: 10, autoAlpha: 0, stagger: 0.02, duration: 0.28}, '<0.04');
+  addFrom([hero.querySelector('.home-map-head'), ...names], {y: 10, autoAlpha: 0, stagger: {amount: Math.min(0.24, names.length * 0.02)}, duration: 0.28}, '<0.04');
   addFrom(homeDots, {scale: 0, autoAlpha: 0, duration: 0.4, ease: 'back.out(2.2)', stagger: {amount: 0.55, from: 'random'}}, '<0.03');
   addFrom([$('home-note'), $('home-manage')], {y: 12, autoAlpha: 0, stagger: 0.05, duration: 0.3}, '<0.5');
   addFrom(document.querySelector('#home-agents-sec .home-section-head'), {y: 12, autoAlpha: 0, duration: 0.3}, '<0');
-  addFrom(homeAgentCards, {y: 24, rotationX: -10, transformPerspective: 700, transformOrigin: '50% 0%', autoAlpha: 0, stagger: 0.05, duration: 0.42, ease: 'expo.out'}, '<0.05');
-  addFrom(bars, {scaleX: 0, transformOrigin: 'left center', stagger: 0.05, duration: 0.5, ease: 'power2.inOut'}, '<0.1');
+  addFrom(homeAgentCards, {y: 24, rotationX: -10, transformPerspective: 700, transformOrigin: '50% 0%', autoAlpha: 0, stagger: {amount: Math.min(0.15, Math.max(0, homeAgentCards.length - 1) * 0.05)}, duration: 0.42, ease: 'expo.out'}, '<0.05');
+  addFrom(bars, {scaleX: 0, transformOrigin: 'left center', stagger: {amount: Math.min(0.15, Math.max(0, bars.length - 1) * 0.05)}, duration: 0.5, ease: 'power2.inOut'}, '<0.1');
 }
 
 function killHomeIntro() {

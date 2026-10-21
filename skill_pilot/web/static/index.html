@@ -134,7 +134,8 @@
 <main class="page">
 
   <!-- ========== 首页：一眼看清技能总数、各 agent 和要处理的事 ========== -->
-  <section id="page-home" class="page-section" hidden>
+  <section id="page-home" class="page-section">
+    <p id="home-loading" class="empty" role="status">正在读取技能…</p>
     <div id="home-guide" class="home-guide" hidden>
       <div class="home-guide-card">
         <p class="home-eyebrow">欢迎使用 Skill Pilot</p>
@@ -190,7 +191,7 @@
   </section>
 
   <!-- ========== 技能页 ========== -->
-  <section id="page-skills" class="page-section">
+  <section id="page-skills" class="page-section" hidden>
     <div id="new-banner" class="banner banner-warn" hidden>
       <div class="banner-row">
         <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-inbox"/></svg>

@@ -72,6 +72,10 @@ if (!written.endsWith('#skills/Acme')) { console.error('技能页地址没写对
         self.assertIn('id="home-agents"', html)
         self.assertIn('id="home-todos"', html)
         self.assertIn('id="home-log"', html)
+        # 页面脚本等待读取数据时，导航和内容也都停在首页。
+        self.assertRegex(html, r'<section id="page-home" class="page-section">')
+        self.assertRegex(html, r'<section id="page-skills" class="page-section" hidden>')
+        self.assertRegex(html, r'<p id="home-loading"[^>]*role="status">正在读取技能…</p>')
 
         app = html.index('/app.js?token=__SESSION_TOKEN__')
         gsap = html.index('/vendor/gsap.min.js?token=__SESSION_TOKEN__')
@@ -170,6 +174,39 @@ const none = checked({updates: {review: {running: false, total: 5, done: 5, upda
 if (none.length) fail('全都没有时不应有提醒条：' + keys(none));
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_home_intro_stays_short_for_many_agents_and_groups(self):
+        source = (STATIC / 'app.js').read_text()
+        function = extract_function(source, 'function playHomeIntro(')
+        script = '(function () {\n' + function + r'''
+const window = {gsap: require(process.argv[1]).gsap};
+const node = () => ({querySelector: () => ({}), querySelectorAll: () => []});
+const hero = node();
+let groupCount = 0;
+hero.querySelectorAll = name => name === '.home-cluster-name' ? Array.from({length: groupCount}, node) : [];
+const $ = id => id === 'home-hero' ? hero : node();
+const document = {querySelector: node};
+let state = {table: {skills: []}, agents: []};
+let homeAgentCards = [], homeDots = [], homeIntroPlayed, homeIntroDone, homeIntroTimeline;
+const homeMotionOn = true;
+const homeSetNumbersZero = () => {};
+const homeInUseCount = () => 0;
+const homeCountTo = () => {};
+for (const [groups, agents] of [[0, 0], [3, 4], [80, 60]]) {
+  groupCount = groups;
+  homeAgentCards = Array.from({length: agents}, node);
+  state.agents = homeAgentCards;
+  playHomeIntro();
+  homeIntroTimeline.pause();
+  const duration = homeIntroTimeline.totalDuration();
+  homeIntroTimeline.kill();
+  if (duration >= 2) throw new Error(`${groups} 个分组、${agents} 个 agent 的开场长达 ${duration} 秒`);
+}
+window.gsap.ticker.sleep();
+})();
+'''
+        result = subprocess.run(['node', '-e', script, str(STATIC / 'vendor' / 'gsap.min.js')], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_unorganized_readonly_user_sees_badge(self):
