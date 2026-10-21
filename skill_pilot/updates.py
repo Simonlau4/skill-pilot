@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import time
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -345,9 +346,10 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
     if lark_names:
         groups.append(sorted(lark_names))
     completed, failed, updated, normalization_results = [], [], [], {}
+    batch = uuid.uuid4().hex
     for group in groups:
         try:
-            result = _apply_group(review, group, choices, merge_ids)
+            result = _apply_group(review, group, choices, merge_ids, batch)
         except operations.RollbackError:
             raise
         except (ValueError, OSError) as error:
@@ -368,7 +370,7 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
             'normalization': normalization_results, 'message': message}
 
 
-def _apply_group(review, names, choices, merge_ids):
+def _apply_group(review, names, choices, merge_ids, batch):
     home, registry, agents = operations.load(review['home'])
     rows = [selected_row(review, name) for name in names]
     lark_rows = [r for r in rows if r['source']['kind'] == 'lark']
@@ -432,7 +434,7 @@ def _apply_group(review, names, choices, merge_ids):
             raise ValueError('这个技能的内容或分配已经变了，请刷新后重新检查。')
         return current
     result = operations._run(home, registry, agents, current_registry, f'核对并更新了 {len(names)} 个技能', mutate,
-                             extra_paths=lark.CLI_PATHS if lark_rows else None)
+                             extra_paths=lark.CLI_PATHS if lark_rows else None, batch=batch)
     for row in rows:
         row.pop('update_error', None)
         row['_arrow'] = {'has_update': row.get('has_update'), 'status': row.get('status'),
