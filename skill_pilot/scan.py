@@ -131,11 +131,11 @@ def content_digest(directory):
     return digest.hexdigest()
 
 
-def read_disabled(config_path, home):
-    if not config_path.exists():
+def read_disabled(config_path, home, text=None):
+    if text is None and not config_path.exists():
         return {"names": [], "paths": [], "error": None}
     try:
-        config = tomllib.loads(config_path.read_text())
+        config = tomllib.loads(config_path.read_text() if text is None else text)
     except (OSError, tomllib.TOMLDecodeError) as error:
         return {"names": [], "paths": [], "error": str(error)}
     names, paths = set(), set()

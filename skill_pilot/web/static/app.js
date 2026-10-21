@@ -99,6 +99,7 @@ async function api(path, body) {
   if (!response.ok) {
     const error = new Error((result && result.error) || '操作没能完成，请稍后再试。');
     error.retry = Boolean(result && result.retry);
+    error.recheck = Boolean(result && result.recheck);
     throw error;
   }
   return result;
@@ -534,7 +535,7 @@ const state = {
   saved: {},
   draft: {},
   pending: null,
-  pendingClick: null,
+  assignmentIntents: new Map(), // 只记用户亲手选的改动，依赖始终根据最新状态重算。
   autoAdded: new Map(),   // 「技能|agent」→ 需要它的那个技能（预览的 auto_added）
   detail: null,
   agent: null,
@@ -780,7 +781,6 @@ const PREVIEW_DEBOUNCE_MS = 100;
 let previewBusy = false;
 let previewSequence = 0;
 let previewTimer = null;
-let assignmentErrors = {};
 
 /* agent 的颜色：按表里的顺序从一组颜色里取，全页同一个 agent 用同一种颜色。 */
 const AGENT_COLORS = ['#2F5BD3', '#C4552B', '#6D4BC2', '#0F7C6E', '#93650A', '#B0346B', '#3D7A1F', '#5B6B85'];
@@ -959,7 +959,7 @@ function switchHtml(skill, agent, on, pending, locked) {
 function skillRowHtml(skill, agent) {
   const on = assignedAfter(skill.name, agent.id);
   const pending = on !== assignedNow(skill.name, agent.id);
-  const error = assignmentErrors[skill.name + '|' + agent.id];
+  const error = state.pending?.conflicts?.find(c => c.skill === skill.name && c.agent === agent.id)?.message;
   const note = cellNote(skill, agent);
   const locked = Boolean(writeBusy) || !state.table.write_allowed;
   const status = error ? `<span class="row-note is-error">${escape(error)}</span>`
@@ -1444,9 +1444,17 @@ function renderSkillTable() {
 
 function pendingChanges() {
   if (!state.table) return [];
-  return state.table.skills.flatMap(skill => state.agents
+  const changes = state.table.skills.flatMap(skill => state.agents
     .filter(agent => assignedAfter(skill.name, agent.id) !== assignedNow(skill.name, agent.id))
     .map(agent => ({skill: skill.name, agent: agent.id, enabled: assignedAfter(skill.name, agent.id)})));
+  for (const change of state.pending?.changes || []) {
+    if (!state.skillIndex.has(change.skill) && assignedAfter(change.skill, change.agent) !== assignedNow(change.skill, change.agent)) changes.push(change);
+  }
+  for (const intent of state.assignmentIntents.values()) {
+    if (!changes.some(c => c.skill === intent.skill && c.agent === intent.agent) &&
+        (state.pending?.conflicts || []).some(c => c.skill === intent.skill && c.agent === intent.agent)) changes.push(intent);
+  }
+  return changes;
 }
 
 /* “给 Claude 加 2 个、从 Codex 撤下 1 个”。 */
@@ -1476,11 +1484,13 @@ function renderSkillsActionBar() {
     const users = change.enabled ? [] : state.table.skills
       .filter(skill => skill.requires.includes(change.skill) && assignedAfter(skill.name, change.agent))
       .map(skill => `「${titleOf(skill.name)}」`);
-    const why = because ? `<small>自动带上：「${escape(titleOf(because))}」要用它</small>`
+    const conflict = state.pending?.conflicts?.find(c => c.skill === change.skill && c.agent === change.agent);
+    const why = conflict ? `<small class="warn">${escape(conflict.message)}</small>`
+      : because ? `<small>自动带上：「${escape(titleOf(because))}」要用它</small>`
       : users.length ? `<small class="warn">注意：${escape(users.join(''))}还要用它</small>` : '';
     return `<li><span class="action-agent">${swatch(change.agent)}${escape(agent?.name || change.agent)}</span>
       <p>${change.enabled ? '加上' : '<span class="verb-off">撤下</span>'}「${escape(titleOf(change.skill))}」${why}</p>
-      ${because ? '' : `<button class="btn btn-quiet btn-small" data-revert-skill="${escape(change.skill)}" data-revert-agent="${escape(change.agent)}">不改这处</button>`}</li>`;
+      ${because && !conflict ? '' : `<button class="btn btn-quiet btn-small" data-revert-skill="${escape(change.skill)}" data-revert-agent="${escape(change.agent)}">不改这处</button>`}</li>`;
   }).join('');
   const paths = state.pending?.path_warnings || [];
   const extra = paths.length ? `<details><summary>有 ${paths.length} 份你的文件里写着这些技能现在的位置，应用后位置会变，那些文件里的说法可能要改</summary>
@@ -1488,7 +1498,8 @@ function renderSkillsActionBar() {
   const removing = changes.some(change => !change.enabled);
   showActionBar({
     text: `改了 ${changes.length} 处，还没生效`,
-    note: changeSummary(changes) + (removing ? '。撤下的技能文件还留着，随时能加回来' : ''),
+    note: state.pending?.conflicts?.length ? '需要处理的原因写在对应改动下，其他选择已保留。'
+      : changeSummary(changes) + (removing ? '。撤下的技能文件还留着，随时能加回来' : ''),
     items,
     extra,
     buttons: [
@@ -1523,20 +1534,13 @@ async function runPreview() {
   previewBusy = true;
   renderSkillsActionBar();
   try {
-    const result = await api('/api/assignment/preview', {changes: pendingChanges()});
+    const result = await api('/api/assignment/preview', {changes: [...state.assignmentIntents.values()], recheck: true});
     if (sequence !== previewSequence) return;
-    state.pending = result;
-    state.draft = result.assignments;
-    state.autoAdded = new Map((result.auto_added || []).map(item => [item.skill + '|' + item.agent, item.because]));
+    acceptAssignmentPlan(result);
   } catch (error) {
     if (sequence !== previewSequence) return;
-    const clicked = state.pendingClick;
-    if (clicked && clicked.sequence === sequence) {
-      const assigned = new Set(state.draft[clicked.skill] || []);
-      if (clicked.enabled) assigned.delete(clicked.agent); else assigned.add(clicked.agent);
-      state.draft[clicked.skill] = [...assigned];
-      assignmentErrors[clicked.skill + '|' + clicked.agent] = '这次没改成：' + error.message;
-    }
+    // 网络或读取失败不撤销用户的选择；再次应用时会重新读取。
+    state.pending ||= {changed: pendingChanges().map(c => c.skill)};
     toast({text: error.message, tone: 'error'});
   } finally {
     // 只有最新那次请求负责收起忙碌态；被作废的旧请求什么都不动。
@@ -1545,15 +1549,22 @@ async function runPreview() {
   }
 }
 
+function acceptAssignmentPlan(plan) {
+  state.pending = plan;
+  state.saved = plan.base_assignments || state.saved;
+  state.draft = plan.assignments;
+  state.autoAdded = new Map((plan.auto_added || []).map(item => [item.skill + '|' + item.agent, item.because]));
+  if (plan.changes?.length === 0 && !plan.conflicts?.length) state.assignmentIntents.clear();
+}
+
 function discardPending() {
   clearTimeout(previewTimer);
   invalidatePreview();
   previewBusy = false;
   state.draft = clone(state.saved);
   state.pending = null;
-  state.pendingClick = null;
+  state.assignmentIntents.clear();
   state.autoAdded = new Map();
-  assignmentErrors = {};
   renderAssignmentViews();
 }
 
@@ -1561,7 +1572,6 @@ function setDraft(name, agentId, enabled) {
   const selected = new Set(state.draft[name] || []);
   if (enabled) selected.add(agentId); else selected.delete(agentId);
   state.draft[name] = [...selected];
-  delete assignmentErrors[name + '|' + agentId];
 }
 
 /* 关掉一个技能时，它自动带上的技能也一起退回原样，不留孤零零的依赖。 */
@@ -1581,13 +1591,15 @@ function changeAssignment(name, agentId, enabled) {
   const refocus = active?.dataset?.skill === name && active?.dataset?.agent === agentId
     ? (active.closest('#detail-body') ? '#detail-body' : '#skills-list') : null;
   setDraft(name, agentId, enabled);
+  const key = name + '|' + agentId;
+  if (enabled === assignedNow(name, agentId)) state.assignmentIntents.delete(key);
+  else state.assignmentIntents.set(key, {skill: name, agent: agentId, enabled});
   if (!enabled) revertAutos(name, agentId);
   if (!pendingChanges().length) {
     discardPending();
   } else {
     // 先作废在途的预览结果，再记下这一次；这样第二次拨动不会被第一个请求的返回盖掉。
-    const sequence = invalidatePreview();
-    state.pendingClick = {skill: name, agent: agentId, enabled, sequence};
+    invalidatePreview();
     renderAssignmentViews();
     schedulePreview();
   }
@@ -1608,37 +1620,69 @@ function assignmentGroups(changes) {
 }
 
 async function applyAssignment(button) {
-  const plan = state.pending;
-  if (!plan) return;
-  const changes = pendingChanges();
-  const removed = changes.filter(change => !change.enabled);
-  if (removed.length) {
-    const warnings = removed.flatMap(change => state.table.skills
-      .filter(skill => skill.requires.includes(change.skill) && assignedAfter(skill.name, change.agent))
-      .map(skill => `${nameOf(change.agent)} 的「${titleOf(skill.name)}」还要用「${titleOf(change.skill)}」，撤下后它可能用不了。`));
-    const ok = await confirmDialog({
-      title: '撤下这些技能',
-      lines: [`${changeSummary(removed)}。技能文件还留着，随时能加回来。`, ...warnings],
-      groups: assignmentGroups(removed),
-      note: '应用后也能在提示条或操作记录里撤销。',
-      okText: '撤下',
-    });
-    if (!ok) return;
-  }
-  await runWrite({
+  if (!state.assignmentIntents.size) return;
+  const previous = state.pending || {};
+  const effectKey = c => c.skill + '|' + c.agent + '|' + c.enabled;
+  const seenEffects = new Set((previous.changes || pendingChanges()).map(effectKey));
+  const seenWarnings = new Set(previous.dependency_warnings || []);
+  const seenPaths = new Set((previous.path_warnings || []).map(w => JSON.stringify(w)));
+  clearTimeout(previewTimer);
+  invalidatePreview();
+  previewBusy = false;
+  const written = await runWrite({
     button,
     busyText: '正在应用…',
     work: async () => {
-      const result = await api('/api/assignment/apply', {changes, revision: state.table.revision, confirmed: true});
-      state.pending = null;
-      await refreshEverything();
-      return result;
+      let consent = '';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const plan = await api('/api/assignment/preview', {changes: [...state.assignmentIntents.values()], recheck: true});
+          acceptAssignmentPlan(plan);
+          renderAssignmentViews();
+          if (plan.conflicts?.length) return {needs_attention: true, message: '有几处无法直接应用，原因已列在对应改动下；其他选择已保留。'};
+          const changes = plan.changes || pendingChanges();
+          const removed = changes.filter(c => !c.enabled);
+          const extra = changes.filter(c => !seenEffects.has(effectKey(c)));
+          const newWarnings = (plan.dependency_warnings || []).filter(w => !seenWarnings.has(w));
+          const newPaths = (plan.path_warnings || []).filter(w => !seenPaths.has(JSON.stringify(w)));
+          const newImpact = extra.length || newWarnings.length || newPaths.length;
+          const review = JSON.stringify([changes, plan.dependency_warnings, plan.path_warnings]);
+          if (changes.length && review !== consent && (removed.length || newImpact)) {
+            const ok = await confirmDialog({
+              title: newImpact ? '最新状态里有新的影响' : '撤下这些技能',
+              lines: [changeSummary(changes) + (removed.length ? '。撤下的技能文件还留着，随时能加回来。' : ''), ...(plan.dependency_warnings || []), ...(newPaths.length ? ['新发现有文件引用会受影响，位置提示已保留在改动托盘里。'] : [])],
+              groups: [...assignmentGroups(removed), ...(extra.filter(c => c.enabled).length ? [{label: '需要一起加上', items: extra.filter(c => c.enabled).map(c => ({name: c.skill, note: nameOf(c.agent)}))}] : [])],
+              note: '你的选择已保留；取消也不用重选。应用后仍可撤销。',
+              okText: newImpact ? '继续应用' : '撤下',
+            });
+            if (!ok) return {cancelled: true};
+            consent = review;
+          }
+          const result = await api('/api/assignment/apply', {changes: [...state.assignmentIntents.values()], revision: plan.revision, recheck: true, confirmed: true});
+          if (result.needs_attention) {
+            acceptAssignmentPlan(result);
+            renderAssignmentViews();
+            return {...result, message: '有几处无法直接应用，原因已列在对应改动下；其他选择已保留。'};
+          }
+          state.assignmentIntents.clear();
+          state.pending = null;
+          await refreshEverything();
+          return {...result, appliedSkills: plan.changed};
+        } catch (error) {
+          if (!error.recheck) throw error;
+        }
+      }
+      return {needs_attention: true, message: '其他调整仍在进行，暂时无法保存。你的选择已保留，稍后再点应用即可。'};
     },
-    success: result => ({
-      text: pastTense(result.message || changeSummary(changes)),
-      undo: undoButton => undoOperation(result.id, {skills: plan.changed || [], message: pastTense(result.message), button: undoButton}),
+    success: result => result.cancelled ? null : result.needs_attention ? {text: result.message, tone: 'error', sticky: true} : ({
+      text: pastTense(result.message || '技能分配已保存'),
+      undo: result.id ? undoButton => undoOperation(result.id, {skills: result.appliedSkills || [], message: pastTense(result.message), button: undoButton}) : null,
     }),
   });
+  if (written?.needs_attention) {
+    $('action-summary').tabIndex = -1;
+    $('action-summary').focus();
+  }
 }
 
 $('skills-list').addEventListener('click', event => {
@@ -1717,7 +1761,7 @@ $('skills-search').addEventListener('input', renderSkillTable);
 // 重新盘点是只有图标的按钮，所以不换文案，忙碌时图标自己转
 $('skills-refresh').addEventListener('click', event => withBusy(event.currentTarget, '', async () => {
   await refreshInventory();
-  await refreshTable();
+  await refreshTable(true);
 }));
 
 /* 新技能横幅：发现没收进仓库的，先在这里提醒。 */
@@ -1789,19 +1833,26 @@ async function refreshInventory() {
   return inventoryRequest;
 }
 
-async function refreshTable(preserveDraft = false) {
+async function refreshTable(preserveDraft = true) {
   const table = await api('/api/table');
-  const keepDraft = preserveDraft && table.revision === state.table?.revision;
-  const draft = state.draft, pending = state.pending;
+  if (!preserveDraft) state.assignmentIntents.clear();
+  clearTimeout(previewTimer);
+  invalidatePreview();
+  previewBusy = false;
+  const pending = state.pending;
   state.table = table;
   state.tableReadAt = new Date().toISOString();
   state.skillIndex = new Map(table.skills.map(s => [s.name, s]));
   state.groupIndex = new Map((table.groups || []).flatMap(group => group.skills.map(name => [name, group.name])));
-  state.saved = Object.fromEntries(table.skills.map(s => [s.name, [...s.assigned_agents]]));
+  state.saved = table.actual_assignments || Object.fromEntries(table.skills.map(s => [s.name, [...s.assigned_agents]]));
   state.draft = clone(state.saved);
   state.pending = null;
   state.autoAdded = new Map();
-  if (keepDraft) { state.draft = draft; state.pending = pending; }
+  if (state.assignmentIntents.size) {
+    for (const change of state.assignmentIntents.values()) setDraft(change.skill, change.agent, change.enabled);
+    state.pending = pending;
+    schedulePreview();
+  }
   state.agents = table.agents || [];
   renderConfigExport();
   // 只有只读预览才显示标记；能改的时候右边什么都不放，导航仍是居中的。

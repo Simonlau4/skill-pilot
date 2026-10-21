@@ -93,6 +93,67 @@ class OperationsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '刷新'):
             self.assign('other', 'claude', expected=view['revision'])
 
+    def test_pending_assignment_preserves_unrelated_codex_changes(self):
+        operations.table(self.home)
+        config = self.home / '.codex/config.toml'
+        extra = '\n[projects."/tmp/example workspace"]\ntrust_level = "trusted"\n[features]\nexample = true\n'
+        changed = 'model = "example"\n# new comment\n' + config.read_text() + extra
+        config.write_text(changed)
+        changes = [{'skill': 'other', 'agent': 'codex', 'enabled': False}]
+        review = operations.preview_assign(changes, self.home, recheck=True)
+        result = operations.apply_assign(changes, review['revision'], True, self.home, recheck=True)
+        self.assertNotIn('other', visibility(self.home)['codex']['available'])
+        self.assertEqual(config.read_text().replace(', { name = "other", enabled = false }', ''), changed)
+        operations.undo(result['id'], home=self.home)
+        self.assertEqual(config.read_text(), changed)
+        self.assertIn('other', visibility(self.home)['codex']['available'])
+
+    def test_pending_assignment_rejects_changed_skill_settings(self):
+        view = operations.table(self.home)
+        config = self.home / '.codex/config.toml'
+        config.write_text(config.read_text().replace('plugin:original', 'other'))
+        before = self.fingerprint()
+        with self.assertRaisesRegex(ValueError, '刷新'):
+            self.assign('grilling', 'claude', expected=view['revision'], confirmed=True)
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_pending_assignment_rejects_changed_skill_files(self):
+        view = operations.table(self.home)
+        skill = self.home / '.skill-pilot/store/other/SKILL.md'
+        skill.write_text(skill.read_text() + '\nexternal edit\n')
+        before = self.fingerprint()
+        with self.assertRaisesRegex(ValueError, '刷新'):
+            self.assign('other', 'codex', False, expected=view['revision'], confirmed=True)
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_pending_assignment_cannot_bypass_config_modes_or_invalid_content(self):
+        config = self.home / '.codex/config.toml'
+        original, mode = config.read_text(), config.stat().st_mode
+        for change in ('mode', 'invalid'):
+            with self.subTest(change=change):
+                config.write_text(original)
+                config.chmod(mode)
+                view = operations.table(self.home)
+                if change == 'mode':
+                    config.chmod(0o600 if mode & 0o777 != 0o600 else 0o644)
+                else:
+                    config.write_text('[skills]\nconfig = [ broken')
+                before = self.fingerprint()
+                with self.assertRaises(ValueError):
+                    self.assign('other', 'claude', expected=view['revision'], confirmed=True)
+                self.assertEqual(self.fingerprint(), before)
+
+    def test_assignment_revision_does_not_relax_undo_guard(self):
+        view = operations.table(self.home)
+        result = self.assign('other', 'codex', False,
+                             expected=view['revision'], confirmed=True)
+        config = self.home / '.codex/config.toml'
+        config.write_text(config.read_text() + '\n[projects."/tmp/later workspace"]\ntrust_level = "trusted"\n')
+        before = self.fingerprint()
+        with self.assertRaisesRegex(ValueError, '外部改动'):
+            operations.undo(result['id'], expected=operations.table(self.home)['revision'], home=self.home)
+        self.assertEqual(self.fingerprint(), before)
+
     def test_path_warnings_check_this_users_files_not_a_fixed_directory(self):
         removed = ['.codex/skills/alpha', '.codex/skills/beta', '.agents/skills/sample-skill']
         self.assertEqual(operations.path_warnings(removed, self.home), [])
