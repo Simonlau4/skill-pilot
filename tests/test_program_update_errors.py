@@ -3,7 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
 from skill_pilot import self_update
@@ -142,7 +142,7 @@ class ProgramUpdateErrorTests(unittest.TestCase):
         cases = {
             'inside': (
                 f'Permission denied: {inside}',
-                f'Permission denied: ~/{inside.relative_to(self.home).as_posix()}'),
+                f'Permission denied: ~{os.sep}{inside.relative_to(self.home)}'),
             'outside': (
                 f"fatal: cannot open '{spaced}': No such file or directory ({outside})",
                 "fatal: cannot open '[路径已隐藏]': No such file or directory ([路径已隐藏])"),
@@ -214,6 +214,75 @@ class ProgramUpdateErrorTests(unittest.TestCase):
                                      .read_text().splitlines()[-1])['detail']
                 self.assertEqual(detail, expected)
                 self.assertEqual(str(error), original)
+
+    def test_separate_paths_preserve_the_explanation_between_them(self):
+        cases = {
+            'deep-relative': (
+                'warning: /opt/x/y is not a git repo and src/a/main.py was skipped',
+                'warning: [路径已隐藏] is not a git repo and src/a/main.py was skipped'),
+            'short-relative-clause': (
+                '/opt/x/y and src/a/main.py were skipped',
+                '[路径已隐藏] and src/a/main.py were skipped'),
+            'two-paths': (
+                'error: cannot open /opt/a/b.txt and also /opt/c/d.txt failed',
+                'error: cannot open [路径已隐藏] and also [路径已隐藏] failed'),
+            'because': (
+                'cannot open /opt/a/b.txt because the file at /opt/c/d.txt is busy',
+                'cannot open [路径已隐藏] because the file at [路径已隐藏] is busy'),
+            'rename': (
+                'error: unable to rename /opt/a/b.lock to /opt/a/b: Permission denied',
+                'error: unable to rename [路径已隐藏] to [路径已隐藏]: Permission denied'),
+            'adjacent': ('/opt/a/b /opt/c/d failed', '[路径已隐藏] [路径已隐藏] failed'),
+            'same-home-prefix': (
+                f'cannot read {self.home}X/secret/one.txt and {self.home}2/secret/two.txt',
+                'cannot read [路径已隐藏] and [路径已隐藏]'),
+            'spaced-folder': (
+                '/opt/Skill Pilot copy/file.txt is busy',
+                '[路径已隐藏] is busy'),
+        }
+        for name, (original, expected) in cases.items():
+            with self.subTest(name=name):
+                error = ValueError(original)
+                self_update.record_failure(self.home, 'check', error)
+                detail = json.loads((self.home / '.skill-pilot/logs/program-update.jsonl')
+                                     .read_text().splitlines()[-1])['detail']
+                self.assertEqual(detail, expected)
+                self.assertEqual(str(error), original)
+
+    def test_windows_paths_are_hidden_without_changing_relative_paths_or_reasons(self):
+        cases = [
+            (r'cannot rename C:\Private Data\repo\index.lock to D:\Other Data\repo\index: Permission denied',
+             'cannot rename [路径已隐藏] to [路径已隐藏]: Permission denied'),
+            (r'cannot open "C:\Private Folder\file.txt" because \\server\Share\other.txt is busy',
+             'cannot open "[路径已隐藏]" because [路径已隐藏] is busy'),
+            ('C:/Private Folder/repo/file.py and src/a/main.py failed',
+             '[路径已隐藏] and src/a/main.py failed'),
+            (r'run .\scripts\build.cmd from ..\other\repo; HTTP/2 403',
+             r'run .\scripts\build.cmd from ..\other\repo; HTTP/2 403'),
+        ]
+        for original, expected in cases:
+            with self.subTest(original=original):
+                error = ValueError(original)
+                self_update.record_failure(self.home, 'check', error)
+                detail = json.loads((self.home / '.skill-pilot/logs/program-update.jsonl')
+                                     .read_text().splitlines()[-1])['detail']
+                self.assertEqual(detail, expected)
+                self.assertEqual(str(error), original)
+
+    def test_windows_home_paths_keep_their_abbreviation_and_directory_boundary(self):
+        cases = [
+            (r'c:\users\test person\Logs\update.log', r'~\Logs\update.log'),
+            ('C:/Users/Test Person/Logs/update.log', '~/Logs/update.log'),
+            (r'C:\Users\Test Person: Permission denied', '~: Permission denied'),
+            (r'C:\Users\Test PersonX\private\notes.txt', '[路径已隐藏]'),
+        ]
+        with patch.object(self_update.Path, 'home', return_value=PureWindowsPath('C:/Users/Test Person')):
+            for original, expected in cases:
+                with self.subTest(original=original):
+                    self_update.record_failure(self.home, 'check', ValueError(original))
+                    detail = json.loads((self.home / '.skill-pilot/logs/program-update.jsonl')
+                                         .read_text().splitlines()[-1])['detail']
+                    self.assertEqual(detail, expected)
 
     def test_relative_paths_and_shell_links_stay_readable(self):
         original = ('run ./scripts/build.sh from ../other/repo '

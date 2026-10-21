@@ -67,6 +67,9 @@ def git(project, *arguments, **options):
 
 _PATH_STOP = set('\r\n\'"<>:;,)]，。；：、）】')
 _HIDDEN_PATH = '[路径已隐藏]'
+_PATH_START = r'(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/]|/)'
+_ABSOLUTE_PATH = re.compile(r'(?<![~\w.])' + _PATH_START)
+_PATH_PROSE = {'and', 'or', 'to', 'from', 'because', 'is', 'are', 'was', 'were', 'in', 'at', 'with'}
 
 
 def _path_token_end(detail, pos):
@@ -91,46 +94,32 @@ def _next_word(detail, pos):
 
 
 def _through_continued_path(detail, pos):
-    """Plain words stay in the path when a later word still continues that path.
-
-    A single slash after ordinary words is a separate relative path, so the
-    sentence in front of it is left alone.
-    """
+    """Allow short spaced directory names, without scanning across a clause."""
     scan = pos
-    while scan < len(detail):
-        if detail[scan] in _PATH_STOP or detail[scan] == '\t':
-            return None
-        if detail[scan] == ' ':
-            scan += 1
-            continue
+    # Three plain words cover names such as "Skill Pilot copy 2/repo".
+    for _ in range(4):
         word_end = _path_token_end(detail, scan)
-        if word_end == scan:
+        word = detail[scan:word_end]
+        if (_ABSOLUTE_PATH.match(detail, scan) or word.lower() in _PATH_PROSE or
+                word.startswith(('~/', '~\\', './', '../', '.\\', '..\\'))):
             return None
-        slashes = detail[scan:word_end].count('/')
-        if slashes >= 2:
+        if '/' in word or '\\' in word:
             return word_end
-        if slashes == 1:
-            nxt = _next_word(detail, word_end)
-            if nxt and '/' in detail[nxt[0]:nxt[1]]:
-                scan = word_end
-                continue
+        found = _next_word(detail, word_end)
+        if not found:
             return None
-        scan = word_end
+        scan = found[0]
     return None
 
 
 def _absolute_path_end(detail, start):
-    """Join a word that already contains /, and stop at an ordinary word."""
+    """Stop at the next independent path or explanatory clause."""
     end = _path_token_end(detail, start)
     while True:
         found = _next_word(detail, end)
         if not found:
             break
-        word_start, word_end = found
-        if '/' in detail[word_start:word_end]:
-            end = word_end
-            continue
-        continued = _through_continued_path(detail, word_start)
+        continued = _through_continued_path(detail, found[0])
         if continued is None:
             break
         end = continued
@@ -140,11 +129,11 @@ def _absolute_path_end(detail, start):
 def _hide_unquoted_absolute_paths(detail):
     pieces = []
     cursor = 0
-    for match in re.finditer(r'(?<![~\w.])/', detail):
+    for match in _ABSOLUTE_PATH.finditer(detail):
         start = match.start()
         if start < cursor:
             continue
-        end = _absolute_path_end(detail, start)
+        end = _absolute_path_end(detail, match.end())
         if end <= start:
             continue
         pieces.append(detail[cursor:start])
@@ -159,7 +148,7 @@ def _hide_paths_outside_home(detail):
     def quoted(match):
         return match.group(1) + _HIDDEN_PATH + match.group(1)
 
-    detail = re.sub(r'(?<![~\w.])(["\'])(/[^\n]*?)\1', quoted, detail)
+    detail = re.sub(r'(?<![~\w.])(["\'])' + _PATH_START + r'[^\r\n]*?\1', quoted, detail)
     return _hide_unquoted_absolute_paths(detail)
 
 
@@ -168,7 +157,7 @@ def _home_ends(detail, index):
     if index >= len(detail):
         return True
     character = detail[index]
-    if character == '/' or character.isspace() or character in _PATH_STOP:
+    if character in '/\\' or character.isspace() or character in _PATH_STOP:
         return True
     if character == '.' and (index + 1 >= len(detail) or not (detail[index + 1].isalnum() or detail[index + 1] == '_')):
         return True
@@ -180,22 +169,11 @@ def _abbreviate_home(detail, home):
     for directory in sorted({str(home), str(Path.home())}, key=len, reverse=True):
         if not directory:
             continue
-        pieces = []
-        start = 0
-        while True:
-            found = detail.find(directory, start)
-            if found < 0:
-                pieces.append(detail[start:])
-                break
-            after = found + len(directory)
-            if _home_ends(detail, after):
-                pieces.append(detail[start:found])
-                pieces.append('~')
-                start = after
-            else:
-                pieces.append(detail[start:after])
-                start = after
-        detail = ''.join(pieces)
+        pattern, flags = re.escape(directory), 0
+        if '\\' in directory:
+            pattern, flags = pattern.replace(r'\\', r'[\\/]'), re.IGNORECASE
+        detail = re.sub(pattern, lambda match: '~' if _home_ends(match.string, match.end()) else match[0],
+                        detail, flags=flags)
     return detail
 
 
