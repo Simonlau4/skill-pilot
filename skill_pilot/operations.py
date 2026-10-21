@@ -5,10 +5,11 @@ import hashlib
 import json
 import re
 import shutil
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import profiles
+from . import codex_config, profiles
 from .scan import SKIP_CONTENT, content_digest, metadata, scan_root, tokens
 from .store import (PROJECT, _restore, backup, check_links, git_tree, guard, physical_state,
                     target_home, transaction, write_allowed, write_json)
@@ -59,7 +60,7 @@ def load(home=None):
     return home, registry, agents
 
 
-def revision(home, agents):
+def _revisions(home, agents):
     catalog = profiles.managed(home, agents)
     roots = sorted({r for p in catalog for r in p['skill_roots']})
     paths = roots + profiles.config_paths(home, agents) + ['.agents/.skill-lock.json', '.skill-pilot/registry.json',
@@ -70,7 +71,24 @@ def revision(home, agents):
     state['skill_trees'] = {p.name: git_tree(p)
                             for p in (home / '.skill-pilot/store').iterdir()
                             if p.is_dir() and not p.name.startswith('.')}
-    return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
+    strict = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
+    # Assignments read the latest config before editing only its skill settings.
+    # Project trust, model and UI settings must not invalidate pending choices.
+    config = home / codex_config.CONFIG_PATH
+    if codex_config.CONFIG_PATH in state and config.is_file():
+        try:
+            skills = tomllib.loads(config.read_text()).get('skills', {})
+        except (UnicodeError, tomllib.TOMLDecodeError):
+            return {'revision': strict, 'assignment_revision': strict}
+        state[codex_config.CONFIG_PATH] = {
+            'skills': skills, 'mode': config.lstat().st_mode,
+            'link': str(config.readlink()) if config.is_symlink() else None}
+    assignment = hashlib.sha256(json.dumps(state, sort_keys=True, default=str).encode()).hexdigest()
+    return {'revision': strict, 'assignment_revision': assignment}
+
+
+def revision(home, agents):
+    return _revisions(home, agents)['revision']
 
 
 def new_skills(home, agents):
@@ -125,7 +143,7 @@ def table(home=None):
                      'update_watch': skill.get('update_watch') or 'all',
                      'local_modified': normalization.tree(path) != normalization.tree(home / '.skill-pilot/bases' / name),
                      'cell_notes': cells[name]})
-    return {'home': str(home), 'revision': revision(home, agents), 'write_allowed': write_allowed(home), 'skills': rows,
+    return {'home': str(home), **_revisions(home, agents), 'write_allowed': write_allowed(home), 'skills': rows,
             'agents': [{'id': a, 'name': catalog[a]['name'],
                         'activation': '目录改变后会动态刷新' if catalog[a]['activation'] == 'immediate' else '新会话生效',
                         'activation_text': profiles.activation_text(catalog[a]),
@@ -377,7 +395,13 @@ def apply_assign(changes, expected=None, confirmed=False, home=None):
         current.update(plan['registry'])
         reconcile_assignments(current, home, checked, plan['changed'])
         return plan['changed'], [], {'reasons': plan['reasons']}
-    return _run(home, registry, agents, expected or revision(home, agents), plan['message'], mutate)
+    expected = expected or revision(home, agents)
+    def check_revision():
+        # Keep accepting the strict revision sent by older pages and callers.
+        if expected not in _revisions(home, agents).values():
+            raise ValueError('目录内容已经变了，请刷新后重新核对。')
+        return registry
+    return _run(home, registry, agents, check_revision, plan['message'], mutate)
 
 
 def decide_dependencies(decisions, expected=None, home=None):

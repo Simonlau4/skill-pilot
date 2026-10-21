@@ -1629,7 +1629,7 @@ async function applyAssignment(button) {
     button,
     busyText: '正在应用…',
     work: async () => {
-      const result = await api('/api/assignment/apply', {changes, revision: state.table.revision, confirmed: true});
+      const result = await api('/api/assignment/apply', {changes, revision: state.table.assignment_revision || state.table.revision, confirmed: true});
       state.pending = null;
       await refreshEverything();
       return result;
