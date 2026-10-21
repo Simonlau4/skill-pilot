@@ -554,6 +554,7 @@ const state = {
   storeGroup: '',      // 选中的分组；'-' 是没分组
   storeMine: false,    // 只看我上架的
   storeDetail: null,   // 详情面板里正在看的卡片编号
+  queue: null,         // /api/team/queue：安装队列；null 是还没读
 };
 
 /* 编号翻名字：先看接口给的目录（操作记录、已撤下的技能不在当前表里，也从这里兜底），
@@ -2248,6 +2249,7 @@ const STORE_STATUS = {
   mine: ['tag-quiet', '我上架的'],
 };
 const storeTitle = card => card.title || card.name;
+const teamReadOnly = () => state.table ? !state.table.write_allowed : !state.writeAllowed;
 const teamCanWrite = () => Boolean(state.table?.write_allowed) && !writeBusy;
 // 还没整理过时没有技能表，就看 /api/status 给的只读状态。
 const teamSettingsWritable = () => state.table ? Boolean(state.table.write_allowed) : state.writeAllowed;
@@ -2329,7 +2331,97 @@ async function enterTeam() {
 }
 
 let storeSequence = 0;
-async function loadStore() {
+
+/* 安装队列：点一次「装上」就加入，后台一个接一个装；页面不锁，可以继续逛、继续加。 */
+const queueActive = item => item.status === 'waiting' || item.status === 'running';
+const storeQueueItem = key => (state.queue?.items || []).find(item => item.key === key) || null;
+const queueHasActive = (items = state.queue?.items || []) => items.some(queueActive);
+let queueTimer = null;
+let queueVersion = 0;   // 写队列或重新读时作废还在路上的旧结果，免得刚加入的又被旧数据盖掉
+
+function scheduleQueuePoll() {
+  if (queueTimer) return;
+  queueTimer = setTimeout(() => {
+    queueTimer = null;
+    readQueue();
+  }, 1000);
+}
+
+function stopQueuePolling() {
+  clearTimeout(queueTimer);
+  queueTimer = null;
+}
+
+function readQueue() {
+  const version = ++queueVersion;
+  api('/api/team/queue').then(result => {
+    if (version !== queueVersion) return;
+    applyQueue(result);
+  }).catch(() => {
+    if (version !== queueVersion) return;
+    // 队列读不到不耽误逛商店；还有没装完的，过一秒再试。
+    if (queueHasActive()) scheduleQueuePoll();
+    else stopQueuePolling();
+  });
+}
+
+function applyQueue(result, {force = false} = {}) {
+  const before = state.queue?.items || [];
+  const beforeStatus = new Map(before.map(item => [item.key, item.status]));
+  const beforeActive = before.some(queueActive);
+  const items = Array.isArray(result?.items) ? result.items : [];
+  const afterActive = items.some(queueActive);
+  const finished = items.some(item => (item.status === 'done' || item.status === 'failed')
+    && beforeStatus.has(item.key) && beforeStatus.get(item.key) !== item.status);
+  const changed = force || JSON.stringify(items) !== JSON.stringify(before);
+  state.queue = {items};
+  // 有技能装好了或没装上：重读目录，卡片和详情跟着变。
+  if (finished) loadStore({syncQueue: false}).catch(() => {});
+  // 整个队列都结束后，在后台刷新一次技能页数据，不锁页面、不挡操作。
+  if (beforeActive && !afterActive) {
+    refreshEverything().catch(error => toast({text: error.message, tone: 'error', sticky: true}));
+  }
+  if (changed) {
+    if (state.page === 'team') renderTeam();
+    else renderStoreQueue();
+    if (state.storeDetail) renderStoreDetail();
+  }
+  if (afterActive) scheduleQueuePoll();
+  else stopQueuePolling();
+}
+
+async function addToStoreQueue(item) {
+  queueVersion += 1;   // 还在路上的队列读取作废，别把刚加入的盖掉
+  const result = await api('/api/team/queue', {key: item.key});
+  queueVersion += 1;   // 写入期间发出的读取也作废，以这次返回的队列为准
+  return result;
+}
+
+async function clearStoreQueue(button) {
+  await withBusy(button, '正在清除…', async () => {
+    try {
+      queueVersion += 1;
+      const result = await api('/api/team/queue/clear', {});
+      queueVersion += 1;
+      applyQueue(result, {force: true});
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+async function retryStoreQueue(key, button) {
+  await withBusy(button, '正在重试…', async () => {
+    try {
+      applyQueue(await addToStoreQueue({key}), {force: true});
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+async function loadStore({syncQueue = true} = {}) {
+  if (syncQueue) readQueue();
   const sequence = ++storeSequence;
   try {
     const result = await api('/api/team/catalog');
@@ -2401,6 +2493,9 @@ function storeRatingHtml(rating) {
 }
 
 function storeStatusTag(card) {
+  const queued = storeQueueItem(card.key);
+  if (queued?.status === 'waiting') return '<span class="tag tag-quiet">排队中</span>';
+  if (queued?.status === 'running') return '<span class="tag">正在装</span>';
   const [tone, label] = STORE_STATUS[card.local?.status] || ['tag-quiet', card.local?.label || ''];
   return label ? `<span class="tag ${tone}">${escape(label)}</span>` : '';
 }
@@ -2439,6 +2534,56 @@ function storeRowHtml(card) {
   </div>`;
 }
 
+/* ---------- 安装队列：排队中、正在装、装好了、没装上 ---------- */
+
+function storeQueueRowHtml(item, locked = false) {
+  const extra = item.status === 'done'
+    ? (item.installed || []).filter(name => name !== item.name).length
+    : 0;
+  const status = item.status === 'done'
+    ? `<span class="tag tag-ok">装好了</span>${extra ? `<small class="item-note">连同 ${extra} 个所需技能</small>` : ''}`
+    : item.status === 'failed'
+      ? `<span class="tag tag-danger">没装上：${escape(item.message || '不知道原因')}</span>`
+      : item.status === 'running'
+        ? '<span class="tag">正在装</span>'
+        : '<span class="tag tag-quiet">排队中</span>';
+  const action = item.status === 'done'
+    ? `<button class="link-btn" type="button" data-store-goto="${escape(item.name)}">去技能页启用</button>`
+    : item.status === 'failed'
+      ? `<button class="btn btn-small btn-quiet" type="button" data-store-queue-retry="${escape(item.key)}"${locked ? ' disabled' : ''}>重试</button>`
+      : '';
+  return `<div class="item-row">
+    <div>
+      <div class="item-title">${escape(item.title || item.name || '')}</div>
+      <div class="store-queue-state">${status}</div>
+    </div>
+    ${action ? `<span class="item-end">${action}</span>` : ''}
+  </div>`;
+}
+
+function renderStoreQueue() {
+  const box = $('store-queue');
+  const list = $('store-queue-items');
+  const items = state.queue?.items || [];
+  const hadFocus = box.contains(document.activeElement);
+  const focusKey = document.activeElement?.dataset.storeGoto || document.activeElement?.dataset.storeQueueRetry || '';
+  const wasHidden = box.hidden;
+  box.hidden = !items.length;
+  const active = items.filter(queueActive).length;
+  $('store-queue-left').textContent = active ? `还剩 ${active} 个` : '';
+  $('store-queue-clear').hidden = !items.some(item => item.status === 'done' || item.status === 'failed');
+  $('store-queue-clear').disabled = teamReadOnly();
+  const html = items.map(item => storeQueueRowHtml(item, teamReadOnly())).join('');
+  const changed = list.innerHTML !== html;
+  if (changed) list.innerHTML = html;
+  // 队列每秒重画一次：刚按过的按钮可能没了，焦点放回同一处或队列标题。
+  if ((changed || wasHidden !== box.hidden) && hadFocus) {
+    const next = focusKey && [...box.querySelectorAll('[data-store-goto], [data-store-queue-retry]')]
+      .find(button => (button.dataset.storeGoto || button.dataset.storeQueueRetry) === focusKey);
+    (next || (box.hidden ? $('store-all-title') : $('store-queue-title'))).focus();
+  }
+}
+
 /* ---------- 商店首页：几排推荐 + 全部技能 ---------- */
 
 /* 几排推荐按这个顺序挑卡片；同一张卡片只出现在第一排挑中它的地方，免得几排看起来一样。 */
@@ -2471,6 +2616,7 @@ function renderTeam() {
   $('store-mine').disabled = !cards;
   $('store-mine').setAttribute('aria-pressed', String(state.storeMine));
   $('store-mine-count').textContent = mineCount ? number(mineCount) : '';
+  renderStoreQueue();
   renderStoreShelves(cards);
   renderStoreAll(cards);
 }
@@ -2574,14 +2720,20 @@ $('store-refresh').addEventListener('click', event => reloadStorePage(event.curr
 $('store-retry').addEventListener('click', event => reloadStorePage(event.currentTarget));
 $('store-publish').addEventListener('click', () => openPublish());
 
-/* 卡片、列表行和空状态里的按钮都在团队页里，统一在这里分派。 */
+/* 卡片、列表行、安装队列和空状态里的按钮都在团队页里，统一在这里分派。 */
 $('page-team').addEventListener('click', event => {
+  const goto = event.target.closest('[data-store-goto]');
+  const retry = event.target.closest('[data-store-queue-retry]');
+  const clear = event.target.closest('[data-store-queue-clear]');
   const open = event.target.closest('[data-store-open]');
   const more = event.target.closest('[data-store-more]');
   const publish = event.target.closest('[data-store-publish]');
   const republish = event.target.closest('[data-store-republish]');
   const unlist = event.target.closest('[data-store-unlist]');
-  if (open) openStoreDetail(open.dataset.storeOpen, open);
+  if (goto) gotoStoreSkill(goto);
+  else if (retry) retryStoreQueue(retry.dataset.storeQueueRetry, retry);
+  else if (clear) clearStoreQueue(clear);
+  else if (open) openStoreDetail(open.dataset.storeOpen, open);
   else if (more) {
     state.storeSort = more.dataset.storeMore;
     renderTeam();
@@ -2591,6 +2743,25 @@ $('page-team').addEventListener('click', event => {
   else if (republish) openPublish([republish.dataset.storeRepublish]);
   else if (unlist) unlistStore(unlist.dataset.storeUnlist, unlist);
 });
+
+/* 队列里刚装好的技能可能还没进当前技能表：先补读一次，再打开它的详情。 */
+async function gotoStoreSkill(button) {
+  const name = button.dataset.storeGoto;
+  closeDetail();
+  showPage('skills');
+  if (!state.table?.skills.some(skill => skill.name === name)) {
+    try {
+      await refreshTable();
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+      return;
+    }
+  }
+  if (state.table?.skills.some(skill => skill.name === name)) openDetail(name);
+  else toast({text: '技能页里还没看到这个技能，稍等一下再试。', tone: 'error'});
+  // 有新版时顺便检查更新，详情里随后出现“有新版”和更新按钮。
+  if (button.hasAttribute('data-store-check') && !updateState.review?.running && !updateState.starting) checkUpdates();
+}
 
 async function unlistStore(name, button) {
   const cards = (state.store?.cards || []).filter(item => item.local?.status === 'mine');
@@ -2634,13 +2805,13 @@ async function unlistStore(name, button) {
 
 let storeOpener = null;
 let storeOpenerArea = null;   // store-shelves 或 store-list：卡片重画后按编号在同一处找回
-let storeGet = null;   // 详情里的「装上」：{key, agents, plan, reading, error}
+let storeGet = null;   // 详情里「装上」的状态：{key, error}
 
 const storeCard = key => state.store?.cards.find(card => card.key === key) || null;
 const storeMyListing = card => card.listings.find(item => item.member.id === state.store?.member?.id) || card.listings[0];
 
 function openStoreDetail(key, opener = null) {
-  if (state.storeDetail !== key || !storeGet) storeGet = {key, agents: new Set(state.agents.map(agent => agent.id)), plan: null, reading: false, error: ''};
+  if (state.storeDetail !== key || !storeGet) storeGet = {key, error: ''};
   storeOpener = opener;
   storeOpenerArea = opener?.closest('#store-shelves, #store-list')?.id || null;
   state.storeDetail = key;
@@ -2689,13 +2860,17 @@ function storeRequireTitle(card, name) {
 }
 
 function storeSourceText(card) {
-  if (card.kind === 'github') return '网上的公开技能，装的时候从原作者那里下载。';
+  const latest = card.listings?.[0];
+  if (card.kind === 'github') {
+    return latest?.file_count
+      ? '网上的公开技能，上架时连文件存到了分享站，装的时候从分享站下载。'
+      : '网上的公开技能，装的时候从原作者那里下载。';
+  }
   if (card.kind === 'lark') return '飞书官方技能。';
-  const latest = card.listings[0];
   return `${latest.member.name} 上传的文件${latest.file_count ? `，共 ${number(latest.file_count)} 个、${sizeText(latest.size || 0)}` : ''}。`;
 }
 
-/* 详情里最重要的一块：能不能装、装给谁。 */
+/* 详情里最重要的一块：能不能装、装好没有。 */
 function storeGetHtml(card) {
   const local = card.local || {};
   const users = (local.agents || []).map(nameOf).join('、');
@@ -2703,7 +2878,11 @@ function storeGetHtml(card) {
     <p class="store-get-line">${text}</p>${action ? `<div class="store-get-actions">${action}</div>` : ''}</section>`;
   const locked = teamCanWrite() ? '' : ' disabled';
   if (local.status === 'installed') {
-    return box('ok', `${icon('check-circle')}<span><strong>已装</strong>${users ? `，${escape(users)} 在用` : '，还没有 agent 在用'}</span>`,
+    if (!local.agents?.length) {
+      return box('ok', `${icon('check-circle')}<span><strong>已装进技能库，还没给 agent 启用</strong></span>`,
+        `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">去技能页启用</button>`);
+    }
+    return box('ok', `${icon('check-circle')}<span><strong>已装</strong>，${escape(users)} 在用</span>`,
       `<button class="link-btn" type="button" data-store-goto="${escape(card.name)}">在技能页看看</button>`);
   }
   if (local.status === 'update') {
@@ -2727,35 +2906,31 @@ function storeGetHtml(card) {
 
 function storeInstallHtml(card) {
   const get = storeGet;
-  const plan = get.plan;
-  const locked = !teamCanWrite();
-  const agents = state.agents.map(agent => `<label class="store-agent">
-      <input type="checkbox" data-store-agent="${escape(agent.id)}" ${get.agents.has(agent.id) ? 'checked' : ''}${locked || get.reading ? ' disabled' : ''}>
-      ${swatch(agent.id)}<span>${escape(agent.name)}</span></label>`).join('');
-  const count = get.agents.size;
-  const cost = `每个 agent 每次新对话多占约 <b>${tokenText(card.tokens)} Token</b>${hint(TOKEN_HINT)}`;
-  let review = '';
-  let actions = `<button class="btn btn-primary" type="button" data-store-install${locked || !count || get.reading ? ' disabled' : ''}>${get.reading ? '正在核对…' : `装上${count ? `（给 ${count} 个 agent）` : ''}`}</button>`;
-  if (plan) {
-    const names = list => list.map(item => escape(item.title || item.name || item)).join('、');
-    review = `<div class="store-plan" role="status">
-      ${plan.install?.length ? `<p>会装上 ${plan.install.length} 个：${names(plan.install)}</p>` : ''}
-      ${plan.reuse?.length ? `<p>本机已有，直接用：${names(plan.reuse)}</p>` : ''}
-      ${plan.skipped?.length ? `<p class="is-warn">${icon('warning')}跳过 ${plan.skipped.length} 个：${plan.skipped.map(item => `${escape(item.name)}（${escape(item.reason)}）`).join('、')}</p>` : ''}
-      <p class="muted">给 ${escape((plan.agents || []).map(nameOf).join('、'))} 用</p>
-    </div>`;
-    const empty = !plan.install?.length && !plan.reuse?.length;
-    actions = `<button class="btn" type="button" data-store-plan-cancel>改一改</button>
-      <button class="btn btn-primary" type="button" data-store-install-apply${locked || empty ? ' disabled' : ''}>确认装上</button>`;
+  const readOnly = teamReadOnly();
+  const queued = storeQueueItem(card.key);
+  const cost = `启用后每个 agent 每次新对话多占约 <b>${tokenText(card.tokens)} Token</b>${hint(TOKEN_HINT)}`;
+  let status = '';
+  let action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>装上</button>`;
+  if (queued?.status === 'waiting') {
+    status = '<p class="store-queue-state" role="status">已加入安装队列</p>';
+    action = '';
+  } else if (queued?.status === 'running') {
+    status = '<p class="store-queue-state" role="status">正在装…</p>';
+    action = '';
+  } else if (queued?.status === 'failed') {
+    status = `<p class="store-get-error" role="alert">没装上：${escape(queued.message || '不知道原因')}</p>`;
+    action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>重试</button>`;
+  } else if (queued?.status === 'done') {
+    status = '<p class="store-queue-state" role="status">装好了</p>';
+    action = `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">去技能页启用</button>`;
   }
-  return `<section class="store-get store-get-install" aria-labelledby="store-get-title">
-    <h3 id="store-get-title" class="store-get-title">装到哪些 agent</h3>
-    <div class="store-agents">${agents}</div>
+  return `<section class="store-get store-get-install">
+    <p class="store-get-line">装进技能库，到技能页给 agent 启用后才生效。</p>
     <p class="store-cost">${cost}</p>
-    ${get.error ? `<p class="store-get-error" role="alert">${escape(get.error)}</p>` : ''}
-    ${review}
-    <div class="store-get-actions">${actions}</div>
-    ${locked && !writeBusy ? '<p class="row-note">只读预览，不能装上。</p>' : ''}
+    ${status}
+    ${!queued && get?.error ? `<p class="store-get-error" role="alert">${escape(get.error)}</p>` : ''}
+    ${action ? `<div class="store-get-actions">${action}</div>` : ''}
+    ${readOnly && action ? '<p class="row-note">只读预览，不能装上。</p>' : ''}
   </section>`;
 }
 
@@ -2792,34 +2967,14 @@ function storeRateHtml(card) {
   </form>`;
 }
 
-$('detail-body').addEventListener('change', event => {
-  const box = event.target.closest('[data-store-agent]');
-  if (!box || !storeGet) return;
-  if (box.checked) storeGet.agents.add(box.dataset.storeAgent);
-  else storeGet.agents.delete(box.dataset.storeAgent);
-  storeGet.plan = null;
-  storeGet.error = '';
-  renderStoreDetail();
-  $('detail-body').querySelector(`[data-store-agent="${CSS.escape(box.dataset.storeAgent)}"]`)?.focus();
-});
-
-$('detail-body').addEventListener('click', async event => {
+$('detail-body').addEventListener('click', event => {
   if (!state.storeDetail) return;
   const target = event.target;
-  if (target.closest('[data-store-install]')) previewStoreInstall();
-  else if (target.closest('[data-store-plan-cancel]')) {
-    storeGet.plan = null;
-    renderStoreDetail();
-    $('detail-body').querySelector('[data-store-agent]')?.focus();
-  } else if (target.closest('[data-store-install-apply]')) applyStoreInstall(target.closest('[data-store-install-apply]'));
-  else if (target.closest('[data-store-goto]')) {
-    const button = target.closest('[data-store-goto]');
-    const name = button.dataset.storeGoto;
-    closeDetail();
-    showPage('skills');
-    if (state.table?.skills.some(skill => skill.name === name)) openDetail(name);
-    // 有新版时顺便检查更新，详情里随后出现“有新版”和更新按钮。
-    if (button.hasAttribute('data-store-check') && !updateState.review?.running && !updateState.starting) checkUpdates();
+  if (target.closest('[data-store-install]')) {
+    const card = storeCard(state.storeDetail);
+    if (card) queueStoreInstall(card);
+  } else if (target.closest('[data-store-goto]')) {
+    gotoStoreSkill(target.closest('[data-store-goto]'));
   } else if (target.closest('[data-store-republish]')) {
     const name = target.closest('[data-store-republish]').dataset.storeRepublish;
     closeDetail();
@@ -2837,64 +2992,27 @@ $('detail-body').addEventListener('submit', event => {
   rateStore(form, false);
 });
 
-async function previewStoreInstall() {
+/* 点一次就加入队列：不用 runWrite，也不锁页面；别的写操作进行中照样可以排队。
+   加入失败时把原因留在这块里，按钮还能再按。 */
+async function queueStoreInstall(card) {
   const get = storeGet;
-  const card = storeCard(get?.key);
-  if (!card || get.reading) return;
-  get.reading = true;
+  if (!get || get.key !== card.key) return;
   get.error = '';
-  renderStoreDetail();
   try {
-    get.plan = await api('/api/team/install/preview', {key: card.key, agents: state.agents.map(agent => agent.id).filter(id => get.agents.has(id))});
+    applyQueue(await addToStoreQueue(card), {force: true});
+    if (storeGet === get) focusStorePanel('.store-get button, .store-get a');
   } catch (error) {
     get.error = error.message;
+    if (storeGet !== get) return;
+    renderStoreDetail();
+    focusStorePanel('.store-get button');
   }
-  get.reading = false;
-  if (storeGet !== get) return;
-  renderStoreDetail();
-  $('detail-body').querySelector('[data-store-install-apply], [data-store-install]')?.focus();
-}
-
-async function applyStoreInstall(button) {
-  const get = storeGet;
-  const plan = get?.plan;
-  const card = storeCard(get?.key);
-  if (!plan || !card || writeBusy) return;
-  await runWrite({
-    button, busyText: '正在装上…',
-    onError: error => {
-      if (storeGet !== get) return;
-      get.plan = null;
-      get.error = error.message;
-      renderStoreDetail();
-    },
-    work: async () => {
-      const result = await api('/api/team/install/apply', {review: plan.review});
-      get.plan = null;
-      await refreshEverything();
-      await loadStore();
-      return result;
-    },
-    success: result => {
-      focusStorePanel('.store-get button, .store-get a');
-      return {
-      text: result.message || `装上了「${storeTitle(card)}」`,
-      undo: result.id ? undoButton => undoStoreInstall(result, undoButton) : null,
-      };
-    },
-  });
 }
 
 /* 详情重画会换掉刚按过的按钮：焦点放到面板里的下一个合适位置，找不到就放在「关闭」上。 */
 function focusStorePanel(selector) {
   if (!state.storeDetail || $('detail-body').contains(document.activeElement)) return;
   ($('detail-body').querySelector(selector) || $('detail-close')).focus();
-}
-
-async function undoStoreInstall(result, button) {
-  const done = await undoOperation(result.id, {skills: result.installed || [], message: result.message, button});
-  if (done) await loadStore();
-  return done;
 }
 
 async function rateStore(form, remove) {
@@ -3015,16 +3133,27 @@ function storeReviewHtml(plan) {
       <ul class="confirm-items">${plan.errors.map(item => `<li>${escape(item.name)}：${escape(item.reason)}</li>`).join('')}</ul>
     </div>` : '';
   const rows = (plan.listings || []).map(item => {
-    const what = item.kind === 'files' ? `连文件一起传：${number(item.files?.count || 0)} 个文件，${sizeText(item.files?.size || 0)}`
-      : item.kind === 'lark' ? '飞书官方技能，只传名字和说明' : '网上的公开技能，只传名字和来源';
+    let what;
+    if (item.kind === 'files') {
+      what = `连文件一起传：${number(item.files?.count || 0)} 个文件，${sizeText(item.files?.size || 0)}`;
+    } else if (item.kind === 'lark') {
+      what = '飞书官方技能，只传名字和说明';
+    } else if (item.version != null) {
+      what = `网上的公开技能，连文件一起传：${number(item.files?.count || 0)} 个文件，${sizeText(item.files?.size || 0)}；同事装的时候不用连 GitHub`;
+    } else {
+      what = `网上的公开技能，只传名字和来源${item.download_note ? `。${item.download_note}` : ''}`;
+    }
     const blocked = item.files?.blocked || [];
+    const blockedTitle = item.kind === 'github'
+      ? `拦下 ${blocked.length} 个疑似密钥或密码的文件，所以这个技能不传文件`
+      : `拦下 ${blocked.length} 个疑似密钥或密码的文件，不会上传`;
     return `<li class="store-review-row">
       <p class="store-review-name"><strong>${escape(item.title || item.name)}</strong>${item.title && item.title !== item.name ? ` <span class="skill-id">${escape(item.name)}</span>` : ''}</p>
       <p class="row-note">${escape(what)}</p>
       <p class="store-review-note">${item.note ? `“${escape(item.note)}”` : `<span class="muted">没写推荐语，同事看到的是技能自带的一句话。</span>`}</p>
       ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.map(name => storeCandidates?.find(row => row.name === name)?.title || name).join('、'))} 需要它，一起上架</p>` : ''}
       ${blocked.length ? `<details class="fold fold-inner store-blocked">
-        <summary>${icon('lock')} 拦下 ${blocked.length} 个疑似密钥或密码的文件，不会上传</summary>
+        <summary>${icon('lock')} ${blockedTitle}</summary>
         <ul class="confirm-items">${blocked.map(file => `<li><span class="mono">${escape(file.path)}</span>：${escape(file.reason)}</li>`).join('')}</ul>
       </details>` : ''}
     </li>`;

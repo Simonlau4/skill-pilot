@@ -573,6 +573,14 @@
         <span id="store-error-text"></span>
         <span class="banner-actions"><button id="store-retry" class="btn btn-small" type="button">重试</button></span>
       </div>
+      <div id="store-queue" role="region" aria-labelledby="store-queue-title" hidden>
+        <div class="store-queue-head">
+          <h2 id="store-queue-title" tabindex="-1">安装队列</h2>
+          <span id="store-queue-left" class="store-count"></span>
+          <button id="store-queue-clear" class="btn btn-small btn-quiet" type="button" data-store-queue-clear hidden>清除已完成</button>
+        </div>
+        <div id="store-queue-items" class="list" aria-live="polite"></div>
+      </div>
       <div id="store-shelves"></div>
       <section id="store-all" class="store-all" aria-labelledby="store-all-title">
         <div class="store-all-head">

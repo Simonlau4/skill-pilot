@@ -1485,6 +1485,24 @@ pre {
 #store-error { margin: 0 0 var(--sp-4); }
 #store-error-text { flex: 1; min-width: 0; }
 
+/* 安装队列：白面板，一行一个技能，状态用 .tag，动作沿用 btn-small / link-btn。 */
+#store-queue {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+}
+.store-queue-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.store-queue-head h2 { font: 600 var(--fs-body)/1.4 var(--font-display); outline: none; }
+.store-queue-head .btn { margin-left: auto; }
+#store-queue-items { margin-top: var(--sp-1); }
+#store-queue-items .item-row { align-items: center; }
+#store-queue-items .tag { white-space: normal; overflow-wrap: anywhere; }
+.store-queue-state { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-top: 2px; }
+p.store-queue-state { margin: var(--sp-2) 0 0; }
+
 /* 星级：同事打的分用墨色实心星（黄色只表示“改了还没生效”，这里不用）。 */
 .star { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; vertical-align: -2px; }
 .star.is-on { fill: currentColor; }
@@ -1631,29 +1649,9 @@ pre {
 .store-get-ok .store-get-line .ico { color: var(--ok-ink); }
 .store-get-info { background: var(--info-bg); box-shadow: inset 0 0 0 1px var(--info-line); color: var(--info-ink); }
 .store-get-warn { background: var(--warn-bg); box-shadow: inset 0 0 0 1px #EFD98F; color: var(--warn-ink); }
-.store-get-title { margin: 0 0 var(--sp-2); font-size: var(--fs-body); }
-.store-agents { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
-.store-agent {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-height: 34px;
-  padding: 0 var(--sp-3) 0 10px;
-  font-size: var(--fs-small);
-  background: var(--panel);
-  border-radius: 999px;
-  box-shadow: inset 0 0 0 1px var(--line);
-  cursor: pointer;
-}
-.store-agent:has(input:checked) { box-shadow: inset 0 0 0 1.5px var(--ink); }
-.store-agent:has(input:disabled) { opacity: 0.6; cursor: default; }
 .store-cost { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; margin: var(--sp-3) 0 0; font-size: var(--fs-small); color: var(--ink-2); }
 .store-cost b { color: var(--ink); font-weight: 600; margin: 0 2px; }
 .store-get-error { margin: var(--sp-3) 0 0; color: var(--danger-ink); font-size: var(--fs-small); }
-.store-plan { margin: var(--sp-3) 0 0; padding: var(--sp-3) var(--sp-4); background: var(--panel); border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1px var(--line); font-size: var(--fs-small); }
-.store-plan p { margin: 2px 0; overflow-wrap: anywhere; }
-.store-plan .is-warn { color: var(--warn-ink); }
-.store-plan .is-warn .ico { margin-right: 4px; }
 .store-get-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-3); }
 .store-get:not(.store-get-install) { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
 .store-get:not(.store-get-install) .store-get-actions { margin: 0 0 0 auto; }
