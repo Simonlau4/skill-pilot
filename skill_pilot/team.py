@@ -14,11 +14,10 @@ import urllib.request
 from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 
-from . import labels, normalization, operations, sharing, team_hub
+from . import labels, operations, sharing, team_hub
 from .scan import SKIP_CONTENT, metadata
 from .sources import github, normalize
 from .store import git_tree, guard
-from .sync import reconcile_assignments
 
 MAX_BODY = team_hub.MAX_BODY
 TIMEOUT = 10
@@ -380,99 +379,91 @@ def package(config, member, name, version, destination):
     return destination
 
 
-def install_preview(home, key, assigned):
+def install(home, key):
     home, registry, agents = operations.load(home)
-    if (not isinstance(assigned, list) or not assigned or
-            any(not isinstance(a, str) or a not in agents for a in assigned)):
-        raise ValueError('请至少选择一个本机已经接入的 agent。')
-    revision = operations.revision(home, agents)
+    guard(home / '.skill-pilot', home)
     config, _, cards = _fetch(home)
     card = next((c for c in cards if c['key'] == key), None)
     if card is None:
-        raise ValueError('这个技能已经下架，请刷新商店。')
-    rows, reuse, skipped = _plan(card, cards, registry)
-    temporary = Path(tempfile.mkdtemp(prefix='skill-pilot-team-install-'))
-    items, downloads = [], {}
-    try:
+        raise ValueError('这个技能已经下架。')
+    root = card['listings'][0]
+    existing = {'installed': [], 'reuse': [], 'message': '本机已经有了。'}
+    if _local(root, registry)[0] in {'installed', 'update'}:
+        return existing
+    rows, _, skipped = _plan(card, cards, registry)
+    if skipped:
+        raise ValueError(next(r['reason'] for r in skipped if r['name'] == root['name']))
+    title = next((r['title'] for r in card['listings'] if 'title' in r), root['name'])
+    with tempfile.TemporaryDirectory(prefix='skill-pilot-team-install-') as temporary:
+        items = {}
         for name, row in sorted(rows.items()):
             source = row['source']
-            if source['kind'] == 'files':
-                path = package(config, row['member']['id'], name, source['version'], temporary / name)
-                origin = {'source': '团队商店', 'team': {'member': row['member']['id'],
-                    'member_name': row['member']['name'], 'name': name, 'version': source['version'],
-                    'key': team_hub.listing_key(row['member']['id'], row)}}
-                item = {'name': name, 'path': str(path), 'source': origin}
+            path = Path(temporary) / name
+            if source['kind'] == 'files' or 'version' in source:
+                package(config, row['member']['id'], name, source['version'], path)
+                if source['kind'] == 'files':
+                    origin = {'source': '团队商店', 'team': {'member': row['member']['id'],
+                        'member_name': row['member']['name'], 'name': name, 'version': source['version'],
+                        'key': team_hub.listing_key(row['member']['id'], row)}}
+                else:
+                    origin = {'source': 'https://github.com/' + source['repository'] + '.git',
+                        'repository': source['repository'], 'source_path': source['path'],
+                        'commit': source.get('commit', ''), 'confidence': '高',
+                        'evidence': '从团队商店读取 GitHub 来源的文件，未执行其中的程序'}
+                    if 'tree_sha' in source:
+                        origin['tree_sha'] = source['tree_sha']
+                items[name] = {'name': name, 'path': str(path), 'source': origin}
             else:
-                identity = (source['repository'], source.get('commit', ''))
-                if identity not in downloads:
-                    url = 'https://github.com/' + identity[0] + ('/tree/' + identity[1] if identity[1] else '')
-                    downloads[identity] = github.inspect(url)
-                found = next((s for s in downloads[identity]['skills'] if s['name'] == name and
-                              PurePosixPath(s['repository_path']) == PurePosixPath(source['path'])), None)
-                if found is None:
-                    raise ValueError(name + ' 的来源里没有找到指定的技能，请联系上架的同事。')
-                github.safe_skill(Path(found['path']))
-                path = temporary / name
-                shutil.copytree(found['path'], path, symlinks=True, ignore=shutil.ignore_patterns(*SKIP_CONTENT))
-                item = {**found, 'path': str(path)}
-            item['tree'] = git_tree(Path(item['path']))
-            items.append(item)
-        virtual = copy.deepcopy(registry)
-        for item in items:
-            virtual['skills'][item['name']] = {'assigned_agents': [], 'requires': rows[item['name']]['requires'], 'entries': []}
-        changes = [{'skill': n, 'agent': a, 'enabled': True} for n in sorted(set(rows) | reuse) for a in sorted(set(assigned))]
-        plan = operations.assignment_plan(virtual, agents, changes, home)
-        tokens = {a: 0 for a in sorted(set(assigned))}
-        for name, skill in plan['registry']['skills'].items():
-            added = set(skill['assigned_agents']) - set(registry['skills'].get(name, {}).get('assigned_agents', []))
-            if not added:
-                continue
-            path = temporary / name if name in rows else home / '.skill-pilot/store' / name
-            cost = operations.listing_tokens(name, metadata((path / 'SKILL.md').read_text()))
-            for agent in added:
-                if agent in tokens:
-                    tokens[agent] += cost
-        title = next((r['title'] for r in card['listings'] if 'title' in r), card['listings'][0]['name'])
-        saved = {'temporary': str(temporary), 'items': items, 'rows': rows, 'reuse': sorted(reuse),
-                 'agents': sorted(set(assigned)), 'revision': revision, 'connection': _connection_version(config),
-                 'title': title, 'changes': changes, 'skipped': skipped}
-        public = {'install': [{'name': n, **({'title': r['title']} if 'title' in r else {})} for n, r in sorted(rows.items())],
-                  'reuse': sorted(reuse), 'skipped': skipped, 'agents': saved['agents'], 'tokens': tokens,
-                  'message': f'将装上 {len(rows)} 个，沿用本机 {len(reuse)} 个' + ('，有所需技能装不了。' if skipped else '。')}
-        return saved, public
-    except Exception:
-        shutil.rmtree(temporary, ignore_errors=True)
-        raise
-    finally:
-        for download in downloads.values():
-            shutil.rmtree(download['temporary'], ignore_errors=True)
+                suffix = source.get('commit')
+                if not suffix:
+                    remote, _, _ = github.parse_url('https://github.com/' + source['repository'])
+                    suffix = github.git(Path(temporary), 'ls-remote', '--exit-code', remote, 'HEAD').split()[0]
+                if source['path'] != '.':
+                    suffix += '/' + source['path']
+                url = 'https://github.com/' + source['repository'] + '/tree/' + urllib.parse.quote(suffix, safe='/')
+                download = github.inspect(url)
+                try:
+                    found = next((s for s in download['skills'] if s['name'] == name and
+                                  PurePosixPath(s['repository_path']) == PurePosixPath(source['path'])), None)
+                    if found is None:
+                        raise ValueError(name + ' 的来源里没有找到指定的技能，请联系上架的同事。')
+                    github.safe_skill(Path(found['path']))
+                    shutil.copytree(found['path'], path, symlinks=True, ignore=shutil.ignore_patterns(*SKIP_CONTENT))
+                    items[name] = {**found, 'path': str(path)}
+                finally:
+                    shutil.rmtree(download['temporary'], ignore_errors=True)
 
+        class AlreadyInstalled(ValueError):
+            pass
 
-def install_apply(home, review):
-    home, registry, agents = operations.load(home)
-    guard(home / '.skill-pilot', home)
-    if operations.revision(home, agents) != review['revision']:
-        raise ValueError('本机技能已经变了，请重新预览后再装上。')
-    if _connection_version(_connection(home)) != review['connection']:
-        raise ValueError('分享站设置已经变了，请重新预览。')
-    for item in review['items']:
-        github.safe_skill(Path(item['path']))
-        if git_tree(Path(item['path'])) != item['tree']:
-            raise ValueError('预览里的技能文件已经变了，请重新预览。')
-    if review['skipped']:
-        return {'skipped': review['skipped'], 'message': '所需技能暂时装不了，本机没有改动。'}
-    if not review['items'] and not operations.assignment_plan(registry, agents, review['changes'], home)['changed']:
-        return {'message': '本机已经装好，分配没有变化。'}
-    def mutate(current, checked):
-        for item in review['items']:
-            operations._put(home, current, item, [], [], checked)
-            current['skills'][item['name']]['requires'] = review['rows'][item['name']]['requires']
-        assignments = operations.assignment_plan(current, agents, review['changes'], home)
-        current.update(assignments['registry'])
-        names = sorted({s['name'] for s in review['items']} | set(assignments['changed']))
-        reconcile_assignments(current, home, checked, names)
-        return names, [s['name'] for s in review['items']], {'installed': [s['name'] for s in review['items']], 'reuse': review['reuse']}
-    return operations._run(home, registry, agents, review['revision'], '从团队商店装上了「' + review['title'] + '」', mutate)
+        pending = {}
+        def expected():
+            current = operations.load(home)[1]
+            if _local(root, current)[0] in {'installed', 'update'}:
+                raise AlreadyInstalled
+            current_rows, reuse, skipped = _plan(card, cards, current)
+            if skipped:
+                raise ValueError(next(r['reason'] for r in skipped if r['name'] == root['name']))
+            if set(current_rows) - items.keys():
+                raise ValueError('本机所需技能已经变了，请重试安装。')
+            pending.update(rows=current_rows, reuse=sorted(reuse))
+            return current
+
+        def mutate(current, checked):
+            names = sorted(pending['rows'])
+            for name in names:
+                item = items[name]
+                operations._put(home, current, item, [], [], checked)
+                skill = current['skills'][name]
+                skill['requires'] = rows[name]['requires']
+                if _origin(skill)['kind'] == 'github' and item['source'].get('tree_sha'):
+                    skill['base_tree_sha'] = item['source']['tree_sha']
+                    skill['base_normalized_tree_sha'] = git_tree(home / '.skill-pilot/bases' / name)
+            return names, names, {'installed': names, 'reuse': pending['reuse']}
+        try:
+            return operations._run(home, registry, agents, expected, '从团队商店装上了「' + title + '」', mutate)
+        except AlreadyInstalled:
+            return existing
 
 
 def _files(root):
@@ -535,15 +526,26 @@ def _candidates(home, registry, member, cards):
         except ValueError:
             unavailable = '这个技能引用了技能文件夹外的文件，不能上架。'
         listed = shared.get(name)
-        if kind == 'files' and not unavailable and listed and listed['source']['kind'] == 'files':
+        if kind in {'files', 'github'} and not unavailable and listed:
             try:
-                version = team_hub.package_version(_files(home / '.skill-pilot/store' / name)[0])
+                files, info = _files(home / '.skill-pilot/store' / name)
+                if kind == 'files' or not info['blocked']:
+                    version = team_hub.package_version(files)
             except (ValueError, OSError):
                 version = ''
+        source = dict(row['source'])
+        if kind == 'github':
+            recorded = skill.get('source', {})
+            recorded = recorded if isinstance(recorded, dict) else {}
+            tree = (skill.get('base_tree_sha') or recorded.get('tree_sha') or
+                    recorded.get('record', {}).get('skillFolderHash'))
+            if isinstance(tree, str) and re.fullmatch(r'[0-9a-f]{40}', tree):
+                source['tree_sha'] = tree
         result[name] = {**{k: row[k] for k in ('name', 'title', 'summary', 'group', 'description', 'requires') if k in row},
             'kind': kind, 'listed': bool(listed), 'note': listed.get('note', '') if listed else '',
-            'changed': bool(listed and listed['source']['kind'] == 'files' and version != listed['source']['version']),
-            'unavailable': unavailable, '_source': row['source']}
+            'changed': bool(listed and kind in {'files', 'github'} and (kind != 'github' or version) and
+                            (not listed['source'].get('version') or version != listed['source']['version'])),
+            'unavailable': unavailable, '_source': source}
     return result
 
 
@@ -591,18 +593,30 @@ def listings_preview(home, skills):
         listing['note'] = notes.get(name, '')
         files_info = {'count': 0, 'size': 0, 'blocked': []}
         version = None
+        download_note = ''
         try:
             if row['kind'] == 'files':
                 files, files_info = _files(home / '.skill-pilot/store' / name)
                 listing['source'] = {'kind': 'files', 'files': files}
                 version = team_hub.package_version(files)
             else:
-                listing['source'] = row['_source'] if row['kind'] == 'github' else {'kind': 'lark'}
+                listing['source'] = dict(row['_source']) if row['kind'] == 'github' else {'kind': 'lark'}
+                if row['kind'] == 'github':
+                    try:
+                        files, files_info = _files(home / '.skill-pilot/store' / name)
+                        if not files_info['blocked']:
+                            listing['source']['files'] = files
+                            version = team_hub.package_version(files)
+                    except (ValueError, OSError):
+                        pass
+                    if version is None:
+                        download_note = '同事装的时候从 GitHub 下载。'
             listing = team_hub.clean_listing(listing)
             payload[name] = listing
             public[name] = {**{k: v for k, v in listing.items() if k != 'source'},
                             'title': listing.get('title', name), 'kind': row['kind'],
-                            'auto': sorted(auto.get(name, set())), 'files': files_info, 'version': version}
+                            'auto': sorted(auto.get(name, set())), 'files': files_info, 'version': version,
+                            **({'download_note': download_note} if download_note else {})}
         except (ValueError, OSError) as error:
             errors[name] = str(error) if isinstance(error, ValueError) else '技能文件没能完整读取，请检查后重试。'
     while True:
@@ -655,12 +669,13 @@ def listings_remove(home, names):
             for name in sorted(pending):
                 row = copy.deepcopy(rows[name])
                 row['requires'] = [n for n in row['requires'] if n not in pending]
-                if row['source']['kind'] == 'files':
+                if 'version' in row['source']:
                     data = _request(config, '/api/packages/' + member['id'] + '/' + name + '?version=' + row['source']['version'])
                     files = team_hub.clean_files(data.get('files'))
                     if team_hub.package_version(files) != row['source']['version']:
                         raise ValueError(FORMAT_ERROR)
-                    row['source'] = {'kind': 'files', 'files': files}
+                    row['source'] = {k: v for k, v in row['source'].items() if k not in {'version', 'file_count', 'size'}}
+                    row['source']['files'] = files
                 replacements.append(team_hub.clean_listing(row))
             _request(config, '/api/listings/me', 'PUT', {'listings': replacements})
             order.extend(sorted(pending))

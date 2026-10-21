@@ -249,6 +249,58 @@ class TeamHubTests(unittest.TestCase):
             changed[1][field] = value
             self.assertNotEqual(version, team_hub.package_version(changed))
 
+    def test_github_packages_keep_identity_and_legacy_catalog_fields(self):
+        row = listing(title='示例技能')
+        row['source'].update(commit='a' * 40, tree_sha='b' * 40,
+                             files=[file('SKILL.md', '示例'), file('scripts/example.sh', 'exit 9', True)])
+        key = team_hub.listing_key(self.first['id'], row)
+        status, receipt = self.put([row])
+        self.assertEqual(status, 200, receipt)
+        version = receipt['listings'][0]['version']
+        source = self.cards()[0]['listings'][0]['source']
+        self.assertEqual(source, {'kind': 'github', 'repository': 'Acme/skills', 'path': 'skills/example',
+            'commit': 'a' * 40, 'tree_sha': 'b' * 40, 'version': version, 'file_count': 2,
+            'size': len('示例'.encode()) + len('exit 9')})
+        self.assertEqual(self.cards()[0]['key'], key)
+        self.assertEqual(self.package(suffix='?version=' + version)[1]['files'], row['source']['files'])
+        self.assertEqual(team_hub.clean_listing(self.cards()[0]['listings'][0], packaged=True)['source'], source)
+        # The old GitHub branch only kept these four fields, then normalized the folder.
+        legacy = copy.deepcopy(self.cards()[0]['listings'][0])
+        legacy['source'] = {k: source[k] for k in ('kind', 'repository', 'path', 'commit')}
+        self.assertEqual(team_hub.clean_listing(legacy, packaged=True)['source'], legacy['source'])
+        self.assertEqual(team_hub.listing_key(self.first['id'], legacy), key)
+        self.assertEqual(self.request()[1]['api'], 2)
+        self.assertEqual(self.put()[0], 200)
+        self.assertEqual(self.package()[0], 404)
+        self.assertNotIn('version', self.cards()[0]['listings'][0]['source'])
+
+    def test_github_packages_reuse_file_limits_and_validate_optional_metadata(self):
+        self.put([listing(kind='files')])
+        before = self.state()
+        for files in ([], [file('other.txt')], [file('SKILL.md'), file('../outside')],
+                      [file('SKILL.md')] + [file(str(i)) for i in range(300)],
+                      [file('SKILL.md', b'x' * (team_hub.MAX_SIZE + 1))]):
+            row = listing()
+            row['source']['files'] = files
+            self.assertEqual(self.put([row])[0], 400)
+            self.assertEqual(self.state(), before)
+        for value in (None, [], '', 'A' * 40, 'a' * 39):
+            row = listing()
+            row['source']['tree_sha'] = value
+            self.assertEqual(self.put([row])[0], 400)
+            self.assertEqual(self.state(), before)
+        for field, value in (('version', '../invalid'), ('file_count', True), ('file_count', 301),
+                             ('size', -1), ('size', team_hub.MAX_SIZE + 1)):
+            row = listing()
+            row['source'].update(version='a' * 64, file_count=1, size=0)
+            row['source'][field] = value
+            with self.assertRaises(ValueError):
+                team_hub.clean_listing(row, packaged=True)
+        row = listing()
+        row['source']['file_count'] = 1
+        with self.assertRaises(ValueError):
+            team_hub.clean_listing(row, packaged=True)
+
     def test_invalid_batches_preserve_every_previous_listing_and_package(self):
         self.put([listing(kind='files')])
         before = self.state()
