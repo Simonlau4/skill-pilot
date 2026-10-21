@@ -99,6 +99,8 @@ git pull --ff-only
 
 先读 [AGENTS.md](AGENTS.md) 和 [docs/STATUS.md](docs/STATUS.md)。需求与决策历史见 [PLAN.md](PLAN.md)。
 
+看板首页的动效用到 GSAP，文件和许可说明在 [skill_pilot/web/static/vendor/](skill_pilot/web/static/vendor/README.md)。
+
 开发最高准则是 [通用化与可复现](AGENTS.md#最高准则通用化与可复现)。下面以满足上述版本要求的 `python3.11` 为例，测试只在系统临时目录中的模拟用户环境运行。
 
 ```bash
