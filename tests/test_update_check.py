@@ -1,3 +1,5 @@
+import sys
+from skill_pilot.platform_support import rmtree
 """Background update checks against isolated homes and controlled repositories."""
 import json
 import shutil
@@ -32,7 +34,7 @@ class UpdateCheckTests(unittest.TestCase):
         try:
             operations.install(review, [name], ['codex'] if assigned else [], home=self.home)
         finally:
-            shutil.rmtree(review['temporary'])
+            rmtree(review['temporary'])
         manifest.write_text(manifest.read_text().replace('old', 'new'))
         self.fixture.commit('change ' + name)
 
@@ -43,7 +45,7 @@ class UpdateCheckTests(unittest.TestCase):
         def close():
             self.dashboard.shutdown(); thread.join(); self.dashboard.server_close()
             for review in self.dashboard.update_reviews.values():
-                shutil.rmtree(review['temporary'], ignore_errors=True)
+                rmtree(review['temporary'], ignore_errors=True)
         self.addCleanup(close)
         # Use the existing HTTP request helper with this isolated server.
         self.server = self.dashboard
@@ -402,7 +404,7 @@ class UpdateCheckTests(unittest.TestCase):
         def api(endpoint, timeout=45):
             if '/slow/' in endpoint:
                 try:
-                    subprocess.run(['python3', '-c', 'import time; time.sleep(10)'], timeout=timeout, capture_output=True)
+                    subprocess.run([sys.executable, '-c', 'import time; time.sleep(10)'], timeout=timeout, capture_output=True)
                 except subprocess.TimeoutExpired:
                     raise ValueError('这个仓库检查超时，可以稍后重试。')
             return [{'sha': 'commit', 'commit': {'tree': {'sha': 'new-tree'}}}]

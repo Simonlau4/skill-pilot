@@ -11,13 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .environment import tool_environment
+from .platform_support import rmtree
 from .sources.github import git as repository_git
 from .store import PROJECT, guard, write_allowed
 
 SOURCE = 'https://github.com/Simonlau4/skill-pilot.git'
 BRANCH = 'main'
 RECORD = '.skill-pilot-install.json'
-BUNDLE_DIRS = ('skill_pilot', 'scripts', 'assets', 'docs', 'skill', 'tests')
+BUNDLE_DIRS = ('skill_pilot', 'scripts', 'assets', 'docs', 'skill', 'tests', '.github')
 
 
 def git(project, *arguments, **options):
@@ -223,9 +224,10 @@ def record_failure(home, action, error):
     try:
         path = guard(home / '.skill-pilot/logs/program-update.jsonl', home)
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
         with os.fdopen(fd, 'w') as stream:
-            os.fchmod(stream.fileno(), 0o600)
+            if os.name != "nt":
+                os.fchmod(stream.fileno(), 0o600)
             stream.write(json.dumps(record, ensure_ascii=False) + '\n')
     except (OSError, ValueError):
         # A log-folder problem must not hide the original update failure.
@@ -263,10 +265,10 @@ def bundle_files(project):
         paths = [p for name in BUNDLE_DIRS for p in (project / name).rglob('*')
                  if p.is_file() and '__pycache__' not in p.parts]
         paths += list(project.glob('*.md'))
-        for name in ('.gitignore', '.claude/launch.json', 'skill-pilot'):
+        for name in ('.gitignore', '.gitattributes', '.claude/launch.json', 'skill-pilot'):
             if (project / name).exists():
                 paths.append(project / name)
-    return {str(p.relative_to(project)): stamp(safe_path(project, str(p.relative_to(project))))
+    return {p.relative_to(project).as_posix(): stamp(safe_path(project, p.relative_to(project).as_posix()))
             for p in sorted(paths) if p.name != '.DS_Store' and p.suffix != '.pyc'}
 
 
@@ -348,7 +350,7 @@ def check(home, project=PROJECT):
                 'latest': git(candidate, 'show', '-s', '--format=%cI', target),
                 'available': before['checkout'] or files != before['files']}
     except BaseException:
-        shutil.rmtree(temporary, ignore_errors=True)
+        rmtree(temporary, ignore_errors=True)
         raise
 
 
@@ -361,7 +363,8 @@ def validate(project, home):
             "compile(Path('scripts/install.py').read_bytes(), 'scripts/install.py', 'exec'); "
             "import skill_pilot.cli, skill_pilot.web.server")
     result = subprocess.run([sys.executable, '-B', '-c', code], cwd=project, env=env,
-                            stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if result.returncode:
         raise ValueError('新版暂时无法在这台电脑运行，当前程序保持原样。请稍后重试或查看新版安装要求。')
 
@@ -370,7 +373,8 @@ def run_installer(project, home):
     env = {**tool_environment(home), 'SKILL_PILOT_HOME': str(home), 'PYTHONDONTWRITEBYTECODE': '1'}
     env.pop('PYTHONPATH', None)
     result = subprocess.run([sys.executable, '-B', str(project / 'scripts/install.py')],
-                            cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+                            cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     if result.returncode:
         reason = result.stderr.decode('utf-8', 'replace').strip()
         if reason.startswith('安装没有完成：'):
@@ -420,6 +424,9 @@ def apply(review, home, project=PROJECT):
         if marker.exists():
             shutil.copy2(marker, backup / 'record')
         entries = [home / 'Applications/Skill Pilot.app', home / '.local/bin/skill-pilot']
+        if os.name == 'nt':
+            from .windows_install import entries as windows_entries
+            entries = windows_entries(home)
         for index, entry in enumerate(entries):
             if entry.is_symlink() or any(p.is_symlink() for p in entry.parents if p.is_relative_to(home)):
                 raise ValueError('SP 启动入口指向了其他位置，请重新安装后再升级。')
@@ -467,7 +474,7 @@ def apply(review, home, project=PROJECT):
                     marker.unlink(missing_ok=True)
                 for index, entry in enumerate(entries):
                     if entry.is_dir():
-                        shutil.rmtree(entry)
+                        rmtree(entry)
                     else:
                         entry.unlink(missing_ok=True)
                     saved = backup / str(index)
@@ -481,5 +488,5 @@ def apply(review, home, project=PROJECT):
             raise ValueError('升级没有完成，已恢复原版，可以继续使用。请稍后重试。') from error
     finally:
         if not retain_backup:
-            shutil.rmtree(backup, ignore_errors=True)
+            rmtree(backup, ignore_errors=True)
     return {'available': False, 'current': review['latest'], 'latest': review['latest']}

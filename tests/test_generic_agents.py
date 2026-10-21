@@ -112,7 +112,7 @@ class GenericAgentTests(unittest.TestCase):
                                  for a in ['claude', 'antigravity']], confirmed=True, home=self.home)
         path = self.home / '.zcode/skills/x'
         path.parent.mkdir(parents=True)
-        path.symlink_to('../../.agents/skills/x', target_is_directory=True)
+        path.symlink_to(Path('../../.agents/skills/x'), target_is_directory=True)
         return path
 
     def test_discover_join_assign_undo_leave_and_rejoin(self):
@@ -414,7 +414,7 @@ class GenericAgentTests(unittest.TestCase):
         record = operations.load(self.home)[1]['skills']['x']
         self.assertEqual(record['assigned_agents'], ['zcode'])
         self.assertEqual(record['entries'], ['.zcode/skills/x'])
-        self.assertEqual(str(path.readlink()), str(self.home / '.skill-pilot/store/x'))
+        self.assertEqual(str(path.resolve()), str(self.home / '.skill-pilot/store/x'))
         self.assertEqual((path / 'SKILL.md').read_bytes(), content)
         current = visibility(self.home)
         self.assertIn('x', current['zcode']['available'])
@@ -432,7 +432,7 @@ class GenericAgentTests(unittest.TestCase):
                                  for a in ['codex', 'claude', 'antigravity', 'dsh']],
                                 confirmed=True, home=self.home)
         self.assertEqual((path / 'SKILL.md').read_bytes(), content)
-        self.assertEqual(str(path.readlink()), str(self.home / '.skill-pilot/store/x'))
+        self.assertEqual(str(path.resolve()), str(self.home / '.skill-pilot/store/x'))
         self.assertFalse((self.home / '.agents/skills/x').is_symlink())
         record = operations.load(self.home)[1]['skills']['x']
         self.assertEqual(record['assigned_agents'], [])
@@ -449,10 +449,10 @@ class GenericAgentTests(unittest.TestCase):
         self.assertEqual(plan['conflicts'], [])
         self.assertIn('直接指向统一仓库', plan['skills'][0]['reason'])
         result = agents.join(['zcode'], plan['plan_id'], plan['revision'], home=self.home)
-        self.assertEqual(str(path.readlink()), str(self.home / '.skill-pilot/store/x'))
+        self.assertEqual(str(path.resolve()), str(self.home / '.skill-pilot/store/x'))
         self.assertEqual({a: visibility(self.home)[a] for a in before}, before)
         operations.undo(result['id'], home=self.home)
-        self.assertEqual(str(path.readlink()), '../../.agents/skills/x')
+        self.assertEqual(path.readlink().as_posix(), '../../.agents/skills/x')
         self.assertEqual(self.fingerprint(), point)
 
     def test_preview_is_cheap_and_matches_original_values(self):

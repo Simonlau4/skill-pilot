@@ -57,7 +57,7 @@ class UpdateScopeTests(unittest.TestCase):
         self.assertIn('id="updates-status"', between)
         bar = extract_function(source, 'function renderUpdateBar(')
         self.assertIn('updateResultSentence(review)', bar)
-        self.assertNotIn('都是最新的', bar)
+        self.assertNotIn('均为最新版本', bar)
 
         number = next(line for line in source.splitlines() if line.startswith('const number = '))
         functions = '\n'.join(extract_function(source, name) for name in (
@@ -77,7 +77,7 @@ const all = updateResultSentence({
   unchecked: [],
   skills: [{has_update: false}, {has_update: false}, {has_update: false}],
 });
-for (const text of ['查了 3 个', '都是最新的', when + ' 检查']) {
+for (const text of ['已检查 3 个技能', '均为最新版本', when + ' 检查']) {
   if (!all.includes(text)) fail('全部已查缺少：' + text + ' / ' + all);
 }
 if (all.includes('没查') || all.includes('没有要查')) fail('全部已查不该说没查：' + all);
@@ -88,7 +88,7 @@ const partial = updateResultSentence({
   unchecked: [{reason: '没有上游来源', count: 3}],
   skills: [{has_update: false}, {has_update: false}],
 });
-for (const text of ['查了 2 个', '另外 3 个没查', '没有上游来源', when + ' 检查']) {
+for (const text of ['已检查 2 个技能', '其余 3 个未检查', '没有上游来源', when + ' 检查']) {
   if (!partial.includes(text)) fail('部分未查缺少：' + text + ' / ' + partial);
 }
 if (partial.includes('最新')) fail('没查的被说成最新：' + partial);
@@ -102,7 +102,7 @@ const mixed = updateResultSentence({
   ],
   skills: [{has_update: true}],
 });
-for (const text of ['1 个有新版', '另外 6 个没查', '2 个没有上游来源', '4 个没有 agent 在用']) {
+for (const text of ['1 个有可用更新', '其余 6 个未检查', '2 个没有上游来源', '4 个没有 agent 在用']) {
   if (!mixed.includes(text)) fail('多种原因缺少：' + text + ' / ' + mixed);
 }
 if (mixed.includes('最新')) fail('有没查的还说最新：' + mixed);
@@ -113,7 +113,7 @@ const none = updateResultSentence({
   unchecked: [{reason: '没有上游来源', count: 5}],
   skills: [],
 });
-for (const text of ['没有可查的技能', '这 5 个没有上游来源', '所以没检查', when + ' 检查']) {
+for (const text of ['暂无可检查的技能', '5 个技能没有上游来源', '已跳过检查', when + ' 检查']) {
   if (!none.includes(text)) fail('没有可查缺少：' + text + ' / ' + none);
 }
 if (none.includes('最新') || none.includes('没有要查的技能') || none.includes('都是最新')) fail('没有可查的说法不对：' + none);
@@ -127,13 +127,13 @@ const both = updateResultSentence({
   ],
   skills: [],
 });
-if (!both.includes('1 个没有上游来源') || !both.includes('2 个没有 agent 在用') || !both.includes('所以没检查')) {
+if (!both.includes('1 个没有上游来源') || !both.includes('2 个没有 agent 在用') || !both.includes('已跳过检查')) {
   fail('两种原因都不可查时没写全：' + both);
 }
 if (both.includes('最新')) fail('都不可查时被说成最新：' + both);
 
 const empty = updateResultSentence({total: 0, checked_at: stamp, unchecked: [], skills: []});
-if (!empty.includes('还没有技能') || empty.includes('最新')) fail('空技能库说法不对：' + empty);
+if (!empty.includes('暂无技能') || empty.includes('最新')) fail('空技能库说法不对：' + empty);
 
 const unknown = updateResultSentence({total: 4, checked_at: stamp, skills: [{has_update: false}]});
 if (unknown.includes('最新')) fail('没记下范围时不能说最新：' + unknown);
@@ -144,7 +144,7 @@ const failed = updateResultSentence({
   unchecked: [],
   skills: [{error: '没连上'}, {has_update: false}],
 });
-if (failed.includes('最新') || !failed.includes('没发现新版')) fail('有没查成的不能说最新：' + failed);
+if (failed.includes('最新') || !failed.includes('未发现可用更新')) fail('有没查成的不能说最新：' + failed);
 
 function fail(message) { console.error(message); process.exit(1); }
 '''

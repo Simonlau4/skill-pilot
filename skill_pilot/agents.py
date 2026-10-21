@@ -1,3 +1,4 @@
+from .platform_support import readlink
 """Repeatable assistant enrollment and departure using the operation transaction."""
 import copy
 import hashlib
@@ -47,7 +48,7 @@ def _root(value, home):
     path = path if path.is_absolute() else home / path
     if '..' in path.parts or not path.is_relative_to(home) or not path.resolve().is_relative_to(home):
         raise ValueError('技能目录必须在你的主目录内。')
-    relative = str(path.relative_to(home))
+    relative = path.relative_to(home).as_posix()
     if relative == '.' or path.is_relative_to(home / '.skill-pilot'):
         raise ValueError('不能把统一仓库或主目录当作 agent 的技能目录。')
     if any(path.is_relative_to(home / r) for r in profiles.readonly_roots(home)):
@@ -141,9 +142,9 @@ def preview_join(requests, home=None):
         reason = {'choose': '内容不同，默认保留仓库里的版本；选择新 agent 的版本，会更新所有 agent 共用的这份技能。',
                   'linked': '已经使用仓库里的版本，直接登记分配。', 'link': '内容相同，改为使用仓库里的版本。',
                   'import': '仓库里还没有，收进仓库。'}[action]
-        if linked and any(os.readlink(c['path']) != str(existing) for c in copies):
+        if linked and any(readlink(c['path']) != str(existing) for c in copies):
             reason = '已经使用仓库里的版本，接入时会改为直接指向统一仓库并登记分配。'
-        skills.append({'name': name, 'entries': sorted({str(Path(c['path']).relative_to(home)) for c in copies}),
+        skills.append({'name': name, 'entries': sorted({Path(c['path']).relative_to(home).as_posix() for c in copies}),
                        'assigned_agents': [p['id'] for p in selected if name in before[p['id']]['available']],
                        'action': action, 'default': options[0]['id'], 'options': options, 'reason': reason,
                        'comparison': '\n'.join(compare_files(Path(options[0]['path']), Path(o['path'])) for o in options[1:])})
@@ -200,7 +201,7 @@ def join(requests, plan_id, expected=None, choices=None, home=None):
             record['entries'] = sorted(set(record['entries']) | set(skill['entries']))
             for entry in skill['entries']:
                 path = checked(home / entry)
-                if path.is_symlink() and os.readlink(path) == str(target):
+                if path.is_symlink() and readlink(path) == str(target):
                     continue
                 remove(path, checked)  # The complete original is in this operation's backup.
                 checked(path.parent).mkdir(parents=True, exist_ok=True)

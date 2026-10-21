@@ -13,10 +13,11 @@ import unittest
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import store
+from skill_pilot import operations, store, team, team_hub
 from skill_pilot.web import runtime, server
 from tests import set_up_home
 
@@ -100,6 +101,7 @@ class RefreshRequestTests(unittest.TestCase):
             self.assertTrue(self.changed.wait(2))
 
 
+@unittest.skipIf(os.name == "nt", "POSIX process fixtures; Windows refresh covered by test_windows_update")
 class ProcessRefreshTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='skill-pilot-runtime-')
@@ -221,6 +223,80 @@ server.run(json_output=True)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(json.loads(second.stdout)['message'], '已打开正在运行的看板。')
         self.assertEqual(self.before, store.physical_state(self.home))
+
+    def test_refresh_preserves_team_uploads_and_discards_the_completed_queue(self):
+        def discovery_after_scan():
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if not self.request('/api/agents')[1]['discovery']['running']:
+                    return json.loads((self.home / '.skill-pilot/agent-discovery.json').read_text())
+                time.sleep(.01)
+            self.fail('agent discovery did not finish')
+
+        def state_without_discovery():
+            entries = [p for p in self.home.iterdir() if p.name != '.skill-pilot']
+            entries += [p for p in (self.home / '.skill-pilot').iterdir()
+                        if p.name != 'agent-discovery.json']
+            state = {str(p.relative_to(self.home)): store.physical_state(p) for p in entries}
+            state['.'] = self.home.stat().st_mode
+            state['.skill-pilot'] = (self.home / '.skill-pilot').stat().st_mode
+            state['.skill-pilot/agent-discovery.json'] = (self.home / '.skill-pilot/agent-discovery.json').stat().st_mode
+            return state
+
+        plan = store.preview(self.home, ['codex'])
+        store.apply(plan['plan_id'], self.home, ['codex'])
+        hub = team_hub.HubServer(self.root / 'Team share data', '127.0.0.1', 0)
+        thread = threading.Thread(target=hub.serve_forever, kwargs={'poll_interval': .01})
+        thread.start()
+        def stop_hub():
+            hub.shutdown()
+            thread.join(timeout=5)
+            hub.server_close()
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(stop_hub)
+        member = hub.store.add_member('示例成员')
+        team.save_settings(self.home, {'url': 'http://127.0.0.1:' + str(hub.server_port), 'key': member['token']})
+        saved, _ = team.listings_preview(self.home, [{'name': 'sample'}])
+        team.listings_apply(self.home, saved)
+        colleague = hub.store.add_member('Acme 示例同事')
+        from tests.test_team_hub import listing, file
+        incoming = listing('acme-incoming', 'files')
+        incoming['source']['files'] = [file('SKILL.md', '---\nname: acme-incoming\ndescription: example\n---\nexample\n')]
+        team._request({'url': 'http://127.0.0.1:' + str(hub.server_port), 'key': colleague['token']},
+                      '/api/listings/me', 'PUT', {'listings': [incoming]})
+        shutil.copytree(store.PROJECT / 'skill', self.code / 'skill')
+        self.env['SKILL_PILOT_READ_ONLY'] = '0'
+        self.start()
+        status, upload = self.request('/api/team/listings/preview', {'skills': [{'name': 'sample'}]})
+        self.assertEqual(status, 200, upload)
+        status, queued = self.request('/api/team/queue', {'key': 'team:' + colleague['id'] + ':acme-incoming'})
+        self.assertEqual(status, 200, queued)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            queued = self.request('/api/team/queue')[1]
+            if queued['items'][0]['status'] in {'done', 'failed'}:
+                break
+            time.sleep(.01)
+        self.assertEqual(queued['items'][0]['status'], 'done', queued)
+        self.assertEqual(operations.load(self.home)[1]['skills']['acme-incoming']['assigned_agents'], [])
+        discovery_before = discovery_after_scan()
+        before = state_without_discovery()
+        self.change_backend()
+        path = self.code / 'skill_pilot/web/server.py'
+        source = path.read_text()
+        needle = "'test_marker': 'new-program', "
+        path.write_text(source.replace(needle, needle +
+            "'test_team_uploads': self.server.team_upload_reviews, "))
+        self.request('/api/runtime/refresh', {})
+        current = self.wait_status(lambda s: s.get('test_marker') == 'new-program')
+        self.assertEqual(current['test_team_uploads'][upload['review']]['listings'][0]['name'], 'sample')
+        self.assertEqual(self.request('/api/team/queue'), (200, {'items': []}))
+        # Restarting legitimately refreshes the discovery time, not the skill data.
+        discovery_after = discovery_after_scan()
+        self.assertEqual({**discovery_after, 'checked_at': ''}, {**discovery_before, 'checked_at': ''})
+        self.assertGreaterEqual(datetime.fromisoformat(discovery_after['checked_at']),
+                                datetime.fromisoformat(discovery_before['checked_at']))
+        self.assertEqual(state_without_discovery(), before)
 
     def test_unloadable_update_keeps_old_program_available_then_allows_retry(self):
         self.start()

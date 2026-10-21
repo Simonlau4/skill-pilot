@@ -1,3 +1,4 @@
+from .platform_support import rmtree
 """M4 read-only reviews, confirmed batches, and preview-only Codex merging."""
 import hashlib
 import json
@@ -6,6 +7,7 @@ import shutil
 import tempfile
 import time
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,9 +32,9 @@ def comparison(left, right):
         if a == b and am == bm:
             continue
         changed.append(name)
-        if 'scripts' in Path(name).parts or Path(name).suffix.lower() in SCRIPT_SUFFIXES or am & 0o111 or bm & 0o111:
+        if 'scripts' in Path(name).parts or Path(name).suffix.lower() in SCRIPT_SUFFIXES or am & 0o111 or bm & 0o111 or a.startswith(b'#!') or b.startswith(b'#!'):
             scripts.append(name)
-            if bm & 0o111: risks.append({'file': name, 'line': '新版中新增或改动了可执行文件'})
+            if bm & 0o111 or b.startswith(b'#!'): risks.append({'file': name, 'line': '新版中新增或改动了可执行文件'})
             risks.extend({'file': name, 'line': line} for line in b.decode(errors='replace').splitlines()
                          if RISK_WORDS.search(line))
         details.append('文件：' + name)
@@ -91,7 +93,7 @@ def create(home=None):
     ) if item['count']]
     result['total'] = sum(map(len, result['_groups'].values()))
     result['remaining'] = result['total']
-    result['repositories'] = sum(g not in {'skip', 'lark'} for g in result['_groups'])
+    result['repositories'] = sum(g not in {'skip', 'lark', 'team'} for g in result['_groups'])
     return result
 
 
@@ -117,6 +119,13 @@ def check(home=None, review=None, lock=None):
                     packages = lark.prepare({n: s for n, _, s in items}, temporary, result['lark']['latest_version'], reader.deadline)
             except (ValueError, OSError, KeyError, TypeError) as error:
                 failure = str(error); result['lark'] = {'available': False, 'message': '飞书更新没查清楚', 'error': failure}
+        if group == 'team':
+            from . import team
+            try:
+                team_config, _, cards = team._fetch(home)
+                listings = {(r['member']['id'], r['name']): r for card in cards for r in card['listings']}
+            except (ValueError, OSError) as error:
+                failure = str(error)
         for name, skill, source in items:
             row = {'name': name, 'source': source, 'has_update': False, 'local_modified': False, 'status': '已是最新'}
             try:
@@ -132,6 +141,22 @@ def check(home=None, review=None, lock=None):
                         if name in packages:
                             row.update(_base_path=str(base), _upstream_path=packages[name]['path'], package=packages[name],
                                        tree_sha=git_tree(Path(packages[name]['path'])), has_update=True, status=result['lark']['message'])
+                    elif group == 'team':
+                        if failure: raise ValueError(failure)
+                        listing = listings.get((source['member'], source['name']))
+                        if not listing or listing['source']['kind'] != 'files':
+                            row['status'] = '作者已下架'
+                        else:
+                            version = listing['source']['version']
+                            row.update(version=version, has_update=version != source['version'],
+                                       status='有更新' if version != source['version'] else '已是最新')
+                            if row['has_update']:
+                                incoming = team.package(team_config, source['member'], source['name'], version,
+                                                        Path(temporary) / 'team' / name)
+                                processing = normalization.apply(incoming)
+                                row.update(_base_path=str(base), _upstream_path=str(incoming),
+                                           tree_sha=git_tree(incoming), normalized_tree_sha=git_tree(incoming),
+                                           normalization=processing)
                     else:
                         reader.remaining()
                         record = skill['source'].get('record', skill['source'])
@@ -267,7 +292,7 @@ def prepare_merge(review, name):
     merged = research.merge(material)
     root = Path(review['temporary']) / ('merged-' + name)
     if root.exists():
-        shutil.rmtree(root)
+        rmtree(root)
     root.mkdir()
     seen = set()
     for item in merged['files']:
@@ -322,9 +347,10 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
     if lark_names:
         groups.append(sorted(lark_names))
     completed, failed, updated, normalization_results = [], [], [], {}
+    batch = uuid.uuid4().hex
     for group in groups:
         try:
-            result = _apply_group(review, group, choices, merge_ids)
+            result = _apply_group(review, group, choices, merge_ids, batch)
         except operations.RollbackError:
             raise
         except (ValueError, OSError) as error:
@@ -345,7 +371,7 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
             'normalization': normalization_results, 'message': message}
 
 
-def _apply_group(review, names, choices, merge_ids):
+def _apply_group(review, names, choices, merge_ids, batch):
     home, registry, agents = operations.load(review['home'])
     rows = [selected_row(review, name) for name in names]
     lark_rows = [r for r in rows if r['source']['kind'] == 'lark']
@@ -380,11 +406,11 @@ def _apply_group(review, names, choices, merge_ids):
             incoming = Path(row['_merge']['path']) if row['_choice'] == 'merge' else Path(row['_upstream_path'])
             if row['_choice'] != 'keep':
                 destination = checked(home / '.skill-pilot/store' / name)
-                shutil.rmtree(destination); shutil.copytree(incoming, destination, symlinks=True)
+                rmtree(destination); shutil.copytree(incoming, destination, symlinks=True)
                 skill['normalization'] = row.get('normalization', normalization.apply(destination))
             base = checked(home / '.skill-pilot/bases' / name)
             if base.exists():
-                shutil.rmtree(base)
+                rmtree(base)
             base.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(row['_upstream_path'], base, symlinks=True)
             normalization.apply(base)
@@ -395,6 +421,8 @@ def _apply_group(review, names, choices, merge_ids):
             skill['source'].update(tree_sha=row['tree_sha'])
             if row['source']['kind'] == 'github':
                 skill['source'].update(repository=row['source']['repository'], commit=row['commit'], source_path=row['source']['path'])
+            elif row['source']['kind'] == 'team':
+                skill['source']['team']['version'] = row['version']
             else:
                 skill['source'].update(cli_version=review['lark']['latest_version'], digest=row['package']['digest'])
             skill['last_update_choice'] = row['_choice']
@@ -407,7 +435,7 @@ def _apply_group(review, names, choices, merge_ids):
             raise ValueError('这个技能的内容或分配已经变了，请刷新后重新检查。')
         return current
     result = operations._run(home, registry, agents, current_registry, f'核对并更新了 {len(names)} 个技能', mutate,
-                             extra_paths=lark.CLI_PATHS if lark_rows else None)
+                             extra_paths=lark.CLI_PATHS if lark_rows else None, batch=batch)
     for row in rows:
         row.pop('update_error', None)
         row['_arrow'] = {'has_update': row.get('has_update'), 'status': row.get('status'),

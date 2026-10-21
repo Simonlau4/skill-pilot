@@ -14,6 +14,11 @@ from skill_pilot.self_update import record_installation
 
 
 def install():
+    if os.name == 'nt':
+        from skill_pilot.windows_install import install as windows_install
+        windows_install(PROJECT, os.environ.get('SKILL_PILOT_HOME') or Path.home())
+        print('已安装 Skill Pilot 的 Windows 开始菜单和命令行入口。')
+        return
     if sys.platform != 'darwin':
         raise ValueError('当前安装器支持 macOS 桌面。')
     if sys.version_info < (3, 11, 4):

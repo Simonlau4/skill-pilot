@@ -1,4 +1,5 @@
-import fcntl
+from ..platform_support import rmtree
+from ..platform_support import fcntl, user_home, user_id, check_directory_links
 import json
 import os
 import re
@@ -19,7 +20,9 @@ def git(directory, *args, timeout=120, input=None):
     command = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
                '-C', str(directory), *args]
     try:
-        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout, input=input)
+        command[1:1] = ['-c', 'core.symlinks=true', '-c', 'core.autocrlf=false']
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout, input=input,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ValueError('仓库读取超时或工具暂时不可用，请稍后重试。') from error
     if result.returncode:
@@ -80,7 +83,7 @@ def inspect(url):
         files = git(checkout, 'ls-tree', '-r', '-z', '--name-only', commit, '--', subpath or '.').split('\0')
         if not any(files):
             raise ValueError('这个仓库里没有找到指定的文件夹。')
-        folders = sorted({str(Path(p).parent) for p in files if Path(p).name == 'SKILL.md'})
+        folders = sorted({Path(p).parent.as_posix() for p in files if Path(p).name == 'SKILL.md'})
         if not folders:
             return {'id': temporary.name, 'temporary': str(temporary), 'url': url, 'skills': []}
         if '.' not in folders:
@@ -102,7 +105,7 @@ def inspect(url):
                 raise ValueError('下载的技能名称不能安全用作文件夹名称。')
             path = Path(skill['path'])
             safe_skill(path)
-            relative = str(path.relative_to(checkout))
+            relative = path.relative_to(checkout).as_posix()
             tree = git(checkout, 'rev-parse', 'HEAD^{tree}' if relative == '.' else 'HEAD:' + relative)
             found.append({'name': name, 'path': str(path), 'repository_path': relative,
                           'digest': content_digest(path), 'description': skill['description'],
@@ -113,7 +116,7 @@ def inspect(url):
             raise ValueError('仓库里有多个同名技能，请粘贴具体技能文件夹的链接。')
         return {'id': temporary.name, 'temporary': str(temporary), 'url': url, 'skills': found}
     except Exception:
-        shutil.rmtree(temporary)
+        rmtree(temporary)
         raise
 
 
@@ -130,7 +133,7 @@ def api(endpoint, timeout=45):
 def search_code(name):
     # Cross-process throttle: never more than ten code searches in one minute.
     path = Path(tempfile.gettempdir()) / 'skill-pilot-github-search.lock'
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, 'r+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         lock.seek(0)

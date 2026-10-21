@@ -1,4 +1,5 @@
 """Lossless edits of only the inline entries recorded as ours."""
+from pathlib import Path
 import json
 import re
 import tomllib
@@ -9,6 +10,27 @@ CONFIG_PATH = '.codex/config.toml'
 def read(home):
     from .scan import read_disabled
     return read_disabled(home / CONFIG_PATH, home)
+
+
+def read_external(home, registry):
+    """Read user preferences without treating our shared-root exclusions as theirs."""
+    from .scan import read_disabled
+    path = home / CONFIG_PATH
+    original = path.read_bytes() if path.exists() else b''
+    text, _ = render(original, registry.get('codex_config'), [])
+    text = text.decode('utf-8')
+    rules = read_disabled(path, home, text=text)
+    # Retain the written entry location as well as its current resolved target.
+    # Moving that entry must not accidentally invalidate a user's path disable.
+    rules['entry_paths'] = []
+    for entry in tomllib.loads(text).get('skills', {}).get('config', []):
+        if entry.get('enabled') is False and 'path' in entry:
+            raw = entry['path']
+            location = home / raw[2:] if raw.startswith('~/') else Path(raw)
+            if not location.is_absolute():
+                location = path.parent / location
+            rules['entry_paths'].append(str(location.absolute()))
+    return rules
 
 
 def copy_skills_config(source, destination, checked):
@@ -22,8 +44,8 @@ def copy_skills_config(source, destination, checked):
     for entry in original.get('config', []):
         fields = []
         for key, value in entry.items():
-            if key == 'path' and isinstance(value, str) and value.startswith(str(source) + '/'):
-                value = str(destination / value.removeprefix(str(source) + '/'))
+            if key == 'path' and isinstance(value, str) and Path(value).is_absolute() and Path(value).is_relative_to(source):
+                value = str(destination / Path(value).relative_to(source))
             fields.append(key + ' = ' + (str(value).lower() if isinstance(value, bool) else json.dumps(value, ensure_ascii=False)))
         rows.append('{ ' + ', '.join(fields) + ' }')
     path = checked(destination / CONFIG_PATH)
@@ -32,7 +54,7 @@ def copy_skills_config(source, destination, checked):
 
 
 def array_span(text):
-    section = re.search(r'(?m)^\[skills\][ \t]*(?:#[^\n]*)?$', text)
+    section = re.search(r'(?m)^\[skills\][ \t\r]*(?:#[^\n]*)?$', text)
     if section is None:
         return None
     end = re.search(r'(?m)^\[', text[section.end():])

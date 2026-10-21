@@ -29,6 +29,13 @@ def resume_state():
     return state
 
 
+def snapshot(server):
+    state = {name: getattr(server, name) for name in
+             ('token', 'inventory', 'install_reviews', 'team_upload_reviews',
+              'update_reviews', 'labels_progress', 'program_review', 'program_progress')}
+    return state
+
+
 def replace(server, lock):
     candidate = version()
     env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'}
@@ -41,8 +48,7 @@ def replace(server, lock):
         raise ValueError('新版仍在修改中，当前程序保持运行，请稍后刷新重试。')
     if server.closing:
         return
-    state = {name: getattr(server, name) for name in
-             ('token', 'inventory', 'install_reviews', 'update_reviews', 'labels_progress', 'program_review', 'program_progress')}
+    state = snapshot(server)
     state.update(pages=sorted(server.pages), socket_fd=server.socket.fileno(), lock_fd=lock.fileno())
     # Session data stays in an unlinked temporary file. The listener and
     # singleton lock survive the replacement alongside it.

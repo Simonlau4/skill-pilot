@@ -104,14 +104,16 @@ class LabelsTests(unittest.TestCase):
     def test_settings_permissions_and_private_readback(self):
         result = self.configure()
         path = self.home / '.skill-pilot/settings.json'
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != 'nt':
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertNotIn(KEY, json.dumps(result))
         self.assertEqual(result['llm']['key_tail'], '1234')
         self.assertTrue(result['llm']['has_key'])
         path.chmod(0o644)
         labels.save_settings(self.home, {**self.config, 'api_key': ''})
         self.assertEqual(labels.settings(self.home)['api_key'], KEY)
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != 'nt':
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         body = {k: v for k, v in self.config.items() if k != 'api_key'}
         labels.save_settings(self.home, body)
         self.assertEqual(labels.settings(self.home)['api_key'], KEY)

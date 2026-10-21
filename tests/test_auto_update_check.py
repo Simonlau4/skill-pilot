@@ -111,6 +111,7 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.assertFalse(progress['automatic'])
         self.assertEqual(progress['phase'], 'idle')
 
+    @unittest.skipIf(os.name == "nt", "POSIX descriptor resume; Windows session retention has its own test")
     def test_resumed_program_preserves_result_without_checking(self):
         listener = socket.socket()
         listener.bind(('127.0.0.1', 0))
@@ -118,7 +119,7 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.addCleanup(listener.close)
         saved = {'running': False, 'phase': 'latest', 'automatic': True,
                  'message': 'SP 已是最新版本', 'available': False, 'error': ''}
-        resume = {'inventory': self.inventory, 'socket_fd': os.dup(listener.fileno()),
+        resume = {'inventory': self.inventory, 'socket_fd': listener.dup().detach(),
                   'lock_fd': os.open(server.lock_path(), os.O_RDWR | os.O_CREAT, 0o600),
                   'program_progress': saved.copy()}
         self.start(resume)
@@ -306,7 +307,7 @@ class CloseDuringAutomaticCheckTests(unittest.TestCase):
                  'current': '', 'latest': ''}
         dashboard = server.Dashboard({'home': str(self.home)}, resume={
             'inventory': {'home': str(self.home)},
-            'socket_fd': os.dup(listener.fileno()),
+            'socket_fd': listener.dup().detach(),
             'program_progress': saved.copy(),
         })
         self.addCleanup(dashboard.server_close)

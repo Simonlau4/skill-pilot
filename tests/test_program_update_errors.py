@@ -123,7 +123,8 @@ class ProgramUpdateErrorTests(unittest.TestCase):
         self.assertNotIn('example-secret', path.read_text())
         self.assertNotIn('token=example', path.read_text())
         self.assertNotIn(str(self.home), path.read_text())
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(list(path.parent.glob('*.json')), [])
 
     def test_automatic_failures_are_logged_without_a_red_error(self):

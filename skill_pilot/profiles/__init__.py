@@ -2,7 +2,7 @@
 import importlib
 import json
 import os
-import pwd
+from ..platform_support import user_home
 import re
 import shutil
 from pathlib import Path
@@ -14,7 +14,7 @@ ADDITIONAL_PROFILES = CATALOG['additional_profiles']
 
 def evidence(profile, home, applications=None):
     home = Path(home).resolve()
-    real_user = home == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    real_user = home == user_home()
     if applications is None:
         applications = ([Path('/Applications')] if real_user else []) + [home / 'Applications']
     detect = profile['detect']

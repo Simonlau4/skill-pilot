@@ -1,11 +1,14 @@
+from .platform_support import rmtree
 """Portable source lists; importing only adds skills and assignments."""
 import json
 import re
 import shutil
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from . import normalization, operations, profiles
+from . import labels, normalization, operations, profiles
+from .scan import metadata
 from .sources import github, normalize
 from .store import guard
 from .sync import reconcile_assignments
@@ -27,12 +30,15 @@ INSTRUCTIONS = [
 ]
 
 
-def export_config(home=None, agent=None):
+def export_config(home=None, agent=None, *, translated_description=False):
     home, registry, agents = operations.load(home)
     if agent is not None and agent not in agents:
         raise ValueError('请选择已经接入的 agent。')
     selected_agents = [agent] if agent else agents
     skills = registry['skills']
+    display = {name: {'title': label['title'], 'summary': label['summary'], 'group': group['name'],
+                      'description': label.get('description', '')}
+               for group in labels.read(home) for name, label in group['skills'].items()}
     selected = {n for n, s in skills.items() if set(s['assigned_agents']) & set(selected_agents)}
     pending = list(selected)
     while pending:
@@ -58,10 +64,31 @@ def export_config(home=None, agent=None):
             source = {'kind': 'manual', 'url': 'https://open.feishu.cn/lark-cli/skills/',
                       'reason': '飞书官方技能，请通过官方安装方式补齐。'}
         path, base = (home / '.skill-pilot' / folder / name for folder in ('store', 'bases'))
-        modified = (not (path / 'SKILL.md').is_file() or not (base / 'SKILL.md').is_file() or
-                    normalization.tree(path) != normalization.tree(base))
-        rows.append({'name': name, 'assigned_agents': sorted(set(skill.get('assigned_agents', [])) & set(selected_agents)),
-                     'requires': sorted(set(skill.get('requires', []))), 'source': source, 'local_modified': modified})
+        try:
+            modified = (not (path / 'SKILL.md').is_file() or not (base / 'SKILL.md').is_file() or
+                        normalization.tree(path) != normalization.tree(base))
+        except OSError:
+            modified = True
+        row = {'name': name, 'assigned_agents': sorted(set(skill.get('assigned_agents', [])) & set(selected_agents)),
+               'requires': sorted(set(skill.get('requires', []))), 'source': source, 'local_modified': modified}
+        try:
+            description = metadata((path / 'SKILL.md').read_text()).get('description', '')
+        except (OSError, UnicodeError):
+            description = ''
+        if translated_description:
+            # Team listings use the same display translation as the local library.
+            # Portable config exports still carry the original description.
+            description = display.get(name, {}).get('description', '').strip() or description
+        details = {**display.get(name, {}), 'description': description}
+        for field, limit in (('title', 40), ('summary', 120), ('group', 20), ('description', 1500)):
+            value = details.get(field, '').replace('\t', ' ')
+            if field != 'description':
+                value = value.replace('\n', ' ').replace('\r', ' ')
+            value = ''.join(char for char in value if unicodedata.category(char) not in {'Cc', 'Cf', 'Zl', 'Zp'} or
+                            (field == 'description' and char == '\n')).strip()[:limit].rstrip()
+            if value:
+                row[field] = value
+        rows.append(row)
     catalog = profiles.by_id(home)
     return validate({'format': FORMAT, 'version': 1, 'created_at': datetime.now(timezone.utc).isoformat(),
             'instructions': INSTRUCTIONS,
@@ -83,6 +110,15 @@ def validate(data):
                 type(row.get('local_modified')) is not bool or not isinstance(row.get('source'), dict)):
             raise ValueError('配置里的技能名称、分配或依赖格式不正确。')
         seen.add(row['name'])
+        for field, limit, label in (('title', 40, '中文名'), ('summary', 120, '一句话说明'),
+                                    ('group', 20, '分组'), ('description', 1500, '原说明')):
+            if field not in row:
+                continue
+            value = row[field]
+            if (not isinstance(value, str) or not value.strip() or len(value) > limit or
+                    any(unicodedata.category(char) in {'Cc', 'Cf', 'Zl', 'Zp'} and
+                        not (field == 'description' and char == '\n') for char in value)):
+                raise ValueError(f'配置里的技能{label}不符合要求，请检查内容、长度和看不见的字符。')
         source = row['source']
         if source.get('kind') == 'manual':
             continue
@@ -109,6 +145,42 @@ def read_config(path):
         raise ValueError('配置文件没能读懂，请重新导出。') from None
 
 
+def _blocked(rows, registry, unavailable=()):
+    blocked = {n: '当前没有对应的 agent，请指定接收方。' for n in unavailable}
+    for name, row in rows.items():
+        if name not in blocked and name not in registry['skills']:
+            if row['local_modified']:
+                blocked[name] = '分享者的本机版本需要另行提供文件。'
+            elif row['source']['kind'] != 'github':
+                blocked[name] = '需要另行提供技能文件或通过原安装方式补齐。'
+    while True:
+        before = len(blocked)
+        for name, row in rows.items():
+            missing = [n for n in row['requires'] if n in blocked]
+            if name not in blocked and missing:
+                blocked[name] = '缺少所需技能：' + '、'.join(missing)
+        if len(blocked) == before:
+            break
+    return blocked
+
+
+def local_status(data, home=None):
+    """Skill availability without mapping the sharer's agents onto this computer."""
+    validate(data)
+    home, registry, agents = operations.load(home)
+    rows = {s['name']: s for s in data['skills']}
+    blocked = _blocked(rows, registry)
+    for name, row in rows.items():
+        if name not in registry['skills'] and not row['local_modified'] and row['source']['kind'] == 'manual':
+            reason = row['source'].get('reason')
+            blocked[name] = reason if isinstance(reason, str) and reason else '自制或来源不明，需要另行提供技能文件。'
+    return {name: {'status': 'needs_files' if name in blocked else
+                           'installed' if name in registry['skills'] else 'installable',
+                   'label': '需要另外补齐' if name in blocked else
+                            '本机已有' if name in registry['skills'] else '可以装',
+                   'reason': blocked.get(name, '')} for name in rows}
+
+
 def _plan(data, registry, agents, assigned):
     validate(data)
     if assigned is not None and (not isinstance(assigned, list) or not assigned or
@@ -129,23 +201,7 @@ def _plan(data, registry, agents, assigned):
                     pending.append(dependency)
         return targets
     targets = expand({n: set(a) for n, a in explicit.items()})
-    blocked = {}
-    for name, row in rows.items():
-        if not targets[name]:
-            blocked[name] = '当前没有对应的 agent，请指定接收方。'
-        elif name not in registry['skills']:
-            if row['local_modified']:
-                blocked[name] = '分享者的本机版本需要另行提供文件。'
-            elif row['source']['kind'] != 'github':
-                blocked[name] = '需要另行提供技能文件或通过原安装方式补齐。'
-    while True:
-        before = len(blocked)
-        for name, row in rows.items():
-            missing = [n for n in row['requires'] if n in blocked]
-            if name not in blocked and missing:
-                blocked[name] = '缺少所需技能：' + '、'.join(missing)
-        if len(blocked) == before:
-            break
+    blocked = _blocked(rows, registry, [n for n in rows if not targets[n]])
     # Do not install a dependency whose only requested parent is blocked.
     ready = roots - blocked.keys()
     pending = list(ready)
@@ -172,7 +228,7 @@ def preview_import(data, assigned=None, home=None):
     return {**_plan(data, registry, agents, assigned), 'revision': revision}
 
 
-def import_config(data, assigned=None, home=None, expected=None):
+def import_config(data, assigned=None, home=None, expected=None, member_name=None):
     home, registry, agents = operations.load(home)
     guard(home / '.skill-pilot', home)
     current = operations.revision(home, agents)
@@ -214,8 +270,9 @@ def import_config(data, assigned=None, home=None, expected=None):
             changed = sorted(set(plan['install']) | set(plan['dependencies']) | set(assignments['changed']))
             reconcile_assignments(current, home, checked, changed)
             return changed, plan['install'], result
+        prefix = f'从{member_name}的分享导入了技能' if member_name is not None else '导入了技能配置'
         return operations._run(home, registry, agents, expected,
-                               f'导入了技能配置：新装 {len(plan["install"])} 个，沿用本机 {len(plan["reuse"])} 个', mutate)
+                               f'{prefix}：新装 {len(plan["install"])} 个，沿用本机 {len(plan["reuse"])} 个', mutate)
     finally:
         for review in reviews.values():
-            shutil.rmtree(review['temporary'], ignore_errors=True)
+            rmtree(review['temporary'], ignore_errors=True)

@@ -3,7 +3,7 @@ name: skill-pilot
 description: 管理本机各 agent 的技能，查看和导出技能清单、打开看板、分配或撤下技能，并在用户同意后导入配置、执行更新、清理、改来源和撤销。
 ---
 
-使用 `skill-pilot`（找不到命令时用 `~/.local/bin/skill-pilot`）；不要直接改 agent 的技能目录或统一仓库登记文件。agent 编号以 `skill-pilot status` 列出的为准（例如 `codex`、`claude`、`antigravity`、`dsh`、`zcode`）。
+使用 `skill-pilot`（Windows PowerShell 中使用 `& "$env:USERPROFILE/.local/bin/skill-pilot.cmd"`；其他系统找不到命令时用 `~/.local/bin/skill-pilot`）；不要直接改 agent 的技能目录或统一仓库登记文件。agent 编号以 `skill-pilot status` 列出的为准（例如 `codex`、`claude`、`antigravity`、`dsh`、`zcode`）。
 
 以下查看命令可以直接运行，需要结构化结果时加 `--json`。
 
@@ -35,3 +35,5 @@ description: 管理本机各 agent 的技能，查看和导出技能清单、打
 把结果用中文大白话转述，说明涉及哪些技能、给谁加了或撤下了、能否撤销。不要直接贴一大块机器输出。失败就说明原因和仍未完成的部分，不声称成功。
 
 开发和只读检查真实主目录时，所有命令前加 `SKILL_PILOT_READ_ONLY=1`；此模式禁止写入，也不会自动安装本技能。不要执行被管理技能里的脚本。
+
+Windows：从开始菜单打开 Skill Pilot。需要 Python 3.12+ 和 Windows 开发者模式。首次接入由用户在看板核对整理；安装工具本身不等于授权整理已有技能。Windows 版不自动升级飞书 CLI，按本机飞书规则手动处理。

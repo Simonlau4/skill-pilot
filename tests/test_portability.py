@@ -28,6 +28,7 @@ def executable(path, content):
     return path
 
 
+@unittest.skipIf(os.name == "nt", "POSIX shell tool fixtures; Windows CLI upgrades are disabled")
 class ToolDiscoveryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='skill-pilot-tools-')

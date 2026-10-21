@@ -8,6 +8,17 @@ def normalize(source):
     source = source if isinstance(source, dict) else {'source': source}
     record = source.get('record', source)
     text = str(source.get('source', ''))
+    if text == '团队商店':
+        team = source.get('team', {})
+        if (not isinstance(team, dict) or
+                not re.fullmatch(r'[0-9a-f]{32}', str(team.get('member', ''))) or
+                not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', str(team.get('name', ''))) or
+                not re.fullmatch(r'[0-9a-f]{64}', str(team.get('version', ''))) or
+                not isinstance(team.get('member_name'), str) or
+                team.get('key') != 'team:' + team['member'] + ':' + team['name']):
+            raise ValueError('团队商店的来源记录不完整，请重新装上这个技能。')
+        return {'kind': 'team', 'label': '团队商店 · ' + team['member_name'],
+                **{k: team[k] for k in ('member', 'member_name', 'name', 'version', 'key')}}
     if text in {'自制', '本机源码', '本机文档生成', '来源不明'}:
         return {'kind': 'skip', 'label': '自制，不检查更新'}
     if record.get('sourceType') == 'well-known':

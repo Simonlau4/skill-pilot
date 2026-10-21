@@ -4,9 +4,11 @@
 
 ## 安装
 
-当前支持 macOS 本地桌面。需要 Python 3.11.4 或更高版本，以及可用的 Git；飞书技能更新另外需要 Node.js 和 npm。Python 最低版本用于支持下载文件的安全解包，见 [Python 官方说明](https://docs.python.org/3.11/library/tarfile.html#extraction-filters)；飞书工具的依赖与账号配置见 [飞书官方安装说明](https://github.com/larksuite/cli#installation--quick-start)。
+当前支持 macOS 和 Windows 本地桌面。macOS 需要 Python 3.11.4 或更高版本，Windows 需要 Python 3.12 或更高版本；两者都需要可用的 Git。macOS 飞书技能更新另外需要 Node.js 和 npm，Windows 不自动升级飞书 CLI。Python 最低版本用于支持下载文件的安全解包，见 [Python 官方说明](https://docs.python.org/3.11/library/tarfile.html#extraction-filters)；飞书工具的依赖与账号配置见 [飞书官方安装说明](https://github.com/larksuite/cli#installation--quick-start)。
 
-从 GitHub 获取源码后，在项目文件夹运行：
+Windows 用户从 GitHub 获取或解压完整源码后，在项目文件夹运行 `python -X utf8 -B scripts/install.py`，再从开始菜单打开 **Skill Pilot**。首次整理前需开启 Windows 开发者模式。Windows 安装与后续看板升级见 [Windows 说明](WINDOWS.md)。
+
+macOS 用户从 GitHub 获取源码后，在项目文件夹运行：
 
 ```bash
 git clone https://github.com/Simonlau4/skill-pilot.git
@@ -18,7 +20,9 @@ sh scripts/build-app.sh
 
 双击当前用户 `Applications` 文件夹里的 **Skill Pilot.app** 打开看板，按页面提示选择要接入的 agent、核对首次整理结果。项目文件夹需要保留；移动后在新位置重新运行安装命令。命令行可用 `~/.local/bin/skill-pilot`，或把 `~/.local/bin` 加入自己的命令搜索路径后用 `skill-pilot`。
 
-Cursor、豆包工作和 WorkBuddy 会按已安装应用或各自的应用数据识别，还没装过用户技能也会显示。首次使用在首页选择；已经整理过的用户在首页「发现新 agent」处点一次「接入」即可，后台会读取并接入。应用放在系统或当前用户的 `Applications` 文件夹时可直接识别；放在其他位置时，先正常打开一次该应用，让它建立应用数据，再打开或刷新 SP。内置技能、市场、插件和连接器只查看；豆包工作使用桌面应用数据中的用户技能目录。目录依据与验证范围见 [agent 识别说明](docs/agent-discovery-report.md)。
+打开和刷新看板都先到首页：查看技能总览、各 agent、要处理的事和最近改动，点一下前往对应页面。首次使用按首页提示到技能页做整理。
+
+Cursor、豆包工作和 WorkBuddy 会按已安装应用或各自的应用数据识别，还没装过用户技能也会显示。已经整理过的用户可从首页「发现新 agent」提醒前往设置，再点「接入」，后台会读取并接入。应用放在系统或当前用户的 `Applications` 文件夹时可直接识别；放在其他位置时，先正常打开一次该应用，让它建立应用数据，再打开或刷新 SP。内置技能、市场、插件和连接器只查看；豆包工作使用桌面应用数据中的用户技能目录。目录依据与验证范围见 [agent 识别说明](docs/agent-discovery-report.md)。
 
 已有飞书工具会自动识别。新用户先按官方说明安装并用自己的账号授权；若要将工具装在当前用户目录，可执行：
 
@@ -83,9 +87,11 @@ git pull --ff-only
 
 分享给另一位 Skill Pilot 用户的方法见 [分享技能配置](docs/sharing-config.md)。配置不包含技能正文和账号密钥；自制或修改过的技能会列为待补齐。
 
+团队里想互相看看在用什么技能：管理员在局域网电脑或 NAS 上运行团队分享站，同事在「设置 → 团队分享」连上后，就能在「团队」页分享自己的技能名单、挑同事的技能装上。部署和用法见 [团队分享站](docs/team-hub.md)。
+
 新装了 agent，不用重启看板：在 **设置 → agent** 点 **重新扫描 agent**。打开看板时会先显示已保存的名单，再检查应用和常见技能目录；按钮会进一步查找主目录隐藏文件夹中的技能目录，显示扫描状态和上次检查时间。发现结果会保留到下次打开，接入、忽略和技能分配仍由你决定。为了快速显示名单，发现阶段不再统计每个候选 agent 的技能数，点击接入后在后台读取。详细技能盘点在打开“诊断与备份”或使用原来的盘点操作时读取。技能页底部先显示名单读取时间，打开诊断后改为盘点时间。
 
-首页和设置里的已发现 agent 都只需点一次「接入」，后台读取并显示进度；等待期间可以继续浏览技能，失败后可重试，完成后可撤销。同名技能沿用统一仓库里的版本；只有尚未收录、又存在多份不同内容的技能需要选一次版本。手动填写名字和文件夹时仍先显示预览。
+技能页和设置里的已发现 agent 都只需点一次「接入」，后台读取并显示进度；等待期间可以继续浏览技能，失败后可重试，完成后可撤销。同名技能沿用统一仓库里的版本；只有尚未收录、又存在多份不同内容的技能需要选一次版本。手动填写名字和文件夹时仍先显示预览。
 
 ## 数据放在哪
 
@@ -93,9 +99,15 @@ git pull --ff-only
 - 登记表、基准、操作记录、备份及显示设置：当前用户 `~/.skill-pilot/` 下的 `registry.json`、`bases/`、`logs/`、`backups/`、`labels.json`、`tags.json`（用户标签，与 AI 整理分开保存）。其他技能文件夹记在同一目录的 `extra-sources.json`。账号设置和密钥只保存在用户自己的 `settings.json` 中，不随项目或分享配置导出。
 - 管理规则（给所有 agent 看）：[AGENTS.md](AGENTS.md)。
 
+每次改动成功后，自动只保留最近 10 次还能撤销的操作备份；一次「全部更新」整批算一次，整批一起保留、一起清理。已经撤销的操作和撤销本身不再保留备份，更早的操作不能再撤销，完整操作记录仍可导出。升级后第一次改动会按同样规则清理旧备份，只读预览不清理。
+
+首次整理前（包括还原后重新整理前）的备份一直保留，「设置 → 诊断与备份 → 整理与还原」和 `backups` 命令只列出这类备份，可以还原到整理前。操作失败且自动恢复也失败的备份一直保留；收编时挪开的原件也原样保留。
+
 ## 开发
 
 先读 [AGENTS.md](AGENTS.md) 和 [docs/STATUS.md](docs/STATUS.md)。需求与决策历史见 [PLAN.md](PLAN.md)。
+
+看板首页的动效用到 GSAP，文件和许可说明在 [skill_pilot/web/static/vendor/](skill_pilot/web/static/vendor/README.md)。
 
 开发最高准则是 [通用化与可复现](AGENTS.md#最高准则通用化与可复现)。下面以满足上述版本要求的 `python3.11` 为例，测试只在系统临时目录中的模拟用户环境运行。
 

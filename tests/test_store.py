@@ -1,3 +1,4 @@
+from skill_pilot.platform_support import readlink
 from tests import set_up_home
 import importlib.util
 import json
@@ -34,7 +35,7 @@ class MigrationTests(unittest.TestCase):
         (shared / "doc").symlink_to(self.home / "missing")
         claude = self.home / ".claude/skills"
         claude.mkdir()
-        (claude / "sample").symlink_to("../../.codex/skills/sample")
+        (claude / "sample").symlink_to(Path("../../.codex/skills/sample"), target_is_directory=True)
         self.skill(".gemini/config/skills/sample", body="旧版")
         self.skill(".codex/skills/community/nested", "nested")
         self.skill(".claude/skills/synced/account/builtin", "builtin")
@@ -85,8 +86,8 @@ class MigrationTests(unittest.TestCase):
             self.assertNotIn("inner", registry["skills"])
             self.assertEqual(visibility(self.home)["codex"]["available"], visible["codex"]["available"])
             self.assertEqual(visibility(self.home)["dsh"]["available"], ["off", "sample"])
-            self.assertEqual((self.home / ".codex/skills/community/nested").readlink(), self.home / ".skill-pilot/store/nested")
-            self.assertEqual(os.readlink(self.home / ".agents/skills/doc"), str(self.home / "missing"))
+            self.assertEqual((self.home / ".codex/skills/community/nested").resolve(), self.home / ".skill-pilot/store/nested")
+            self.assertEqual(readlink(self.home / ".agents/skills/doc"), str(self.home / "missing"))
             checked = lambda p: store.guard(p, self.home)
             self.assertEqual(reconcile(registry, self.home, checked), [])
             results.append({k: v["base_digest"] for k, v in registry["skills"].items()})
@@ -138,8 +139,8 @@ class MigrationTests(unittest.TestCase):
         store.restore(result["backup_id"], self.home)
 
     def test_real_home_default_writable_and_explicit_readonly(self):
-        import pwd
-        real = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        from skill_pilot.platform_support import user_home
+        real = user_home()
         with patch.object(store.os.environ, "get", return_value="1"):
             self.assertFalse(store.write_allowed(real))
             with self.assertRaises(ValueError):
@@ -262,7 +263,7 @@ class MigrationTests(unittest.TestCase):
         (path/'run.sh').chmod(0o755)
         (path/'alias').symlink_to('folder/file.txt')
         subprocess.run(['git','init','-q',str(path)],check=True,capture_output=True)
-        subprocess.run(['git','-C',str(path),'add','.'],check=True,capture_output=True)
+        subprocess.run(['git','-c','core.autocrlf=false','-c','core.symlinks=true','-C',str(path),'add','.'],check=True,capture_output=True)
         expected=subprocess.check_output(['git','-C',str(path),'write-tree'],text=True).strip()
         self.assertEqual(store.git_tree(path),expected)
 
@@ -336,7 +337,7 @@ class MigrationTests(unittest.TestCase):
                 skills.mkdir(parents=True)
                 (skills / "alpha").symlink_to(absolute, target_is_directory=True)
                 (skills / "beta").symlink_to(os.path.relpath(relative, skills), target_is_directory=True)
-                extra_relative = str(extra.relative_to(self.home))
+                extra_relative = extra.relative_to(self.home).as_posix()
                 if configured:
                     state = self.home / ".skill-pilot"
                     state.mkdir()
@@ -351,7 +352,7 @@ class MigrationTests(unittest.TestCase):
                     self.assertEqual(link.resolve(), copied)
                     self.assertTrue(link.resolve().is_relative_to(fake))
                     self.assertEqual((copied / "SKILL.md").read_bytes(), (target / "SKILL.md").read_bytes())
-                    self.assertIn(target_relative, result["link_dependencies"])
+                    self.assertIn(Path(target_relative).as_posix(), result["link_dependencies"])
                 store.check_links(fake, fake)
                 self.assertEqual((fake / extra_relative).exists(), configured)
                 self.assertEqual(extra_relative in result["copied_roots"], configured)

@@ -28,7 +28,7 @@ web
 
 ## Capabilities and Constraints
 
-- 前端只有 `skill_pilot/web/static/` 下的三个文件，不用框架、不用构建工具；后端只用 Python 标准库。
+- 前端是 `skill_pilot/web/static/` 下的三个文件，不用框架、不用构建工具；首页动效另带 GSAP（`static/vendor/`，原样随项目发布，只用于首页）。后端只用 Python 标准库。
 - 所有写入走同一套流程：改了先标“待应用”，统一应用，之后可以撤销。
 - 不统计用量（2026-10-13 用户决定：有的 agent 统计不到、能统计的覆盖也不全）。哪些技能该撤下由用户自己在清理页挑，看板只给“每次新对话占用多少 Token”帮用户判断。
 - 界面全中文，称 agent，不称“助手”。

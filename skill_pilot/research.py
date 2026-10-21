@@ -1,13 +1,13 @@
 """Codex receives only review material in an isolated, ephemeral home."""
+from .platform_support import user_home
 import json
 import os
-import pwd
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-CODEX = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'
+CODEX = shutil.which('codex') or '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'
 
 
 def ask(material, schema, instruction):
@@ -15,7 +15,7 @@ def ask(material, schema, instruction):
         root = Path(temporary)
         auth_home = root / '.codex'
         auth_home.mkdir(mode=0o700)
-        auth = Path(pwd.getpwuid(os.getuid()).pw_dir) / '.codex/auth.json'
+        auth = user_home() / '.codex/auth.json'
         if auth.is_file():
             shutil.copyfile(auth, auth_home / 'auth.json')
             (auth_home / 'auth.json').chmod(0o600)

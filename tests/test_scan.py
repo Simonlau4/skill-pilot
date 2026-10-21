@@ -90,7 +90,7 @@ class InventoryTests(unittest.TestCase):
         config.write_text('[skills]\nconfig = [{ name = "name-off", enabled = false }, '
                           '{ name = "on", enabled = true }, '
                           '{ name = "plugin:foo", enabled = false }, '
-                          '{ path = "~/'+str(path_off.relative_to(self.home))+'/SKILL.md", enabled = false }]\n')
+                          '{ path = "~/'+path_off.relative_to(self.home).as_posix()+'/SKILL.md", enabled = false }]\n')
         before = config.read_bytes()
         disabled = read_disabled(config, self.home)
         skills = {s["name"]: s for s in scan_root(root)["skills"]}

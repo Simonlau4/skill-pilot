@@ -1,9 +1,9 @@
+from .platform_support import readlink, rmtree, is_junction
 """Backed-up local migration and guarded, reversible writes."""
-import fcntl
+from .platform_support import fcntl, user_home, user_id, check_directory_links
 import hashlib
 import json
 import os
-import pwd
 import re
 import shutil
 import stat
@@ -29,13 +29,13 @@ def write_allowed(home):
     """允许真实主目录和系统临时目录；显式只读时一律拒绝写入。"""
     home = Path(home).resolve()
     return os.environ.get("SKILL_PILOT_READ_ONLY") != "1" and (
-        home == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve() or
+        home == user_home() or
         home.is_relative_to(Path(tempfile.gettempdir()).resolve()))
 
 
 def guard(path, home):
     home = Path(home).resolve()
-    path = Path(path).absolute()
+    path = Path(str(path).removeprefix('\\\\?\\')).absolute()
     if not write_allowed(home):
         raise ValueError("当前处于只读模式或目录不受管理，文件没有改动。")
     # 先换成真实路径再比较。macOS 临时目录的 /var 指向 /private/var，
@@ -47,7 +47,7 @@ def guard(path, home):
 
 def check_links(path, home):
     """Check even broken links, and do not walk through directory links."""
-    if path.is_symlink():
+    if path.is_symlink() or is_junction(path):
         if not path.resolve().is_relative_to(home):
             raise ValueError("目录中的链接指向主目录之外，已停止操作。")
     elif path.is_dir():
@@ -63,8 +63,8 @@ def physical_state(path, include_times=False):
         mode = stat.S_IMODE(info.st_mode)
         if include_times:
             rows.append((relative, "modified", info.st_mtime_ns))
-        if p.is_symlink():
-            rows.append((relative, "link", mode, os.readlink(p)))
+        if p.is_symlink() or is_junction(p):
+            rows.append((relative, "link", mode, readlink(p)))
         elif p.is_dir():
             rows.append((relative, "dir", mode))
             for child in sorted(p.iterdir()):
@@ -87,7 +87,7 @@ def git_tree(path):
         if child.name in SKIP_CONTENT:
             continue
         if child.is_symlink():
-            mode, digest, suffix = "120000", git_object("blob", os.fsencode(os.readlink(child))), ""
+            mode, digest, suffix = "120000", git_object("blob", os.fsencode(readlink(child))), ""
         elif child.is_dir():
             mode, digest, suffix = "40000", bytes.fromhex(git_tree(child)), "/"
         else:
@@ -155,7 +155,7 @@ def preview(home=None, agent_ids=None):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
                 raise ValueError("有技能名称不能安全用作文件夹名称，请先核对。")
             grouped[name].append(skill)
-            entries[name].append(str(Path(skill["path"]).relative_to(home)))
+            entries[name].append(Path(skill["path"]).relative_to(home).as_posix())
     from .extra_sources import paths as extra_source_paths
     for relative in extra_source_paths(home):
         folder = home / relative
@@ -230,13 +230,15 @@ def preview(home=None, agent_ids=None):
 
 def remove(path, checked):
     checked(path)
-    if path.is_symlink() or path.is_file():
+    if is_junction(path):
+        path.rmdir()  # Remove the entry only, never traverse its target.
+    elif path.is_symlink() or path.is_file():
         path.unlink()
     elif path.exists():
         for base, dirs, files in os.walk(path, followlinks=False):
             for name in dirs + files:
                 checked(Path(base) / name)
-        shutil.rmtree(path)
+        rmtree(path)
 
 
 def write_json(path, value, checked):
@@ -244,13 +246,25 @@ def write_json(path, value, checked):
     checked(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
+def backup_kind(manifest):
+    if "kind" in manifest:
+        return manifest["kind"]
+    paths = manifest["paths"]
+    if ".skill-pilot/store" in paths and ".skill-pilot/logs" not in paths:
+        return "organize"
+    if ".skill-pilot/store" not in paths and ".skill-pilot/logs" not in paths:
+        return "undo"
+    return "operation"
+
+
 def backups(home=None):
     home = target_home() if home is None else Path(home).resolve()
     root = home / ".skill-pilot/backups"
-    return [json.loads(p.read_text()) for p in sorted(root.glob("*/manifest.json"), reverse=True)]
+    manifests = [json.loads(p.read_text()) for p in sorted(root.glob("*/manifest.json"), reverse=True)]
+    return [m for m in manifests if backup_kind(m) == "organize"]
 
 
-def backup(home, plan, checked):
+def backup(home, plan, checked, kind="organize"):
     backup_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     directory = checked(home / ".skill-pilot/backups" / backup_id)
     directory.mkdir(parents=True)
@@ -258,17 +272,26 @@ def backup(home, plan, checked):
     for relative in list(paths):
         real = (home / relative).resolve()
         if real != home / relative and real.is_dir():
-            paths.append(str(real.relative_to(home)))
+            paths.append(real.relative_to(home).as_posix())
     paths = sorted(set(paths))
     protected_roots = profiles.readonly_roots(home)
-    protected = sorted(protected_roots | {str((home / p).resolve().relative_to(home)) for p in protected_roots
+    protected = sorted(protected_roots | {(home / p).resolve().relative_to(home).as_posix() for p in protected_roots
                                           if (home / p).resolve().is_relative_to(home)})
-    manifest = {"backup_id": backup_id, "home": str(home), "plan_id": plan["plan_id"], "paths": paths,
+    manifest = {"backup_id": backup_id, "kind": kind, "home": str(home), "plan_id": plan["plan_id"], "paths": paths,
                 "existing": [r for r in paths if (home / r).exists() or (home / r).is_symlink()],
                 "before": plan["before"], "protected": protected}
     with tarfile.open(checked(directory / "files.tar"), "w", dereference=False) as archive:
         for relative in manifest["existing"]:
             def included(info):
+                original = home / info.name
+                if os.name == 'nt' and is_junction(original):
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = readlink(original)
+                    info.size = 0
+                    info.pax_headers['skill-pilot.junction'] = 'True'
+                if os.name == 'nt' and info.issym():
+                    original = home / info.name
+                    info.pax_headers['skill-pilot.directory-link'] = str(bool(original.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_DIRECTORY))
                 return None if any(info.name == p or info.name.startswith(p + "/") for p in protected) else info
             archive.add(home / relative, arcname=relative, filter=included)
     write_json(directory / "manifest.json", manifest, checked)
@@ -304,7 +327,7 @@ def _restore(home, backup_id, checked):
             path = checked(home / relative)
             if path.is_dir() and not path.is_symlink() and relative in manifest["existing"]:
                 for child in path.iterdir():
-                    if str(child.relative_to(home)) not in protected:
+                    if child.relative_to(home).as_posix() not in protected:
                         remove(child, checked)
             else:
                 remove(path, checked)
@@ -312,7 +335,19 @@ def _restore(home, backup_id, checked):
         # reject the intentionally absolute in-home links and change permissions.
         for member in archive.getmembers():
             checked(home / member.name)
-            archive.extract(member, home, filter="fully_trusted")
+            if os.name == 'nt' and member.issym():
+                destination = home / member.name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                target = Path(member.linkname)
+                absolute_target = target if target.is_absolute() else destination.parent / target
+                if member.pax_headers.get('skill-pilot.junction') == 'True':
+                    import _winapi
+                    _winapi.CreateJunction(str(absolute_target), str(destination))
+                    continue
+                directory_link = member.pax_headers.get('skill-pilot.directory-link')
+                destination.symlink_to(target, target_is_directory=(directory_link == 'True' if directory_link is not None else absolute_target.is_dir()))
+            else:
+                archive.extract(member, home, filter="fully_trusted")
         # Restore directory attributes after their children have been written.
         for member in reversed(archive.getmembers()):
             if member.isdir():
@@ -325,8 +360,8 @@ def _restore(home, backup_id, checked):
 def transaction(home):
     """The operation lock is outside home, so rejected writes create no state."""
     identity = hashlib.sha256(str(home).encode()).hexdigest()[:16]
-    path = Path(tempfile.gettempdir()) / f"skill-pilot-write-{os.getuid()}-{identity}.lock"
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    path = Path(tempfile.gettempdir()) / f"skill-pilot-write-{user_id()}-{identity}.lock"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     return os.fdopen(fd, "r+")
 
 
@@ -346,6 +381,7 @@ def apply(plan_id, home=None, agent_ids=None, choices=None, sources=None):
         return join(agent_ids or [], plan_id, home=home, choices=choices)
     checked = lambda p: guard(p, home)
     checked(home / ".skill-pilot")
+    check_directory_links()
     with transaction(home) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         plan = preview(home, agent_ids)

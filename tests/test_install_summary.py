@@ -78,7 +78,7 @@ if (summary.items[0].purpose !== purpose.split('. ')[0] + '.') fail('摘要没�
 if (summary.items[0].purpose.includes('Use when')) fail('一句话用途带上了后面的句子');
 
 const card = installSummaryCard(single, 'Codex', false, true);
-for (const text of ['prioritize-features', summary.items[0].purpose, '装给 Codex', '全部装给 Codex', '挑一挑', '1 个可以直接装']) {
+for (const text of ['prioritize-features', summary.items[0].purpose, '添加至 Codex', '全部添加给 Codex', '挑选安装', '1 个可直接安装']) {
   if (!card.includes(text)) fail('卡片缺少：' + text);
 }
 if (card.includes('查看全部') || card.includes('收起')) fail('一个技能不应出现查看全部');
@@ -109,7 +109,7 @@ for (const name of ['alpha', 'beta', 'gamma']) {
 }
 if (folded.includes('delta')) fail('未展开时不应出现第四个技能');
 if (!folded.includes('查看全部') || folded.includes('收起')) fail('多于三个时应有查看全部');
-if (!folded.includes('装给 Codex') || !folded.includes('要先对比')) fail('多个技能时应能看到装给谁和要先对比');
+if (!folded.includes('添加至 Codex') || !folded.includes('需核对')) fail('多个技能时应能看到装给谁和需核对');
 
 const opened = installSummaryCard(many, 'Codex', true, true);
 if (!opened.includes('delta') || !opened.includes('delta 的用途')) fail('查看全部后应能核对第四个技能');
@@ -119,15 +119,15 @@ const installed = installSummaryCard({
   skills: [{name: 'prioritize-features', description: '已经有了。'}],
   conflicts: [{name: 'prioritize-features', same_content: true}],
 }, 'Codex', false, true);
-if (!installed.includes('已经装过')) fail('已经装过的技能卡片上应标明');
-if (installed.includes('data-install-all') || installed.includes('装给 Codex') || installed.includes('挑一挑')) fail('都装过了不应再提示装给谁');
+if (!installed.includes('已安装')) fail('已安装的技能卡片上应标明');
+if (installed.includes('data-install-all') || installed.includes('添加至 Codex') || installed.includes('挑选安装')) fail('都装过了不应再提示装给谁');
 
 const locked = installSummaryCard(single, 'Codex', false, false);
 if (!locked.includes('data-install-all disabled')) fail('不能修改时，一键安装应不可点');
-if (locked.includes('data-install-pick disabled')) fail('挑一挑不该被这次改动禁用');
+if (locked.includes('data-install-pick disabled')) fail('挑选安装不该被这次改动禁用');
 
 const empty = installSummaryCard({skills: [], conflicts: []}, 'Codex', false, true);
-if (!empty.includes('这个链接里没找到技能')) fail('没找到技能时卡片没有说明');
+if (!empty.includes('未在此链接中找到技能')) fail('没找到技能时卡片没有说明');
 if (empty.includes('install-summary-name') || empty.includes('查看全部')) fail('没找到技能时不应列出技能');
 
 function fail(message) { console.error(message); process.exit(1); }

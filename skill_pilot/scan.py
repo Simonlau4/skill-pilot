@@ -1,3 +1,4 @@
+from .platform_support import readlink
 """Read-only discovery. Files are never imported or executed."""
 import hashlib
 import json
@@ -125,17 +126,17 @@ def content_digest(directory):
             digest.update(("F\0" + relative + "\0").encode())
             digest.update(hashlib.sha256(path.read_bytes()).digest())
         elif path.is_symlink():
-            digest.update(("L\0" + relative + "\0" + os.readlink(path)).encode())
+            digest.update(("L\0" + relative + "\0" + readlink(path)).encode())
 
     visit(directory, "", set())
     return digest.hexdigest()
 
 
-def read_disabled(config_path, home):
-    if not config_path.exists():
+def read_disabled(config_path, home, text=None):
+    if text is None and not config_path.exists():
         return {"names": [], "paths": [], "error": None}
     try:
-        config = tomllib.loads(config_path.read_text())
+        config = tomllib.loads(config_path.read_text() if text is None else text)
     except (OSError, tomllib.TOMLDecodeError) as error:
         return {"names": [], "paths": [], "error": str(error)}
     names, paths = set(), set()
@@ -173,11 +174,11 @@ def scan_root(root, recursive=True, digest_cache=None, user_root=True, excluded=
             real = path.resolve()
             if path.is_symlink() and not path.exists():
                 if not user_root and path.parent.name != "skills":
-                    unresolved.append({"path": str(path), "link_target": os.readlink(path),
+                    unresolved.append({"path": str(path), "link_target": readlink(path),
                                        "message": "目录链接已失效，无法确定其中有哪些技能"})
                     return
                 skills.append({"name": path.name, "directory_name": path.name,
-                               "path": str(path), "kind": "link", "link_target": os.readlink(path),
+                               "path": str(path), "kind": "link", "link_target": readlink(path),
                                "resolved_path": str(real), "broken": True, "valid": False,
                                "description": "", "description_chars": 0, "description_tokens": 0, "digest": None,
                                "manual_only_for": [],
@@ -207,7 +208,7 @@ def scan_root(root, recursive=True, digest_cache=None, user_root=True, excluded=
                         markers.append('agents/openai.yaml')
                 skills.append({"name": name, "directory_name": path.name, "path": str(path),
                                "kind": "link" if path.is_symlink() else "directory",
-                               "link_target": os.readlink(path) if path.is_symlink() else None,
+                               "link_target": readlink(path) if path.is_symlink() else None,
                                "resolved_path": str(real), "broken": False, "valid": valid,
                                "description": info.get("description", ""),
                                "model_invocable": info.get("model_invocable", True),
@@ -338,7 +339,7 @@ def scan(home=None, applications=None):
     for root in roots.values():
         for skill in root['skills']:
             skill['manual_only_for'] = [p['id'] for p in catalog if p['id'] in root['readers'] and
-                                       (root['category'] != 'user' or profiles.reads(p, str(Path(skill['path']).relative_to(home)))) and
+                                       (root['category'] != 'user' or profiles.reads(p, Path(skill['path']).relative_to(home).as_posix())) and
                                        profiles.manual_only(skill, p)]
         errors.extend(root["errors"])
         if root["category"] == "user":

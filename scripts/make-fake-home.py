@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from skill_pilot.platform_support import readlink
 from skill_pilot.extra_sources import paths as extra_source_paths
 from skill_pilot.store import check_links, guard
 from skill_pilot import profiles
@@ -34,7 +35,7 @@ def make_fake_home(source, destination):
     copied, dependencies = set(), []
     def copy(relative):
         src, dst = source / relative, destination / relative
-        if relative in {'.skill-pilot/settings.json', '.skill-pilot/tags.json'} or Path(relative).parent == Path('.skill-pilot') and Path(relative).name.startswith('usage.sqlite'):
+        if relative in {'.skill-pilot/settings.json', '.skill-pilot/tags.json', '.skill-pilot/team.json'} or Path(relative).parent == Path('.skill-pilot') and Path(relative).name.startswith('usage.sqlite'):
             copied.add(relative)
             return
         if relative in copied or dst.exists() or dst.is_symlink():
@@ -46,10 +47,10 @@ def make_fake_home(source, destination):
             raise ValueError("有来源链接指向真实主目录之外，已停止复制。")
         guard(dst.parent, destination).mkdir(parents=True, exist_ok=True)
         if src.is_symlink():
-            guard(dst, destination).symlink_to(os.readlink(src), target_is_directory=src.is_dir())
+            guard(dst, destination).symlink_to(readlink(src), target_is_directory=src.is_dir())
         elif src.is_dir():
             shutil.copytree(src, guard(dst, destination), symlinks=True,
-                            ignore=(lambda directory, names: [n for n in names if n in {"backups", "settings.json", "tags.json"} or n.startswith('usage.sqlite')]
+                            ignore=(lambda directory, names: [n for n in names if n in {"backups", "settings.json", "tags.json", "team.json"} or n.startswith('usage.sqlite')]
                                     if Path(directory) == source / ".skill-pilot" else []))
         else:
             shutil.copy2(src, guard(dst, destination))
@@ -67,10 +68,10 @@ def make_fake_home(source, destination):
                 resolved = src.resolve()
                 if not resolved.is_relative_to(source):
                     raise ValueError("有来源链接指向真实主目录之外，已停止复制。")
-                relative = str(resolved.relative_to(source))
+                relative = resolved.relative_to(source).as_posix()
                 if resolved.exists() and not (destination / relative).exists() and relative not in copied:
                     pending.append(relative)
-                text = os.readlink(dst)
+                text = readlink(dst)
                 if os.path.isabs(text) and Path(text).is_relative_to(source):
                     # Unlinking an untrusted link does not follow its target.
                     guard(dst.parent, destination)

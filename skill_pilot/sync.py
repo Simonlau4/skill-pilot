@@ -1,3 +1,4 @@
+from .platform_support import readlink
 """M2 reconciliation keeps existing entry paths, including compatibility aliases."""
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ def desired_links(registry, home):
             readers = {r: {p['id'] for p in catalog.values() if r in p['skill_roots']}
                        for r in profile['skill_roots']}
             root = max(profile['skill_roots'], key=lambda r: (-len(readers[r] - assigned), len(readers[r] & assigned)))
-            entries.add(str(Path(root) / name))
+            entries.add((Path(root) / name).as_posix())
         for relative in entries:
             links[str(home / relative)] = str(home / ".skill-pilot/store" / name)
     return links
@@ -37,7 +38,7 @@ def reconcile(registry, home, guard):
     for source, target in sorted(desired_links(registry, home).items()):
         path = guard(Path(source))
         guard(Path(target))
-        if path.is_symlink() and os.readlink(path) == target:
+        if path.is_symlink() and readlink(path) == target:
             continue
         remove(path, guard)
         guard(path.parent).mkdir(parents=True, exist_ok=True)
@@ -75,6 +76,39 @@ def visibility(home, catalog=None):
         result[profile["id"]] = {"available": sorted(available), "automatic": sorted(automatic),
                                   "versions": {n: sorted(v) for n, v in sorted(versions.items())}}
     return result
+
+
+def external_disable_rules(registry, home):
+    """User-owned disables are preferences, not evidence that an install failed."""
+    result = {}
+    for profile in profiles.managed(home):
+        if profile['disable']:
+            adapter = profiles.adapter(profile)
+            rules = adapter.read_external(home, registry)
+            if rules.get('error'):
+                raise ValueError(profile['name'] + ' 的停用设置没能读懂，请先修复后再预览。')
+            result[profile['id']] = rules
+    return result
+
+
+def externally_disabled(name, skill, agent, home, rules, planned=False):
+    from .scan import is_disabled
+    if agent not in rules:
+        return False
+    profile = profiles.by_id(home)[agent]
+    entries = list(skill.get('entries', []))
+    if planned:
+        entries += assignment_entries(name, sorted(set(skill['assigned_agents']) | {agent}), home)
+    paths = [Path(home) / '.skill-pilot/store' / name]
+    paths += [Path(home) / e for e in entries if profiles.reads(profile, e)]
+    return any(is_disabled({'name': name, 'path': str(path)}, rules[agent]) for path in paths)
+
+
+def effective_assignments(registry, home, rules=None):
+    rules = external_disable_rules(registry, home) if rules is None else rules
+    return {name: [agent for agent in skill['assigned_agents']
+                   if not externally_disabled(name, skill, agent, home, rules)]
+            for name, skill in registry['skills'].items()}
 
 
 def _follow_directory(path):
@@ -129,7 +163,7 @@ def assignment_entries(name, agents, home=None, catalog=None):
     uncovered, chosen = set(assigned), []
     while uncovered:
         root = max(safe, key=lambda r: len(readers[r] & uncovered))
-        chosen.append(str(Path(root) / name))
+        chosen.append((Path(root) / name).as_posix())
         uncovered -= readers[root]
     return sorted(chosen)
 
@@ -184,12 +218,21 @@ def notes(home, agent_ids=None):
 
 def reconcile_assignments(registry, home, checked, changed_names, entries_override=None):
     from .store import check_links
+    external = external_disable_rules(registry, home)
     for name in sorted(changed_names):
         skill = registry['skills'][name]
         target = home / '.skill-pilot/store' / name
         check_links(target, home)
         desired = (entries_override[name] if entries_override and name in entries_override else
                    assignment_entries(name, skill['assigned_agents'], home))
+        if not entries_override or name not in entries_override:
+            watched = {Path(path) for agent in skill['assigned_agents']
+                       for path in external.get(agent, {}).get('entry_paths', [])}
+            # Keep a user-disabled alias when adding another reader. Removing it
+            # would make the old path rule stop applying to the shared copy.
+            protected = [entry for entry in skill.get('entries', [])
+                         if home / entry in watched or home / entry / 'SKILL.md' in watched]
+            desired = sorted(set(desired) | set(protected))
         for relative in sorted(set(skill.get('entries', [])) | set(desired)):
             path = checked(home / relative)
             if path.exists() or path.is_symlink():

@@ -1,3 +1,4 @@
+from ..platform_support import rmtree
 """Pinned upstream trees and full-directory historical baseline calibration."""
 import difflib
 import hashlib
@@ -104,7 +105,7 @@ class Reader:
         staging = self.root / ('partial-tree-' + tree)
         if staging.exists():
             import shutil
-            shutil.rmtree(staging)
+            rmtree(staging)
         rows = self.git(checkout, 'ls-tree', '-rz', tree).split('\0')
         entries = []
         for row in filter(None, rows):

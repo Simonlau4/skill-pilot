@@ -1,7 +1,9 @@
+from ..platform_support import rmtree
 """CLI-only staged installation; official archives never run an installer."""
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -82,6 +84,8 @@ def prepare(sources, temporary, version, deadline=None):
 
 def install_cli(home, version, checked):
     guard(home / '.skill-pilot', home)
+    if os.name == 'nt':
+        raise ValueError('Windows 版不自动升级飞书 CLI；请按本机飞书规则手动升级后，再检查技能版本。')
     if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', version):
         raise ValueError('飞书版本号不正确。')
     env = tool_environment(home)
@@ -109,7 +113,7 @@ def install_cli(home, version, checked):
             raise ValueError('飞书工具版本没有核对通过，技能保持原样。')
         target = checked(home / CLI_PATHS[0])
         if target.exists():
-            shutil.rmtree(target)
+            rmtree(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(package, target, symlinks=True)
         entry = checked(home / CLI_PATHS[1])

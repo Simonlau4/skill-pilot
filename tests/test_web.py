@@ -1,3 +1,4 @@
+from skill_pilot.platform_support import rmtree
 from tests import set_up_home
 import json
 import threading
@@ -88,11 +89,25 @@ class WebTests(unittest.TestCase):
         headers = {"X-Skill-Pilot-Token": self.server.token}
         self.assertEqual(self.request('/brand/../favicon.svg', headers)[0], 404)
 
+    def test_gsap_assets_require_session_and_use_javascript_type(self):
+        for path in ("/vendor/gsap.min.js", "/vendor/ScrollTrigger.min.js"):
+            self.assertEqual(self.request(path)[0], 403, path)
+            with urllib.request.urlopen(self.server.origin + path + '?token=' + self.server.token) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers.get_content_type(), 'text/javascript')
+                body = response.read()
+                self.assertTrue(body.startswith(b'/*!'), path + ' 的开头版权说明不见了')
+                self.assertIn(b'@license', body[:400])
+        headers = {"X-Skill-Pilot-Token": self.server.token}
+        for path in ("/vendor/", "/vendor/README.md", "/vendor/gsap.min.js.map", "/vendor/other.js"):
+            self.assertEqual(self.request(path, headers)[0], 404, path)
+
     def test_browser_favicon_ico_needs_no_token(self):
         status, body = self.request("/favicon.ico")
         self.assertEqual(status, 204)
         self.assertEqual(body, b"")
-        for path in ("/", "/app.js", "/app.css", "/favicon.svg", "/api/scan", "/favicon.ico/../"):
+        for path in ("/", "/app.js", "/app.css", "/favicon.svg", "/vendor/gsap.min.js",
+                     "/vendor/ScrollTrigger.min.js", "/api/scan", "/favicon.ico/../"):
             self.assertEqual(self.request(path)[0], 403, path)
 
 
@@ -199,6 +214,51 @@ class M3WebTests(MigrationWebTests):
         self.assertEqual(status,409)
         self.assertIn('刷新',result['error'])
 
+    def test_assignment_keeps_pending_choices_after_unrelated_config_change(self):
+        config = self.home / '.codex/config.toml'
+        config.write_text('# original\n[skills]\nconfig = []\n')
+        _, table = self.request('/api/table')
+        changes = [{'skill': 'sample', 'agent': 'codex', 'enabled': False}]
+        self.assertEqual(self.request('/api/assignment/preview', {'changes': changes})[0], 200)
+        extra = '\n[projects."/tmp/example workspace"]\ntrust_level = "trusted"\n'
+        config.write_text(config.read_text() + extra)
+        _, review = self.request('/api/assignment/preview', {'changes': changes, 'recheck': True})
+        status, result = self.request('/api/assignment/apply', {
+            'changes': changes, 'revision': review['revision'], 'recheck': True, 'confirmed': True})
+        self.assertEqual(status, 200, result)
+        self.assertTrue(config.read_text().endswith(extra))
+        _, refreshed = self.request('/api/table')
+        self.assertNotIn('codex', next(s for s in refreshed['skills'] if s['name'] == 'sample')['assigned_agents'])
+
+    def test_assignment_still_rejects_changed_skill_settings(self):
+        config = self.home / '.codex/config.toml'
+        config.write_text('[skills]\nconfig = []\n')
+        _, table = self.request('/api/table')
+        config.write_text('[skills]\nconfig = [{name = "sample", enabled = false}]\n')
+        before = physical_state(self.home)
+        status, result = self.request('/api/assignment/apply', {
+            'changes': [{'skill': 'sample', 'agent': 'claude', 'enabled': True}],
+            'revision': table['revision'], 'confirmed': True})
+        self.assertEqual(status, 409)
+        self.assertIn('刷新', result['error'])
+        self.assertEqual(physical_state(self.home), before)
+
+    def test_recheck_reports_race_and_allows_latest_plan(self):
+        changes = [{'skill': 'sample', 'agent': 'claude', 'enabled': True}]
+        status, review = self.request('/api/assignment/preview', {'changes': changes, 'recheck': True})
+        self.assertEqual(status, 200, review)
+        path = self.home / '.skill-pilot/store/sample/SKILL.md'
+        path.write_text(path.read_text() + '\nexternal edit\n')
+        status, result = self.request('/api/assignment/apply', {
+            'changes': changes, 'revision': review['revision'], 'recheck': True, 'confirmed': True})
+        self.assertEqual(status, 409)
+        self.assertTrue(result['recheck'])
+        _, latest = self.request('/api/assignment/preview', {'changes': changes, 'recheck': True})
+        status, result = self.request('/api/assignment/apply', {
+            'changes': changes, 'revision': latest['revision'], 'recheck': True, 'confirmed': True})
+        self.assertEqual(status, 200, result)
+        self.assertIn('external edit', path.read_text())
+
     def test_changed_choice_applies_and_confirmed_restore_recovers(self):
         from skill_pilot.sources import github
         _,table=self.request('/api/table')
@@ -221,7 +281,7 @@ class M3WebTests(MigrationWebTests):
         self.assertTrue(result['conflicts'])
         self.assertIn('comparison',self.request('/api/incoming/compare',{'name':'new','review_id':review['id']})[1])
         import shutil
-        shutil.rmtree(review['temporary'])
+        rmtree(review['temporary'])
 
     def test_readonly_target_write_denied(self):
         _,table=self.request('/api/table')

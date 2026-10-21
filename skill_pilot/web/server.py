@@ -1,6 +1,7 @@
+from ..platform_support import rmtree
 """Loopback dashboard; every migration write requires an explicit confirmation."""
 import difflib
-import fcntl
+from ..platform_support import fcntl, user_home, user_id, check_directory_links
 import hashlib
 import json
 import os
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import SKIP_CONTENT, apply, backups, guard, preview, restore, target_home
-from .. import operations, updates, cleanup, labels, tags, sharing, self_update, extra_sources
+from .. import operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from . import runtime
@@ -41,6 +42,10 @@ class Dashboard(ThreadingHTTPServer):
         self.home = Path(inventory.get("home", target_home()))
         extra_sources.ensure(self.home)
         self.install_reviews = session.get('install_reviews', {})
+        self.team_upload_reviews = session.get('team_upload_reviews', {})
+        self.team_queue = []
+        self.team_queue_lock = threading.RLock()
+        self.team_queue_thread = None
         self.update_reviews = session.get('update_reviews', {})
         self.update_lock = threading.Lock()
         self.update_thread = None
@@ -87,8 +92,12 @@ class Dashboard(ThreadingHTTPServer):
         self.url = f"{self.origin}/?token={self.token}"
 
     def server_close(self):
-        self.closing = True
+        with self.team_queue_lock:
+            self.closing = True
         super().server_close()
+        with self.team_queue_lock:
+            queue_thread = self.team_queue_thread
+        if queue_thread: queue_thread.join()
         if self.update_thread: self.update_thread.join()
         if self.labels_thread: self.labels_thread.join()
         if self.agents_thread: self.agents_thread.join()
@@ -96,7 +105,7 @@ class Dashboard(ThreadingHTTPServer):
             self.program_thread.join()
         if self.reload_thread: self.reload_thread.join()
         if self.program_review:
-            shutil.rmtree(self.program_review['temporary'], ignore_errors=True)
+            rmtree(self.program_review['temporary'], ignore_errors=True)
 
     def _program_thread_blocks_exit(self):
         # 打开看板时的自动检查不挡住关看板和刷新应用新版；手动检查和升级仍要等。
@@ -105,8 +114,72 @@ class Dashboard(ThreadingHTTPServer):
 
     def background_busy(self):
         return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread, self.agents_thread)) or
+                any(item['status'] in {'waiting', 'running'} for item in self.team_queue_status()['items']) or
                 self._program_thread_blocks_exit() or
                 self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
+
+    def team_queue_status(self):
+        with self.team_queue_lock:
+            return {'items': [{**item, 'installed': list(item['installed']), 'reuse': list(item['reuse'])}
+                              for item in self.team_queue]}
+
+    def queue_team(self, key):
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError('请选择要装上的技能。')
+        with self.team_queue_lock:
+            previous = next((item for item in self.team_queue if item['key'] == key), None)
+            if previous and previous['status'] in {'waiting', 'running'}:
+                return self.team_queue_status()
+        if previous:
+            name, title = previous['name'], previous.get('title')
+        else:
+            _, _, cards = team._fetch(self.home)
+            card = next((c for c in cards if c['key'] == key), None)
+            if card is None:
+                raise ValueError('这个技能已经下架。')
+            name = card['listings'][0]['name']
+            title = next((r['title'] for r in card['listings'] if 'title' in r), None)
+        with self.team_queue_lock:
+            if self.closing:
+                raise ValueError('看板正在关闭，请重新打开后再装上。')
+            if any(item['key'] == key and item['status'] in {'waiting', 'running'} for item in self.team_queue):
+                return self.team_queue_status()
+            self.team_queue = [item for item in self.team_queue if item['key'] != key]
+            self.team_queue.append({'id': secrets.token_urlsafe(16), 'key': key, 'name': name,
+                **({'title': title} if title is not None else {}), 'status': 'waiting', 'message': '等待安装。',
+                'installed': [], 'reuse': []})
+            if self.team_queue_thread is None:
+                self.team_queue_thread = threading.Thread(target=self.team_queue_work, daemon=True)
+                self.team_queue_thread.start()
+            return self.team_queue_status()
+
+    def clear_team_queue(self):
+        with self.team_queue_lock:
+            self.team_queue = [item for item in self.team_queue if item['status'] in {'waiting', 'running'}]
+            return self.team_queue_status()
+
+    def team_queue_work(self):
+        while True:
+            with self.team_queue_lock:
+                if self.closing:
+                    self.team_queue_thread = None
+                    return
+                item = next((item for item in self.team_queue if item['status'] == 'waiting'), None)
+                if item is None:
+                    self.team_queue_thread = None
+                    return
+                item.update(status='running', message='正在装进技能库…')
+            try:
+                result = team.install(self.home, item['key'])
+                self.invalidate_agents()
+                with self.team_queue_lock:
+                    item.update(status='done', message=result['message'], installed=result['installed'], reuse=result['reuse'])
+                    if 'id' in result:
+                        item['operation'] = result['id']
+            except Exception as error:
+                with self.team_queue_lock:
+                    item.update(status='failed', message=str(error) if isinstance(error, ValueError) else
+                                '安装没能完成，请稍后重试。')
 
     def start_program(self, action, target=None, automatic=False):
         with self.runtime_lock:
@@ -125,7 +198,7 @@ class Dashboard(ThreadingHTTPServer):
         try:
             if action == 'check':
                 if self.program_review:
-                    shutil.rmtree(self.program_review['temporary'], ignore_errors=True)
+                    rmtree(self.program_review['temporary'], ignore_errors=True)
                 self.program_review = None
                 self.program_review = self_update.check(self.home)
                 review = self.program_review
@@ -137,7 +210,8 @@ class Dashboard(ThreadingHTTPServer):
                     with self.runtime_lock:
                         idle = not self.active_requests and not (
                             any(t and t.is_alive() for t in (self.update_thread, self.labels_thread)) or
-                            self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
+                            self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())) or
+                            any(item['status'] in {'waiting', 'running'} for item in self.team_queue_status()['items']))
                     if idle:
                         break
                     time.sleep(.05)
@@ -190,9 +264,10 @@ class Dashboard(ThreadingHTTPServer):
             time.sleep(.05)
 
     def watch(self):
-        while time.monotonic() - self.last_heartbeat < (OPEN_PAGE_TIMEOUT if self.pages else HEARTBEAT_TIMEOUT) or self.background_busy() or self.reload_pending:
+        while not self.closing and (time.monotonic() - self.last_heartbeat < (OPEN_PAGE_TIMEOUT if self.pages else HEARTBEAT_TIMEOUT) or self.background_busy() or self.reload_pending):
             time.sleep(0.1)
-        self.shutdown()
+        if not self.closing:
+            self.shutdown()
 
     def agents_view(self):
         with self.agents_lock:
@@ -332,6 +407,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, sharing.export_config(self.server.home, query.get('agent', [None])[0]))
             except (ValueError, OSError, KeyError) as error:
                 self.reply(409, {'error': str(error)})
+        elif path == '/api/team/queue':
+            self.reply(200, self.server.team_queue_status())
+        elif path in {'/api/team', '/api/team/catalog', '/api/team/listings/candidates'}:
+            try:
+                result = (team.status(self.server.home, strict=False) if path == '/api/team' else
+                          team.catalog(self.server.home) if path == '/api/team/catalog' else
+                          team.listing_candidates(self.server.home))
+                self.reply(200, result)
+            except (ValueError, OSError) as error:
+                self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取团队分享，请稍后重试。'})
         elif path == '/api/updates/progress':
             with self.server.update_lock:
                 review = next(reversed(self.server.update_reviews.values()), None)
@@ -371,7 +456,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, {"comparison": "\n".join(texts)})
             except (ValueError, OSError, StopIteration) as error:
                 self.reply(409, {"error": str(error) or "这个技能已不在预览里，请重新预览。"})
-        elif path in ("/", "/app.js", "/app.css", "/favicon.svg"):
+        elif path in ("/", "/app.js", "/app.css", "/favicon.svg",
+                      "/vendor/gsap.min.js", "/vendor/ScrollTrigger.min.js"):
             file = STATIC / ("index.html" if path == "/" else path.removeprefix("/"))
             body = file.read_bytes().replace(b"__SESSION_TOKEN__", self.server.token.encode())
             kind = {"html": "text/html", "js": "text/javascript", "css": "text/css", "svg": "image/svg+xml"}[file.suffix.removeprefix(".")]
@@ -384,6 +470,16 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(403, {"error": "请求来源不属于本次看板。"})
             return
         path = urllib.parse.urlsplit(self.path).path
+        if path in {'/api/heartbeat', '/api/runtime/refresh'}:
+            # Consume small optional bodies before closing the HTTP/1.0
+            # connection; unread request bytes can reset the reply on Windows.
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 <= length <= 1024 or len(self.rfile.read(length)) != length:
+                    raise ValueError()
+            except (ValueError, OSError):
+                self.reply(400, {'error': '请求内容不正确，请刷新后重试。'})
+                return
         if path == "/api/heartbeat":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             page = query.get("page", [""])[0]
@@ -407,13 +503,18 @@ class Handler(BaseHTTPRequestHandler):
         read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan'}
+                       '/api/agents/scan', '/api/team/listings/preview'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply','/api/withdrawn/restore',
-                        '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply'}
+                        '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
+                        '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/queue', '/api/team/queue/clear',
+                        '/api/team/ratings', '/api/team/ratings/remove'}
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
-                           '/api/settings/extra-sources', '/api/tags'}
+                           '/api/settings/extra-sources', '/api/tags', '/api/team/settings'}
         program_routes = {'/api/program/check', '/api/program/apply'}
+        if path.startswith(('/api/team/shares', '/api/team/upload/', '/api/team/import/')) or path == '/api/team/withdraw':
+            self.reply(404, {'error': '没有这个团队商店操作。'})
+            return
         if path not in {"/api/migration/apply", "/api/restore"} | read_routes | write_routes | settings_routes | program_routes:
             self.reply(405, {"error": "当前阶段没有这个操作。"})
             return
@@ -424,6 +525,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError('请求内容格式不正确。')
+            if path.startswith('/api/team/'):
+                if path not in read_routes and not preview_allowed(self.server.home):
+                    self.reply(403, {'error': '当前处于只读模式，分享和本机文件没有改动。'})
+                    return
+                self.reply(200, self.team_post(path, body))
+                return
             if path == '/api/agents/scan':
                 self.reply(200, self.server.start_agents_scan(full=True))
                 return
@@ -484,7 +591,7 @@ class Handler(BaseHTTPRequestHandler):
                     if review is None or not review['running']:
                         # A long-lived dashboard would otherwise keep every earlier check's downloads.
                         for old in self.server.update_reviews.values():
-                            shutil.rmtree(old['temporary'], ignore_errors=True)
+                            rmtree(old['temporary'], ignore_errors=True)
                         self.server.update_reviews.clear()
                         review = updates.create(self.server.home)
                         self.server.update_reviews[review['id']] = review
@@ -500,7 +607,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, result)
                 return
             if path == '/api/assignment/preview':
-                self.reply(200, operations.preview_assign(body['changes'], self.server.home))
+                self.reply(200, operations.preview_assign(body['changes'], self.server.home, body.get('recheck') is True))
                 return
             if path == '/api/config/preview':
                 self.reply(200, sharing.preview_import(body.get('config'), body.get('agents'), self.server.home))
@@ -562,7 +669,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/restore':
                 result = restore(body["backup_id"], self.server.home)
             elif path == '/api/assignment/apply':
-                result = operations.apply_assign(body['changes'], body['revision'], True, self.server.home)
+                result = operations.apply_assign(body['changes'], body['revision'], True, self.server.home,
+                                                 body.get('recheck') is True)
             elif path == '/api/config/apply':
                 result = sharing.import_config(body.get('config'), body.get('agents'), self.server.home, body['revision'])
             elif path == '/api/agents/join/apply':
@@ -599,8 +707,39 @@ class Handler(BaseHTTPRequestHandler):
             self.server.inventory = scan(self.server.home)
             self.reply(200, result)
         except (ValueError, OSError, KeyError, TypeError, StopIteration) as error:
-            message = '设置没能保存，请核对后再试。' if path in settings_routes and not isinstance(error, ValueError) else str(error)
-            self.reply(400 if path == '/api/cleanup/preview' else 409, {"error": message or "操作没能完成，请重新预览。"})
+            message = ('团队操作没能完成，请重新预览后重试。' if path.startswith('/api/team/') and not isinstance(error, ValueError) else
+                       '设置没能保存，请核对后再试。' if path in settings_routes and not isinstance(error, ValueError) else str(error))
+            self.reply(400 if path == '/api/cleanup/preview' else 409, {
+                "error": message or "操作没能完成，请重新预览。",
+                **({'recheck': True} if isinstance(error, operations.AssignmentChanged) else {})})
+
+    def team_post(self, path, body):
+        home = self.server.home
+        if path == '/api/team/settings':
+            return team.save_settings(home, body)
+        if path == '/api/team/listings/preview':
+            saved, result = team.listings_preview(home, body.get('skills'))
+            review = secrets.token_urlsafe(16)
+            self.server.team_upload_reviews[review] = saved
+            return {**result, 'review': review}
+        if path == '/api/team/queue':
+            return self.server.queue_team(body.get('key'))
+        if path == '/api/team/queue/clear':
+            return self.server.clear_team_queue()
+        if path == '/api/team/listings/remove':
+            return team.listings_remove(home, body.get('names'))
+        if path in {'/api/team/ratings', '/api/team/ratings/remove'}:
+            return team.rate(home, body, path.endswith('/remove'))
+        reviews = self.server.team_upload_reviews
+        identifier = body.get('review')
+        if not isinstance(identifier, str) or identifier not in reviews:
+            raise ValueError('这份预览已失效，请重新预览。')
+        review = reviews[identifier]
+        result = team.listings_apply(home, review)
+        reviews.pop(identifier, None)
+        self.server.invalidate_agents()
+        self.server.inventory = scan(home)
+        return result
 
 
 def preview_allowed(home):
@@ -613,7 +752,7 @@ def preview_allowed(home):
 
 def compare_files(left, right):
     def files(root):
-        return {str(p.relative_to(root)): p for p in root.rglob("*") if p.is_file()
+        return {p.relative_to(root).as_posix(): p for p in root.rglob("*") if p.is_file()
                 and not any(part in SKIP_CONTENT for part in p.relative_to(root).parts)}
     one, two = files(left), files(right)
     result = [f"默认选择：{left}\n另一份：{right}\n"]
@@ -632,7 +771,7 @@ def compare_files(left, right):
 
 def lock_path():
     identity = hashlib.sha256(str(target_home()).encode()).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"skill-pilot-{os.getuid()}-{identity}.lock"
+    return Path(tempfile.gettempdir()) / f"skill-pilot-{user_id()}-{identity}.lock"
 
 
 def open_existing(lock):
@@ -656,10 +795,14 @@ def open_existing(lock):
 
 
 def run(json_output=False):
+    if os.name == 'nt':
+        from .windows_runtime import run as windows_run
+        return windows_run(json_output)
     resume = runtime.resume_state()
-    fd = resume['lock_fd'] if resume else os.open(lock_path(), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fd = resume['lock_fd'] if resume else os.open(lock_path(), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "r+") as lock:
-        os.fchmod(lock.fileno(), 0o600)
+        if os.name != "nt":
+            os.fchmod(lock.fileno(), 0o600)
         if not resume:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -692,9 +835,9 @@ def run(json_output=False):
             server.server_close()
             import shutil
             for review in server.install_reviews.values():
-                shutil.rmtree(review['temporary'], ignore_errors=True)
+                rmtree(review['temporary'], ignore_errors=True)
             for review in server.update_reviews.values():
-                shutil.rmtree(review['temporary'], ignore_errors=True)
+                rmtree(review['temporary'], ignore_errors=True)
             lock.seek(0)
             lock.truncate()
             # Do not unlink: another launcher could be holding the same inode.

@@ -1,6 +1,6 @@
 /* Skill Pilot 看板。
    分段：通用工具 → 页头与导航 → 技能页 → 技能详情 → 安装技能 → 接入新 agent →
-        检查更新（结果显示在技能页和详情里） → 清理页 → 操作记录页 → 诊断与备份页 → 设置页 → 启动。
+        检查更新（结果显示在技能页和详情里） → 清理页 → 操作记录页 → 诊断与备份页 → 设置页 → 团队分享 → 启动。
    页面不写死任何具体 agent：名字、顺序、生效方式都来自接口。 */
 
 /* ==================== 通用工具：请求、转义、提示、确认框、按钮忙碌态 ==================== */
@@ -16,7 +16,7 @@ const clone = value => JSON.parse(JSON.stringify(value));
 function renderButtons(container, markup, key) {
   const template = document.createElement('template');
   template.innerHTML = markup;
-  const existing = new Map([...container.children].map(button => [button.getAttribute(key), button]));
+  const existing = new Map([...container.children].filter(button => !button.classList.contains('selection-plate')).map(button => [button.getAttribute(key), button]));
   for (const [index, next] of [...template.content.children].entries()) {
     const value = next.getAttribute(key);
     const button = existing.get(value) || next;
@@ -29,6 +29,55 @@ function renderButtons(container, markup, key) {
     if (container.children[index] !== button) container.insertBefore(button, container.children[index] || null);
   }
   for (const button of existing.values()) button.remove();
+  if (container.matches('#agent-rail, #skills-tabs, .filter-group-list, .filter-tag-list')) glideSelection(container);
+}
+
+const selectionMotions = new WeakMap();
+
+/* 同一块选中底色在按钮之间移动。连点时从屏幕上正在经过的位置接着走。 */
+function glideSelection(container) {
+  let motion = selectionMotions.get(container);
+  if (!motion) {
+    const plate = document.createElement('span');
+    plate.className = 'selection-plate';
+    plate.setAttribute('aria-hidden', 'true');
+    container.append(plate);
+    container.classList.add('selection-track');
+    motion = {plate, animation: null, target: null};
+    selectionMotions.set(container, motion);
+    const observer = new ResizeObserver(() => {
+      if (!container.isConnected) { observer.disconnect(); return; }
+      glideSelection(container);
+    });
+    observer.observe(container);
+  }
+  const selected = container.querySelector('button[aria-current="page"], button[aria-current="true"], button[aria-pressed="true"]');
+  const {plate} = motion;
+  if (!selected || !selected.offsetWidth || !container.offsetWidth) {
+    motion.animation?.cancel();
+    motion.target = null;
+    plate.hidden = true;
+    return;
+  }
+  const target = {x: selected.offsetLeft, y: selected.offsetTop, w: selected.offsetWidth, h: selected.offsetHeight};
+  if (motion.target && Object.keys(target).every(key => target[key] === motion.target[key])) return;
+  const before = motion.target && !plate.hidden ? plate.getBoundingClientRect() : null;
+  const bounds = container.getBoundingClientRect();
+  motion.animation?.cancel();
+  plate.hidden = false;
+  plate.style.width = `${target.w}px`;
+  plate.style.height = `${target.h}px`;
+  const finish = `translate(${target.x}px, ${target.y}px)`;
+  plate.style.transform = finish;
+  motion.target = target;
+  if (before && !prefersReducedMotion()) {
+    const x = before.left - bounds.left - container.clientLeft + container.scrollLeft;
+    const y = before.top - bounds.top - container.clientTop + container.scrollTop;
+    motion.animation = plate.animate([
+      {transform: `translate(${x}px, ${y}px) scale(${before.width / target.w}, ${before.height / target.h})`},
+      {transform: finish},
+    ], {duration: 360, easing: 'cubic-bezier(0.22, 1.1, 0.36, 1)'});
+  }
 }
 
 /* 图标加几个字：图标来自 index.html 顶部的 <symbol>，只用来配文字，读屏不读。 */
@@ -50,6 +99,7 @@ async function api(path, body) {
   if (!response.ok) {
     const error = new Error((result && result.error) || '操作没能完成，请稍后再试。');
     error.retry = Boolean(result && result.retry);
+    error.recheck = Boolean(result && result.recheck);
     throw error;
   }
   return result;
@@ -77,7 +127,7 @@ async function withBusy(button, label, work) {
 const CONFIRM_FOLD = 8;
 
 function confirmItems(items) {
-  return items.map(item => `<li>${nameHtml(item.name)}${item.note ? `<span class="confirm-note-inline">（${escape(item.note)}）</span>` : ''}</li>`).join('');
+  return items.map(item => `<li>${item.html || nameHtml(item.name)}${item.note ? `<span class="confirm-note-inline">（${escape(item.note)}）</span>` : ''}</li>`).join('');
 }
 
 function confirmGroupsHtml(groups) {
@@ -290,6 +340,8 @@ $('task-bar').addEventListener('click', event => {
      任务条转成错误样式（写入不给「重试」，让用户看清原因自己决定）。
    返回 work() 的结果；失败返回 null，不往外抛。 */
 const WRITE_LOCK_SELECTORS = [
+  '#team-form input', '#team-save', '#store-publish', '#store-list [data-store-republish]', '#store-list [data-store-unlist]',
+  '#store-shelves [data-store-publish]', '#store-publish-dialog input', '#store-publish-dialog button:not(.hint)',
   '#skills-list button[data-skill]', '#skills-list button[data-update-up]', '#action-bar button', '#skills-refresh',
   '#install-url', '#install-rail button:not(.hint)',
   '#cleanup-rows input[data-cleanup]', '#withdrawn-list button', '#withdrawn-refresh',
@@ -329,6 +381,8 @@ function renderBusyAreas() {
   if (state.detail) renderDetail();
   renderRailNotes();
   renderAgents();
+  renderTeamSettings();
+  renderTeam();
 }
 
 async function runWrite({button = null, busyText, taskText = busyText, success = null, onError = null, work}) {
@@ -451,7 +505,7 @@ async function undoOperation(id, {skills = [], message = '', button = null} = {}
           done++;
         }
       } catch (error) {
-        if (done) error.message = `已撤销 ${done} 项，其余还没撤销：${error.message}`;
+        if (done) error.message = `已撤销 ${done} 项，其余尚未撤销：${error.message}`;
         throw error;
       } finally {
         await refreshEverything();
@@ -469,7 +523,7 @@ async function undoOperation(id, {skills = [], message = '', button = null} = {}
 /* agent 的一切都来自接口：/api/table 给当前表里的 agent（顺序就是显示顺序），
    /api/agents 补齐名字、目录、生效方式、用量和接入建议。页面不认识任何具体 agent。 */
 const state = {
-  page: 'skills',
+  page: 'home',
   writeAllowed: false,
   inventory: null,
   table: null,
@@ -481,7 +535,7 @@ const state = {
   saved: {},
   draft: {},
   pending: null,
-  pendingClick: null,
+  assignmentIntents: new Map(), // 只记用户亲手选的改动，依赖始终根据最新状态重算。
   autoAdded: new Map(),   // 「技能|agent」→ 需要它的那个技能（预览的 auto_added）
   detail: null,
   agent: null,
@@ -493,7 +547,18 @@ const state = {
   cleanup: null,
   cleanupSelected: new Set(),
   logs: [],
+  team: null,          // /api/team：有没有连上分享站、我是谁
+  store: null,         // /api/team/catalog：团队技能商店的全部卡片；null 是还没读
+  storeError: '',
+  storeSort: 'latest', // 全部技能的排序：latest / rating / popular
+  storeGroup: '',      // 选中的分组；'-' 是没分组
+  storeMine: false,    // 只看我上架的
+  storeDetail: null,   // 详情面板里正在看的卡片编号
+  queue: null,         // /api/team/queue：安装队列；null 是还没读
 };
+
+/* 首页是否正显示着。数据刷新只在首页可见时重画，避免在别的页面做无用功。 */
+let homeVisible = false;
 
 /* 编号翻名字：先看接口给的目录（操作记录、已撤下的技能不在当前表里，也从这里兜底），
    再退回表里的名字，都查不到就直接显示编号。 */
@@ -580,6 +645,7 @@ function rememberPlace() {
 
 function showPage(page) {
   state.page = page;
+  homeVisible = page === 'home';
   rememberPlace();
   for (const section of document.querySelectorAll('.page-section')) {
     section.hidden = section.id !== 'page-' + page;
@@ -588,11 +654,25 @@ function showPage(page) {
     if (button.dataset.page === page) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   }
+  glideSelection(document.querySelector('.nav'));
   if (page === 'cleanup') { renderCleanup(); loadCleanup(); }
   if (page === 'settings') renderSettings();
+  if (page === 'team') enterTeam();
+  if (page === 'home') {
+    // 先回到顶部再量下面两栏的位置，免得从别页滚下来时误以为它们已经在眼前。
+    window.scrollTo({top: 0, behavior: 'auto'});
+    renderHome({animate: homeIntroPlayed ? 'fade' : 'intro'});
+    homeSetScrollEnabled(true);
+    ensureHomeCleanup();
+  } else {
+    // 首页藏着时别让 ScrollTrigger 把下面两栏提前放出来，回来时还要滚到眼前才出现。
+    homeSetScrollEnabled(false);
+    homeHideTip();
+  }
   renderActionBar();
   window.scrollTo({top: 0, behavior: 'auto'});
   if (page === 'skills') fitFilterRail();
+  if (page === 'home') requestAnimationFrame(() => refreshHomeScroll());
 }
 
 /* 跳到某一页；设置页还可以点名去哪一块（data-goto="settings/agents"）。 */
@@ -608,8 +688,15 @@ function gotoPlace(place) {
 
 /* ==================== 设置页：左边一列目录，右边六块连在一起（用户选的 B 版） ==================== */
 
-const SETTINGS_BLOCKS = ['ai', 'agents', 'share', 'log', 'diagnostics', 'version'];
+const SETTINGS_BLOCKS = ['ai', 'agents', 'share', 'team', 'log', 'diagnostics', 'version'];
 const prefersReducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', event => {
+  if (event.matches) {
+    for (const plate of document.querySelectorAll('.selection-plate')) plate.getAnimations().forEach(animation => animation.cancel());
+    skillListMotion?.cancel();
+    filterLayoutMotion?.cancel();
+  }
+});
 
 function highlightSettingsBlock(name) {
   for (const button of document.querySelectorAll('#settings-nav [data-block]')) {
@@ -673,6 +760,7 @@ function renderSettings() {
   renderConfigExport();
   renderAgents();
   refreshSettings();
+  refreshTeam();
   refreshProgramUpdate();
   refreshLog();
   renderDiagnostics();
@@ -710,7 +798,6 @@ const PREVIEW_DEBOUNCE_MS = 100;
 let previewBusy = false;
 let previewSequence = 0;
 let previewTimer = null;
-let assignmentErrors = {};
 
 /* agent 的颜色：按表里的顺序从一组颜色里取，全页同一个 agent 用同一种颜色。 */
 const AGENT_COLORS = ['#2F5BD3', '#C4552B', '#6D4BC2', '#0F7C6E', '#93650A', '#B0346B', '#3D7A1F', '#5B6B85'];
@@ -748,7 +835,7 @@ function agentLoad(agentId) {
   return {groups, now, after, plus, minus, countNow, countAfter};
 }
 
-const TOKEN_HINT = '每开一次新对话，agent 都要先读一遍分给它的技能说明，大约占这么多 Token。按说明长度粗算，只用来互相比较。';
+const TOKEN_HINT = 'Agent 启动新对话时会加载已分配技能的说明。Token 按说明长度估算，用于比较上下文占用。';
 
 /* 条的长度取各 agent 里最长的，向上取到 2k 的整数倍；每 5k 一条刻度。 */
 function loadMax(loads) {
@@ -761,15 +848,15 @@ function loadHtml(agentId, load, max, big = false) {
   const pct = value => `${(value / max * 100).toFixed(2)}%`;
   const segs = [...load.groups].sort((a, b) => b[1] - a[1]).map(([group, cost]) =>
     `<span class="load-seg" style="width:${pct(cost)}" title="${escape(group)}：${tokenText(cost)} Token"></span>`).join('');
-  const minus = load.minus ? `<span class="load-minus" style="width:${pct(load.minus)}" title="会撤下 ${tokenText(load.minus)} Token"></span>` : '';
-  const plus = load.plus ? `<span class="load-plus" style="width:${pct(load.plus)}" title="会加上 ${tokenText(load.plus)} Token"></span>` : '';
+  const minus = load.minus ? `<span class="load-minus" style="width:${pct(load.minus)}" title="撤下后释放约 ${tokenText(load.minus)} Token"></span>` : '';
+  const plus = load.plus ? `<span class="load-plus" style="width:${pct(load.plus)}" title="启用后增加约 ${tokenText(load.plus)} Token"></span>` : '';
   const ticks = [];
   for (let at = 5000; at < max; at += 5000) ticks.push(`<i style="left:${pct(at)}"></i>`);
   const delta = load.after - load.now;
   const deltaText = delta ? ` → <span class="delta">${tokenText(load.after)}（${delta > 0 ? '+' : '−'}${tokenText(Math.abs(delta))}）</span>` : '';
   return `<div class="load${big ? ' load-big' : ''}" style="--c:${agentColor(agentId)}">
-    <div class="load-track" role="img" aria-label="现在占用 ${tokenText(load.now)} Token${delta ? `，应用后 ${tokenText(load.after)} Token` : ''}">${segs}${minus}${plus}<span class="load-ticks">${ticks.join('')}</span></div>
-    <span class="load-text"${big ? '' : ` title="${escape(TOKEN_HINT)}"`}>${big ? '每次新对话占用约' : '占用'} <b>${tokenText(load.now)} Token</b>${deltaText}${big ? hint(TOKEN_HINT) : ''}</span>
+    <div class="load-track" role="img" aria-label="当前占用约 ${tokenText(load.now)} Token${delta ? `，应用后 ${tokenText(load.after)} Token` : ''}">${segs}${minus}${plus}<span class="load-ticks">${ticks.join('')}</span></div>
+    <span class="load-text"${big ? '' : ` title="${escape(TOKEN_HINT)}"`}>${big ? '单次对话预占约' : '占用'} <b>${tokenText(load.now)} Token</b>${deltaText}${big ? hint(TOKEN_HINT) : ''}</span>
   </div>`;
 }
 
@@ -777,7 +864,7 @@ function loadHtml(agentId, load, max, big = false) {
 function renderAgentSummary() {
   const rail = $('agent-rail');
   if (!state.table || !state.agents.length) {
-    rail.innerHTML = '<p class="item-note">正在读取各 agent…</p>';
+    rail.innerHTML = '<p class="item-note">正在读取 Agent…</p>';
     return;
   }
   const loads = Object.fromEntries(state.agents.map(agent => [agent.id, agentLoad(agent.id)]));
@@ -810,27 +897,27 @@ function railUpdateNote() {
   const button = (action, label) => `<button class="btn btn-small btn-primary" data-program-rail="${action}"${lock}>${label}</button>`;
   if (progress.phase === 'ready') {
     return `<div class="rail-note">
-      <p class="rail-note-title">${icon('check-circle')}<strong>升级好了</strong></p>
-      <div class="rail-note-row"><small>刷新页面就能用新版</small>${button('refresh', '刷新生效')}</div>
+      <p class="rail-note-title">${icon('check-circle')}<strong>升级完成</strong></p>
+      <div class="rail-note-row"><small>刷新页面即可启用新版</small>${button('refresh', '刷新生效')}</div>
     </div>`;
   }
   if (progress.running && progress.phase === 'apply') {
     return `<div class="rail-note">
       <p class="rail-note-title">${icon('update-up')}<strong>正在升级…</strong></p>
-      <div class="rail-note-row"><small>等当前操作完成后自动继续</small><button class="btn btn-small" disabled>升级</button></div>
+      <div class="rail-note-row"><small>当前操作完成后自动继续</small><button class="btn btn-small" disabled>升级</button></div>
     </div>`;
   }
   if (progress.available) {
     const latest = progress.latest ? new Date(progress.latest).toLocaleDateString('zh-CN') : '';
     return `<div class="rail-note">
-      <p class="rail-note-title">${icon('update-up')}<strong>SP 有新版</strong></p>
+      <p class="rail-note-title">${icon('update-up')}<strong>Skill Pilot 发现新版本</strong></p>
       <div class="rail-note-row">${latest ? `<small>新版 ${escape(latest)}</small>` : ''}${button('apply', '升级')}</div>
     </div>`;
   }
   if (progress.phase === 'error' && programFailedAction === 'apply') {
     return `<div class="rail-note">
-      <p class="rail-note-title">${icon('warning')}<strong>升级没完成</strong></p>
-      <div class="rail-note-row"><small>${escape(progress.error || '稍后再试一次')}</small>${button('apply', '升级')}</div>
+      <p class="rail-note-title">${icon('warning')}<strong>升级未完成</strong></p>
+      <div class="rail-note-row"><small>${escape(progress.error || '请稍后重试')}</small>${button('apply', '升级')}</div>
     </div>`;
   }
   return '';
@@ -850,9 +937,9 @@ function renderRailNotes() {
   const ignored = new Set((state.agentsView?.ignored || []).map(item => (item && typeof item === 'object') ? item.id : item));
   const suggested = (state.agentsView?.suggested || []).filter(item => !ignored.has(item.id));
   const notes = [railUpdateNote(), ...suggested.map(item => `<div class="rail-note">
-      <p class="rail-note-title">${icon('plus')}<strong>发现新 agent：${escape(item.name)}</strong></p>
+      <p class="rail-note-title">${icon('plus')}<strong>发现新 Agent：${escape(item.name)}</strong></p>
       <div class="rail-note-row">
-        ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后一起管理技能；同名内容沿用统一仓库里的版本，完成后可以撤销。')}
+        ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后统一管理技能；同名技能沿用当前技能库的内容，支持撤销。')}
         ${agentJoinButton(item)}
       </div>
     </div>`)];
@@ -876,8 +963,8 @@ function autoAddedBy(skillName, agentId) {
 
 function pendingNote(name, agentId) {
   const because = autoAddedBy(name, agentId);
-  if (!assignedAfter(name, agentId)) return '待应用：会撤下，文件还留着';
-  return because ? `待应用：自动带上，因为「${titleOf(because)}」要用它` : '待应用：会加上';
+  if (!assignedAfter(name, agentId)) return '待应用：即将撤下（保留本地文件）';
+  return because ? `待应用：关联依赖，因「${titleOf(because)}」需要已自动勾选` : '待应用：即将启用';
 }
 
 function switchHtml(skill, agent, on, pending, locked) {
@@ -889,7 +976,7 @@ function switchHtml(skill, agent, on, pending, locked) {
 function skillRowHtml(skill, agent) {
   const on = assignedAfter(skill.name, agent.id);
   const pending = on !== assignedNow(skill.name, agent.id);
-  const error = assignmentErrors[skill.name + '|' + agent.id];
+  const error = state.pending?.conflicts?.find(c => c.skill === skill.name && c.agent === agent.id)?.message;
   const note = cellNote(skill, agent);
   const locked = Boolean(writeBusy) || !state.table.write_allowed;
   const status = error ? `<span class="row-note is-error">${escape(error)}</span>`
@@ -898,12 +985,12 @@ function skillRowHtml(skill, agent) {
   // 小标记：图标加两三个字，完整的意思在鼠标移上去的提示里；详情里也有同样的信息。
   const needs = skill.requires.length;
   const flags = [
-    skill.local_modified ? `<span class="flag" data-hint="你在这台电脑上改过它，更新时会问你保留哪一份。">${icon('edit')}你改过</span>` : '',
-    needs ? `<span class="flag" role="img" aria-label="${escape(`会一起带上 ${needs} 个别的技能`)}" data-hint="${escape(`给 agent 加上它时，会自动一起加上 ${needs} 个别的技能。`)}">${icon('link')}${needs}</span>` : '',
+    skill.local_modified ? `<span class="flag" data-hint="此技能已有本地修改，更新前需选择保留的内容。">${icon('edit')}已本地修改</span>` : '',
+    needs ? `<span class="flag" role="img" aria-label="${escape(`包含 ${needs} 个依赖项`)}" data-hint="${escape(`启用此技能时，将一并启用 ${needs} 个前置依赖。`)}">${icon('link')}${needs}</span>` : '',
   ].join('');
   const tags = (skill.tags || []).map(tag => tagPickHtml(tag)).join('');
   const sum = skill.summary || skill.description;
-  return `<div class="skill-row${pending ? ' is-pending' : ''}">
+  return `<div class="skill-row${pending ? ' is-pending' : ''}" data-row="${escape(skill.name)}">
     <div class="skill-cell">
       <button class="skill-name" data-open="${escape(skill.name)}"><span class="t">${escape(skill.title || skill.name)}</span>${skill.title ? `<span class="skill-id">${escape(skill.name)}</span>` : ''}${flags}</button>
       <span class="skill-sub"><span class="skill-sum" title="${escape(sum)}">${escape(sum)}</span>${tags ? `<span class="row-tags">${tags}</span>` : ''}</span>
@@ -911,7 +998,7 @@ function skillRowHtml(skill, agent) {
     </div>
     <span class="meta num" data-hint="${escape(TOKEN_HINT)}">${tokenText(skill.description_tokens)} Token</span>
     <span class="row-end">
-      ${updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有新版，点一下更新"
+      ${updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有可用更新"
         aria-label="${escape('更新「' + titleOf(skill.name) + '」')}" ${writeBusy ? 'disabled' : ''}><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg></button>` : ''}
       ${switchHtml(skill, agent, on, pending, locked)}
     </span>
@@ -1005,9 +1092,9 @@ function detailTagsHtml(skill, locked) {
   return `${tagList}
     <form id="detail-tag-form" class="tag-editor" novalidate>
       <div class="tag-editor-row">
-        <input id="detail-tag-input" class="input" list="used-tags" autocomplete="off" placeholder="加个标签，比如项目名" aria-label="新标签"${locked ? ' disabled' : ''}>
-        <button id="detail-tag-add" class="btn btn-small" type="submit" disabled>加上</button>
-        ${hint('标签由你自己打，用来按项目、客户这类事找技能，可以不打。')}
+        <input id="detail-tag-input" class="input" list="used-tags" autocomplete="off" placeholder="添加自定义标签（如项目、领域）" aria-label="新标签"${locked ? ' disabled' : ''}>
+        <button id="detail-tag-add" class="btn btn-small" type="submit" disabled>添加</button>
+        ${hint('添加标签后可快速筛选技能，留空则不设标签。')}
       </div>
       <p id="detail-tag-error" class="row-note is-error" role="alert" hidden></p>
     </form>`;
@@ -1122,7 +1209,7 @@ async function applyBatchTag(action) {
     $('tag-dialog').close();
     applyTagResult(result);
     toast({text: action === 'add'
-      ? `已给 ${names.length} 个技能加上「${canonical}」`
+      ? `已给 ${names.length} 个技能添加标签「${canonical}」`
       : `已从 ${names.length} 个技能去掉「${canonical}」`});
   } catch (error) {
     tagDialogBusy = false;
@@ -1179,7 +1266,7 @@ function filtersHtml({skills, inTab, withUpdate, scope, hasTag, inChip}) {
   const groups = count(inTab.filter(hasTag), skill => [groupOf(skill.name)]);
   if (state.chip && state.chip !== UPDATES_CHIP && !groups.has(state.chip)) groups.set(state.chip, 0);
   const several = new Set(skills.map(skill => groupOf(skill.name))).size > 1;
-  const groupRow = `<div class="filter-group-list" data-filter-list="groups" role="group" aria-label="按分组看">
+  const groupRow = `<div class="filter-group-list" data-filter-list="groups" role="group" aria-label="按分组筛选">
       ${option('data-chip', '', '全部技能', inTab.filter(hasTag).length, !state.chip)}
       ${withUpdate.length || state.chip === UPDATES_CHIP ? option('data-chip', UPDATES_CHIP, '有新版', withUpdate.filter(hasTag).length, state.chip === UPDATES_CHIP, ' filter-update') : ''}
       ${several ? [...groups].sort(([a, x], [b, y]) => (a === '未分组') - (b === '未分组') || y - x)
@@ -1199,15 +1286,27 @@ function filtersHtml({skills, inTab, withUpdate, scope, hasTag, inChip}) {
   return several || withUpdate.length || state.chip || tagRow ? groupRow + tagRow : '';
 }
 
+let filterLayoutMotion = null;
+
 function renderFilterLayout() {
   const available = Boolean($('skills-filters').innerHTML);
   const collapsed = !available || state.filtersCollapsed;
+  const browser = $('skills-browser');
+  const results = browser.querySelector('.skills-results');
+  const changing = browser.classList.contains('without-filters') !== collapsed;
+  const before = changing ? results.getBoundingClientRect() : null;
+  if (changing) filterLayoutMotion?.cancel();
   $('skills-filter-slot').hidden = !available;
   $('skills-filter-rail').hidden = !available;
   $('skills-filter-rail').inert = collapsed;
   $('skills-filter-rail').setAttribute('aria-hidden', String(collapsed));
   $('filters-show').hidden = !available || !state.filtersCollapsed;
-  $('skills-browser').classList.toggle('without-filters', collapsed);
+  browser.classList.toggle('without-filters', collapsed);
+  if (before && !prefersReducedMotion()) {
+    const distance = before.left - results.getBoundingClientRect().left;
+    filterLayoutMotion = results.animate([{transform: `translateX(${distance}px)`}, {transform: 'none'}],
+      {duration: 300, easing: 'cubic-bezier(0.2, 0.65, 0.3, 1)'});
+  }
 }
 
 function fitFilterRail() {
@@ -1220,14 +1319,9 @@ function fitFilterRail() {
 addEventListener('scroll', fitFilterRail, {passive: true});
 addEventListener('resize', fitFilterRail);
 
-let filterGroupMotion = null;
-
 /* 重画筛选时保留焦点和目录滚动位置。 */
 function renderSkillFilters(options) {
   const filters = $('skills-filters');
-  const groupList = filters.querySelector('.filter-group-list');
-  const groupHeight = groupList?.getBoundingClientRect().height;
-  filterGroupMotion?.cancel();
   const active = document.activeElement;
   const selector = filters.contains(active) && active.hasAttribute('data-chip') ? `[data-chip="${CSS.escape(active.dataset.chip)}"]`
     : filters.contains(active) && active.hasAttribute('data-tag-chip') ? `[data-tag-chip="${CSS.escape(active.dataset.tagChip)}"]` : null;
@@ -1241,16 +1335,11 @@ function renderSkillFilters(options) {
       renderButtons(list, next.innerHTML, next.dataset.filterList === 'groups' ? 'data-chip' : 'data-tag-chip');
     }
   } else filters.replaceChildren(template.content);
+  for (const list of filters.querySelectorAll('[data-filter-list]')) glideSelection(list);
   const empty = $('filter-tags-empty');
   if (empty) empty.hidden = Boolean(filters.querySelector('[data-tag-chip]:not([data-tag-chip=""])'));
   renderFilterLayout();
   for (const [name, top] of scrolls) filters.querySelector(`[data-filter-list="${name}"]`)?.scrollTo(0, top);
-  const nextGroup = filters.querySelector('.filter-group-list');
-  const nextHeight = nextGroup?.getBoundingClientRect().height;
-  if (groupList && groupList === nextGroup && groupHeight !== nextHeight && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    filterGroupMotion = nextGroup.animate([{height: `${groupHeight}px`, flexShrink: 0}, {height: `${nextHeight}px`, flexShrink: 0}],
-      {duration: 260, easing: 'cubic-bezier(0.22, 1, 0.36, 1)'});
-  }
   if (selector) {
     const target = filters.querySelector(selector);
     target?.focus({preventScroll: true});
@@ -1260,14 +1349,41 @@ function renderSkillFilters(options) {
 let skillScope = '', skillListMotion = null;
 
 function animateSkillResults(agent) {
-  const scope = JSON.stringify([agent.id, state.tab, state.chip, state.tag]);
+  const scope = JSON.stringify([agent.id, state.tab, state.chip, state.tag, $('skills-search').value]);
+  if (skillScope === scope) return;
+  const list = $('skills-list');
+  const opacity = getComputedStyle(list).opacity;
+  const transform = getComputedStyle(list).transform;
   skillListMotion?.cancel();
   if (skillScope && skillScope !== scope && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    skillListMotion = $('skills-list').animate([
-      {opacity: 0.75, transform: 'translateY(3px)'}, {opacity: 1, transform: 'translateY(0)'},
-    ], {duration: 180, easing: 'cubic-bezier(0.22, 1, 0.36, 1)'});
+    skillListMotion = list.animate([
+      {opacity: Math.min(Number(opacity), 0.88), transform: transform === 'none' ? 'translateY(5px)' : transform},
+      {opacity: 1, transform: 'none'},
+    ], {duration: 240, easing: 'cubic-bezier(0.2, 0.65, 0.3, 1)'});
   }
   skillScope = scope;
+}
+
+/* 同一批技能只更新变动的格子，保留开关节点，滑块才能走完过渡。 */
+function renderSkillList(markup) {
+  const list = $('skills-list');
+  const template = document.createElement('template');
+  template.innerHTML = markup;
+  const current = [...list.children], next = [...template.content.children];
+  const key = node => node.dataset.row ? `skill:${node.dataset.row}` : `group:${node.querySelector('strong')?.textContent}`;
+  if (current.length !== next.length || current.some((node, index) => key(node) !== key(next[index]))) {
+    list.replaceChildren(template.content);
+    return;
+  }
+  current.forEach((row, index) => {
+    const updated = next[index];
+    row.className = updated.className;
+    if (!row.dataset.row) { if (row.innerHTML !== updated.innerHTML) row.innerHTML = updated.innerHTML; return; }
+    for (let cell = 0; cell < 2; cell++) {
+      if (row.children[cell].innerHTML !== updated.children[cell].innerHTML) row.children[cell].innerHTML = updated.children[cell].innerHTML;
+    }
+    renderButtons(row.querySelector('.row-end'), updated.querySelector('.row-end').innerHTML, 'data-skill');
+  });
 }
 
 /* 右边顶部：agent 名字、技能数和生效方式、占用条。
@@ -1307,9 +1423,9 @@ function renderSkillTable() {
 
   const skills = state.table.skills;
   const nOn = skills.filter(skill => assignedNow(skill.name, agent.id)).length;
-  renderButtons($('skills-tabs'), `<button class="seg" data-tab="on" aria-pressed="${state.tab === 'on'}">在用<span class="n">${nOn}</span></button>
-    <button class="seg" data-tab="off" aria-pressed="${state.tab === 'off'}">可以加的<span class="n">${skills.length - nOn}</span></button>`, 'data-tab');
-  $('skills-search').placeholder = `在 ${agent.name} 的技能里搜`;
+  renderButtons($('skills-tabs'), `<button class="seg" data-tab="on" aria-pressed="${state.tab === 'on'}">已启用<span class="n">${nOn}</span></button>
+    <button class="seg" data-tab="off" aria-pressed="${state.tab === 'off'}">可添加<span class="n">${skills.length - nOn}</span></button>`, 'data-tab');
+  $('skills-search').placeholder = `搜索 ${agent.name} 的技能`;
 
   const query = $('skills-search').value.trim().toLowerCase();
   const matches = skill => matchesQuery(skill, query);
@@ -1328,13 +1444,13 @@ function renderSkillTable() {
   $('skills-clear-filters').hidden = !state.chip && !state.tag;
 
   // 空的时候只说一句话，需要下一步的给一个按钮，不写操作说明
-  const empty = query ? emptyInner('search', '没找到，换个词试试')
-    : state.chip || state.tag ? emptyInner('skills', '这一类里没有技能', '<button class="link-btn" data-empty="all">看全部</button>')
-    : state.tab === 'on' ? emptyInner('skills', `${agent.name} 还没有技能`, '<button class="link-btn" data-empty="off">去「可以加的」</button>')
-    : emptyInner('check-circle', '都已经加上了');
-  $('skills-list').innerHTML = groupedRows(rows).map(group =>
+  const empty = query ? emptyInner('search', '未找到匹配技能')
+    : state.chip || state.tag ? emptyInner('skills', '该分类下暂无技能', '<button class="link-btn" data-empty="all">查看全部</button>')
+    : state.tab === 'on' ? emptyInner('skills', `${agent.name} 暂未启用技能`, '<button class="link-btn" data-empty="off">前往「可添加」</button>')
+    : emptyInner('check-circle', '全部技能已在此启用');
+  renderSkillList(groupedRows(rows).map(group =>
     `<div class="list-group-head"><strong>${escape(group.name)}</strong><span>${group.skills.length} 个</span></div>`
-    + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`;
+    + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`);
   listedSkillNames = rows.map(skill => skill.name);
   $('tags-batch').hidden = !state.table.write_allowed || listedSkillNames.length < 2;
   $('tags-batch').disabled = Boolean(writeBusy);
@@ -1345,9 +1461,17 @@ function renderSkillTable() {
 
 function pendingChanges() {
   if (!state.table) return [];
-  return state.table.skills.flatMap(skill => state.agents
+  const changes = state.table.skills.flatMap(skill => state.agents
     .filter(agent => assignedAfter(skill.name, agent.id) !== assignedNow(skill.name, agent.id))
     .map(agent => ({skill: skill.name, agent: agent.id, enabled: assignedAfter(skill.name, agent.id)})));
+  for (const change of state.pending?.changes || []) {
+    if (!state.skillIndex.has(change.skill) && assignedAfter(change.skill, change.agent) !== assignedNow(change.skill, change.agent)) changes.push(change);
+  }
+  for (const intent of state.assignmentIntents.values()) {
+    if (!changes.some(c => c.skill === intent.skill && c.agent === intent.agent) &&
+        (state.pending?.conflicts || []).some(c => c.skill === intent.skill && c.agent === intent.agent)) changes.push(intent);
+  }
+  return changes;
 }
 
 /* “给 Claude 加 2 个、从 Codex 撤下 1 个”。 */
@@ -1356,7 +1480,7 @@ function changeSummary(changes) {
   for (const agent of state.agents) {
     const added = changes.filter(c => c.agent === agent.id && c.enabled).length;
     const removed = changes.filter(c => c.agent === agent.id && !c.enabled).length;
-    if (added) parts.push(`给 ${agent.name} 加 ${added} 个`);
+    if (added) parts.push(`将为 ${agent.name} 启用 ${added} 个`);
     if (removed) parts.push(`从 ${agent.name} 撤下 ${removed} 个`);
   }
   return parts.join('、');
@@ -1377,24 +1501,27 @@ function renderSkillsActionBar() {
     const users = change.enabled ? [] : state.table.skills
       .filter(skill => skill.requires.includes(change.skill) && assignedAfter(skill.name, change.agent))
       .map(skill => `「${titleOf(skill.name)}」`);
-    const why = because ? `<small>自动带上：「${escape(titleOf(because))}」要用它</small>`
-      : users.length ? `<small class="warn">注意：${escape(users.join(''))}还要用它</small>` : '';
+    const conflict = state.pending?.conflicts?.find(c => c.skill === change.skill && c.agent === change.agent);
+    const why = conflict ? `<small class="warn">${escape(conflict.message)}</small>`
+      : because ? `<small>依赖关联：「${escape(titleOf(because))}」需要此技能，已自动勾选</small>`
+      : users.length ? `<small class="warn">注意：${escape(users.join(''))}仍依赖此技能</small>` : '';
     return `<li><span class="action-agent">${swatch(change.agent)}${escape(agent?.name || change.agent)}</span>
-      <p>${change.enabled ? '加上' : '<span class="verb-off">撤下</span>'}「${escape(titleOf(change.skill))}」${why}</p>
-      ${because ? '' : `<button class="btn btn-quiet btn-small" data-revert-skill="${escape(change.skill)}" data-revert-agent="${escape(change.agent)}">不改这处</button>`}</li>`;
+      <p>${change.enabled ? '启用' : '<span class="verb-off">撤下</span>'}「${escape(titleOf(change.skill))}」${why}</p>
+      ${because && !conflict ? '' : `<button class="btn btn-quiet btn-small" data-revert-skill="${escape(change.skill)}" data-revert-agent="${escape(change.agent)}">放弃此项</button>`}</li>`;
   }).join('');
   const paths = state.pending?.path_warnings || [];
-  const extra = paths.length ? `<details><summary>有 ${paths.length} 份你的文件里写着这些技能现在的位置，应用后位置会变，那些文件里的说法可能要改</summary>
+  const extra = paths.length ? `<details><summary>有 ${paths.length} 份文件引用了当前技能位置，应用后可能需要调整引用</summary>
       <ul>${paths.map(warning => `<li class="mono">${pathLabel(warning.file)}</li>`).join('')}</ul></details>` : '';
   const removing = changes.some(change => !change.enabled);
   showActionBar({
-    text: `改了 ${changes.length} 处，还没生效`,
-    note: changeSummary(changes) + (removing ? '。撤下的技能文件还留着，随时能加回来' : ''),
+    text: `有 ${changes.length} 处待应用的改动`,
+    note: state.pending?.conflicts?.length ? '请处理对应改动下的冲突，其他选择已保留。'
+      : changeSummary(changes) + (removing ? '（撤下的技能保留在本地，随时可恢复）' : ''),
     items,
     extra,
     buttons: [
-      {label: '全部不改', kind: 'btn btn-quiet', action: () => discardPending()},
-      {label: `应用这 ${changes.length} 处`, kind: 'btn btn-primary', disabled: previewBusy || Boolean(writeBusy) || !state.table.write_allowed, action: button => applyAssignment(button)},
+      {label: '全部放弃', kind: 'btn btn-quiet', action: () => discardPending()},
+      {label: `应用更改 (${changes.length})`, kind: 'btn btn-primary', disabled: previewBusy || Boolean(writeBusy) || !state.table.write_allowed, action: button => applyAssignment(button)},
     ],
   });
 }
@@ -1415,7 +1542,7 @@ function renderAssignmentViews() {
   renderSkillTable();
   renderAgentSummary();
   renderSkillsActionBar();
-  if (state.detail) renderDetail();
+  if (state.detail) renderDetail(true);
 }
 
 async function runPreview() {
@@ -1424,20 +1551,13 @@ async function runPreview() {
   previewBusy = true;
   renderSkillsActionBar();
   try {
-    const result = await api('/api/assignment/preview', {changes: pendingChanges()});
+    const result = await api('/api/assignment/preview', {changes: [...state.assignmentIntents.values()], recheck: true});
     if (sequence !== previewSequence) return;
-    state.pending = result;
-    state.draft = result.assignments;
-    state.autoAdded = new Map((result.auto_added || []).map(item => [item.skill + '|' + item.agent, item.because]));
+    acceptAssignmentPlan(result);
   } catch (error) {
     if (sequence !== previewSequence) return;
-    const clicked = state.pendingClick;
-    if (clicked && clicked.sequence === sequence) {
-      const assigned = new Set(state.draft[clicked.skill] || []);
-      if (clicked.enabled) assigned.delete(clicked.agent); else assigned.add(clicked.agent);
-      state.draft[clicked.skill] = [...assigned];
-      assignmentErrors[clicked.skill + '|' + clicked.agent] = '这次没改成：' + error.message;
-    }
+    // 网络或读取失败不撤销用户的选择；再次应用时会重新读取。
+    state.pending ||= {changed: pendingChanges().map(c => c.skill)};
     toast({text: error.message, tone: 'error'});
   } finally {
     // 只有最新那次请求负责收起忙碌态；被作废的旧请求什么都不动。
@@ -1446,15 +1566,22 @@ async function runPreview() {
   }
 }
 
+function acceptAssignmentPlan(plan) {
+  state.pending = plan;
+  state.saved = plan.base_assignments || state.saved;
+  state.draft = plan.assignments;
+  state.autoAdded = new Map((plan.auto_added || []).map(item => [item.skill + '|' + item.agent, item.because]));
+  if (plan.changes?.length === 0 && !plan.conflicts?.length) state.assignmentIntents.clear();
+}
+
 function discardPending() {
   clearTimeout(previewTimer);
   invalidatePreview();
   previewBusy = false;
   state.draft = clone(state.saved);
   state.pending = null;
-  state.pendingClick = null;
+  state.assignmentIntents.clear();
   state.autoAdded = new Map();
-  assignmentErrors = {};
   renderAssignmentViews();
 }
 
@@ -1462,7 +1589,6 @@ function setDraft(name, agentId, enabled) {
   const selected = new Set(state.draft[name] || []);
   if (enabled) selected.add(agentId); else selected.delete(agentId);
   state.draft[name] = [...selected];
-  delete assignmentErrors[name + '|' + agentId];
 }
 
 /* 关掉一个技能时，它自动带上的技能也一起退回原样，不留孤零零的依赖。 */
@@ -1482,13 +1608,15 @@ function changeAssignment(name, agentId, enabled) {
   const refocus = active?.dataset?.skill === name && active?.dataset?.agent === agentId
     ? (active.closest('#detail-body') ? '#detail-body' : '#skills-list') : null;
   setDraft(name, agentId, enabled);
+  const key = name + '|' + agentId;
+  if (enabled === assignedNow(name, agentId)) state.assignmentIntents.delete(key);
+  else state.assignmentIntents.set(key, {skill: name, agent: agentId, enabled});
   if (!enabled) revertAutos(name, agentId);
   if (!pendingChanges().length) {
     discardPending();
   } else {
     // 先作废在途的预览结果，再记下这一次；这样第二次拨动不会被第一个请求的返回盖掉。
-    const sequence = invalidatePreview();
-    state.pendingClick = {skill: name, agent: agentId, enabled, sequence};
+    invalidatePreview();
     renderAssignmentViews();
     schedulePreview();
   }
@@ -1509,37 +1637,69 @@ function assignmentGroups(changes) {
 }
 
 async function applyAssignment(button) {
-  const plan = state.pending;
-  if (!plan) return;
-  const changes = pendingChanges();
-  const removed = changes.filter(change => !change.enabled);
-  if (removed.length) {
-    const warnings = removed.flatMap(change => state.table.skills
-      .filter(skill => skill.requires.includes(change.skill) && assignedAfter(skill.name, change.agent))
-      .map(skill => `${nameOf(change.agent)} 的「${titleOf(skill.name)}」还要用「${titleOf(change.skill)}」，撤下后它可能用不了。`));
-    const ok = await confirmDialog({
-      title: '撤下这些技能',
-      lines: [`${changeSummary(removed)}。技能文件还留着，随时能加回来。`, ...warnings],
-      groups: assignmentGroups(removed),
-      note: '应用后也能在提示条或操作记录里撤销。',
-      okText: '撤下',
-    });
-    if (!ok) return;
-  }
-  await runWrite({
+  if (!state.assignmentIntents.size) return;
+  const previous = state.pending || {};
+  const effectKey = c => c.skill + '|' + c.agent + '|' + c.enabled;
+  const seenEffects = new Set((previous.changes || pendingChanges()).map(effectKey));
+  const seenWarnings = new Set(previous.dependency_warnings || []);
+  const seenPaths = new Set((previous.path_warnings || []).map(w => JSON.stringify(w)));
+  clearTimeout(previewTimer);
+  invalidatePreview();
+  previewBusy = false;
+  const written = await runWrite({
     button,
     busyText: '正在应用…',
     work: async () => {
-      const result = await api('/api/assignment/apply', {changes, revision: state.table.revision, confirmed: true});
-      state.pending = null;
-      await refreshEverything();
-      return result;
+      let consent = '';
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const plan = await api('/api/assignment/preview', {changes: [...state.assignmentIntents.values()], recheck: true});
+          acceptAssignmentPlan(plan);
+          renderAssignmentViews();
+          if (plan.conflicts?.length) return {needs_attention: true, message: '有几处无法直接应用，原因已列在对应改动下；其他选择已保留。'};
+          const changes = plan.changes || pendingChanges();
+          const removed = changes.filter(c => !c.enabled);
+          const extra = changes.filter(c => !seenEffects.has(effectKey(c)));
+          const newWarnings = (plan.dependency_warnings || []).filter(w => !seenWarnings.has(w));
+          const newPaths = (plan.path_warnings || []).filter(w => !seenPaths.has(JSON.stringify(w)));
+          const newImpact = extra.length || newWarnings.length || newPaths.length;
+          const review = JSON.stringify([changes, plan.dependency_warnings, plan.path_warnings]);
+          if (changes.length && review !== consent && (removed.length || newImpact)) {
+            const ok = await confirmDialog({
+              title: newImpact ? '最新状态里有新的影响' : '撤下这些技能',
+              lines: [changeSummary(changes) + (removed.length ? '（撤下的技能保留在本地，随时可恢复）。' : ''), ...(plan.dependency_warnings || []), ...(newPaths.length ? ['新发现有文件引用会受影响，位置提示已保留在改动托盘里。'] : [])],
+              groups: [...assignmentGroups(removed), ...(extra.filter(c => c.enabled).length ? [{label: '需要一并启用的依赖', items: extra.filter(c => c.enabled).map(c => ({name: c.skill, note: nameOf(c.agent)}))}] : [])],
+              note: '你的选择已保留；取消也不用重选。应用后仍可撤销。',
+              okText: newImpact ? '继续应用' : '撤下',
+            });
+            if (!ok) return {cancelled: true};
+            consent = review;
+          }
+          const result = await api('/api/assignment/apply', {changes: [...state.assignmentIntents.values()], revision: plan.revision, recheck: true, confirmed: true});
+          if (result.needs_attention) {
+            acceptAssignmentPlan(result);
+            renderAssignmentViews();
+            return {...result, message: '有几处无法直接应用，原因已列在对应改动下；其他选择已保留。'};
+          }
+          state.assignmentIntents.clear();
+          state.pending = null;
+          await refreshEverything();
+          return {...result, appliedSkills: plan.changed};
+        } catch (error) {
+          if (!error.recheck) throw error;
+        }
+      }
+      return {needs_attention: true, message: '其他调整仍在进行，暂时无法保存。你的选择已保留，稍后再点应用即可。'};
     },
-    success: result => ({
-      text: pastTense(result.message || changeSummary(changes)),
-      undo: undoButton => undoOperation(result.id, {skills: plan.changed || [], message: pastTense(result.message), button: undoButton}),
+    success: result => result.cancelled ? null : result.needs_attention ? {text: result.message, tone: 'error', sticky: true} : ({
+      text: pastTense(result.message || '技能分配已保存'),
+      undo: result.id ? undoButton => undoOperation(result.id, {skills: result.appliedSkills || [], message: pastTense(result.message), button: undoButton}) : null,
     }),
   });
+  if (written?.needs_attention) {
+    $('action-summary').tabIndex = -1;
+    $('action-summary').focus();
+  }
 }
 
 $('skills-list').addEventListener('click', event => {
@@ -1618,7 +1778,7 @@ $('skills-search').addEventListener('input', renderSkillTable);
 // 重新盘点是只有图标的按钮，所以不换文案，忙碌时图标自己转
 $('skills-refresh').addEventListener('click', event => withBusy(event.currentTarget, '', async () => {
   await refreshInventory();
-  await refreshTable();
+  await refreshTable(true);
 }));
 
 /* 新技能横幅：发现没收进仓库的，先在这里提醒。 */
@@ -1626,7 +1786,7 @@ function renderNewSkills() {
   const list = state.table?.new_skills || [];
   $('new-banner').hidden = !list.length;
   if (!list.length) return;
-  $('new-text').innerHTML = `发现 ${list.length} 个新装的技能${hint('它们还没交给 Skill Pilot 管。收编后，就能在这里统一分配、检查更新。')}`;
+  $('new-text').innerHTML = `发现 ${list.length} 个新安装的技能${hint('这些技能尚未纳入统一管理。收编后可分配给不同 Agent、检查更新。')}`;
   $('new-list').innerHTML = list.map(s => `<p>${escape(s.name)} <span class="mono muted">${pathLabel(s.relative)}</span></p>`).join('');
 }
 
@@ -1681,7 +1841,7 @@ async function refreshInventory() {
       renderDiagnostics();
       renderFooter();
     } catch (error) {
-      toast({text: '技能清单没能读出来：' + error.message, tone: 'error', sticky: true});
+      toast({text: '技能清单读取失败：' + error.message, tone: 'error', sticky: true});
     } finally {
       clearTask('inventory');
       inventoryRequest = null;
@@ -1690,19 +1850,26 @@ async function refreshInventory() {
   return inventoryRequest;
 }
 
-async function refreshTable(preserveDraft = false) {
+async function refreshTable(preserveDraft = true) {
   const table = await api('/api/table');
-  const keepDraft = preserveDraft && table.revision === state.table?.revision;
-  const draft = state.draft, pending = state.pending;
+  if (!preserveDraft) state.assignmentIntents.clear();
+  clearTimeout(previewTimer);
+  invalidatePreview();
+  previewBusy = false;
+  const pending = state.pending;
   state.table = table;
   state.tableReadAt = new Date().toISOString();
   state.skillIndex = new Map(table.skills.map(s => [s.name, s]));
   state.groupIndex = new Map((table.groups || []).flatMap(group => group.skills.map(name => [name, group.name])));
-  state.saved = Object.fromEntries(table.skills.map(s => [s.name, [...s.assigned_agents]]));
+  state.saved = table.actual_assignments || Object.fromEntries(table.skills.map(s => [s.name, [...s.assigned_agents]]));
   state.draft = clone(state.saved);
   state.pending = null;
   state.autoAdded = new Map();
-  if (keepDraft) { state.draft = draft; state.pending = pending; }
+  if (state.assignmentIntents.size) {
+    for (const change of state.assignmentIntents.values()) setDraft(change.skill, change.agent, change.enabled);
+    state.pending = pending;
+    schedulePreview();
+  }
   state.agents = table.agents || [];
   renderConfigExport();
   // 只有只读预览才显示标记；能改的时候右边什么都不放，导航仍是居中的。
@@ -1722,6 +1889,7 @@ async function refreshTable(preserveDraft = false) {
     startLabels('missing');
   }
   renderFooter();
+  if (homeVisible) renderHome();
 }
 
 /* agent 目录与接入建议。页面里翻名字、设置页那一栏、新 agent 横幅都看它。 */
@@ -1733,11 +1901,13 @@ async function refreshAgents() {
   renderAgentHead();
   renderAgents();
   if (!state.table) renderMigrationStatus();
+  if (homeVisible) renderHome();
   clearTimeout(agentsPollTimer);
   if (state.agentsView?.discovery?.running) {
     agentsPollTimer = setTimeout(() => refreshAgents().catch(error => {
       state.agentsView.discovery = {...state.agentsView.discovery, running: false, error: error.message + '，请重新扫描。'};
       renderAgents();
+      if (homeVisible) renderHome();
     }), 500);
   }
 }
@@ -1751,10 +1921,11 @@ let programFailedAction = '';   // 本次打开页面里哪一步没成；左栏
 function renderProgram() {
   const progress = programUpdate;
   const date = value => value ? new Date(value).toLocaleString('zh-CN') : '首次安装版本';
+  const message = (progress.message || '从 Skill Pilot 官方项目获取新版').replace(/\bSP\b/g, 'Skill Pilot');
   $('program-version').hidden = !progress.current && !progress.latest;
   $('program-version').textContent = `已安装：${date(progress.current)}`
     + (progress.available ? ` · 新版：${date(progress.latest)}` : '');
-  $('program-message').textContent = progress.message || '从 GitHub 官方项目获取新版';
+  $('program-message').textContent = message;
   $('program-error').textContent = progress.error || '';
   $('program-error').hidden = !progress.error;
   $('program-check').disabled = progress.running || Boolean(writeBusy);
@@ -1769,9 +1940,10 @@ function renderProgram() {
   $('program-refresh').disabled = Boolean(writeBusy);
   // 打开看板时的自动检查不占页头任务条（左栏照常提醒）；手动检查和升级照旧显示。
   const quiet = progress.phase === 'check' && progress.automatic && !programActionRunning;
-  if (progress.running && !quiet && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: progress.message});
+  if (progress.running && !quiet && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: message});
   else clearTask('self-update');
   renderRailNotes();
+  if (homeVisible) renderHomeTodos();
 }
 
 async function refreshProgramUpdate() {
@@ -1788,7 +1960,7 @@ async function programAction(action) {
   if (programUpdate.running || writeBusy) return;
   programFailedAction = '';
   programUpdate = {...programUpdate, running: true, phase: action, error: '',
-    message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等当前操作完成…'};
+    message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等待当前操作完成…'};
   programActionRunning = true;
   renderProgram();
   const fail = error => {
@@ -1809,7 +1981,7 @@ async function programAction(action) {
   };
   try {
     if (action === 'apply') {
-      await runWrite({button: $('program-apply'), busyText: '正在升级 SP…', work, onError: fail});
+      await runWrite({button: $('program-apply'), busyText: '正在升级 Skill Pilot…', work, onError: fail});
     } else await work();
   } catch (error) {
     fail(error);
@@ -1852,10 +2024,10 @@ function renderLabelCounts() {
   const remaining = table.labels_pending;
   const done = table.skills.length - remaining;
   $('labels-count').innerHTML = remaining
-    ? `${icon('warning')}<span>已整理 ${done} 个，还差 ${remaining} 个</span>${hint('还差的是缺中文名或中文说明的技能。')}`
-    : `${icon('check-circle')}<span>已整理 ${done} 个，都齐了</span>`;
+    ? `${icon('warning')}<span>已整理 ${done} 个，${remaining} 个待处理</span>${hint('待处理技能尚缺少中文名称或中文说明。')}`
+    : `${icon('check-circle')}<span>全部 ${done} 个技能已整理完成</span>`;
   $('labels-missing').hidden = !remaining;
-  $('labels-missing').querySelector('span').textContent = `整理剩下的 ${remaining} 个`;
+  $('labels-missing').querySelector('span').textContent = `整理待处理技能 (${remaining})`;
   for (const id of ['labels-missing', 'labels-all']) {
     $(id).disabled = !table.write_allowed || !table.llm_configured || labelsRunning;
   }
@@ -1889,7 +2061,7 @@ async function refreshSettings() {
     const defaults = LLM_DEFAULTS[$('llm-provider').value];
     $('llm-base-url').value = llmSettings.base_url || defaults[0];
     $('llm-model').value = llmSettings.model || defaults[1];
-    $('llm-key').placeholder = llmSettings.has_key ? `已保存，末尾 ${llmSettings.key_tail}；不改就留空` : '粘贴服务商提供的 key';
+    $('llm-key').placeholder = llmSettings.has_key ? `已保存，末尾 ${llmSettings.key_tail}；不改就留空` : '粘贴服务商提供的 API 密钥';
     $('llm-clear').hidden = !llmSettings.has_key;
     for (const input of $('llm-form').querySelectorAll('input, select, button')) input.disabled = !state.table?.write_allowed;
     renderLabelCounts();
@@ -1900,8 +2072,8 @@ async function refreshSettings() {
 
 function renderConfigExport() {
   const selected = $('config-agent').value;
-  $('config-agent').innerHTML = '<option value="">全部在用技能</option>' + state.agents.map(agent =>
-    `<option value="${escape(agent.id)}">${escape(agent.name)} 在用的技能</option>`).join('');
+  $('config-agent').innerHTML = '<option value="">全部已启用技能</option>' + state.agents.map(agent =>
+    `<option value="${escape(agent.id)}">${escape(agent.name)} 已启用的技能</option>`).join('');
   $('config-agent').value = state.agents.some(agent => agent.id === selected) ? selected : '';
   $('config-export').disabled = !state.table || Boolean(writeBusy);
   $('config-agent').disabled = !state.table || Boolean(writeBusy);
@@ -1923,7 +2095,7 @@ $('config-export').addEventListener('click', async () => {
       link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       const manual = config.skills.filter(skill => skill.local_modified || skill.source.kind === 'manual').length;
-      toast({text: `已导出 ${config.skills.length} 个技能的配置。${manual ? `其中 ${manual} 个需要对方另行补齐，文件里已标明。` : '把文件交给对方的 agent 即可。'}`});
+      toast({text: `已导出 ${config.skills.length} 个技能的配置。${manual ? `其中 ${manual} 个需要对方另行补齐，文件里已标明。` : '可将文件交给对方的 Agent 导入。'}`});
     });
   } catch (error) {
     toast({text: error.message, tone: 'error'});
@@ -1956,20 +2128,24 @@ function renderConfigImportControls() {
   $('config-import-undo').hidden = !configImportResult?.id;
 }
 
-function renderConfigImportReview(plan, done = false) {
-  const items = names => names.map(name => ({name, note: [
+function importReviewHtml(plan, done, unmappedTip, html = () => '') {
+  const items = names => names.map(name => ({name, html: html(name), note: [
     (plan.assignments[name] || []).map(nameOf).join('、'),
     plan.dependencies[name]?.length ? `补上所需技能：${plan.dependencies[name].join('、')}` : '',
   ].filter(Boolean).join('；')}));
-  $('config-import-review').innerHTML = [
-    [done ? '新装好了' : '将安装', items(plan.install)],
+  return [
+    [done ? '安装完成' : '将安装', items(plan.install)],
     ['沿用本机', items(plan.reuse)],
-    ['待补齐，本次跳过', plan.skipped.map(row => ({name: row.name, note: row.reason}))],
+    ['待补齐，本次跳过', plan.skipped.map(row => ({name: row.name, html: html(row.name), note: row.reason}))],
   ].filter(([, rows]) => rows.length).map(([label, rows]) =>
     `<details class="fold fold-inner" ${rows.length <= CONFIRM_FOLD ? 'open' : ''}>
       <summary>${escape(label)} ${rows.length} 个</summary><ul class="confirm-items">${confirmItems(rows)}</ul>
     </details>`).join('') + (plan.unmapped_agents.length
-      ? `<p class="muted">这些 agent 还没接入，${done ? '相应分配未导入' : '可在上方指定接收方'}：${escape(plan.unmapped_agents.map(nameOf).join('、'))}。</p>` : '');
+      ? `<p class="muted">以下 Agent 尚未接入，${done ? '相应分配未导入' : unmappedTip}：${escape(plan.unmapped_agents.map(nameOf).join('、'))}。</p>` : '');
+}
+
+function renderConfigImportReview(plan, done = false) {
+  $('config-import-review').innerHTML = importReviewHtml(plan, done, '可在上方指定接收方');
 }
 
 async function previewConfigImport() {
@@ -2007,7 +2183,7 @@ $('config-import').addEventListener('click', () => {
   $('config-import-file').value = '';
   $('config-import-agent').innerHTML = '<option value="">按配置中的分配</option>' + state.agents.map(agent =>
     `<option value="${escape(agent.id)}">全部给 ${escape(agent.name)}</option>`).join('');
-  $('config-import-message').textContent = '选好文件后，先核对可导入和待补齐的技能。';
+  $('config-import-message').textContent = '选择配置文件后，即可核对可导入和待补齐的技能。';
   $('config-import-review').replaceChildren();
   $('config-import-retry').hidden = true;
   renderConfigImportControls();
@@ -2084,6 +2260,986 @@ $('config-import-apply').addEventListener('click', async event => {
   });
 });
 
+/* ==================== 团队技能商店：设置里连上分享站；「团队」页浏览、装上、评价、上架 ==================== */
+
+/* 商店里的名字、说明、推荐语和评价都是同事写的：一律当纯文字转义。
+   技能可能本机还没有，所以名字用上架者给的中文名，不查本机的整理结果。 */
+const STORE_STATUS = {
+  installed: ['tag-ok', '已安装'], update: ['tag', '有新版'], installable: ['tag-quiet', '可安装'],
+  lark: ['tag-quiet', '飞书官方'], conflict: ['tag-warn', '本机有同名技能'], blocked: ['tag-warn', '暂不可装'],
+  mine: ['tag-quiet', '我的上架'],
+};
+const storeTitle = card => card.title || card.name;
+const teamReadOnly = () => state.table ? !state.table.write_allowed : !state.writeAllowed;
+const teamCanWrite = () => Boolean(state.table?.write_allowed) && !writeBusy;
+// 还没整理过时没有技能表，就看 /api/status 给的只读状态。
+const teamSettingsWritable = () => state.table ? Boolean(state.table.write_allowed) : state.writeAllowed;
+let teamUrlEdited = false;
+
+async function refreshTeam() {
+  try {
+    state.team = await api('/api/team');
+  } catch (error) {
+    state.team = {configured: false, url: '', has_key: false, member: null, error: error.message};
+  }
+  document.querySelector('.nav-item[data-page="team"]').hidden = !state.team.configured;
+  renderTeamSettings();
+  renderTeam();
+  if (homeVisible) renderHomeTodos();
+}
+
+function renderTeamSettings() {
+  const team = state.team;
+  if (!team) return;
+  if (!teamUrlEdited) $('team-url').value = team.url || '';
+  const connected = Boolean(team.member);
+  $('team-name-label').hidden = connected;
+  $('team-name').hidden = connected;
+  $('team-key').placeholder = team.has_key ? '已保存；不改就留空' : '粘贴管理员给你的口令';
+  $('team-message').textContent = [team.error || (team.member ? `已连接，你是 ${team.member.name}。` : ''),
+    teamSettingsWritable() ? '' : '只读模式下不能修改。'].filter(Boolean).join(' ');
+  $('team-goto').hidden = !team.configured;
+  const locked = !teamSettingsWritable() || Boolean(writeBusy);
+  for (const element of $('team-form').querySelectorAll('input, #team-save, #team-key-toggle')) element.disabled = locked;
+}
+
+function setTeamKeyOpen(open) {
+  $('team-key-box').hidden = !open;
+  $('team-key-toggle').setAttribute('aria-expanded', String(open));
+}
+
+$('team-url').addEventListener('input', () => { teamUrlEdited = true; });
+$('team-key-toggle').addEventListener('click', () => setTeamKeyOpen($('team-key-box').hidden));
+$('team-goto').addEventListener('click', () => showPage('team'));
+$('team-setup').addEventListener('click', () => gotoPlace('settings/team'));
+
+$('team-form').addEventListener('submit', event => {
+  event.preventDefault();
+  let failed = false;
+  withBusy($('team-save'), '正在连接…', async () => {
+    try {
+      const result = await api('/api/team/settings', {
+        url: $('team-url').value.trim(),
+        name: $('team-name').value.trim(),
+        key: $('team-key').value.trim(),
+      });
+      teamUrlEdited = false;
+      $('team-name').value = '';
+      $('team-key').value = '';
+      setTeamKeyOpen(false);
+      state.team = result;
+      state.store = null;
+      storeCandidates = null;
+      document.querySelector('.nav-item[data-page="team"]').hidden = false;
+      toast({text: `已连上分享站，你是 ${result.member.name}。`});
+    } catch (error) {
+      failed = true;
+      $('team-message').textContent = error.message;
+      toast({text: error.message, tone: 'error'});
+    }
+  }).finally(() => {
+    // withBusy 会放开按钮，这里按最新状态重画（只读、写入中会重新禁用），并保留刚才的报错。
+    const message = $('team-message').textContent;
+    renderTeamSettings();
+    if (failed) $('team-message').textContent = message;
+  });
+});
+
+/* 进团队页：先画已知的，再读最新状态和商店目录。 */
+async function enterTeam() {
+  renderTeam();
+  await refreshTeam();
+  if (state.team?.configured && !state.team.error) await loadStore();
+}
+
+let storeSequence = 0;
+
+/* 安装队列：点一次「装上」就加入，后台一个接一个装；页面不锁，可以继续逛、继续加。 */
+const queueActive = item => item.status === 'waiting' || item.status === 'running';
+const storeQueueItem = key => (state.queue?.items || []).find(item => item.key === key) || null;
+const queueHasActive = (items = state.queue?.items || []) => items.some(queueActive);
+let queueTimer = null;
+let queueVersion = 0;   // 写队列或重新读时作废还在路上的旧结果，免得刚加入的又被旧数据盖掉
+
+function scheduleQueuePoll() {
+  if (queueTimer) return;
+  queueTimer = setTimeout(() => {
+    queueTimer = null;
+    readQueue();
+  }, 1000);
+}
+
+function stopQueuePolling() {
+  clearTimeout(queueTimer);
+  queueTimer = null;
+}
+
+function readQueue() {
+  const version = ++queueVersion;
+  api('/api/team/queue').then(result => {
+    if (version !== queueVersion) return;
+    applyQueue(result);
+  }).catch(() => {
+    if (version !== queueVersion) return;
+    // 队列读不到不耽误逛商店；还有没装完的，过一秒再试。
+    if (queueHasActive()) scheduleQueuePoll();
+    else stopQueuePolling();
+  });
+}
+
+function applyQueue(result, {force = false} = {}) {
+  const before = state.queue?.items || [];
+  const beforeStatus = new Map(before.map(item => [item.key, item.status]));
+  const beforeActive = before.some(queueActive);
+  const items = Array.isArray(result?.items) ? result.items : [];
+  const afterActive = items.some(queueActive);
+  const finished = items.some(item => (item.status === 'done' || item.status === 'failed')
+    && beforeStatus.has(item.key) && beforeStatus.get(item.key) !== item.status);
+  const changed = force || JSON.stringify(items) !== JSON.stringify(before);
+  state.queue = {items};
+  // 有技能装好了或没装上：重读目录，卡片和详情跟着变。
+  if (finished) loadStore({syncQueue: false}).catch(() => {});
+  // 整个队列都结束后，在后台刷新一次技能页数据，不锁页面、不挡操作。
+  if (beforeActive && !afterActive) {
+    refreshEverything().catch(error => toast({text: error.message, tone: 'error', sticky: true}));
+  }
+  if (changed) {
+    if (state.page === 'team') renderTeam();
+    else renderStoreQueue();
+    if (state.storeDetail) renderStoreDetail();
+  }
+  if (afterActive) scheduleQueuePoll();
+  else stopQueuePolling();
+}
+
+async function addToStoreQueue(item) {
+  queueVersion += 1;   // 还在路上的队列读取作废，别把刚加入的盖掉
+  const result = await api('/api/team/queue', {key: item.key});
+  queueVersion += 1;   // 写入期间发出的读取也作废，以这次返回的队列为准
+  return result;
+}
+
+async function clearStoreQueue(button) {
+  await withBusy(button, '正在清除…', async () => {
+    try {
+      queueVersion += 1;
+      const result = await api('/api/team/queue/clear', {});
+      queueVersion += 1;
+      applyQueue(result, {force: true});
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+async function retryStoreQueue(key, button) {
+  await withBusy(button, '正在重试…', async () => {
+    try {
+      applyQueue(await addToStoreQueue({key}), {force: true});
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+async function loadStore({syncQueue = true} = {}) {
+  if (syncQueue) readQueue();
+  const sequence = ++storeSequence;
+  try {
+    const result = await api('/api/team/catalog');
+    if (sequence !== storeSequence) return;
+    state.store = result;
+    state.storeError = '';
+  } catch (error) {
+    if (sequence !== storeSequence) return;
+    state.storeError = error.message;
+  }
+  renderTeam();
+  if (state.storeDetail) renderStoreDetail();
+}
+
+/* 自己能上架的技能（含已上架的是否改过）：打开上架窗口或看“我上架的”时才读。 */
+let storeCandidates = null;
+async function loadCandidates() {
+  storeCandidates = (await api('/api/team/listings/candidates')).skills;
+  return storeCandidates;
+}
+
+/* ---------- 排序与筛选：只看数据，不碰页面，方便单独测试 ---------- */
+
+const storeTime = card => Date.parse(card.updated_at) || 0;
+const storeScore = card => card.rating?.count ? card.rating.average : -1;
+const STORE_SORTS = {
+  latest: (a, b) => storeTime(b) - storeTime(a),
+  rating: (a, b) => storeScore(b) - storeScore(a) || (b.rating?.count || 0) - (a.rating?.count || 0) || storeTime(b) - storeTime(a),
+  popular: (a, b) => b.listings.length - a.listings.length || storeScore(b) - storeScore(a) || storeTime(b) - storeTime(a),
+};
+
+function storeFilter(cards, {query = '', group = '', mine = false} = {}) {
+  const words = query.trim().toLowerCase();
+  return cards.filter(card =>
+    (!mine || card.local?.status === 'mine') &&
+    (!group || (group === '-' ? !card.group : card.group === group)) &&
+    (!words || [card.name, card.title, card.summary, card.description, card.group,
+      ...card.listings.flatMap(item => [item.note, item.member?.name])]
+      .some(value => String(value || '').toLowerCase().includes(words))));
+}
+
+function storeGroups(cards) {
+  const counts = new Map();
+  for (const card of cards) counts.set(card.group || '-', (counts.get(card.group || '-') || 0) + 1);
+  return [...counts].sort((a, b) => (a[0] === '-') - (b[0] === '-') || b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'));
+}
+
+/* 一句话：没整理过中文名的技能没有，就用技能自带说明的第一句。 */
+function storeSummary(card) {
+  if (card.summary) return card.summary;
+  const first = String(card.description || '').split(/[\n。！？!?]/).map(part => part.trim()).find(Boolean) || '';
+  return first.length > 60 ? first.slice(0, 60) + '…' : first;
+}
+
+/* 谁推荐的：两个人以内写全名，多了写“某某等 N 人”。 */
+function storeRecommenders(card) {
+  const names = card.listings.map(item => item.member.name);
+  return names.length > 2 ? `${names[0]} 等 ${names.length} 人推荐` : `${names.join('、')} 推荐`;
+}
+
+/* ---------- 小部件：星级、状态标签、卡片、列表行 ---------- */
+
+const starIcon = on => `<svg class="star${on ? ' is-on' : ''}" aria-hidden="true" focusable="false"><use href="#sp-star"/></svg>`;
+const starsHtml = stars => `<span class="stars" role="img" aria-label="${stars} 星">${[1, 2, 3, 4, 5].map(n => starIcon(n <= stars)).join('')}</span>`;
+
+function storeRatingHtml(rating) {
+  if (!rating?.count) return '<span class="rating is-empty">暂无评价</span>';
+  return `<span class="rating" aria-label="${rating.average.toFixed(1)} 分，${rating.count} 人评价">${starIcon(true)}<b>${rating.average.toFixed(1)}</b><span>${rating.count} 人评</span></span>`;
+}
+
+function storeStatusTag(card) {
+  const queued = storeQueueItem(card.key);
+  if (queued?.status === 'waiting') return '<span class="tag tag-quiet">排队中</span>';
+  if (queued?.status === 'running') return '<span class="tag">正在安装</span>';
+  const [tone, label] = STORE_STATUS[card.local?.status] || ['tag-quiet', card.local?.label || ''];
+  return label ? `<span class="tag ${tone}">${escape(label)}</span>` : '';
+}
+
+const sizeText = bytes => bytes < 1024 ? `${bytes} 字节` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+function storeCardHtml(card) {
+  const quote = card.listings.find(item => item.note);
+  const people = card.listings.length > 1 ? `<span>${card.listings.length} 人推荐</span>` : '';
+  return `<button class="store-card" type="button" data-store-open="${escape(card.key)}">
+    <span class="store-card-top"><span class="store-card-title">${escape(storeTitle(card))}</span>${storeStatusTag(card)}</span>
+    <span class="store-card-sum">${escape(storeSummary(card))}</span>
+    <span class="store-card-quote">${quote
+      ? `“${escape(quote.note)}”<span class="by"> — ${escape(quote.member.name)}</span>`
+      : `<span class="by">${escape(storeRecommenders(card))}</span>`}</span>
+    <span class="store-card-foot">${storeRatingHtml(card.rating)}${people}${card.group ? `<span>${escape(card.group)}</span>` : ''}</span>
+  </button>`;
+}
+
+function storeRowHtml(card) {
+  const mine = state.storeMine;
+  const candidate = mine ? storeCandidates?.find(item => item.name === card.name) : null;
+  const locked = teamCanWrite() ? '' : ' disabled';
+  const end = mine
+    ? `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>` : ''}
+       <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`
+    : storeStatusTag(card);
+  return `<div class="store-row">
+    <button class="store-row-main" type="button" data-store-open="${escape(card.key)}">
+      <span class="store-row-name"><span class="t">${escape(storeTitle(card))}</span>${card.title ? `<span class="skill-id">${escape(card.name)}</span>` : ''}</span>
+      <span class="store-row-sub">${escape(storeSummary(card) || card.listings.find(item => item.note)?.note || '')}</span>
+    </button>
+    <span class="store-row-rating">${storeRatingHtml(card.rating)}</span>
+    <span class="store-row-by">${escape(mine ? `${friendlyDate(storeMyListing(card)?.updated_at)}上架` : storeRecommenders(card))}</span>
+    <span class="store-row-end">${end}</span>
+  </div>`;
+}
+
+/* ---------- 安装队列：排队中、正在装、装好了、没装上 ---------- */
+
+function storeQueueRowHtml(item, locked = false) {
+  const extra = item.status === 'done'
+    ? (item.installed || []).filter(name => name !== item.name).length
+    : 0;
+  const status = item.status === 'done'
+    ? `<span class="tag tag-ok">安装完成</span>${extra ? `<small class="item-note">含 ${extra} 个前置依赖</small>` : ''}`
+    : item.status === 'failed'
+      ? `<span class="tag tag-danger">安装失败：${escape(item.message || '原因未知')}</span>`
+      : item.status === 'running'
+        ? '<span class="tag">正在安装</span>'
+        : '<span class="tag tag-quiet">排队中</span>';
+  const action = item.status === 'done'
+    ? `<button class="link-btn" type="button" data-store-goto="${escape(item.name)}">前往分配</button>`
+    : item.status === 'failed'
+      ? `<button class="btn btn-small btn-quiet" type="button" data-store-queue-retry="${escape(item.key)}"${locked ? ' disabled' : ''}>重试</button>`
+      : '';
+  return `<div class="item-row">
+    <div>
+      <div class="item-title">${escape(item.title || item.name || '')}</div>
+      <div class="store-queue-state">${status}</div>
+    </div>
+    ${action ? `<span class="item-end">${action}</span>` : ''}
+  </div>`;
+}
+
+function renderStoreQueue() {
+  const box = $('store-queue');
+  const list = $('store-queue-items');
+  const items = state.queue?.items || [];
+  const hadFocus = box.contains(document.activeElement);
+  const focusKey = document.activeElement?.dataset.storeGoto || document.activeElement?.dataset.storeQueueRetry || '';
+  const wasHidden = box.hidden;
+  box.hidden = !items.length;
+  const active = items.filter(queueActive).length;
+  $('store-queue-left').textContent = active ? `待安装 ${active} 个` : '';
+  $('store-queue-clear').hidden = !items.some(item => item.status === 'done' || item.status === 'failed');
+  $('store-queue-clear').disabled = teamReadOnly();
+  const html = items.map(item => storeQueueRowHtml(item, teamReadOnly())).join('');
+  const changed = list.innerHTML !== html;
+  if (changed) list.innerHTML = html;
+  // 队列每秒重画一次：刚按过的按钮可能没了，焦点放回同一处或队列标题。
+  if ((changed || wasHidden !== box.hidden) && hadFocus) {
+    const next = focusKey && [...box.querySelectorAll('[data-store-goto], [data-store-queue-retry]')]
+      .find(button => (button.dataset.storeGoto || button.dataset.storeQueueRetry) === focusKey);
+    (next || (box.hidden ? $('store-all-title') : $('store-queue-title'))).focus();
+  }
+}
+
+/* ---------- 商店首页：几排推荐 + 全部技能 ---------- */
+
+/* 几排推荐按这个顺序挑卡片；同一张卡片只出现在第一排挑中它的地方，免得几排看起来一样。 */
+const STORE_SHELVES = [
+  {sort: 'rating', title: '最受好评', pick: cards => cards.filter(card => card.rating?.count)},
+  {sort: 'popular', title: '同事推荐最多', pick: cards => cards.filter(card => card.listings.length > 1)},
+  {sort: 'latest', title: '最新上架', pick: cards => cards},
+];
+const SHELF_SIZE = 4;
+const SHELF_MIN = 8;   // 技能少于这个数时不分几排，直接看全部
+
+const storeQuery = () => $('store-search').value.trim();
+const storeBrowsing = () => !storeQuery() && !state.storeGroup && !state.storeMine;
+
+function renderTeam() {
+  if (state.page !== 'team') return;
+  const team = state.team;
+  $('team-unset').hidden = !team || team.configured;
+  $('team-ready').hidden = Boolean(team) && !team.configured;
+  if (team && !team.configured) return;
+  const problem = (team && team.error) || state.storeError;
+  $('store-error').hidden = !problem;
+  $('store-error-text').textContent = problem || '';
+  const cards = state.store?.cards || null;
+  const ready = Boolean(team?.member) && !team?.error;
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  $('store-publish').disabled = !ready || !teamCanWrite();
+  $('store-publish').title = !state.table ? '整理过技能后才能上架' : readOnly ? '只读预览，不能上架' : '';
+  const mineCount = (cards || []).filter(card => card.local?.status === 'mine').length;
+  $('store-mine').disabled = !cards;
+  $('store-mine').setAttribute('aria-pressed', String(state.storeMine));
+  $('store-mine-count').textContent = mineCount ? number(mineCount) : '';
+  renderStoreQueue();
+  renderStoreShelves(cards);
+  renderStoreAll(cards);
+}
+
+function renderStoreShelves(cards) {
+  const box = $('store-shelves');
+  if (!cards) {
+    box.innerHTML = state.storeError || state.team?.error ? '' : `<section class="shelf">
+      <div class="shelf-head"><h2 class="is-loading" role="status">正在读取团队技能…</h2></div>
+      <div class="shelf-cards" aria-hidden="true">${'<span class="store-card is-skeleton"></span>'.repeat(SHELF_SIZE)}</div>
+    </section>`;
+    return;
+  }
+  if (!cards.length) {
+    box.innerHTML = `<div class="empty store-empty">${emptyInner('team', '暂无团队技能')}
+      <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>`;
+    return;
+  }
+  if (!storeBrowsing() || cards.length < SHELF_MIN) {
+    box.innerHTML = '';
+    return;
+  }
+  const shown = new Set();
+  box.innerHTML = STORE_SHELVES.map(shelf => {
+    const picked = shelf.pick(cards).filter(card => !shown.has(card.key)).sort(STORE_SORTS[shelf.sort]).slice(0, SHELF_SIZE);
+    for (const card of picked) shown.add(card.key);
+    return picked.length ? `<section class="shelf" aria-labelledby="shelf-${shelf.sort}">
+      <div class="shelf-head">
+        <h2 id="shelf-${shelf.sort}">${shelf.title}</h2>
+        <button class="link-btn" type="button" data-store-more="${shelf.sort}">查看全部</button>
+      </div>
+      <div class="shelf-cards">${picked.map(storeCardHtml).join('')}</div>
+    </section>` : '';
+  }).join('');
+}
+
+function renderStoreAll(cards) {
+  $('store-all').hidden = !cards?.length;
+  if (!cards?.length) return;
+  const query = storeQuery();
+  const base = storeFilter(cards, {query, mine: state.storeMine});
+  const groups = storeGroups(base);
+  // 选中的分组搜不到时也留着，数量写 0，免得筛选条件悄悄消失。
+  if (state.storeGroup && !groups.some(([name]) => name === state.storeGroup)) groups.push([state.storeGroup, 0]);
+  renderButtons($('store-groups'), [['', base.length], ...groups].map(([name, count]) =>
+    `<button class="store-group" type="button" data-store-group="${escape(name)}" aria-pressed="${name === state.storeGroup}">${
+      escape(name === '' ? '全部' : name === '-' ? '未分组' : name)}<span class="n">${number(count)}</span></button>`).join(''), 'data-store-group');
+  $('store-groups').hidden = groups.length < 2 && !state.storeGroup;
+  const rows = storeFilter(base, {group: state.storeGroup}).sort(STORE_SORTS[state.storeSort]);
+  $('store-all-title').textContent = state.storeMine ? '我的上架' : query ? '搜索结果' : '全部技能';
+  $('store-count').textContent = `${number(rows.length)} 个`;
+  for (const button of $('store-sort').querySelectorAll('[data-store-sort]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.storeSort === state.storeSort));
+  }
+  const empty = state.storeMine && !base.length
+    ? emptyInner('team', '暂无上架技能', `<button type="button" class="link-btn" data-store-publish${teamCanWrite() ? '' : ' disabled'}>上架技能</button>`)
+    : emptyInner('search', '未找到匹配技能');
+  $('store-list').innerHTML = rows.length
+    ? `<div class="store-list-inner${state.storeMine ? ' is-mine' : ''}">${rows.map(storeRowHtml).join('')}</div>`
+    : `<div class="empty">${empty}</div>`;
+}
+
+$('store-search').addEventListener('input', renderTeam);
+
+$('store-sort').addEventListener('click', event => {
+  const button = event.target.closest('[data-store-sort]');
+  if (!button) return;
+  state.storeSort = button.dataset.storeSort;
+  renderTeam();
+});
+
+$('store-groups').addEventListener('click', event => {
+  const button = event.target.closest('[data-store-group]');
+  if (!button) return;
+  // 再点一次当前分组就回到全部。
+  state.storeGroup = button.dataset.storeGroup === state.storeGroup ? '' : button.dataset.storeGroup;
+  renderTeam();
+});
+
+$('store-mine').addEventListener('click', async () => {
+  state.storeMine = !state.storeMine;
+  state.storeGroup = '';
+  renderTeam();
+  if (!state.storeMine || storeCandidates) return;
+  try {
+    await loadCandidates();
+  } catch (error) {
+    toast({text: error.message, tone: 'error'});
+  }
+  renderTeam();
+});
+
+async function reloadStorePage(button) {
+  await withBusy(button, '', async () => {
+    await enterTeam();
+    if (state.storeMine || storeCandidates) await loadCandidates().catch(() => { storeCandidates = null; });
+    renderTeam();
+  });
+}
+$('store-refresh').addEventListener('click', event => reloadStorePage(event.currentTarget));
+$('store-retry').addEventListener('click', event => reloadStorePage(event.currentTarget));
+$('store-publish').addEventListener('click', () => openPublish());
+
+/* 卡片、列表行、安装队列和空状态里的按钮都在团队页里，统一在这里分派。 */
+$('page-team').addEventListener('click', event => {
+  const goto = event.target.closest('[data-store-goto]');
+  const retry = event.target.closest('[data-store-queue-retry]');
+  const clear = event.target.closest('[data-store-queue-clear]');
+  const open = event.target.closest('[data-store-open]');
+  const more = event.target.closest('[data-store-more]');
+  const publish = event.target.closest('[data-store-publish]');
+  const republish = event.target.closest('[data-store-republish]');
+  const unlist = event.target.closest('[data-store-unlist]');
+  if (goto) gotoStoreSkill(goto);
+  else if (retry) retryStoreQueue(retry.dataset.storeQueueRetry, retry);
+  else if (clear) clearStoreQueue(clear);
+  else if (open) openStoreDetail(open.dataset.storeOpen, open);
+  else if (more) {
+    state.storeSort = more.dataset.storeMore;
+    renderTeam();
+    $('store-all').scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start'});
+    $('store-all-title').focus({preventScroll: true});
+  } else if (publish) openPublish();
+  else if (republish) openPublish([republish.dataset.storeRepublish]);
+  else if (unlist) unlistStore(unlist.dataset.storeUnlist, unlist);
+});
+
+/* 队列里刚装好的技能可能还没进当前技能表：先补读一次，再打开它的详情。 */
+async function gotoStoreSkill(button) {
+  const name = button.dataset.storeGoto;
+  closeDetail();
+  showPage('skills');
+  if (!state.table?.skills.some(skill => skill.name === name)) {
+    try {
+      await refreshTable();
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+      return;
+    }
+  }
+  if (state.table?.skills.some(skill => skill.name === name)) openDetail(name);
+  else toast({text: '技能清单尚未刷新，请稍后重试。', tone: 'error'});
+  // 有新版时顺便检查更新，详情里随后出现“有新版”和更新按钮。
+  if (button.hasAttribute('data-store-check') && !updateState.review?.running && !updateState.starting) checkUpdates();
+}
+
+async function unlistStore(name, button) {
+  const cards = (state.store?.cards || []).filter(item => item.local?.status === 'mine');
+  const card = cards.find(item => item.name === name);
+  // 自己上架的别的技能需要它时，一起下架，先在确认框里说清楚。
+  const names = [name];
+  for (let index = 0; index < names.length; index++) {
+    for (const item of cards) if (item.requires?.includes(names[index]) && !names.includes(item.name)) names.push(item.name);
+  }
+  const extra = cards.filter(item => names.slice(1).includes(item.name)).map(storeTitle);
+  const ok = await confirmDialog({
+    title: `下架「${card ? storeTitle(card) : name}」`,
+    lines: [extra.length ? `${extra.join('、')} 需要它，会一起下架。` : '', '同事在商店里将看不到它。',
+      '已安装的同事不受影响，之后仍可重新上架。'],
+    okText: extra.length ? `下架 ${names.length} 个` : '下架',
+  });
+  if (!ok) return;
+  const rows = [...$('store-list').querySelectorAll('.store-row-main')];
+  const place = rows.findIndex(row => row.closest('.store-row')?.contains(button));
+  await withBusy(button, '正在下架…', async () => {
+    try {
+      await api('/api/team/listings/remove', {names});
+      if (state.storeDetail === card?.key) closeDetail();
+      storeCandidates = null;
+      await loadStore();
+      if (state.storeMine) await loadCandidates().catch(() => {});
+      renderTeam();
+      toast({text: `已下架「${card ? storeTitle(card) : name}」${extra.length ? `等 ${names.length} 个技能` : ''}。`});
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+  // 这一行没了：焦点交给顶上来的那一行，没有就交给列表标题。
+  if (!button.isConnected) {
+    const next = $('store-list').querySelectorAll('.store-row-main')[Math.max(0, place)];
+    (next || $('store-all-title')).focus();
+  }
+}
+
+/* ---------- 详情：沿用技能页右侧的详情面板 ---------- */
+
+let storeOpener = null;
+let storeOpenerArea = null;   // store-shelves 或 store-list：卡片重画后按编号在同一处找回
+let storeGet = null;   // 详情里「装上」的状态：{key, error}
+
+const storeCard = key => state.store?.cards.find(card => card.key === key) || null;
+const storeMyListing = card => card.listings.find(item => item.member.id === state.store?.member?.id) || card.listings[0];
+
+function openStoreDetail(key, opener = null) {
+  if (state.storeDetail !== key || !storeGet) storeGet = {key, error: ''};
+  storeOpener = opener;
+  storeOpenerArea = opener?.closest('#store-shelves, #store-list')?.id || null;
+  state.storeDetail = key;
+  renderStoreDetail(true);
+  showDetailPanel(() => state.storeDetail === key);
+  if (storeCard(key)?.local?.status === 'mine' && !storeCandidates) {
+    loadCandidates().then(() => { if (state.storeDetail === key) renderStoreDetail(); }).catch(() => {});
+  }
+}
+
+function renderStoreDetail(fresh = false) {
+  const card = storeCard(state.storeDetail);
+  if (!card) {
+    // 同事下架了，或者分享站换了人：详情跟着关掉。
+    closeDetail();
+    return;
+  }
+  const body = $('detail-body');
+  const scroll = fresh ? 0 : body.scrollTop;
+  $('detail-title').textContent = storeTitle(card);
+  body.innerHTML = `
+    ${card.title ? `<p class="detail-id">${escape(card.name)}</p>` : ''}
+    ${storeSummary(card) ? `<p class="detail-summary">${escape(storeSummary(card))}</p>` : ''}
+    <p class="store-facts">${storeRatingHtml(card.rating)}<span>${escape(storeRecommenders(card))}</span>${card.group ? `<span>${escape(card.group)}</span>` : ''}</p>
+    ${storeGetHtml(card)}
+    <h3 class="sub-title">推荐人</h3>
+    <ul class="store-recs">${card.listings.map(item => `<li>
+      <p class="store-rec-head"><strong>${escape(item.member.name)}</strong><span>${escape(friendlyDate(item.updated_at))}上架</span></p>
+      ${item.note ? `<p class="store-rec-note">“${escape(item.note)}”</p>` : ''}
+    </li>`).join('')}</ul>
+    ${storeReviewsHtml(card)}
+    ${card.description ? `<h3 class="sub-title">说明</h3><p class="detail-desc">${escape(card.description)}</p>` : ''}
+    ${card.requires?.length ? `<h3 class="sub-title">前置依赖${hint('安装此技能时将一并安装前置依赖；本机已有同名技能时沿用现有内容。')}</h3>
+      <p class="store-requires">${card.requires.map(name => escape(storeRequireTitle(card, name))).join('、')}</p>` : ''}
+    <h3 class="sub-title">来源</h3>
+    <p class="store-source">${escape(storeSourceText(card))}</p>`;
+  body.scrollTop = scroll;
+}
+
+/* 所需技能优先用同一作者上架的那张卡片的中文名，没有就写原名。 */
+function storeRequireTitle(card, name) {
+  const authors = new Set(card.listings.map(item => item.member.id));
+  const cards = state.store?.cards.filter(item => item.name === name) || [];
+  const found = cards.find(item => item.listings.some(listing => authors.has(listing.member.id))) || cards[0];
+  return found?.title || name;
+}
+
+function storeSourceText(card) {
+  const latest = card.listings?.[0];
+  if (card.kind === 'github') {
+    return latest?.file_count
+      ? '公开技能，文件已随上架保存至分享站，安装时从分享站下载。'
+      : '公开技能，安装时从原作者的来源下载。';
+  }
+  if (card.kind === 'lark') return '飞书官方技能。';
+  return `${latest.member.name} 上传的文件${latest.file_count ? `，共 ${number(latest.file_count)} 个、${sizeText(latest.size || 0)}` : ''}。`;
+}
+
+/* 详情里最重要的一块：能不能装、装好没有。 */
+function storeGetHtml(card) {
+  const local = card.local || {};
+  const users = (local.agents || []).map(nameOf).join('、');
+  const box = (tone, text, action = '') => `<section class="store-get store-get-${tone}">
+    <p class="store-get-line">${text}</p>${action ? `<div class="store-get-actions">${action}</div>` : ''}</section>`;
+  const locked = teamCanWrite() ? '' : ' disabled';
+  if (local.status === 'installed') {
+    if (!local.agents?.length) {
+      return box('ok', `${icon('check-circle')}<span><strong>已在技能库中，尚未分配给 Agent</strong></span>`,
+        `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">前往分配</button>`);
+    }
+    return box('ok', `${icon('check-circle')}<span><strong>已安装</strong>，使用中：${escape(users)}</span>`,
+      `<button class="link-btn" type="button" data-store-goto="${escape(card.name)}">查看技能</button>`);
+  }
+  if (local.status === 'update') {
+    return box('info', `${icon('update-up')}<span><strong>有新版</strong>${users ? `，使用中：${escape(users)}` : ''}</span>`,
+      `<button class="btn btn-small btn-update" type="button" data-store-goto="${escape(card.name)}" data-store-check>前往更新</button>`);
+  }
+  if (local.status === 'mine') {
+    const candidate = storeCandidates?.find(item => item.name === card.name);
+    return box('quiet', `${icon('team')}<span><strong>我的上架</strong>${candidate?.changed ? '，已有本地修改，可上架新版' : ''}</span>`,
+      `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>` : ''}
+       <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`);
+  }
+  if (local.status === 'lark') {
+    return box('quiet', `${icon('info')}<span><strong>请通过飞书官方渠道安装</strong>${local.reason ? hint(local.reason) : ''}</span>`);
+  }
+  if (local.status !== 'installable') {
+    return box('warn', `${icon('warning')}<span><strong>${escape(local.label || '暂不可装')}</strong>${local.reason ? `：${escape(local.reason)}` : ''}</span>`);
+  }
+  return storeInstallHtml(card);
+}
+
+function storeInstallHtml(card) {
+  const get = storeGet;
+  const readOnly = teamReadOnly();
+  const queued = storeQueueItem(card.key);
+  const cost = `启用后，每个 Agent 的单次对话预占增加约 <b>${tokenText(card.tokens)} Token</b>${hint(TOKEN_HINT)}`;
+  let status = '';
+  let action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>安装技能</button>`;
+  if (queued?.status === 'waiting') {
+    status = '<p class="store-queue-state" role="status">已加入安装队列</p>';
+    action = '';
+  } else if (queued?.status === 'running') {
+    status = '<p class="store-queue-state" role="status">正在安装…</p>';
+    action = '';
+  } else if (queued?.status === 'failed') {
+    status = `<p class="store-get-error" role="alert">安装失败：${escape(queued.message || '原因未知')}</p>`;
+    action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>重试</button>`;
+  } else if (queued?.status === 'done') {
+    status = '<p class="store-queue-state" role="status">安装完成</p>';
+    action = `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">前往分配</button>`;
+  }
+  return `<section class="store-get store-get-install">
+    <p class="store-get-line">安装后保存至技能库，分配给 Agent 后生效。</p>
+    <p class="store-cost">${cost}</p>
+    ${status}
+    ${!queued && get?.error ? `<p class="store-get-error" role="alert">${escape(get.error)}</p>` : ''}
+    ${action ? `<div class="store-get-actions">${action}</div>` : ''}
+    ${readOnly && action ? '<p class="row-note">只读预览，无法安装技能。</p>' : ''}
+  </section>`;
+}
+
+function storeReviewsHtml(card) {
+  const me = state.store?.member?.id;
+  const reviews = card.reviews || [];
+  const others = card.can_rate && !(state.table ? !state.table.write_allowed : !state.writeAllowed) ? reviews.filter(review => review.member.id !== me) : reviews;
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  const editor = card.can_rate && !readOnly ? storeRateHtml(card)
+    : `<p class="store-rate-note">${icon('info')}${card.local?.status === 'mine' ? '无法评价自己上架的技能'
+      : readOnly ? '只读预览，无法发表评价' : '安装后即可发表评价'}</p>`;
+  const summary = card.rating?.count ? `<span class="sub-note">· ${card.rating.average.toFixed(1)} 分，${card.rating.count} 人</span>` : '';
+  return `<h3 class="sub-title">评价 ${summary}</h3>
+    ${editor}
+    ${others.length ? `<ul class="store-reviews">${others.map(review => `<li>
+      <p class="store-review-head"><strong>${escape(review.member.name)}</strong>${starsHtml(review.stars)}<span>${escape(friendlyDate(review.updated_at))}</span></p>
+      ${review.text ? `<p class="store-review-text">${escape(review.text)}</p>` : ''}
+    </li>`).join('')}</ul>` : card.can_rate ? '' : '<p class="muted store-rate-empty">暂无评价。</p>'}`;
+}
+
+/* 打分：五颗星是一组单选，倒着排再用 CSS 反过来，鼠标移到哪颗，它和左边的都亮。 */
+function storeRateHtml(card) {
+  const mine = card.my_rating;
+  const stars = [5, 4, 3, 2, 1].map(n => `<input class="sr-only" type="radio" name="store-stars" id="store-star-${n}" value="${n}"${mine?.stars === n ? ' checked' : ''}>
+    <label for="store-star-${n}" title="${n} 星">${starIcon(false)}<span class="sr-only">${n} 星</span></label>`).join('');
+  return `<form class="store-rate" data-store-rate>
+    <fieldset class="star-input"><legend>${mine ? '我的评价' : '评价技能'}</legend><span class="star-input-row">${stars}</span></fieldset>
+    <input class="input store-rate-text" name="text" maxlength="200" placeholder="分享使用心得（选填）" aria-label="使用评价" value="${escape(mine?.text || '')}">
+    <span class="store-rate-actions">
+      <button class="btn btn-small btn-primary" type="submit">${mine ? '保存' : '提交评价'}</button>
+      ${mine ? '<button class="btn btn-small btn-quiet" type="button" data-store-rate-remove>删除</button>' : ''}
+    </span>
+    <p class="row-note" data-store-rate-message role="status"></p>
+  </form>`;
+}
+
+$('detail-body').addEventListener('click', event => {
+  if (!state.storeDetail) return;
+  const target = event.target;
+  if (target.closest('[data-store-install]')) {
+    const card = storeCard(state.storeDetail);
+    if (card) queueStoreInstall(card);
+  } else if (target.closest('[data-store-goto]')) {
+    gotoStoreSkill(target.closest('[data-store-goto]'));
+  } else if (target.closest('[data-store-republish]')) {
+    const name = target.closest('[data-store-republish]').dataset.storeRepublish;
+    closeDetail();
+    openPublish([name]);
+  } else if (target.closest('[data-store-unlist]')) {
+    const button = target.closest('[data-store-unlist]');
+    unlistStore(button.dataset.storeUnlist, button);
+  } else if (target.closest('[data-store-rate-remove]')) rateStore(target.closest('form'), true);
+});
+
+$('detail-body').addEventListener('submit', event => {
+  const form = event.target.closest('[data-store-rate]');
+  if (!form) return;
+  event.preventDefault();
+  rateStore(form, false);
+});
+
+/* 点一次就加入队列：不用 runWrite，也不锁页面；别的写操作进行中照样可以排队。
+   加入失败时把原因留在这块里，按钮还能再按。 */
+async function queueStoreInstall(card) {
+  const get = storeGet;
+  if (!get || get.key !== card.key) return;
+  get.error = '';
+  try {
+    applyQueue(await addToStoreQueue(card), {force: true});
+    if (storeGet === get) focusStorePanel('.store-get button, .store-get a');
+  } catch (error) {
+    get.error = error.message;
+    if (storeGet !== get) return;
+    renderStoreDetail();
+    focusStorePanel('.store-get button');
+  }
+}
+
+/* 详情重画会换掉刚按过的按钮：焦点放到面板里的下一个合适位置，找不到就放在「关闭」上。 */
+function focusStorePanel(selector) {
+  if (!state.storeDetail || $('detail-body').contains(document.activeElement)) return;
+  ($('detail-body').querySelector(selector) || $('detail-close')).focus();
+}
+
+async function rateStore(form, remove) {
+  const card = storeCard(state.storeDetail);
+  if (!card || !form) return;
+  const message = form.querySelector('[data-store-rate-message]');
+  const stars = Number(form.querySelector('input[name="store-stars"]:checked')?.value || 0);
+  if (!remove && !stars) {
+    message.textContent = '先点星星打分。';
+    form.querySelector('input[name="store-stars"]').focus();
+    return;
+  }
+  const button = remove ? form.querySelector('[data-store-rate-remove]') : form.querySelector('[type="submit"]');
+  await withBusy(button, remove ? '正在删除…' : '正在保存…', async () => {
+    try {
+      const text = form.elements.text.value.trim();
+      await api(remove ? '/api/team/ratings/remove' : '/api/team/ratings',
+        remove ? {key: card.key} : {key: card.key, stars, ...(text ? {text} : {})});
+      toast({text: remove ? '已删除你的评价。' : '已保存你的评价，同事都能看到。'});
+      await loadStore();
+      focusStorePanel('[data-store-rate] [type="submit"]');
+    } catch (error) {
+      if (form.isConnected) message.textContent = error.message;
+      else toast({text: error.message, tone: 'error'});
+    }
+  });
+}
+
+/* ---------- 上架：先挑技能、写推荐语，再核对要传的文件 ---------- */
+
+let storePick = null;   // {selected: Map(技能名 → 推荐语), plan}
+let storePublishing = false;
+
+async function openPublish(preselect = []) {
+  storePick = {selected: new Map(), plan: null};
+  $('store-pick-search').value = '';
+  showPublishStep('pick');
+  $('store-pick-list').innerHTML = '<p class="muted store-pick-loading">正在读取已启用技能…</p>';
+  $('store-publish-message').textContent = '';
+  $('store-publish-dialog').showModal();
+  try {
+    await loadCandidates();
+  } catch (error) {
+    $('store-pick-list').replaceChildren();
+    $('store-publish-message').textContent = error.message;
+    return;
+  }
+  for (const name of preselect) {
+    const candidate = storeCandidates.find(item => item.name === name);
+    if (candidate && !candidate.unavailable) storePick.selected.set(name, candidate.note || '');
+  }
+  renderPick();
+  if (preselect.length) $('store-pick-list').querySelector('input:checked')?.scrollIntoView({block: 'nearest'});
+  $('store-pick-search').focus();
+}
+
+function showPublishStep(step) {
+  $('store-pick').hidden = step !== 'pick';
+  $('store-review').hidden = step !== 'review';
+  $('store-publish-back').hidden = step !== 'review';
+  $('store-publish-next').hidden = step !== 'pick';
+  $('store-publish-apply').hidden = step !== 'review';
+  $('store-publish-title').textContent = step === 'pick' ? '上架技能' : '核对要上架的技能';
+}
+
+function storePickRowHtml(candidate) {
+  const checked = storePick.selected.has(candidate.name);
+  const name = candidate.title || candidate.name;
+  const state = candidate.listed ? candidate.changed ? '<span class="tag">已修改，可上架新版</span>' : '<span class="tag tag-ok">已上架</span>' : '';
+  const kind = candidate.unavailable ? '' : candidate.kind === 'files' ? `<span class="flag">${icon('file-kept')}包含技能文件</span>`
+    : candidate.kind === 'lark' ? '<span class="flag">飞书官方</span>' : '';
+  return `<div class="store-pick-row${checked ? ' is-checked' : ''}">
+    <label class="store-pick-main">
+      <input type="checkbox" data-store-pick="${escape(candidate.name)}"${checked ? ' checked' : ''}${candidate.unavailable ? ' disabled' : ''}>
+      <span class="store-pick-name"><span class="t">${escape(name)}</span>${candidate.title ? `<span class="skill-id">${escape(candidate.name)}</span>` : ''}</span>
+      <span class="store-pick-tags">${kind}${state}</span>
+    </label>
+    ${candidate.unavailable ? `<p class="row-note">${escape(candidate.unavailable)}</p>` : ''}
+    ${checked ? `<input class="input store-pick-note" data-store-note="${escape(candidate.name)}" maxlength="200"
+      placeholder="${escape(candidate.summary ? `推荐语（留空将使用：${candidate.summary}）` : '推荐语：简述适用场景（选填）')}"
+      aria-label="${escape(`给「${name}」写推荐语`)}" value="${escape(storePick.selected.get(candidate.name))}">` : ''}
+  </div>`;
+}
+
+function renderPick() {
+  const query = $('store-pick-search').value.trim().toLowerCase();
+  const rows = (storeCandidates || []).filter(item => !query ||
+    [item.name, item.title, item.summary, item.group].some(value => String(value || '').toLowerCase().includes(query)));
+  $('store-pick-list').innerHTML = rows.map(storePickRowHtml).join('')
+    || `<div class="empty">${emptyInner('search', storeCandidates?.length ? '未找到匹配技能' : '暂无已启用技能')}</div>`;
+  const count = storePick.selected.size;
+  $('store-publish-next').disabled = !count;
+  $('store-publish-next').textContent = count ? `下一步：核对 ${count} 个` : '下一步：核对';
+  $('store-publish-message').textContent = count ? '' : '选择要推荐给同事的技能。';
+}
+
+$('store-pick-search').addEventListener('input', renderPick);
+
+$('store-pick-list').addEventListener('change', event => {
+  const box = event.target.closest('[data-store-pick]');
+  if (!box) return;
+  const name = box.dataset.storePick;
+  if (box.checked) storePick.selected.set(name, storeCandidates.find(item => item.name === name)?.note || '');
+  else storePick.selected.delete(name);
+  renderPick();
+  const again = $('store-pick-list').querySelector(`[data-store-pick="${CSS.escape(name)}"]`);
+  again?.focus();
+});
+
+$('store-pick-list').addEventListener('input', event => {
+  const note = event.target.closest('[data-store-note]');
+  if (note) storePick.selected.set(note.dataset.storeNote, note.value);
+});
+
+function storeReviewHtml(plan) {
+  const errors = plan.errors?.length ? `<div class="banner banner-warn">
+      <p>${icon('warning')} 以下技能暂不可上架，将跳过上传：</p>
+      <ul class="confirm-items">${plan.errors.map(item => `<li>${escape(item.name)}：${escape(item.reason)}</li>`).join('')}</ul>
+    </div>` : '';
+  const rows = (plan.listings || []).map(item => {
+    let what;
+    if (item.kind === 'files') {
+      what = `包含技能文件：共 ${number(item.files?.count || 0)} 个文件 (${sizeText(item.files?.size || 0)})`;
+    } else if (item.kind === 'lark') {
+      what = '飞书官方技能，仅上传名称与说明';
+    } else if (item.version != null) {
+      what = `公开技能，包含技能文件：共 ${number(item.files?.count || 0)} 个文件 (${sizeText(item.files?.size || 0)})；同事安装时从分享站下载`;
+    } else {
+      what = `公开技能，仅上传名称与来源${item.download_note ? `。${item.download_note}` : ''}`;
+    }
+    const blocked = item.files?.blocked || [];
+    const blockedTitle = item.kind === 'github'
+      ? `已拦截 ${blocked.length} 个疑似敏感凭据文件（此技能仅上传名称与来源）`
+      : `已拦截 ${blocked.length} 个疑似敏感凭据文件（不予上传）`;
+    return `<li class="store-review-row">
+      <p class="store-review-name"><strong>${escape(item.title || item.name)}</strong>${item.title && item.title !== item.name ? ` <span class="skill-id">${escape(item.name)}</span>` : ''}</p>
+      <p class="row-note">${escape(what)}</p>
+      <p class="store-review-note">${item.note ? `“${escape(item.note)}”` : `<span class="muted">未填写推荐语，将使用技能自带的简短说明。</span>`}</p>
+      ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.map(name => storeCandidates?.find(row => row.name === name)?.title || name).join('、'))} 依赖此技能，将一并上架</p>` : ''}
+      ${blocked.length ? `<details class="fold fold-inner store-blocked">
+        <summary>${icon('lock')} ${blockedTitle}</summary>
+        <ul class="confirm-items">${blocked.map(file => `<li><span class="mono">${escape(file.path)}</span>：${escape(file.reason)}</li>`).join('')}</ul>
+      </details>` : ''}
+    </li>`;
+  }).join('');
+  return errors + (rows ? `<ul class="store-review-list">${rows}</ul>` : '');
+}
+
+$('store-publish-next').addEventListener('click', async () => {
+  const skills = [...storePick.selected].map(([name, note]) => ({name, ...(note.trim() ? {note: note.trim()} : {})}));
+  showPublishStep('review');
+  storePick.plan = null;
+  $('store-review').replaceChildren();
+  $('store-publish-message').textContent = '正在核对上传文件…';
+  $('store-publish-apply').disabled = true;
+  $('store-publish-apply').textContent = '上架';
+  try {
+    const plan = await api('/api/team/listings/preview', {skills});
+    if ($('store-review').hidden) return;
+    storePick.plan = plan;
+    $('store-review').innerHTML = storeReviewHtml(plan);
+    const count = plan.listings?.length || 0;
+    $('store-publish-message').textContent = plan.message || '';
+    $('store-publish-apply').disabled = !count || !teamCanWrite();
+    $('store-publish-apply').textContent = count ? `上架 ${count} 个` : '上架';
+    $('store-publish-apply').focus();
+  } catch (error) {
+    $('store-publish-message').textContent = error.message;
+  }
+});
+
+$('store-publish-back').addEventListener('click', () => {
+  storePick.plan = null;
+  showPublishStep('pick');
+  renderPick();
+  $('store-pick-search').focus();
+});
+
+$('store-publish-apply').addEventListener('click', async event => {
+  const plan = storePick?.plan;
+  if (!plan || storePublishing) return;
+  storePublishing = true;
+  $('store-publish-back').disabled = $('store-publish-close').disabled = true;
+  await withBusy(event.currentTarget, '正在上架…', async () => {
+    try {
+      await api('/api/team/listings/apply', {review: plan.review});
+      storePublishing = false;
+      $('store-publish-dialog').close();
+      toast({text: `已上架 ${plan.listings.length} 个技能，同事现在能看到了。`});
+      storeCandidates = null;
+      await loadStore();
+      if (state.storeMine) await loadCandidates().catch(() => {});
+      renderTeam();
+    } catch (error) {
+      $('store-publish-message').textContent = error.message;
+    }
+  });
+  storePublishing = false;
+  $('store-publish-back').disabled = $('store-publish-close').disabled = false;
+});
+
+$('store-publish-close').addEventListener('click', () => $('store-publish-dialog').close());
+$('store-publish-dialog').addEventListener('cancel', event => { if (storePublishing) event.preventDefault(); });
+$('store-publish-dialog').querySelector('form').addEventListener('submit', event => event.preventDefault());
+
 function llmBody() {
   return {provider: $('llm-provider').value, base_url: $('llm-base-url').value, model: $('llm-model').value};
 }
@@ -2091,7 +3247,7 @@ function llmBody() {
 $('extra-source-form').addEventListener('submit', event => {
   event.preventDefault();
   const path = $('extra-source-path').value.trim();
-  withBusy($('extra-source-add'), '正在记下…', async () => {
+  withBusy($('extra-source-add'), '正在保存目录…', async () => {
     try {
       await saveExtraSource(path, false);
       $('extra-source-path').value = '';
@@ -2107,7 +3263,7 @@ $('extra-sources').addEventListener('click', event => {
   if (!button) return;
   const path = extraSourcePaths[Number(button.dataset.extraIndex)];
   if (!path) return;
-  withBusy(button, '正在去掉…', async () => {
+  withBusy(button, '正在移除…', async () => {
     try {
       await saveExtraSource(path, true);
     } catch (error) {
@@ -2149,9 +3305,9 @@ $('llm-form').addEventListener('submit', event => {
 
 $('llm-clear').addEventListener('click', async event => {
   const ok = await confirmDialog({
-    title: '删除已保存的 key？',
+    title: '删除已保存的密钥？',
     lines: ['删除后不会再自动整理技能的中文名、说明和分组，已经整理好的会保留。'],
-    okText: '删除 key',
+    okText: '删除密钥',
   });
   if (!ok) return;
   await withBusy(event.currentTarget, '正在删除…', async () => {
@@ -2160,7 +3316,7 @@ $('llm-clear').addEventListener('click', async event => {
       $('llm-key').value = '';
       await refreshTable(true);
       await refreshSettings();
-      toast({text: '已删除 key。'});
+      toast({text: '已删除密钥。'});
     } catch (error) {
       toast({text: error.message, tone: 'error'});
     }
@@ -2256,10 +3412,10 @@ function renderAgents() {
   const locked = writeBusy || !state.table?.write_allowed ? ' disabled' : '';
   $('agents-scan').disabled = Boolean(discovery.running || writeBusy);
   $('agents-scan').setAttribute('aria-busy', String(Boolean(discovery.running)));
-  $('agents-scan').querySelector('span').textContent = discovery.running ? '正在扫描…' : '重新扫描 agent';
+  $('agents-scan').querySelector('span').textContent = discovery.running ? '正在扫描…' : '重新扫描 Agent';
   const checked = discovery.checked_at ? `上次检查：${new Date(discovery.checked_at).toLocaleString('zh-CN')}` : '';
   $('agents-scan-status').textContent = discovery.error || [discovery.message, checked].filter(Boolean).join(' · ')
-    || '打开时会检查新安装的软件；新装 agent 后，也可以在这里重新扫描。';
+    || '打开看板时自动检查新安装的 Agent，也可手动重新扫描。';
   const managed = view?.managed || [];
   const suggested = view?.suggested || [];
   const ignored = ignoredAgents(view);
@@ -2272,7 +3428,7 @@ function renderAgents() {
     ].filter(Boolean).join(' · ');
     const leave = agent.can_leave
       ? `<button class="btn btn-small btn-quiet" data-agent-leave="${escape(agent.id)}"${locked}>不再管理…</button>`
-      : `<span class="item-note agent-share">${icon('lock')}至少留一个</span>`;
+      : `<span class="item-note agent-share">${icon('lock')}至少保留一个</span>`;
     return `<div class="item-row">
       <div>
         <div class="item-title">${swatch(agent.id)} ${escape(agent.name)}</div>
@@ -2305,7 +3461,7 @@ function renderAgents() {
 $('agents-scan').addEventListener('click', async () => {
   if (state.agentsView?.discovery?.running || writeBusy) return;
   $('agents-scan').disabled = true;
-  $('agents-scan-status').textContent = '正在扫描 agent…';
+  $('agents-scan-status').textContent = '正在扫描 Agent…';
   try {
     await api('/api/agents/scan', {});
     await refreshAgents();
@@ -2407,7 +3563,7 @@ async function joinAgent(id, button) {
     success: result => {
       if (!result) return null;
       const missing = sharedNames.filter(name => !(result.message || '').includes(name));
-      const text = result.message || '新 agent 已经接入';
+      const text = result.message || '新 Agent 已接入';
       return {
         text: missing.length ? `${text}，一并接入 ${missing.join('、')}` : text,
         undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
@@ -2464,7 +3620,7 @@ for (const id of ['rail-notes', 'agents-suggested', 'agents-ignored']) {
 const JOIN_ACTIONS = [
   ['linked', '已经在用统一仓库', '直接登记分配。'],
   ['link', '内容一致，改成统一管理', '改为使用仓库里的那份。'],
-  ['import', '收进统一仓库', '仓库里还没有，收进来。'],
+  ['import', '收进统一仓库', '技能库中尚未收录，将添加至技能库。'],
   ['choose', '内容不同，需要你选', '每一条单独选，默认保留仓库里的版本。'],
   ['skipped', '原样留着', '这些内容不动。'],
 ];
@@ -2476,21 +3632,21 @@ function joinRows(plan, action) {
 function joinChoiceRow(skill) {
   const options = skill.options.map(option => `<p class="join-option"><label class="check">
     <input type="radio" name="join-choice-${escape(skill.name)}" data-join-choice="${escape(skill.name)}" value="${escape(option.id)}" ${option.id === skill.default ? 'checked' : ''}>
-    ${option.origin === 'store' ? '用统一仓库里的（默认）' : '用这个 agent 里的'}</label>
+    ${option.origin === 'store' ? '用统一仓库里的（默认）' : '用这个 Agent 里的'}</label>
     <span class="mono">${pathLabel(option.path)}</span></p>`).join('');
   return `<details class="fold fold-inner join-choice" data-join-row="${escape(skill.name)}">
     <summary>${escape(skill.name)} <span class="tag tag-quiet">内容不同</span></summary>
     <p class="item-note">${escape(skill.reason)}</p>
     ${options}
     ${skill.comparison ? `<details class="fold fold-inner"><summary data-join-compare="${escape(skill.name)}">看看差别</summary><pre></pre></details>` : ''}
-    <p class="item-note" data-join-warn hidden>选了这一份，会更新所有 agent 用的这份技能。</p>
+    <p class="item-note" data-join-warn hidden>选择此版本后，所有已分配的 Agent 将统一使用此内容。</p>
     <p class="item-note">${(skill.entries || []).map(pathLabel).join('、')}</p>
   </details>`;
 }
 
 function renderJoin(plan) {
   $('join-summary').textContent = (plan.profiles || []).map(profile => `${profile.name}（${rootsLabel(profile.skill_roots)}）`).join('；')
-    || '这次没有要接入的 agent。';
+    || '本次没有待接入的 Agent。';
   $('join-counts').innerHTML = JOIN_ACTIONS.map(([action, label, note]) => {
     const count = joinRows(plan, action).length;
     return count ? `<p><strong>${escape(label)}：${count} 个</strong>${hint(note)}</p>` : '';
@@ -2536,7 +3692,7 @@ $('join-apply').addEventListener('click', async event => {
       return result;
     },
     success: result => ({
-      text: result.message || '新 agent 已经接入',
+      text: result.message || '新 Agent 已接入',
       undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
     }),
   });
@@ -2555,7 +3711,7 @@ function entriesFor(name) {
   return rows;
 }
 
-function renderDetail() {
+function renderDetail(assignmentsOnly = false) {
   const skill = state.table?.skills.find(s => s.name === state.detail);
   if (!skill) { closeDetail(); return; }
   $('detail-title').textContent = skill.title || skill.name;
@@ -2567,8 +3723,8 @@ function renderDetail() {
     const pending = on !== assignedNow(skill.name, agent.id);
     let text;
     if (pending) text = pendingNote(skill.name, agent.id);
-    else if (!on) text = cellNote(skill, agent) || (disabledFor.has(agent.id) ? `${agent.name} 里停用了` : '没用');
-    else text = '在用';
+    else if (!on) text = cellNote(skill, agent) || (disabledFor.has(agent.id) ? `${agent.name} 中已停用` : '未启用');
+    else text = '已启用';
     return `<div class="who-row${pending ? ' is-pending' : ''}">
       <span class="who-name">${swatch(agent.id)}${escape(agent.name)}</span>
       <p${pending ? ' class="is-pending"' : ''}>${escape(text)}</p>
@@ -2576,9 +3732,28 @@ function renderDetail() {
     </div>`;
   }).join('');
 
+  // 拨动详情里的开关时，只更新状态和说明，保留正在滑动的按钮。
+  if (assignmentsOnly) {
+    const rows = [...$('detail-body').querySelectorAll('.who-row')];
+    const template = document.createElement('template');
+    template.innerHTML = who;
+    const next = [...template.content.children];
+    if (rows.length === next.length && rows.every((row, index) => row.querySelector('.switch').dataset.agent === next[index].querySelector('.switch').dataset.agent)) {
+      rows.forEach((row, index) => {
+        row.className = next[index].className;
+        row.querySelector('p').replaceWith(next[index].querySelector('p'));
+        const button = row.querySelector('.switch'), updated = next[index].querySelector('.switch');
+        button.className = updated.className;
+        button.setAttribute('aria-checked', updated.getAttribute('aria-checked'));
+        button.disabled = updated.disabled;
+      });
+      return;
+    }
+  }
+
   const requires = skill.requires.map(name => `<span class="chip"><button data-open="${escape(name)}">${escape(titleOf(name))}</button>
       <button class="chip-x" data-dep-remove="${escape(skill.name)}" data-dep-name="${escape(name)}"
-        aria-label="${escape('不再一起带上 ' + titleOf(name))}" ${locked ? 'disabled' : ''}>移除</button></span>`).join('');
+        aria-label="${escape('移除依赖项 ' + titleOf(name))}" ${locked ? 'disabled' : ''}>移除</button></span>`).join('');
   const requiredBy = (state.table?.skills || []).filter(s => s.requires.includes(skill.name))
     .map(s => `<span class="chip chip-solo"><button data-open="${escape(s.name)}">${escape(titleOf(s.name))}</button></span>`).join('');
   const options = (state.table?.skills || [])
@@ -2603,7 +3778,7 @@ function renderDetail() {
   const tags = detailTagsHtml(skill, locked || detailTagBusy);
   const zh = skill.description_zh;
   // 有些说明本来就是中文，这时没有“英文原文”可说
-  const original = /[\u4e00-\u9fff]/.test(skill.description) ? '看原文' : '看英文原文';
+  const original = /[\u4e00-\u9fff]/.test(skill.description) ? '查看原文' : '查看英文原文';
 
   $('detail-body').innerHTML = `
     ${skill.title ? `<p class="detail-id">${escape(skill.name)}</p>` : ''}
@@ -2611,32 +3786,32 @@ function renderDetail() {
     ${skill.summary ? `<p class="detail-summary">${escape(skill.summary)}</p>` : ''}
     ${tags}
 
-    <h3 class="sub-title">谁在用</h3>
+    <h3 class="sub-title">Agent 分配情况</h3>
     <div class="who">${who}</div>
 
-    <h3 class="sub-title">会一起带上${hint('给某个 agent 加上它时，这些技能会自动一起加上。')}</h3>
-    ${requires ? `<div class="chips">${requires}</div>` : `<p class="item-note">${icon('link')} 不需要别的技能</p>`}
+    <h3 class="sub-title">前置依赖${hint('启用此技能时，所依赖的技能将一并启用。')}</h3>
+    ${requires ? `<div class="chips">${requires}</div>` : `<p class="item-note">${icon('link')} 无前置依赖</p>`}
     <details class="fold fold-inner">
-      <summary>加一个要一起带上的技能</summary>
+      <summary>添加依赖项</summary>
       <p class="row-wrap">
-        <select id="dep-select" class="input" aria-label="选择要一起带上的技能"><option value="">选一个技能…</option>${options}</select>
-        <button class="btn btn-small" id="dep-add" data-dep-add="${escape(skill.name)}" disabled>${icon('plus')}<span>加上</span></button>
-        ${hint(`加上后，用「${titleOf(skill.name)}」的 agent 会自动一起分到它。可以撤销。`)}
+        <select id="dep-select" class="input" aria-label="选择前置依赖"><option value="">选择技能…</option>${options}</select>
+        <button class="btn btn-small" id="dep-add" data-dep-add="${escape(skill.name)}" disabled>${icon('plus')}<span>添加依赖</span></button>
+        ${hint(`添加后，已启用「${titleOf(skill.name)}」的 Agent 将一并启用此依赖，支持撤销。`)}
       </p>
     </details>
-    ${requiredBy ? `<h3 class="sub-title">谁要用它</h3><div class="chips">${requiredBy}</div>` : ''}
+    ${requiredBy ? `<h3 class="sub-title">被以下技能依赖</h3><div class="chips">${requiredBy}</div>` : ''}
 
-    <h3 class="sub-title">${zh ? '说明' : 'agent 实际读到的说明'} <span class="sub-note">· 约 ${tokenText(skill.description_tokens)} Token</span>${hint('每次开新对话，agent 都要先读一遍这段说明，大约占这么多 Token。')}</h3>
+    <h3 class="sub-title">${zh ? '说明' : 'Agent 实际读取的说明'} <span class="sub-note">· 约 ${tokenText(skill.description_tokens)} Token</span>${hint('Agent 启动新对话时会加载此说明，Token 按文本长度估算。')}</h3>
     ${zh ? `<p class="detail-desc">${escape(zh)}</p>
-      <details class="fold fold-inner"><summary>${original}（agent 实际读到的）</summary><p class="detail-desc">${escape(skill.description)}</p></details>`
+      <details class="fold fold-inner"><summary>${original}（Agent 实际读取的文本）</summary><p class="detail-desc">${escape(skill.description)}</p></details>`
       : `<p class="detail-desc">${escape(skill.description)}</p>`}
 
     <h3 class="sub-title">其他</h3>
     <dl class="detail-list">
-      <dt>从哪来</dt><dd>${escape(skill.source_label || '没记录')}</dd>
-      <dt>改过没有</dt><dd>${skill.local_modified ? `${icon('edit')} 你改过${hint('你在这台电脑上改过它，更新时会问你要哪一份。')}` : `${icon('check-circle')} 没改过`}</dd>
+      <dt>来源</dt><dd>${escape(skill.source_label || '未记录')}</dd>
+      <dt>本地修改</dt><dd>${skill.local_modified ? `${icon('edit')} 已修改${hint('此技能已有本地修改，更新前需选择保留的内容。')}` : `${icon('check-circle')} 未修改`}</dd>
       <dt>更新提醒</dt><dd class="row-wrap">${['all', 'description', 'off'].map(mode => {
-        const label = {all: '照常提醒', description: '只看说明有没有变', off: '先不提醒'}[mode];
+        const label = {all: '全部提醒', description: '仅说明变动时提醒', off: '暂不提醒'}[mode];
         const on = (skill.update_watch || 'all') === mode;
         return `<button class="btn btn-small${on ? '' : ' btn-quiet'}" data-watch="${mode}" data-watch-skill="${escape(skill.name)}" ${on || locked ? 'disabled' : ''}>${escape(label)}</button>`;
       }).join('')}</dd>
@@ -2644,11 +3819,11 @@ function renderDetail() {
     </dl>
 
     <details class="fold fold-inner">
-      <summary data-hint="排查问题时用，平时不用看。">技术细节</summary>
+      <summary data-hint="包含本地文件路径与入口状态，供排查参考。">技术细节</summary>
       <dl class="detail-list">
         <dt>存放位置</dt><dd class="mono">${pathLabel(homePath() + '/.skill-pilot/store/' + skill.name)}</dd>
       </dl>
-      ${entries ? `<ul class="entry-list">${entries}</ul>` : '<p class="item-note">没找到这个技能在 agent 文件夹里的入口。</p>'}
+      ${entries ? `<ul class="entry-list">${entries}</ul>` : '<p class="item-note">未找到此技能在 Agent 目录中的入口。</p>'}
     </details>`;
 }
 
@@ -2683,7 +3858,7 @@ function detailTabbables(panel) {
 function trapDetailTab(event) {
   const panel = $('detail-panel');
   // 开始收起后就不再拦 Tab，免得焦点被拉回正在消失的面板。
-  if (!state.detail || panel.hidden) return;
+  if (!(state.detail || state.storeDetail) || panel.hidden) return;
   const items = detailTabbables(panel);
   if (!items.length) {
     event.preventDefault();
@@ -2742,12 +3917,17 @@ function openDetail(name) {
   if (state.detail !== name || $('detail-panel').hidden) detailOpener = document.activeElement?.closest('#skills-list') ? document.activeElement : null;
   state.detail = name;
   renderDetail();
+  showDetailPanel(() => state.detail === name);
+}
+
+/* 技能详情和团队商店的详情共用这块面板。stillOpen 判断动画开始前用户有没有换走。 */
+function showDetailPanel(stillOpen) {
   const panel = $('detail-panel');
   panel.hidden = false;
   $('panel-scrim').hidden = false;
   $('detail-body').scrollTop = 0;
   requestAnimationFrame(() => {
-    if (state.detail !== name || panel.hidden) return;
+    if (!stillOpen() || panel.hidden) return;
     panel.classList.add('is-open');
   });
   // 先把焦点放进面板，再锁住后面的页面，避免焦点在中途落到页脚并带着页面滚。
@@ -2758,14 +3938,26 @@ function openDetail(name) {
 function closeDetail() {
   const panel = $('detail-panel');
   panel.classList.remove('is-open');
+  const storeKey = state.storeDetail;
   state.detail = null;
+  state.storeDetail = null;
+  storeGet = null;
   setTimeout(() => {
-    if (state.detail) return;
+    if (state.detail || state.storeDetail) return;
     panel.classList.remove('is-open');
     panel.hidden = true;
     $('panel-scrim').hidden = true;
   }, 200);
   holdDetailBackground(false);
+  if (storeKey) {
+    // 商店的卡片或列表行可能已经重画过：按卡片编号找回来，把焦点还给它。
+    const selector = `[data-store-open="${CSS.escape(storeKey)}"]`;
+    const opener = storeOpener?.isConnected ? storeOpener
+      : (storeOpenerArea && $(storeOpenerArea)?.querySelector(selector)) || $('page-team').querySelector(selector);
+    opener?.focus();
+    storeOpener = null;
+    return;
+  }
   // 列表可能已经重画过：按技能名找回打开详情的那一行，把焦点还给它。
   const openerName = detailOpener?.dataset?.open || detailOpener?.dataset?.updateUp;   // 从技能名或更新小箭头打开的
   const opener = detailOpener?.isConnected ? detailOpener
@@ -2820,9 +4012,9 @@ $('detail-body').addEventListener('click', async event => {
     const mode = button.dataset.watch;
     const name = button.dataset.watchSkill;
     const words = {
-      all: '以后照常提醒有新版',
-      description: '以后只看技能说明有没有变，旁边的资料变了不提醒',
-      off: '以后检查更新时先不提醒',
+      all: '提醒全部更新',
+      description: '仅在技能说明变动时提醒，辅助资料变动不提醒',
+      off: '暂停更新提醒',
     };
     const ok = await confirmDialog({
       title: '更新提醒',
@@ -2850,16 +4042,16 @@ $('detail-body').addEventListener('click', async event => {
     const requires = $('dep-select')?.value;
     if (!requires) return;
     const ok = await confirmDialog({
-      title: '加一个要一起带上的技能',
-      lines: [`以后给 agent 加上「${titleOf(addName)}」时，会自动一起加上「${titleOf(requires)}」。现在用着「${titleOf(addName)}」的 agent 也会一起分到它。`],
-      note: '可以撤销。', okText: '加上',
+      title: '添加依赖项',
+      lines: [`启用「${titleOf(addName)}」时，将一并启用「${titleOf(requires)}」。当前已启用「${titleOf(addName)}」的 Agent 也将分配该依赖。`],
+      note: '支持撤销。', okText: '添加依赖',
     });
     if (!ok) return;
     await decideDependency(addName, requires, true, button);
   } else if (removeName) {
     const ok = await confirmDialog({
-      title: '不再一起带上',
-      lines: [`以后给 agent 加上「${titleOf(removeName)}」时，不再自动带上「${titleOf(button.dataset.depName)}」。现在的分配保持不变。`],
+      title: '移除依赖项',
+      lines: [`启用「${titleOf(removeName)}」时，将不再自动启用「${titleOf(button.dataset.depName)}」。当前分配保持不变。`],
       note: '可以撤销。', okText: '移除',
     });
     if (!ok) return;
@@ -2876,7 +4068,7 @@ async function decideDependency(skill, requires, confirmed, button) {
       await refreshEverything();
       return true;
     },
-    success: () => ({text: confirmed ? '以后会一起带上这个技能' : '以后不再一起带上它'}),
+    success: () => ({text: confirmed ? '已添加前置依赖' : '已移除前置依赖'}),
   });
 }
 
@@ -2914,18 +4106,18 @@ function installSummary(review) {
   const installed = conflicts.filter(item => item.same_content).length;
   const compare = conflicts.length - installed;
   const ready = installReadyNames(review).length;
-  if (!skills.length) return {title: '这个链接里没找到技能', notes: [], items: []};
+  if (!skills.length) return {title: '未在此链接中找到技能', notes: [], items: []};
   const notes = [];
-  if (ready) notes.push(`${ready} 个可以直接装`);
-  if (installed) notes.push(`${installed} 个已经装过`);
-  if (compare) notes.push(`${compare} 个同名，要先对比`);
+  if (ready) notes.push(`${ready} 个可直接安装`);
+  if (installed) notes.push(`${installed} 个已安装`);
+  if (compare) notes.push(`${compare} 个存在同名内容，需核对`);
   const byName = new Map(conflicts.map(item => [item.name, item]));
   const items = skills.map(skill => {
     const conflict = byName.get(skill.name);
-    const status = conflict ? (conflict.same_content ? '已经装过' : '要先对比') : '';
+    const status = conflict ? (conflict.same_content ? '已安装' : '需核对') : '';
     return {name: skill.name, purpose: installPurpose(skill.description), status};
   });
-  return {title: `读到 ${skills.length} 个技能`, notes, items};
+  return {title: `已获取 ${skills.length} 个技能`, notes, items};
 }
 
 /* 左栏卡片：不另开窗口就能看到装什么、有什么用、给谁。多于三个先显示前三个。 */
@@ -2940,7 +4132,7 @@ function installSummaryCard(review, agentName, expanded, writable) {
   const showTarget = Boolean(agentName) && (ready.length > 0 || conflicts.some(item => !item.same_content));
   const items = shown.map(item => {
     const tag = item.status
-      ? `<span class="tag ${item.status === '要先对比' ? 'tag-warn' : 'tag-quiet'}">${escape(item.status)}</span>`
+      ? `<span class="tag ${item.status === '需核对' ? 'tag-warn' : 'tag-quiet'}">${escape(item.status)}</span>`
       : '';
     const purpose = item.purpose ? `<span class="install-summary-purpose">${escape(item.purpose)}</span>` : '';
     const detail = purpose || tag ? `<p class="item-note install-summary-detail">${purpose}${tag}</p>` : '';
@@ -2950,23 +4142,23 @@ function installSummaryCard(review, agentName, expanded, writable) {
     ? '<button type="button" class="link-btn" data-install-more>查看全部</button>'
     : (expanded && summary.items.length > preview ? '<button type="button" class="link-btn" data-install-more="open">收起</button>' : '');
   const facts = [];
-  if (showTarget) facts.push(`装给 ${agentName}`);
+  if (showTarget) facts.push(`添加至 ${agentName}`);
   if (summary.notes.length) facts.push(summary.notes.join('，'));
   return `<p class="rail-note-title">${icon('plus')}<strong>${escape(summary.title)}</strong></p>
     ${items ? `<ul class="install-summary">${items}</ul>` : ''}
     ${more}
     ${facts.length ? `<p class="item-note">${escape(facts.join(' · '))}。</p>` : ''}
     <div class="install-actions">
-      ${ready.length && agentName ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>全部装给 ${escape(agentName)}</button>` : ''}
+      ${ready.length && agentName ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>全部添加给 ${escape(agentName)}</button>` : ''}
       <div class="install-actions-row">
-        ${pickable ? '<button class="btn btn-small" data-install-pick>挑一挑</button>' : ''}
+        ${pickable ? '<button class="btn btn-small" data-install-pick>挑选安装</button>' : ''}
         ${installDismissButton()}
       </div>
     </div>`;
 }
 
 const installDismissButton = () =>
-  `<button class="btn btn-quiet btn-iconic" data-install-dismiss aria-label="关闭这张卡片" title="关闭">${icon('close')}</button>`;
+  `<button class="btn btn-quiet btn-iconic" data-install-dismiss aria-label="关闭安装摘要" title="关闭">${icon('close')}</button>`;
 
 /* 左栏安装区：粘贴框下面按状态显示一张卡片（正在读取 / 概要 / 没读成），读取不挡住页面。 */
 function renderInstallRail() {
@@ -2976,12 +4168,12 @@ function renderInstallRail() {
   if (installReadingUrl) {
     card.hidden = false;
     card.innerHTML = `<p class="rail-note-title"><strong>正在读取…</strong></p>
-      <p class="item-note">页面照常能用，读完这里显示概要。</p>`;
+      <p class="item-note">正在解析技能名称、用途与安装状态。</p>`;
     return;
   }
   if (installReadError) {
     card.hidden = false;
-    card.innerHTML = `<p class="rail-note-title">${icon('warning')}<strong>没读成</strong></p>
+    card.innerHTML = `<p class="rail-note-title">${icon('warning')}<strong>解析未完成</strong></p>
       <p class="item-note">${escape(installReadError)}</p>
       <div class="install-actions-row">
         <button class="btn btn-small" data-install-retry${writable ? '' : ' disabled'}>重试</button>
@@ -3133,9 +4325,9 @@ function renderInstallSkills(review) {
       <p class="item-note">${escape((skill.description || '').slice(0, 160))}</p>
       ${conflict ? `<p class="item-note"><span class="tag tag-warn">${icon('warning')}已有同名技能</span>${hint('安装时会先让你对比两份内容。')}</p>` : ''}
     </div>`;
-  }).join('') || '<p class="item-note">这个链接里没找到技能。</p>';
+  }).join('') || '<p class="item-note">未在此链接中找到技能。</p>';
   const allInstalled = skills.length > 0 && skills.every(skill => conflicts.get(skill.name)?.same_content);
-  $('install-message').textContent = !skills.length ? '这个链接里没找到技能。'
+  $('install-message').textContent = !skills.length ? '未在此链接中找到技能。'
     : allInstalled ? '这些技能都已经装过了'
     : `找到 ${skills.length} 个技能。`;
   renderInstallApply();
@@ -3176,8 +4368,8 @@ async function showIncomingConflicts(result, reviewId) {
 
 /* 完成提示：一个技能写名字，多个写数量；给谁用照 agent 的名字写。 */
 function installDoneText(skills, agents) {
-  const what = skills.length === 1 ? `装好了 ${skills[0]}` : `装好了 ${skills.length} 个技能`;
-  return what + (agents.length ? `，给了 ${agents.map(nameOf).join('、')}` : '，还没给 agent 用');
+  const what = skills.length === 1 ? `已安装 ${skills[0]}` : `已安装 ${skills.length} 个技能`;
+  return what + (agents.length ? `，已分配给 ${agents.map(nameOf).join('、')}` : '，尚未分配给 Agent');
 }
 
 /* 只点一次安装：不再弹确认框，装完直接关窗、刷新列表，中文名在后台补。 */
@@ -3282,6 +4474,7 @@ function showReview(review) {
     renderSkillTable();
     if (state.detail) renderDetail();
   }
+  if (homeVisible) renderHomeTodos();
 }
 
 /* 这次没查的技能和原因。名单在开始检查时已经记下，这里只读。 */
@@ -3310,22 +4503,22 @@ function updateResultSentence(review) {
   const failed = rows.filter(row => row.error).length;
   const skipped = uncheckedReasons(review);
   const when = updateCheckedAtText(review.checked_at);
-  const finish = text => when ? `${text}。${when} 检查` : `${text}。`;
+  const finish = text => when ? `${text}（${when} 检查）。` : `${text}。`;
   if (!review.total) {
-    let why = '还没有技能';
-    if (!skipped.known) why = '暂时说不清为什么没查';
+    let why = '暂无技能';
+    if (!skipped.known) why = '本次未记录检查范围';
     else if (skipped.count) {
-      const detail = skipped.single ? `这 ${number(skipped.count)} 个${skipped.text}` : skipped.text;
-      why = `${detail}，所以没检查`;
+      const detail = skipped.single ? `${number(skipped.count)} 个技能${skipped.text}` : skipped.text;
+      why = `${detail}，已跳过检查`;
     }
-    return finish(`没有可查的技能：${why}`);
+    return finish(`暂无可检查的技能：${why}`);
   }
-  const outcome = waiting ? `${number(waiting)} 个有新版`
-    : (failed || skipped.count || !skipped.known) ? '没发现新版'
-    : '都是最新的';
-  const lead = `查了 ${number(review.total)} 个，${outcome}`;
+  const outcome = waiting ? `${number(waiting)} 个有可用更新`
+    : (failed || skipped.count || !skipped.known) ? '未发现可用更新'
+    : '均为最新版本';
+  const lead = `已检查 ${number(review.total)} 个技能，${outcome}`;
   if (!skipped.count) return finish(lead);
-  return finish(`${lead}。另外 ${number(skipped.count)} 个没查：${skipped.text}`);
+  return finish(`${lead}；其余 ${number(skipped.count)} 个未检查：${skipped.text}`);
 }
 
 /* 工具栏：检查按钮（带进度）和“全部更新”。
@@ -3339,8 +4532,8 @@ function renderUpdateBar() {
   const failed = rows.filter(row => row.error);
   const notUpdated = rows.filter(row => row.update_error || (row.has_update && row.blocked_reason));
   const problems = [...failed, ...notUpdated];
-  const failureCounts = [failed.length ? `${failed.length} 个没查成` : '',
-    notUpdated.length ? `${notUpdated.length} 个没更新` : ''].filter(Boolean).join('，');
+  const failureCounts = [failed.length ? `${failed.length} 个检查失败` : '',
+    notUpdated.length ? `${notUpdated.length} 个更新未完成` : ''].filter(Boolean).join('，');
 
   const check = $('updates-check');
   check.disabled = checking || Boolean(writeBusy);
@@ -3374,6 +4567,7 @@ $('updates-status').addEventListener('click', event => {
 async function checkUpdates() {
   updateState.starting = true;
   renderUpdateBar();
+  if (homeVisible) renderHomeTodos();
   setTask('updates', {text: '正在准备检查名单…'});
   try {
     showReview(await api('/api/updates/check', {}));
@@ -3382,6 +4576,7 @@ async function checkUpdates() {
   } finally {
     updateState.starting = false;
     renderUpdateBar();
+    if (homeVisible) renderHomeTodos();
   }
 }
 
@@ -3416,21 +4611,21 @@ function detailUpdateHtml(row) {
     <p class="update-summary">${row.file_count ? `${number(row.file_count)} 个文件有变化，新增 ${number(row.added_lines)} 行，删除 ${number(row.removed_lines)} 行` : escape(row.status)}${row.updated_at ? ' · 上游 ' + escape(friendlyDate(row.updated_at)) + '更新' : ''}</p>
     ${row.blocked_reason ? `<div class="risk-block"><p>${escape(row.blocked_reason)}</p></div>` : ''}
     ${row.script_files?.length ? `<div class="risk-block">
-      <p><strong>脚本或执行权限有变化，请先看</strong></p>
+      <p><strong>脚本或执行权限发生变化，请先核对</strong></p>
       <p>${row.script_files.map(escape).join('、')}</p>
       ${(row.risk_hits || []).map(hit => `<p class="risk-line">${escape(hit.file)}：${escape(hit.line)}</p>`).join('')}
     </div>` : ''}
-    ${row.baseline_uncertain ? '<p class="item-note">无法判断你是否改过这个技能，默认用新版。</p>' : ''}
+    ${row.baseline_uncertain ? '<p class="item-note">无法确认此技能是否有本地修改，默认使用新版。</p>' : ''}
     <div class="update-links">
-      <button class="link-btn" data-update-diff="${escape(row.name)}">${updateState.open.has(row.name) ? '收起完整对比' : '看完整对比'}</button>
+      <button class="link-btn" data-update-diff="${escape(row.name)}">${updateState.open.has(row.name) ? '收起完整对比' : '查看完整对比'}</button>
       <button class="link-btn" data-update-explain="${escape(row.name)}" ${canAct ? '' : 'disabled'}>让 Codex 解释</button>
       ${asks ? `<button class="link-btn" data-update-merge="${escape(row.name)}" ${canAct ? '' : 'disabled'}>交给 Codex 合并</button>` : ''}
     </div>
     <div class="update-actions">
-      ${asks ? `<label class="update-choice">${row.baseline_uncertain ? '不确定你改没改过' : '你改过这个技能'}，更新时
+      ${asks ? `<label class="update-choice">${row.baseline_uncertain ? '本地修改状态未确认' : '此技能已有本地修改'}，更新时
         <select class="input" data-update-choice="${escape(row.name)}" ${canAct ? '' : 'disabled'}>
-          <option value="upstream" ${choice === 'upstream' ? 'selected' : ''}>用新版</option>
-          <option value="keep" ${choice === 'keep' ? 'selected' : ''}>保留我的</option>
+          <option value="upstream" ${choice === 'upstream' ? 'selected' : ''}>使用新版</option>
+          <option value="keep" ${choice === 'keep' ? 'selected' : ''}>保留本地版本</option>
           ${merge ? `<option value="merge" ${choice === 'merge' ? 'selected' : ''}>采用已核对的合并结果</option>` : ''}
         </select></label>` : '<span></span>'}
       <button class="btn btn-primary btn-small" data-update-one="${escape(row.name)}" ${canAct ? '' : 'disabled'}>${row.source?.kind === 'lark' ? '更新整组飞书技能' : '更新'}</button>
@@ -3460,11 +4655,11 @@ async function chooseUpdate(select) {
   updateState.choices.set(name, select.value);
   if (select.value !== 'keep') return;
   updateState.busy = true;
-  updateState.notices.set(name, {text: '正在找你改过的地方…'});
+  updateState.notices.set(name, {text: '正在检查本地修改…'});
   renderDetail();
   try {
     const result = await api('/api/updates/calibrate', {review_id: updateState.review.id, name});
-    updateState.notices.set(name, result.comparison ? {pre: result.comparison} : {text: '没有发现你改过的地方。'});
+    updateState.notices.set(name, result.comparison ? {pre: result.comparison} : {text: '未发现本地修改。'});
   } catch (error) {
     updateState.choices.set(name, 'upstream');
     updateState.notices.set(name, {text: error.message});
@@ -3542,7 +4737,7 @@ async function applyUpdates(names, button = null) {
       const notes = [
         choices[name] === 'keep' ? '保留我的' : choices[name] === 'merge'
           ? mergeIds[name] ? '用已核对的合并结果' : '合并结果尚未确认，本次会跳过'
-          : row.local_modified ? '你改过，会换成新版' : row.baseline_uncertain ? '不确定你改没改过，会换成新版' : '',
+          : row.local_modified ? '已有本地修改，将替换为新版' : row.baseline_uncertain ? '本地修改状态未确认，将替换为新版' : '',
         row.script_files?.length ? '脚本有变化' : '',
         row.source?.kind === 'lark' ? '飞书技能，整组一起更新' : '',
       ].filter(Boolean);
@@ -3624,18 +4819,18 @@ function renderCleanup() {
       <td><strong>${nameHtml(skill.name)}</strong>${skill.summary ? `<p class="skill-desc">${escape(skill.summary)}</p>` : ''}</td>
       <td>${(state.saved[skill.name] || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('')}</td>
       <td class="col-num">${tokenText(skill.description_tokens)}</td>
-    </tr>`).join('') || `<tr><td class="empty" colspan="4">${searching ? emptyInner('search', '没找到，换个词试试') : emptyInner('check-circle', '没有可撤下的技能')}</td></tr>`;
+    </tr>`).join('') || `<tr><td class="empty" colspan="4">${searching ? emptyInner('search', '未找到匹配技能') : emptyInner('check-circle', '没有可撤下的技能')}</td></tr>`;
 
   // 已撤下的：原来给了谁用颜色块和名字，和上面“现在给了谁”一个样子
   const view = state.cleanup;
-  const was = row => (row.previous_agents || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('') || '没有记录';
+  const was = row => (row.previous_agents || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('') || '未记录';
   $('withdrawn-list').innerHTML = !view ? '<p class="item-note">正在读取…</p>' : view.withdrawn.map(row => `<div class="item-row">
     <div>
       <div class="item-title">${nameHtml(row.name)}</div>
-      <div class="item-note">原来给 ${was(row)}${row.withdrawn_at ? ` · ${escape(friendlyDate(row.withdrawn_at))}撤下` : ''}</div>
+      <div class="item-note">曾分配给 ${was(row)}${row.withdrawn_at ? ` · 撤下于 ${escape(friendlyDate(row.withdrawn_at))}` : ''}</div>
     </div>
     <span class="item-end"><button class="btn btn-small" data-restore-withdrawn="${escape(row.name)}" ${view.write_allowed && !writeBusy ? '' : 'disabled'}>${icon('undo')}<span>恢复…</span></button></span>
-  </div>`).join('') || `<div class="empty">${emptyInner('cleanup', '还没有撤下过技能')}</div>`;
+  </div>`).join('') || `<div class="empty">${emptyInner('cleanup', '暂无已撤下技能')}</div>`;
   renderCleanupActionBar();
 }
 
@@ -3647,16 +4842,16 @@ function renderCleanupActionBar() {
   const savings = state.agents.map(agent => {
     const cost = names.filter(name => (state.saved[name] || []).includes(agent.id))
       .reduce((sum, name) => sum + (state.skillIndex.get(name)?.description_tokens || 0), 0);
-    return cost ? `${agent.name} 少占 ${tokenText(cost)} Token` : '';
+    return cost ? `${agent.name} 可释放约 ${tokenText(cost)} Token 开销` : '';
   }).filter(Boolean);
   showActionBar({
-    text: `选了 ${names.length} 个，还没撤下`,
-    note: [savings.join('、'), '撤下只是不给 agent 用，文件还留着，随时能恢复'].filter(Boolean).join('。'),
+    text: `已选 ${names.length} 个待撤下技能`,
+    note: [savings.join('、'), '保留本地文件，随时可恢复'].filter(Boolean).join('。'),
     items: names.map(name => `<li><p>「${escape(titleOf(name))}」<small>${escape((state.saved[name] || []).map(nameOf).join('、'))}</small></p>
-      <button class="btn btn-quiet btn-small" data-cleanup-unpick="${escape(name)}">不撤这个</button></li>`).join(''),
+      <button class="btn btn-quiet btn-small" data-cleanup-unpick="${escape(name)}">取消选择</button></li>`).join(''),
     buttons: [
-      {label: '全部不选', kind: 'btn btn-quiet', action: () => { state.cleanupSelected.clear(); renderCleanup(); }},
-      {label: `撤下这 ${names.length} 个`, kind: 'btn btn-primary', disabled: !state.table?.write_allowed || Boolean(writeBusy), action: button => applyCleanup(button)},
+      {label: '全部取消', kind: 'btn btn-quiet', action: () => { state.cleanupSelected.clear(); renderCleanup(); }},
+      {label: `确认撤下 (${names.length})`, kind: 'btn btn-primary', disabled: !state.table?.write_allowed || Boolean(writeBusy), action: button => applyCleanup(button)},
     ],
   });
 }
@@ -3668,14 +4863,16 @@ async function loadCleanup() {
   if (awaitingFirstOrganization()) {
     state.cleanup = null;
     renderCleanup();
+    if (homeVisible) renderHomeTodos();
     return;
   }
   try {
     state.cleanup = await api('/api/cleanup');
   } catch (error) {
-    toast({text: '已撤下的技能没能读出来：' + error.message, tone: 'error'});
+    toast({text: '已撤下技能读取失败：' + error.message, tone: 'error'});
   }
   renderCleanup();
+  if (homeVisible) renderHomeTodos();
 }
 
 /* 先请后台核对一遍（依赖、你的文件里提到的位置），确认后再撤下。 */
@@ -3692,11 +4889,11 @@ async function applyCleanup(button) {
   const files = new Set((plan.path_warnings || []).map(warning => warning.file));
   const ok = await confirmDialog({
     title: '撤下这些技能',
-    lines: [`从所有 agent 撤下这 ${skills.length} 个技能，文件还留着，随时能恢复。`,
+    lines: [`将从全部 Agent 撤下这 ${skills.length} 个技能，保留本地文件，随时可恢复。`,
             ...(plan.dependency_warnings || []),
-            files.size ? `有 ${files.size} 份你的文件里写着这些技能现在的位置，撤下后那些说法可能要改。` : ''],
+            files.size ? `有 ${files.size} 份文件引用了当前技能位置，撤下后可能需要调整引用。` : ''],
     groups: [{label: '要撤下的技能', items: skills.map(name => ({name}))}],
-    note: '撤下后也能在提示条或操作记录里撤销。', okText: '撤下',
+    note: '可通过提示条或操作记录撤销本次操作。', okText: '撤下',
   });
   if (!ok) return;
   await runWrite({
@@ -3737,10 +4934,10 @@ $('withdrawn-list').addEventListener('click', async event => {
   const name = button?.dataset.restoreWithdrawn;
   if (!name) return;
   const row = state.cleanup.withdrawn.find(item => item.name === name);
-  const back = (row?.previous_agents || []).map(nameOf).join('、') || '原来的 agent';
+  const back = (row?.previous_agents || []).map(nameOf).join('、') || '原 Agent';
   const ok = await confirmDialog({
     title: '恢复这个技能',
-    lines: [`会把它重新给 ${back} 用。`],
+    lines: [`将重新分配给 ${back}。`],
     groups: [{label: '要恢复的技能', items: [{name}]}],
     note: '可以在操作记录里撤销。', okText: '恢复',
   });
@@ -3754,7 +4951,7 @@ $('withdrawn-list').addEventListener('click', async event => {
       return written;
     },
     success: written => ({
-      text: '已经恢复原来的分配',
+      text: '已恢复原分配',
       undo: undoButton => undoOperation(written.id, {skills: [name], message: written.message, button: undoButton}),
     }),
   });
@@ -3763,7 +4960,10 @@ $('withdrawn-list').addEventListener('click', async event => {
 /* ==================== 操作记录页 ==================== */
 
 function renderLog() {
-  if (state.page !== 'settings') return;
+  if (state.page !== 'settings') {
+    if (homeVisible) renderHomeLog();
+    return;
+  }
   $('log-list').innerHTML = state.logs.slice(0, 10).map(record => `<li class="${record.undone ? 'is-undone' : ''}">
     <span class="log-time">${escape(new Date(record.time).toLocaleString('zh-CN'))}</span>
     <div class="log-body">
@@ -3774,7 +4974,7 @@ function renderLog() {
     </div>
     <span class="log-end">${record.undone || record.undo_of || !state.table?.write_allowed || writeBusy ? ''
       : `<button class="btn btn-small btn-quiet" data-undo="${escape(record.id)}">${icon('undo')}<span>撤销…</span></button>`}</span>
-  </li>`).join('') || `<li><div class="empty">${emptyInner('log', '还没有操作记录', hint('做过分配、更新、清理之后，都会记在这里。'))}</div></li>`;
+  </li>`).join('') || `<li><div class="empty">${emptyInner('log', '暂无操作记录', hint('做过分配、更新、清理之后，都会记在这里。'))}</div></li>`;
 }
 
 $('log-refresh').addEventListener('click', event => withBusy(event.currentTarget, '正在刷新…', refreshLog));
@@ -3809,7 +5009,7 @@ $('log-list').addEventListener('click', async event => {
 /* ==================== 诊断与备份页 ==================== */
 
 const CATEGORIES = {user: '用户技能', builtin: '软件内置', plugin: '插件技能', plugin_cache: '插件或市场缓存',
-                    vendor: '下载的候选库', unknown_agent: '疑似新 agent', ignored: '已忽略',
+                    vendor: '下载的候选库', unknown_agent: '疑似新 Agent', ignored: '已忽略',
                     backup_temp: '备份或临时目录', reference: '参考资料'};
 
 /* 扫描条目里的 agent 编号翻成名字，再写成一句给人看的话。 */
@@ -3875,7 +5075,7 @@ function renderDiagnostics() {
 
   $('agent-list').innerHTML = data.agents.map(agent => `<details class="fold fold-inner">
     <summary>${escape(agent.name)}
-      <span class="tag tag-quiet">${agent.status === 'ignored' ? '已忽略' : agent.status === 'discovered' ? '已发现，还没接入' : '有盘点档案'}</span></summary>
+      <span class="tag tag-quiet">${agent.status === 'ignored' ? '已忽略' : agent.status === 'discovered' ? '已发现，尚未接入' : '已登记'}</span></summary>
     <p>${escape(agent.visibility_note || '')}</p>
     ${(agent.skill_roots?.length ? agent.skill_roots : agent.evidence || []).map(path => `<p class="mono">${pathLabel(path)}</p>`).join('')}
   </details>`).join('');
@@ -3985,7 +5185,7 @@ function renderMigrationStatus() {
   if (migrated) {
     for (const id of ['select', 'review', 'complete']) $('migration-' + id).hidden = true;
     $('migration-restore').hidden = !backupId;
-    $('migration-done-text').innerHTML = `${icon('check-circle')}<span>已经整理好了</span>${hint('以后接入新 agent，请到设置里的 agent 一栏。')}`;
+    $('migration-done-text').innerHTML = `${icon('check-circle')}<span>整理完成</span>${hint('可在设置的 Agent 页面接入新 Agent。')}`;
   } else {
     renderMigrationChoices();
     migrationStep('select');
@@ -3996,7 +5196,7 @@ function renderMigrationStatus() {
 $('migration-preview').addEventListener('click', event => withBusy(event.currentTarget, '正在核对…', async () => {
   try {
     const agents = [...document.querySelectorAll('[data-migration-agent]:checked')].map(input => input.dataset.migrationAgent);
-    if (!agents.length) throw new Error('请至少选择一个 agent。');
+    if (!agents.length) throw new Error('请至少选择一个 Agent。');
     migrationPlan = await api('/api/migration/plan?agents=' + agents.join(','));
     renderMigrationReview(migrationPlan);
     migrationStep('review');
@@ -4021,7 +5221,7 @@ function renderMigrationReview(plan) {
     return `<details class="fold fold-inner"><summary>${escape(nameOf(id))}：可调用 ${before.available.length} → ${after.available.length} 个；自动可用 ${before.automatic.length} → ${after.automatic.length} 个</summary>
       <p class="item-note">整理前：${escape(before.available.join('、'))}</p>
       <p class="item-note">整理后：${escape(after.available.join('、'))}</p></details>`;
-  }).join('') || '<p class="item-note">没有需要核对的 agent。</p>';
+  }).join('') || '<p class="item-note">没有需要核对的 Agent。</p>';
   $('migration-versions').innerHTML = plan.conflicts.map(skill => `<details class="fold fold-inner" open>
     <summary>${escape(skill.name)}<span class="tag tag-quiet">${escape(skill.reason)}</span></summary>
     ${skill.options.map((option, index) => `<p><label class="check">
@@ -4065,7 +5265,7 @@ async function finishMigration(title, result) {
     try {
       await refreshTable();
     } catch (error) {
-      toast({text: '技能清单没能读出来：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
+      toast({text: '技能清单读取失败：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
     }
     await loadCleanup();
   } else {
@@ -4081,7 +5281,7 @@ $('migration-apply').addEventListener('click', async event => {
   if (!migrationPlan?.write_allowed) return;
   const ok = await confirmDialog({
     title: '开始整理',
-    lines: ['会先备份，再把各 agent 现在用的技能收进一份技能库。每个 agent 原来能用的技能名单会保留。'],
+    lines: ['将先创建备份，再统一整理各 Agent 的技能库，保留现有技能分配。'],
     note: '完成后可以还原成现在这样。', okText: '开始整理',
   });
   if (!ok) return;
@@ -4103,7 +5303,7 @@ $('migration-apply').addEventListener('click', async event => {
 async function restoreBackup(id, button = null) {
   const ok = await confirmDialog({
     title: '还原到整理前？',
-    lines: ['会把各 agent 的技能恢复成整理前的样子。'],
+    lines: ['将各 Agent 的技能恢复至整理前的状态。'],
     note: '还原本身也会记在操作记录里。', okText: '还原',
   });
   if (!ok) return false;
@@ -4128,7 +5328,7 @@ $('migration-backups').addEventListener('click', event => withBusy(event.current
     $('migration-backup-list').innerHTML = saved.map(backup => `<div class="item-row">
       <span class="mono">${escape(backup.backup_id)}</span>
       <span class="item-end"><button class="btn btn-small" data-restore-backup="${escape(backup.backup_id)}" ${state.writeAllowed ? '' : 'disabled'}>还原这份备份</button></span>
-    </div>`).join('') || '<p class="item-note">还没有整理备份。</p>';
+    </div>`).join('') || '<p class="item-note">暂无整理备份。</p>';
   } catch (error) {
     migrationError(error);
   }
@@ -4145,12 +5345,792 @@ async function refreshMigrationStatus() {
   try {
     const status = await api('/api/status');
     state.writeAllowed = !status.read_only;
+    renderTeamSettings();
     if (!state.table) $('mode-badge').hidden = state.writeAllowed;
     renderMigrationMode(state.writeAllowed);
     $('migration-apply').disabled = !state.writeAllowed;
   } catch (error) {
     migrationError(error);
   }
+}
+
+/* ==================== 首页：技能总数、技能星图、各 agent、要处理的事 ==================== */
+
+/* 首页只用看板已经读到的数据，不新增接口。所有规则都在这一节里，
+   下面「需要你看一眼」的 homeTodos() 只读输入、不改页面，方便用 node 单独测试。 */
+
+const HOME_WHO_DEFAULT = '悬停或点击下方 Agent，查看其启用的技能';
+const HOME_GLOW = 'rgba(47, 91, 211, 0.34)';
+const HOME_DOT_BASE = {
+  on: ['rgba(242, 244, 248, 0.9)', '0 0 0 0 rgba(255, 255, 255, 0)'],
+  n1: ['rgba(242, 244, 248, 0.55)', '0 0 0 0 rgba(255, 255, 255, 0)'],
+  idle: ['rgba(242, 244, 248, 0)', 'inset 0 0 0 1.5px rgba(242, 244, 248, 0.38)'],
+};
+
+let homeIntroPlayed = false;    // 这次打开看板后，开场是否已经播过
+let homeIntroDone = false;      // 开场是否播完；鼠标效果等它播完才生效
+let homeIntroPending = false;
+let homeIntroTimeline = null;
+let homeFadeTimeline = null;
+let homeMotionMedia = null;
+let homeMotionOn = false;
+let homeScrollBuilt = false;
+let homeScrollTriggers = [];
+let homeDotSwell = [];
+let homeDots = [];
+let homeDotCenters = [];
+let homeAgents = [];
+let homeAgentCards = [];
+let homeClusters = [];
+let homeFocusedAgent = null;
+let homeCleanupAsked = false;
+
+const homeDur = value => homeMotionOn ? value : 0;
+const homeNumber = value => Number(value || 0).toLocaleString('zh-CN');
+const homeRgba = (hex, alpha) => `rgba(${parseInt(hex.slice(1, 3), 16)}, ${parseInt(hex.slice(3, 5), 16)}, ${parseInt(hex.slice(5, 7), 16)}, ${alpha})`;
+
+function homeSkillCount() {
+  return (state.table?.skills || []).length;
+}
+
+function homeInUseCount() {
+  return (state.table?.skills || []).filter(skill => (state.saved[skill.name] || []).length).length;
+}
+
+function homeAgentInfo() {
+  return state.agents.map(agent => {
+    const load = agentLoad(agent.id);
+    const catalog = state.catalog.get(agent.id);
+    return {
+      id: agent.id,
+      name: agent.name,
+      activation: catalog?.activation_text || agent.activation_text || agent.activation || '',
+      count: load.countNow,
+      tokens: load.now,
+      color: agentColor(agent.id),
+      shared: (catalog?.shared_with || []).map(nameOf).filter(Boolean),
+    };
+  });
+}
+
+/* 分组顺序跟技能表一致，没分组的放最后；同名只出现一次。 */
+function homeGroupNames() {
+  const names = [];
+  const seen = new Set();
+  for (const group of state.table?.groups || []) {
+    if (!group.name || seen.has(group.name)) continue;
+    seen.add(group.name);
+    names.push(group.name);
+  }
+  if ((state.table?.skills || []).some(skill => groupOf(skill.name) === '未分组') && !seen.has('未分组')) names.push('未分组');
+  return names;
+}
+
+/* 「需要你看一眼」的纯函数：输入是只读快照，返回按顺序排好的条目。
+   条目里的 action 是直接动作（目前只有现在检查），target 是跳转位置。 */
+function homeTodos(input) {
+  const data = input || {};
+  const program = data.program || {};
+  const updates = data.updates || {};
+  const items = [];
+
+  const programDue = Boolean(program.write_allowed) && (
+    program.phase === 'ready'
+    || (program.running && program.phase === 'apply')
+    || Boolean(program.available)
+    || (program.phase === 'error' && program.failedAction === 'apply'));
+  if (programDue) {
+    const ready = program.phase === 'ready';
+    const applying = Boolean(program.running && program.phase === 'apply');
+    const failed = program.phase === 'error' && program.failedAction === 'apply';
+    items.push({
+      key: 'program',
+      icon: 'update-up',
+      tone: ready || failed ? 'warm' : 'calm',
+      title: ready ? '新版本已安装，刷新后生效' : applying ? 'Skill Pilot 正在后台升级' : failed ? '程序升级未完成' : 'Skill Pilot 发现新版本',
+      text: ready ? 'Skill Pilot 已更新完毕，刷新页面即可启用新版，数据与设置完整保留。'
+        : applying ? '等待当前任务完成后将自动继续。'
+        : failed ? '升级遇到问题，可前往版本设置查看原因并重试。'
+        : '发现新版 Skill Pilot，支持在看板内一键升级。',
+      label: ready ? '前往刷新' : '查看版本',
+      target: 'settings/version',
+    });
+  }
+
+  const review = updates.review;
+  const checking = Boolean(updates.starting || review?.running);
+  if (checking) {
+    items.push({
+      key: 'updates-checking',
+      icon: 'updates',
+      tone: 'calm',
+      title: '正在检查技能更新',
+      text: review?.total
+        ? `正在比对各技能的最新版本（已完成 ${homeNumber(review.done)} / ${homeNumber(review.total)} 项）。`
+        : '正在比对已启用技能的最新版本。',
+      label: '',
+    });
+  } else if (!review) {
+    items.push({
+      key: 'updates-unchecked',
+      icon: 'updates',
+      tone: 'warm',
+      title: '尚未检查技能更新',
+      text: '检查已启用且有远程来源的技能是否有可用更新。',
+      label: '立即检查',
+      action: 'check-updates',
+      disabled: Boolean(updates.locked),
+    });
+  } else if (Number(updates.count || 0) > 0) {
+    items.push({
+      key: 'updates-found',
+      icon: 'update-up',
+      tone: 'warm',
+      title: `${homeNumber(updates.count)} 个技能有可用更新`,
+      text: '检测到新版本，可查看变动详情或一键更新。',
+      label: '查看更新',
+      target: 'skills/updates',
+    });
+  }
+
+  const suggested = data.suggested || [];
+  if (suggested.length) {
+    items.push({
+      key: 'suggested',
+      icon: 'plus',
+      tone: 'calm',
+      title: `检测到 ${homeNumber(suggested.length)} 个新 Agent`,
+      text: `${suggested.join('、')} 已安装，可接入 Skill Pilot 统一管理。`,
+      label: '前往接入',
+      target: 'settings/agents',
+    });
+  }
+
+  if (!data.llm_configured) {
+    const pending = Number(data.labels_pending || 0);
+    items.push({
+      key: 'ai',
+      icon: 'sparkle',
+      tone: 'calm',
+      title: '未配置 AI 整理服务',
+      text: pending > 0
+        ? `尚有 ${homeNumber(pending)} 个技能缺少中文名称或说明。配置 AI 服务后将自动整理。`
+        : '配置 AI 服务后，将自动为新技能生成中文名称、说明与用途分组。',
+      label: '前往配置',
+      target: 'settings/ai',
+    });
+  }
+
+  const withdrawn = Number(data.withdrawn || 0);
+  if (withdrawn > 0) {
+    items.push({
+      key: 'withdrawn',
+      icon: 'undo',
+      tone: 'calm',
+      title: `已有 ${homeNumber(withdrawn)} 个技能处于闲置状态`,
+      text: '已从所有 Agent 中撤下，不再占用上下文，随时可恢复。',
+      label: '查看闲置技能',
+      target: 'cleanup',
+    });
+  }
+
+  // 连上团队后不再占一条：团队页在导航里本来就看得到，不算要处理的事。
+  if (data.team && !data.team.member) {
+    items.push({
+      key: 'team',
+      icon: 'team',
+      tone: 'calm',
+      title: '未连接团队分享站',
+      text: '连接团队分享站后，可浏览同事推荐的技能并一键安装。',
+      label: '前往连接',
+      target: 'settings/team',
+    });
+  }
+  return items;
+}
+
+function homeTodosInput() {
+  const ignored = new Set((state.agentsView?.ignored || []).map(item => (item && typeof item === 'object') ? item.id : item));
+  const suggested = (state.agentsView?.suggested || [])
+    .filter(item => !ignored.has(item.id))
+    .map(item => item.name);
+  const updatesCount = (state.table?.skills || []).filter(skill => updateRow(skill.name)).length;
+  return {
+    program: {...programUpdate, failedAction: programFailedAction},
+    updates: {review: updateState.review, count: updatesCount, starting: updateState.starting, locked: Boolean(writeBusy)},
+    suggested,
+    llm_configured: Boolean(state.table?.llm_configured),
+    labels_pending: Number(state.table?.labels_pending || 0),
+    withdrawn: (state.cleanup?.withdrawn || []).length,
+    team: state.team,
+  };
+}
+
+function renderHomeGuide() {
+  const fresh = awaitingFirstOrganization();
+  $('home-guide-title').textContent = fresh ? '首次启动：整理本地技能库' : '技能清单尚未读取';
+  $('home-guide-text').textContent = fresh
+    ? '将本机已有的分散技能统一归集，一站式管理分配与更新。整理前将自动创建完整备份，随时可一键还原。'
+    : '暂时无法读取技能清单。请前往技能页重试，或重新打开看板。';
+  $('home-organize').textContent = fresh ? '开始整理技能库 →' : '前往技能管理 →';
+}
+
+function homeSetNumbersNow() {
+  if (!state.table) return;
+  $('home-total').textContent = homeNumber(homeSkillCount());
+  $('home-in-use').textContent = homeNumber(homeInUseCount());
+  $('home-idle').textContent = homeNumber(homeSkillCount() - homeInUseCount());
+  $('home-agents-n').textContent = homeNumber(state.agents.length);
+}
+
+function homeSetNumbersZero() {
+  for (const id of ['home-total', 'home-in-use', 'home-idle', 'home-agents-n']) $(id).textContent = '0';
+}
+
+function homeCountTo(element, to, duration = 0.6, ease = 'expo.out') {
+  if (!element) return;
+  if (!window.gsap || !homeMotionOn) { element.textContent = homeNumber(to); return; }
+  element._homeCount = element._homeCount || {value: 0};
+  const proxy = element._homeCount;
+  window.gsap.to(proxy, {
+    value: Number(to || 0), duration: homeDur(duration), ease, snap: {value: 1}, overwrite: true,
+    onUpdate: () => { element.textContent = homeNumber(proxy.value); },
+  });
+}
+
+function renderHomeHero() {
+  homeSetNumbersNow();
+  $('home-who').textContent = HOME_WHO_DEFAULT;
+  const agents = homeAgentInfo();
+  const heaviest = agents.reduce((best, agent) => !best || agent.tokens > best.tokens ? agent : best, null);
+  $('home-note').innerHTML = heaviest
+    ? `Agent 启动新对话时会预先加载技能说明。当前上下文占用最大的是 <b>${escape(heaviest.name)}</b>（约 <b>${tokenText(heaviest.tokens)} Token</b>）。`
+    : '尚未接入任何 Agent。';
+}
+
+function renderHomeMap() {
+  const box = $('home-map');
+  const skills = state.table?.skills || [];
+  const inUse = homeInUseCount();
+  box.innerHTML = homeGroupNames().map(group => {
+    const list = skills
+      .filter(skill => groupOf(skill.name) === group)
+      .sort((a, b) => (state.saved[b.name] || []).length - (state.saved[a.name] || []).length);
+    if (!list.length) return '';
+    const dots = list.map(skill => {
+      const using = state.saved[skill.name] || [];
+      const kind = using.length >= 2 ? 'on' : using.length === 1 ? 'n1' : 'idle';
+      const label = titleOf(skill.name);
+      const who = using.length ? `使用中：${using.map(nameOf).join('、')}` : '暂未分配给任何 Agent';
+      return `<button type="button" class="home-dot ${kind}" tabindex="-1" data-home-skill="${escape(skill.name)}" data-kind="${kind}" aria-label="${escape(`${label}：${who}`)}"></button>`;
+    }).join('');
+    return `<div class="home-cluster">
+      <button type="button" class="home-cluster-name" data-home-group="${escape(group)}"><span>${escape(group)}</span><em>${homeNumber(list.length)}</em></button>
+      <div class="home-dots">${dots}</div>
+    </div>`;
+  }).join('');
+  box.setAttribute('aria-label', `${homeNumber(skills.length)} 个技能按分组排列，${homeNumber(inUse)} 个已分配使用`);
+  homeClusters = [...box.querySelectorAll('.home-cluster')];
+  homeDots = [...box.querySelectorAll('.home-dot')];
+  homeFocusedAgent = null;
+}
+
+function renderHomeAgents() {
+  const box = $('home-agents');
+  homeAgents = homeAgentInfo();
+  if (!homeAgents.length) {
+    box.innerHTML = '<p class="home-empty">尚未接入任何 Agent。</p>';
+    homeAgentCards = [];
+    return;
+  }
+  const max = Math.max(1, ...homeAgents.map(agent => agent.tokens));
+  box.innerHTML = homeAgents.map(agent => {
+    const width = Math.max(agent.tokens ? 2 : 0, agent.tokens / max * 100).toFixed(1);
+    return `<button type="button" class="home-agent" data-home-agent="${escape(agent.id)}" style="--c:${agent.color}">
+      <span class="home-agent-top"><span class="home-agent-name"><span class="swatch" aria-hidden="true"></span>${escape(agent.name)}</span><span class="home-agent-act">${escape(agent.activation)}</span></span>
+      <span class="home-agent-n">${homeNumber(agent.count)}<small>个技能</small></span>
+      <span class="home-bar"><i style="--w:${width}%"></i></span>
+      <span class="home-agent-tok">单次对话开销约 <b>${tokenText(agent.tokens)} Token</b></span>
+      ${agent.shared.length ? `<span class="home-agent-share">和 ${escape(agent.shared.join('、'))} 共用</span>` : ''}
+    </button>`;
+  }).join('');
+  homeAgentCards = [...box.querySelectorAll('.home-agent')];
+  homeFocusedAgent = null;
+}
+
+const HOME_ARROW = '<span class="home-arrow" aria-hidden="true">→</span>';
+
+function renderHomeTodos() {
+  if (!homeVisible) return;
+  const box = $('home-todos');
+  const items = homeTodos(homeTodosInput());
+  box.innerHTML = items.map(item => {
+    const action = item.action
+      ? `<button type="button" class="home-todo-go" data-home-action="${escape(item.action)}"${item.disabled ? ' disabled' : ''}>${escape(item.label)}${HOME_ARROW}</button>`
+      : item.target
+        ? `<button type="button" class="home-todo-go" data-home-target="${escape(item.target)}">${escape(item.label)}${HOME_ARROW}</button>`
+        : '';
+    return `<div class="home-todo${item.target ? ' is-link' : ''}" data-key="${escape(item.key)}">
+      <span class="home-todo-ico ${escape(item.tone || '')}" aria-hidden="true">${icon(item.icon)}</span>
+      <span class="home-todo-text"><b>${escape(item.title)}</b><span>${escape(item.text)}</span></span>
+      ${action}
+    </div>`;
+  }).join('') || `<div class="home-done">${icon('check-circle')}<span>所有事项均已处理完毕</span></div>`;
+}
+
+function homeLogTime(value) {
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) return String(value || '');
+  const date = new Date(time);
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function renderHomeLog() {
+  if (!homeVisible) return;
+  const rows = (state.logs || []).slice(0, 4);
+  $('home-log').innerHTML = rows.map(record => `<li>
+    <time>${escape(homeLogTime(record.time))}</time>
+    <span class="${record.undone ? 'is-undone' : ''}">${escape(pastTense(record.message))}${record.undone ? '（已撤销）' : ''}</span>
+  </li>`).join('') || '<li class="home-log-empty">暂无操作记录</li>';
+}
+
+function renderHome({animate = 'none'} = {}) {
+  if (!homeVisible) return;
+  $('home-loading').hidden = true;
+  const ready = Boolean(state.table);
+  $('home-guide').hidden = ready;
+  $('home-main').hidden = !ready;
+  if (!ready) {
+    renderHomeGuide();
+    return;
+  }
+  if (homeIntroTimeline) { killHomeIntro(); homeSetNumbersNow(); }
+  renderHomeHero();
+  renderHomeMap();
+  renderHomeAgents();
+  renderHomeTodos();
+  renderHomeLog();
+  bindHomePointer();
+  bindHomeAgents();
+  ensureHomeMotion();
+  if (homeMotionOn) buildHomeScrollReveal();
+  homePlaceGlow();
+  if (animate === 'intro' && !homeIntroPlayed) homeIntroPending = true;
+  if (homeIntroPending) {
+    homeIntroPending = false;
+    if (homeMotionOn) playHomeIntro();
+    else { homeIntroPlayed = true; homeIntroDone = true; homeSetNumbersNow(); }
+  } else if (animate === 'fade') {
+    playHomeFade();
+  }
+  requestAnimationFrame(() => { homeMeasureDots(); refreshHomeScroll(); });
+}
+
+/* 这次打开看板后第一次显示首页：播一次总长不到 2 秒的开场。 */
+function ensureHomeMotion() {
+  if (homeMotionMedia || !window.gsap) return;
+  const gsap = window.gsap;
+  if (window.ScrollTrigger) gsap.registerPlugin(window.ScrollTrigger);
+  homeMotionMedia = gsap.matchMedia();
+  homeMotionMedia.add('(prefers-reduced-motion: no-preference)', () => {
+    homeMotionOn = true;
+    buildHomeScrollReveal();
+    return () => {
+      homeMotionOn = false;
+      killHomeScrollReveal();
+    };
+  });
+  homeMotionMedia.add('(prefers-reduced-motion: reduce)', () => {
+    homeMotionOn = false;
+    homeIntroPlayed = true;
+    homeIntroDone = true;
+    killHomeIntro();
+    killHomeScrollReveal();
+    homeSetNumbersNow();
+  });
+}
+
+function playHomeIntro() {
+  if (!window.gsap || !homeMotionOn || !state.table) {
+    homeIntroPlayed = true;
+    homeIntroDone = true;
+    homeSetNumbersNow();
+    return;
+  }
+  homeIntroPlayed = true;
+  homeIntroDone = false;
+  homeSetNumbersZero();
+  const gsap = window.gsap;
+  const hero = $('home-hero');
+  const glow = hero.querySelector('.home-glow');
+  const skills = state.table.skills || [];
+  const inUse = homeInUseCount();
+  const idle = skills.length - inUse;
+  const agents = state.agents.length;
+  const labels = [hero.querySelector('.home-eyebrow'), hero.querySelector('.home-big'), $('home-who')].filter(Boolean);
+  const stats = [...hero.querySelectorAll('.home-stat')];
+  const names = [...hero.querySelectorAll('.home-cluster-name')];
+  const bars = homeAgentCards.map(card => card.querySelector('.home-bar i')).filter(Boolean);
+  const timeline = gsap.timeline({
+    defaults: {ease: 'power3.out'},
+    onComplete: () => { homeIntroDone = true; homeIntroTimeline = null; },
+  });
+  homeIntroTimeline = timeline;
+  // 空数组会让 GSAP 在控制台报“target 找不到”，所以先滤掉空的目标。
+  const addFrom = (targets, vars, position) => {
+    const list = (Array.isArray(targets) ? targets : [targets]).filter(Boolean);
+    if (list.length) timeline.from(list, vars, position);
+  };
+  addFrom(hero, {y: 30, scale: 0.98, autoAlpha: 0, duration: 0.55, ease: 'expo.out'});
+  addFrom(glow, {scale: 0.6, autoAlpha: 0, duration: 0.8, ease: 'power2.out'}, '<0.05');
+  addFrom(labels, {y: 18, autoAlpha: 0, stagger: 0.05, duration: 0.36}, '<0.1');
+  timeline.add(() => homeCountTo($('home-total'), skills.length, 0.8), '<0.05');
+  addFrom(stats, {y: 10, autoAlpha: 0, stagger: 0.04, duration: 0.3}, '<0.12');
+  timeline.add(() => {
+    homeCountTo($('home-in-use'), inUse, 0.6);
+    homeCountTo($('home-idle'), idle, 0.6);
+    homeCountTo($('home-agents-n'), agents, 0.6);
+  }, '<0.03');
+  addFrom([hero.querySelector('.home-map-head'), ...names], {y: 10, autoAlpha: 0, stagger: {amount: Math.min(0.24, names.length * 0.02)}, duration: 0.28}, '<0.04');
+  addFrom(homeDots, {scale: 0, autoAlpha: 0, duration: 0.4, ease: 'back.out(2.2)', stagger: {amount: 0.55, from: 'random'}}, '<0.03');
+  addFrom([$('home-note'), $('home-manage')], {y: 12, autoAlpha: 0, stagger: 0.05, duration: 0.3}, '<0.5');
+  addFrom(document.querySelector('#home-agents-sec .home-section-head'), {y: 12, autoAlpha: 0, duration: 0.3}, '<0');
+  addFrom(homeAgentCards, {y: 24, rotationX: -10, transformPerspective: 700, transformOrigin: '50% 0%', autoAlpha: 0, stagger: {amount: Math.min(0.15, Math.max(0, homeAgentCards.length - 1) * 0.05)}, duration: 0.42, ease: 'expo.out'}, '<0.05');
+  addFrom(bars, {scaleX: 0, transformOrigin: 'left center', stagger: {amount: Math.min(0.15, Math.max(0, bars.length - 1) * 0.05)}, duration: 0.5, ease: 'power2.inOut'}, '<0.1');
+}
+
+function killHomeIntro() {
+  const timeline = homeIntroTimeline;
+  homeIntroTimeline = null;
+  // 直接把还没播完的画面推到终点，别留下半透明或隐藏的元素；不触发中途的数字回调。
+  if (timeline) { timeline.progress(1, true); timeline.kill(); }
+  homeIntroDone = true;
+}
+
+/* 从别的页面回首页：整体淡入上移 0.35 秒，不重播开场。 */
+function playHomeFade() {
+  if (!window.gsap || !homeMotionOn) return;
+  homeFadeTimeline?.kill();
+  const lower = document.querySelector('#page-home .home-lower');
+  // 下面两栏如果还在屏幕外，交给 ScrollTrigger；否则淡入会让它提前出现，滚到时再闪一下。
+  const targets = [$('home-hero'), $('home-agents-sec'),
+    lower && lower.getBoundingClientRect().top < innerHeight ? lower : null].filter(Boolean);
+  homeFadeTimeline = window.gsap.fromTo(targets,
+    {y: 12, autoAlpha: 0},
+    {y: 0, autoAlpha: 1, duration: 0.35, stagger: 0.02, ease: 'power2.out', overwrite: 'auto'});
+}
+
+/* 下面两栏滚到眼前才出现。只建一次；窗口够高、本来就在眼前时直接显示。 */
+function buildHomeScrollReveal() {
+  if (!homeVisible || homeScrollBuilt || !homeMotionOn || !window.gsap || !window.ScrollTrigger) return;
+  const lower = document.querySelector('#page-home .home-lower');
+  if (!lower) return;
+  homeScrollBuilt = true;
+  if (lower.getBoundingClientRect().top < innerHeight * 0.88) return;
+  const gsap = window.gsap;
+  const trigger = {trigger: lower, start: 'top 88%'};
+  homeScrollTriggers.push(gsap.from([...lower.querySelectorAll('.home-section-head'), ...lower.querySelectorAll('.home-panel')],
+    {y: 28, autoAlpha: 0, stagger: 0.08, duration: 0.45, ease: 'expo.out', scrollTrigger: trigger}));
+  homeScrollTriggers.push(gsap.from(lower.querySelectorAll('.home-todo'),
+    {x: -18, autoAlpha: 0, stagger: 0.06, duration: 0.4, delay: 0.05, scrollTrigger: trigger}));
+  homeScrollTriggers.push(gsap.from(lower.querySelectorAll('.home-log li'),
+    {x: 18, autoAlpha: 0, stagger: 0.06, duration: 0.4, delay: 0.08, scrollTrigger: trigger}));
+}
+
+function killHomeScrollReveal() {
+  for (const tween of homeScrollTriggers) {
+    tween.scrollTrigger?.kill();
+    tween.kill();
+  }
+  homeScrollTriggers = [];
+  homeScrollBuilt = false;
+}
+
+function homeSetScrollEnabled(enabled) {
+  for (const tween of homeScrollTriggers) {
+    const trigger = tween.scrollTrigger;
+    if (!trigger) continue;
+    if (enabled) trigger.enable();
+    else trigger.disable(false);
+  }
+}
+
+function refreshHomeScroll() {
+  if (!homeVisible || !window.ScrollTrigger) return;
+  window.ScrollTrigger.refresh();
+}
+
+/* ---------- 首页的鼠标效果：光斑、鼓起的点、agent 高亮、卡片微倾、按钮吸附 ---------- */
+
+function homePlaceGlow() {
+  const hero = $('home-hero');
+  const glow = hero?.querySelector('.home-glow');
+  if (!hero || !glow || !window.gsap || !hero.offsetWidth) return;
+  window.gsap.set(glow, {
+    left: 0, top: 0, xPercent: -50, yPercent: -50,
+    x: hero.offsetWidth * 0.72, y: hero.offsetHeight * 0.3,
+  });
+  window.gsap.set(hero, {'--glow': HOME_GLOW});
+}
+
+function homeMeasureDots() {
+  if (!homeDots.length) { homeDotCenters = []; return; }
+  homeDotCenters = homeDots.map(dot => {
+    const rect = dot.getBoundingClientRect();
+    return [rect.left + rect.width / 2, rect.top + rect.height / 2];
+  });
+}
+
+function homeDotField(distance) {
+  return 1 + 0.75 * Math.max(0, 1 - distance / 120);
+}
+
+function bindHomePointer() {
+  if (!window.gsap) { homeDotSwell = []; return; }
+  const gsap = window.gsap;
+  homeDotSwell = homeDots.map(dot => {
+    // quickTo 只认单个属性，scale 要拆成横竖两个。
+    const scaleX = gsap.quickTo(dot, 'scaleX', {duration: 0.4, ease: 'power3'});
+    const scaleY = gsap.quickTo(dot, 'scaleY', {duration: 0.4, ease: 'power3'});
+    return value => { scaleX(value); scaleY(value); };
+  });
+}
+
+function bindHomeAgents() {
+  if (!window.gsap) return;
+  const gsap = window.gsap;
+  for (const card of homeAgentCards) {
+    const rotateX = gsap.quickTo(card, 'rotationX', {duration: 0.5, ease: 'power3'});
+    const rotateY = gsap.quickTo(card, 'rotationY', {duration: 0.5, ease: 'power3'});
+    const lift = gsap.quickTo(card, 'y', {duration: 0.5, ease: 'power3'});
+    card.addEventListener('pointermove', event => {
+      if (!homeMotionOn || !homeIntroDone) return;
+      const rect = card.getBoundingClientRect();
+      gsap.set(card, {transformPerspective: 700});
+      rotateY(((event.clientX - rect.left) / rect.width - 0.5) * 10);
+      rotateX(-((event.clientY - rect.top) / rect.height - 0.5) * 10);
+      lift(-5);
+    });
+    card.addEventListener('pointerleave', () => {
+      if (!homeIntroDone) return;
+      rotateX(0); rotateY(0); lift(0);
+    });
+  }
+}
+
+function homeShowTip(dot) {
+  const name = dot.dataset.homeSkill || '';
+  const skill = state.skillIndex.get(name);
+  const using = (state.saved[name] || []).map(nameOf);
+  const tip = $('home-tip');
+  if (!tip) return;
+  tip.innerHTML = `<b>${escape(skill?.title || name)}</b><span>${escape(using.length ? `使用中：${using.join('、')}` : '暂未分配给任何 Agent')}</span>`;
+  const box = dot.getBoundingClientRect();
+  const width = Math.min(280, innerWidth - 16);
+  tip.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, box.left + box.width / 2 - width / 2))}px`;
+  tip.style.top = `${box.bottom + 10}px`;
+  tip.classList.add('show');
+  tip.setAttribute('aria-hidden', 'false');
+}
+
+function homeHideTip() {
+  const tip = $('home-tip');
+  if (!tip) return;
+  tip.classList.remove('show');
+  tip.setAttribute('aria-hidden', 'true');
+}
+
+function homeFocusAgent(id) {
+  if (id === homeFocusedAgent) return;
+  homeFocusedAgent = id;
+  const agent = id ? homeAgents.find(item => item.id === id) : null;
+  if (!window.gsap) {
+    $('home-who').textContent = agent
+      ? `${agent.name} 已启用 · 单次对话预占约 ${tokenText(agent.tokens)} Token`
+      : HOME_WHO_DEFAULT;
+    return;
+  }
+  const gsap = window.gsap;
+  const total = homeSkillCount();
+  if (!agent) {
+    if (homeDots.length) gsap.to(homeDots, {
+      opacity: 1, y: 0,
+      backgroundColor: (index, element) => HOME_DOT_BASE[element.dataset.kind]?.[0] || HOME_DOT_BASE.on[0],
+      boxShadow: (index, element) => HOME_DOT_BASE[element.dataset.kind]?.[1] || HOME_DOT_BASE.on[1],
+      duration: homeDur(0.45), stagger: {amount: homeDur(0.2), from: 'end'}, overwrite: 'auto',
+    });
+    gsap.to($('home-hero'), {'--glow': HOME_GLOW, duration: homeDur(0.6), overwrite: 'auto'});
+    homeCountTo($('home-total'), total, 0.7);
+    $('home-who').textContent = HOME_WHO_DEFAULT;
+    return;
+  }
+  const using = new Set((state.table?.skills || [])
+    .filter(skill => (state.saved[skill.name] || []).includes(agent.id))
+    .map(skill => skill.name));
+  const hits = homeDots.filter(dot => using.has(dot.dataset.homeSkill));
+  const rest = homeDots.filter(dot => !using.has(dot.dataset.homeSkill));
+  if (rest.length) gsap.to(rest, {
+    opacity: 0.14, y: 0,
+    backgroundColor: (index, element) => HOME_DOT_BASE[element.dataset.kind]?.[0] || HOME_DOT_BASE.on[0],
+    boxShadow: (index, element) => HOME_DOT_BASE[element.dataset.kind]?.[1] || HOME_DOT_BASE.on[1],
+    duration: homeDur(0.35), overwrite: 'auto',
+  });
+  if (hits.length) gsap.to(hits, {
+    opacity: 1, backgroundColor: agent.color,
+    boxShadow: `0 0 0 1px rgba(255, 255, 255, 0.25), 0 0 14px ${homeRgba(agent.color, 0.75)}`,
+    duration: homeDur(0.5), ease: 'power2.out', stagger: {amount: homeDur(0.45)}, overwrite: 'auto',
+  });
+  if (homeMotionOn && hits.length) {
+    gsap.fromTo(hits, {y: 0}, {y: -4, duration: 0.16, ease: 'sine.out', yoyo: true, repeat: 1, stagger: {amount: 0.45}, overwrite: false});
+  }
+  gsap.to($('home-hero'), {'--glow': homeRgba(agent.color, 0.42), duration: homeDur(0.6), overwrite: 'auto'});
+  homeCountTo($('home-total'), agent.count, 0.7);
+  $('home-who').innerHTML = `<b>${escape(agent.name)}</b> 已启用 · 单次对话预占约 ${tokenText(agent.tokens)} Token`;
+}
+
+function homeOpenGroup(group) {
+  state.chip = group;
+  state.tag = '';
+  const agent = currentAgent();
+  const has = Boolean(agent) && (state.table?.skills || [])
+    .some(skill => groupOf(skill.name) === group && assignedNow(skill.name, agent.id));
+  state.tab = has ? 'on' : 'off';
+  showPage('skills');
+  renderSkillTable();
+}
+
+function homeOpenSkill(name) {
+  if (!state.skillIndex.get(name)) return;
+  state.chip = '';
+  state.tag = '';
+  homeHideTip();
+  showPage('skills');
+  openDetail(name);
+}
+
+function homeOpenAgent(id) {
+  showPage('skills');
+  pickAgent(id);
+}
+
+function homeGoto(target) {
+  if (target === 'skills/updates') {
+    state.chip = UPDATES_CHIP;
+    state.tag = '';
+    showPage('skills');
+    renderSkillTable();
+    return;
+  }
+  gotoPlace(target);
+}
+
+async function ensureHomeCleanup() {
+  if (state.cleanup || homeCleanupAsked || !state.table || awaitingFirstOrganization()) return;
+  homeCleanupAsked = true;
+  try { await loadCleanup(); } finally { homeCleanupAsked = false; }
+}
+
+/* ---------- 首页的一次性事件：容器不换，里面重画也不用重新绑 ---------- */
+
+$('brand-home').addEventListener('click', () => showPage('home'));
+$('home-manage').addEventListener('click', () => showPage('skills'));
+$('home-organize').addEventListener('click', () => showPage('skills'));
+$('home-log-all').addEventListener('click', () => gotoPlace('settings/log'));
+
+$('home-map').addEventListener('click', event => {
+  const group = event.target.closest('[data-home-group]');
+  if (group) { homeOpenGroup(group.dataset.homeGroup); return; }
+  const dot = event.target.closest('[data-home-skill]');
+  if (dot) homeOpenSkill(dot.dataset.homeSkill);
+});
+
+$('home-agents').addEventListener('click', event => {
+  const card = event.target.closest('[data-home-agent]');
+  if (card) homeOpenAgent(card.dataset.homeAgent);
+});
+
+$('home-todos').addEventListener('click', event => {
+  const action = event.target.closest('[data-home-action]');
+  if (action) {
+    if (action.dataset.homeAction === 'check-updates') checkUpdates();
+    return;
+  }
+  const target = event.target.closest('[data-home-target]');
+  if (target) { homeGoto(target.dataset.homeTarget); return; }
+  // 整行也能点：文字区域没有单独的按钮，点到行里就去它对应的那一页。
+  const row = event.target.closest('.home-todo');
+  const rowTarget = row?.querySelector('[data-home-target]');
+  if (rowTarget) homeGoto(rowTarget.dataset.homeTarget);
+});
+
+$('home-map').addEventListener('pointerover', event => {
+  const dot = event.target.closest('[data-home-skill]');
+  if (dot) homeShowTip(dot);
+  if (!window.gsap || !homeMotionOn) return;
+  const heading = event.target.closest('.home-cluster-name');
+  if (!heading || !homeClusters.length) return;
+  window.gsap.to(homeClusters, {
+    opacity: (index, element) => !heading || element.contains(heading) ? 1 : 0.3,
+    duration: homeDur(0.3), overwrite: 'auto',
+  });
+});
+$('home-map').addEventListener('pointerout', event => {
+  const dot = event.target.closest('[data-home-skill]');
+  if (dot && !dot.contains(event.relatedTarget)) homeHideTip();
+  if (!event.target.closest('.home-cluster-name')) return;
+  if (!window.gsap || !homeMotionOn || !homeClusters.length) return;
+  window.gsap.to(homeClusters, {opacity: 1, duration: homeDur(0.3), overwrite: 'auto'});
+});
+$('home-agents').addEventListener('pointerover', event => {
+  const card = event.target.closest('[data-home-agent]');
+  if (card) homeFocusAgent(card.dataset.homeAgent);
+});
+$('home-agents').addEventListener('pointerleave', () => homeFocusAgent(null));
+$('home-agents').addEventListener('focusin', event => {
+  const card = event.target.closest('[data-home-agent]');
+  if (card) homeFocusAgent(card.dataset.homeAgent);
+});
+$('home-agents').addEventListener('focusout', event => {
+  if (!$('home-agents').contains(event.relatedTarget)) homeFocusAgent(null);
+});
+
+$('home-map-wrap').addEventListener('pointerenter', homeMeasureDots);
+$('home-map-wrap').addEventListener('pointermove', event => {
+  if (!homeMotionOn || !homeIntroDone) return;
+  if (!homeDotCenters.length) homeMeasureDots();
+  for (let index = 0; index < homeDots.length; index++) {
+    const center = homeDotCenters[index];
+    if (!center) continue;
+    homeDotSwell[index]?.(homeDotField(Math.hypot(event.clientX - center[0], event.clientY - center[1])));
+  }
+});
+$('home-map-wrap').addEventListener('pointerleave', () => {
+  if (homeIntroDone) for (const swell of homeDotSwell) swell(1);
+});
+addEventListener('scroll', homeMeasureDots, {passive: true});
+addEventListener('resize', homeMeasureDots);
+
+if (window.gsap) {
+  const glow = $('home-hero').querySelector('.home-glow');
+  const glowX = window.gsap.quickTo(glow, 'x', {duration: 1.1, ease: 'power3'});
+  const glowY = window.gsap.quickTo(glow, 'y', {duration: 1.1, ease: 'power3'});
+  $('home-hero').addEventListener('pointermove', event => {
+    if (!homeMotionOn) return;
+    const rect = $('home-hero').getBoundingClientRect();
+    glowX(event.clientX - rect.left);
+    glowY(event.clientY - rect.top);
+  });
+
+  const cta = $('home-manage');
+  const ctaX = window.gsap.quickTo(cta, 'x', {duration: 0.4, ease: 'power3'});
+  const ctaY = window.gsap.quickTo(cta, 'y', {duration: 0.4, ease: 'power3'});
+  cta.addEventListener('pointermove', event => {
+    if (!homeMotionOn) return;
+    const rect = cta.getBoundingClientRect();
+    ctaX((event.clientX - rect.left - rect.width / 2) * 0.35);
+    ctaY((event.clientY - rect.top - rect.height / 2) * 0.35);
+  });
+  cta.addEventListener('pointerleave', () => { ctaX(0); ctaY(0); });
 }
 
 /* ==================== 启动 ==================== */
@@ -4184,21 +6164,7 @@ async function refreshProgram() {
   }
 }
 
-/* 地址里记着在哪一页、技能页看哪个 agent、设置页看哪一块。
-   旧地址 #log、#diagnostics 也认，换成设置页对应的那一块。 */
-function placeFromHash() {
-  const [page, arg] = location.hash.slice(1).split('/');
-  if (page === 'settings') return {page: 'settings', block: SETTINGS_BLOCKS.includes(arg) ? arg : 'ai'};
-  if (page === 'log' || page === 'diagnostics') return {page: 'settings', block: page};
-  if (page === 'cleanup') return {page: 'cleanup'};
-  if (page === 'skills' && arg) return {page: 'skills', agent: decodeURIComponent(arg)};
-  return {page: 'skills'};
-}
-
 async function start() {
-  const startPlace = placeFromHash();
-  if (startPlace.agent) state.agent = startPlace.agent;
-  if (startPlace.block) state.settingsBlock = startPlace.block;
   heartbeat();
   setInterval(heartbeat, 10000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
@@ -4222,14 +6188,15 @@ async function start() {
   try {
     if (renderMigrationStatus()) await refreshTable();
   } catch (error) {
-    toast({text: '技能清单没能读出来：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
+    toast({text: '技能清单读取失败：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
   }
   await refreshLog();
   refreshMigrationStatus();
   refreshUpdates();
-  showPage(startPlace.page);
-  // 地址点名了设置页的哪一块，等内容都画完再滚过去。
-  if (startPlace.page === 'settings') setTimeout(() => showSettingsBlock(state.settingsBlock), 300);
+  // 连没连上分享站决定页头有没有「团队」；分享站慢也不挡页面。
+  refreshTeam();
+  // 打开看板和刷新页面都先到首页，不再看地址栏停在哪一页。
+  showPage('home');
 }
 
 start();

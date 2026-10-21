@@ -1,3 +1,5 @@
+import os
+from skill_pilot.platform_support import rmtree
 import shutil
 import tempfile
 import unittest
@@ -116,11 +118,12 @@ class GitHubInspectTests(unittest.TestCase):
             self.assertEqual(row['source']['commit'], commit)
 
     def test_folder_names_with_spaces_leading_dash_or_quotes(self):
-        for i, folder in enumerate(('-skill folder', ' leading space', 'trailing space ', '"quoted folder"', '中文 folder')):
+        folders = ('-skill folder', ' leading space', '中文 folder') if os.name == 'nt' else ('-skill folder', ' leading space', 'trailing space ', '"quoted folder"', '中文 folder')
+        for i, folder in enumerate(folders):
             self.skill(folder, f'skill-{i}')
         self.commit()
         rows = self.inspect()['skills']
-        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(rows), len(folders))
         for row in rows:
             self.assertEqual(row['digest'], content_digest(self.repo / row['repository_path']))
 
@@ -136,7 +139,7 @@ class GitHubInspectTests(unittest.TestCase):
         self.commit()
         with self.assertRaisesRegex(ValueError, '多个同名技能'):
             self.inspect()
-        shutil.rmtree(self.repo / 'skills/duplicate')
+        rmtree(self.repo / 'skills/duplicate')
         (skill / 'outside').symlink_to('../../README.md')
         (self.repo / 'README.md').write_text('技能文件夹之外')
         self.commit()

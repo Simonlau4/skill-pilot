@@ -39,7 +39,7 @@ class UserTagsStaticTests(unittest.TestCase):
         for text in removed:
             self.assertNotIn(text, combined, 'AI 整理不该再提标签：' + text)
         self.assertIn('正在整理中文名和说明', source)
-        self.assertIn('还差的是缺中文名或中文说明的技能。', source)
+        self.assertIn('待处理技能尚缺少中文名称或中文说明。', source)
         self.assertIn('删除后不会再自动整理技能的中文名、说明和分组', source)
         self.assertIn('会重新整理全部中文名、分组和中文说明', source)
 
@@ -51,8 +51,8 @@ class UserTagsStaticTests(unittest.TestCase):
         self.assertIn('data-tag-remove', source)
         self.assertIn('去掉标签「', source)
         self.assertIn('list="used-tags"', source)
-        self.assertIn('加个标签，比如项目名', source)
-        self.assertIn('标签由你自己打，用来按项目、客户这类事找技能，可以不打。', source + html)
+        self.assertIn('添加自定义标签（如项目、领域）', source)
+        self.assertIn('添加标签后可快速筛选技能，留空则不设标签。', source + html)
         self.assertIn('if (!canWrite) return tagList;', source)
 
         apply = extract_function(source, 'function applyTagResult(')
@@ -69,7 +69,7 @@ class UserTagsStaticTests(unittest.TestCase):
         self.assertIn('<button id="tags-batch" class="link-btn" hidden>批量打标签</button>', html)
         self.assertIn('<dialog id="tag-dialog" class="dialog dialog-wide"', html)
         self.assertIn('已选 0 个', html)
-        self.assertIn('去掉这个标签', html)
+        self.assertIn('移除标签', html)
         self.assertIn('$(\'tag-dialog\').showModal();', source)
         self.assertIn('listedSkillNames.length < 2', source)
         self.assertIn('!state.table.write_allowed || listedSkillNames.length < 2', source)
@@ -77,7 +77,7 @@ class UserTagsStaticTests(unittest.TestCase):
         self.assertIn('给这 ${tagDialogNames.length} 个技能打标签', source)
         self.assertIn('已选 ${checked.length} 个', source)
         self.assertIn('hasTag', source)
-        self.assertIn('已给 ${names.length} 个技能加上「${canonical}」', source)
+        self.assertIn('已给 ${names.length} 个技能添加标签「${canonical}」', source)
         self.assertIn('已从 ${names.length} 个技能去掉「${canonical}」', source)
 
     def test_tag_input_cleaning_matches_backend_basics(self):

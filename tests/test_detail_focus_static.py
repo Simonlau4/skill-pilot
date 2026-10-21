@@ -70,12 +70,16 @@ class DetailFocusStaticTests(unittest.TestCase):
             'function setDetailScrollLock(',
             'function holdDetailBackground(',
             'function openDetail(',
+            'function showDetailPanel(',
             'function closeDetail(',
             'function onDetailKey(',
         ]
         functions = '\n'.join(extract_function(source, name) for name in names)
         script = r'''
 let detailOpener = null;
+let storeGet = null;
+let storeOpener = null;
+let storeOpenerArea = null;
 let detailHeld = [];
 let detailScrollLock = null;
 const state = {detail: null};

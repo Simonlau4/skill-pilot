@@ -1,3 +1,5 @@
+import sys
+from skill_pilot.platform_support import rmtree
 from tests import set_up_home
 import io
 import json
@@ -26,7 +28,7 @@ class UpdateTests(unittest.TestCase):
         self.folder.mkdir(parents=True)
         self.manifest = self.folder / 'SKILL.md'
         self.original = '---\nname: sample\ndescription: example\n---\nfirst\nlocal line\n'
-        self.manifest.write_text(self.original)
+        self.manifest.write_text(self.original, newline='\n')
         (self.folder / 'scripts').mkdir()
         (self.folder / 'scripts/task.py').write_text('raise RuntimeError("never run this script")\n')
         github.git(self.repo, 'init', '-q')
@@ -166,6 +168,7 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '已经变了'):
             updates.apply(review, ['sample'], {'sample': 'merge'}, True, {'sample': merged['merge_id']})
 
+    @unittest.skipIf(os.name == 'nt', 'Windows has no POSIX executable permission bits')
     def test_external_mode_change_invalidates_review(self):
         review = self.check()
         (self.local() / 'SKILL.md').chmod(0o755)
@@ -187,6 +190,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(before, {p: store.physical_state(self.home / p) for p in roots})
         self.assertEqual(skill['entries'], operations.load(self.home)[1]['skills']['sample']['entries'])
 
+    @unittest.skipIf(os.name == 'nt', 'Windows has no POSIX executable permission bits')
     def test_mode_only_and_nonstandard_script_detection(self):
         a, b = self.home / 'one', self.home / 'two'
         a.mkdir(); b.mkdir()
@@ -230,10 +234,10 @@ class UpdateTests(unittest.TestCase):
     def test_cli_check_readonly_and_update_requires_yes(self):
         before = self.fingerprint()
         env = {**os.environ, 'SKILL_PILOT_HOME': str(self.home), 'PYTHONDONTWRITEBYTECODE': '1'}
-        result = subprocess.run(['python3', '-m', 'skill_pilot', 'check-updates', '--json'], env=env, capture_output=True, text=True)
+        result = subprocess.run([sys.executable, '-m', 'skill_pilot', 'check-updates', '--json'], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual(json.loads(result.stdout)['update_count'], 1)
-        result = subprocess.run(['python3', '-m', 'skill_pilot', 'update', 'sample', '--json'], env=env, capture_output=True, text=True)
+        result = subprocess.run([sys.executable, '-m', 'skill_pilot', 'update', 'sample', '--json'], env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 1); self.assertIn('明确同意', result.stdout)
         self.assertEqual(before, self.fingerprint())
 
@@ -247,7 +251,7 @@ class UpdateTests(unittest.TestCase):
         review = github.inspect(self.repo.as_uri())
         try:
             operations.install(review, ['another'], home=self.home)
-        finally: shutil.rmtree(review['temporary'])
+        finally: rmtree(review['temporary'])
         operations.undo(result['id'], home=self.home)
         self.assertEqual(before_base, store.physical_state(self.home / '.skill-pilot/bases/sample'))
         self.assertIn('my local edit', (self.local() / 'SKILL.md').read_text())
@@ -368,6 +372,11 @@ class LarkTests(unittest.TestCase):
             self.assertTrue(review['skills'][0]['has_update'])
             with self.assertRaisesRegex(ValueError,'单独确认'):
                 updates.apply(review,['lark-doc'],confirmed=True)
+            if os.name == 'nt':
+                with self.assertRaisesRegex(ValueError, '不自动升级飞书 CLI'):
+                    updates.apply(review, ['lark-doc'], confirmed=True, confirm_lark=True)
+                self.assertEqual(before, {p: store.physical_state(home/p) for p in snapshot_paths})
+                return
             real_run=subprocess.run
             def dispatch(command, **kwargs):
                 return fake_npm(command,**kwargs) if command[0]=='npm' else real_run(command,**kwargs)
@@ -392,14 +401,14 @@ class UpdateWebTests(unittest.TestCase):
 
     def close(self):
         self.server.shutdown(); self.thread.join(); self.server.server_close()
-        for review in self.server.update_reviews.values(): shutil.rmtree(review['temporary'], ignore_errors=True)
+        for review in self.server.update_reviews.values(): rmtree(review['temporary'], ignore_errors=True)
 
     def request(self, path, body=None):
         import urllib.request, urllib.error
         request = urllib.request.Request(self.server.origin+path,data=json.dumps(body).encode() if body is not None else None,headers={
             'X-Skill-Pilot-Token':self.server.token,'Origin':self.server.origin,'Content-Type':'application/json'})
         try:
-            with urllib.request.urlopen(request, timeout=3) as r: return r.status,json.load(r)
+            with urllib.request.urlopen(request, timeout=15 if os.name == "nt" else 3) as r: return r.status,json.load(r)
         except urllib.error.HTTPError as e: return e.code,json.load(e)
 
     def wait_review(self):

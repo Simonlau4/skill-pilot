@@ -1,6 +1,7 @@
 """Independent updates, paired Lark updates, and the real npm config loader."""
 import contextlib
 import io
+from skill_pilot.platform_support import rmtree
 import json
 import os
 import shutil
@@ -36,7 +37,7 @@ class UpdateBatchTests(unittest.TestCase):
         try:
             operations.install(review, [name], ['codex'], home=self.home)
         finally:
-            shutil.rmtree(review['temporary'])
+            rmtree(review['temporary'])
         manifest.write_text(manifest.read_text().replace('old', 'new'))
         self.fixture.commit('update ' + name)
 
@@ -84,7 +85,7 @@ class UpdateBatchTests(unittest.TestCase):
             thread.join()
             server.server_close()
             for review in server.update_reviews.values():
-                shutil.rmtree(review['temporary'], ignore_errors=True)
+                rmtree(review['temporary'], ignore_errors=True)
 
         self.addCleanup(close)
         self.request(server, '/api/updates/check', {})
@@ -142,6 +143,7 @@ class UpdateBatchTests(unittest.TestCase):
         operations.undo(saved['id'], home=self.home)
         self.assertIsNone(operations.load(self.home)[1]['skills']['sample'].get('update_watch'))
 
+    @unittest.skipIf(os.name == "nt", "POSIX CLI replacement fixture; Windows rejects CLI installation before mutation")
     def test_lark_install_failure_preserves_other_updates_and_exact_undo(self):
         for name in ['lark-doc', 'lark-wiki', 'zlast']:
             self.add_skill(name)
@@ -230,7 +232,7 @@ class UpdateBatchTests(unittest.TestCase):
         self.add_skill('zlast')
         review = self.review()
         row = next(r for r in review['skills'] if r['name'] == 'sample')
-        shutil.rmtree(row['_upstream_path'])
+        rmtree(row['_upstream_path'])
         result = updates.apply(review, ['sample', 'zlast'], confirmed=True)
         self.assertEqual(result['updated'], ['zlast'])
         self.assertEqual(result['failed'], [{'name': 'sample', 'error': '这项更新的文件没能读写，请重新检查更新后再试。'}])
@@ -289,6 +291,7 @@ class UpdateBatchTests(unittest.TestCase):
         self.assertEqual(apply_group.call_count, 1)
 
 
+@unittest.skipIf(os.name == "nt", "Windows does not automatically install the Lark CLI")
 class LarkInstallerTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('npm'), 'npm is needed to verify its real configuration loader')
     def test_staged_install_passes_real_npm_configuration_loading(self):
