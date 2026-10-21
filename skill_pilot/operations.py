@@ -398,7 +398,11 @@ def _prune_backups(home, checked):
                     or not (directory / 'manifest.json').is_file()):
                 continue
             manifest = json.loads((directory / 'manifest.json').read_text())
+            if not isinstance(manifest['paths'], list) or any(not isinstance(p, str) for p in manifest['paths']):
+                raise ValueError()
             kind = backup_kind(manifest)
+            if kind not in ('organize', 'operation', 'undo'):
+                raise ValueError()
         except Exception:
             logging.getLogger(__name__).warning('备份 %s 的说明没能读出，已原样保留并跳过。', directory.name)
             continue

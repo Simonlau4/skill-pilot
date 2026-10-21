@@ -208,7 +208,9 @@ class BackupRetentionTests(unittest.TestCase):
 
     def test_damaged_manifests_do_not_block_other_cleanup(self):
         iterdir = type(self.root).iterdir
-        for index, content in enumerate(('{"paths":', '{}')):
+        for index, content in enumerate(('{"paths":', '{}',
+                '{"kind":"future-kind","paths":[".skill-pilot/logs"]}',
+                '{"kind":"operation","paths":".skill-pilot/logs"}')):
             with self.subTest(manifest=content):
                 damaged = self.legacy(f'20000101T{index * 2 + 1:012}', ['.skill-pilot/logs'])
                 (damaged / 'manifest.json').write_text(content)
@@ -227,7 +229,7 @@ class BackupRetentionTests(unittest.TestCase):
                 self.assertTrue(any(damaged.name in warning for warning in warnings.output))
                 self.assertEqual(operations.history(self.home)[0]['id'], result['id'])
                 self.assertEqual('claude' in operations.load(self.home)[1]['skills']['other']['assigned_agents'],
-                                 index == 0)
+                                 index % 2 == 0)
                 self.assertTrue((self.root / result['backup_id'] / 'files.tar').is_file())
 
     def test_cli_lists_only_organize_and_readonly_commands_never_prune(self):
