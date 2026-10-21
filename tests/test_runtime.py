@@ -222,7 +222,7 @@ server.run(json_output=True)
         self.assertEqual(json.loads(second.stdout)['message'], '已打开正在运行的看板。')
         self.assertEqual(self.before, store.physical_state(self.home))
 
-    def test_refresh_preserves_team_upload_and_import_snapshots(self):
+    def test_refresh_preserves_team_uploads_and_discards_the_completed_queue(self):
         plan = store.preview(self.home, ['codex'])
         store.apply(plan['plan_id'], self.home, ['codex'])
         hub = team_hub.HubServer(self.root / 'Team share data', '127.0.0.1', 0)
@@ -244,27 +244,32 @@ server.run(json_output=True)
         incoming['source']['files'] = [file('SKILL.md', '---\nname: acme-incoming\ndescription: example\n---\nexample\n')]
         team._request({'url': 'http://127.0.0.1:' + str(hub.server_port), 'key': colleague['token']},
                       '/api/listings/me', 'PUT', {'listings': [incoming]})
-        before = store.physical_state(self.home)
+        shutil.copytree(store.PROJECT / 'skill', self.code / 'skill')
+        self.env['SKILL_PILOT_READ_ONLY'] = '0'
         self.start()
         status, upload = self.request('/api/team/listings/preview', {'skills': [{'name': 'sample'}]})
         self.assertEqual(status, 200, upload)
-        status, imported = self.request('/api/team/install/preview', {'key': 'team:' + colleague['id'] + ':acme-incoming', 'agents': ['codex']})
-        self.assertEqual(status, 200, imported)
+        status, queued = self.request('/api/team/queue', {'key': 'team:' + colleague['id'] + ':acme-incoming'})
+        self.assertEqual(status, 200, queued)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            queued = self.request('/api/team/queue')[1]
+            if queued['items'][0]['status'] in {'done', 'failed'}:
+                break
+            time.sleep(.01)
+        self.assertEqual(queued['items'][0]['status'], 'done', queued)
+        self.assertEqual(operations.load(self.home)[1]['skills']['acme-incoming']['assigned_agents'], [])
+        before = store.physical_state(self.home)
         self.change_backend()
         path = self.code / 'skill_pilot/web/server.py'
         source = path.read_text()
         needle = "'test_marker': 'new-program', "
         path.write_text(source.replace(needle, needle +
-            "'test_team_uploads': self.server.team_upload_reviews, 'test_team_imports': self.server.team_import_reviews, "))
+            "'test_team_uploads': self.server.team_upload_reviews, "))
         self.request('/api/runtime/refresh', {})
         current = self.wait_status(lambda s: s.get('test_marker') == 'new-program')
         self.assertEqual(current['test_team_uploads'][upload['review']]['listings'][0]['name'], 'sample')
-        saved = current['test_team_imports'][imported['review']]
-        self.assertEqual(saved['reuse'], imported['reuse'])
-        self.assertEqual(saved['agents'], imported['agents'])
-        self.assertEqual(saved['revision'], operations.revision(self.home, ['codex']))
-        self.assertEqual(saved['items'][0]['name'], 'acme-incoming')
-        self.assertTrue((Path(saved['items'][0]['path']) / 'SKILL.md').is_file())
+        self.assertEqual(self.request('/api/team/queue'), (200, {'items': []}))
         self.assertEqual(store.physical_state(self.home), before)
 
     def test_unloadable_update_keeps_old_program_available_then_allows_retry(self):

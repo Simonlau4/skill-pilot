@@ -9,6 +9,7 @@ import socket
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -20,7 +21,9 @@ from unittest.mock import patch
 from skill_pilot import operations, sharing, store, team, team_hub, updates, research
 from skill_pilot.sources import github, normalize
 from tests.test_team_hub import listing, file as package_file
+from skill_pilot.web import runtime
 from skill_pilot.web.server import Dashboard
+from skill_pilot.sources.update_github import Reader
 from tests import set_up_home
 
 
@@ -34,6 +37,9 @@ class TeamTests(unittest.TestCase):
         self.repository = self.root / 'Acme skills'
         for name in ('acme-main', 'acme-base', 'acme-other', 'acme-extra', 'acme-local'):
             self.skill(self.repository / 'skills' / name, name)
+        self.skill(self.repository / 'skills/acme-main/examples', 'nested-example')
+        manifest = self.repository / 'skills/acme-main/SKILL.md'
+        manifest.write_text(manifest.read_text() + '\nSee examples/SKILL.md\n')
         github.git(self.repository, 'init', '-q')
         github.git(self.repository, 'add', '.')
         github.git(self.repository, '-c', 'user.name=Example', '-c', 'user.email=example@local.invalid',
@@ -73,7 +79,8 @@ class TeamTests(unittest.TestCase):
         def sources(skills):
             for name, row in skills.items():
                 row['source'] = {'source': 'https://github.com/acme/skills', 'source_path': 'skills/' + name,
-                                 'commit': self.commit}
+                                 'commit': self.commit,
+                                 'tree_sha': github.git(self.repository, 'rev-parse', self.commit + ':skills/' + name)}
         self.registry(home, sources)
 
     def registry(self, home, change):
@@ -119,18 +126,41 @@ class TeamTests(unittest.TestCase):
     def cards(self, server=None):
         return {c['name']: c for c in self.ok(server or self.b, '/api/team/catalog')['cards']}
 
-    def install(self, name='acme-local', apply=True):
-        card = self.cards()[name]
-        plan = self.ok(self.b, '/api/team/install/preview', {'key': card['key'], 'agents': ['claude']})
-        if not apply:
-            return plan
-        return self.ok(self.b, '/api/team/install/apply', {'review': plan['review']})
+    def enqueue(self, name='acme-local', server=None):
+        server = server or self.b
+        card = self.cards(server)[name]
+        return self.ok(server, '/api/team/queue', {'key': card['key']})['items'][-1]
+
+    def wait_queue(self, server=None):
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            items = self.ok(server or self.b, '/api/team/queue')['items']
+            if not any(item['status'] in {'waiting', 'running'} for item in items):
+                return items
+            time.sleep(.01)
+        self.fail('安装队列没有完成')
+
+    def install(self, name='acme-local'):
+        queued = self.enqueue(name)
+        item = next(item for item in self.wait_queue() if item['id'] == queued['id'])
+        self.assertEqual(item['status'], 'done', item)
+        return item
+
+    def enable(self, name='acme-local'):
+        return operations.apply_assign([{'skill': name, 'agent': 'claude', 'enabled': True}], home=self.other)
 
     def raw_put(self, rows, member=None):
         return team._request({'url': self.url, 'key': (member or self.first)['token']}, '/api/listings/me', 'PUT', {'listings': rows})
 
+    @contextlib.contextmanager
     def local_github(self):
-        return patch.object(github, 'parse_url', return_value=(self.repository.as_uri(), 'acme/skills', self.commit))
+        parse = github.parse_url
+        def local(url):
+            _, repository, suffix = parse(url)
+            return self.repository.as_uri(), repository, suffix
+        with patch.object(github, 'parse_url', side_effect=local), patch.object(
+                github, 'api', side_effect=AssertionError('fallback must not require the GitHub CLI')):
+            yield
 
     def test_two_users_publish_install_files_and_github_with_dependencies_and_undo(self):
         self.configure()
@@ -143,9 +173,10 @@ class TeamTests(unittest.TestCase):
         labels = {'groups': [{'name': '示例分组', 'skills': {'acme-local': {
             'title': '示例技能', 'summary': '示例用途', 'description': ''}}}]}
         (self.home / '.skill-pilot/labels.json').write_text(json.dumps(labels))
+        self.registry(self.home, lambda skills: skills['acme-local'].update(requires=['acme-base']))
         published = self.publish(notes={'acme-local': '<b>示例推荐</b>'})
         rows = {r['name']: r for r in published['listings']}
-        self.assertEqual(rows['acme-base']['auto'], ['acme-main'])
+        self.assertEqual(rows['acme-base']['auto'], ['acme-local', 'acme-main'])
         self.assertEqual(rows['acme-local']['files']['blocked'][0]['path'], '.env')
         self.assertEqual(rows['acme-local']['files']['count'], 3)
         self.assertNotIn('content', json.dumps(published))
@@ -155,12 +186,16 @@ class TeamTests(unittest.TestCase):
         self.assertFalse(card['can_rate'])
         self.assertEqual(card['listings'][0]['note'], '<b>示例推荐</b>')
         before = self.library(self.other)
-        plan = self.install(apply=False)
-        self.assertGreater(plan['tokens']['claude'], 0)
-        installed = self.ok(self.b, '/api/team/install/apply', {'review': plan['review'], 'agents': ['codex'], 'key': 'ignored'})
+        with patch.object(github, 'inspect', side_effect=AssertionError('installation must use the hub')):
+            installed = self.install()
         self.assertEqual(installed['message'], '从团队商店装上了「示例技能」')
-        skill = operations.load(self.other)[1]['skills']['acme-local']
-        self.assertEqual(skill['assigned_agents'], ['claude'])
+        self.assertEqual(installed['title'], '示例技能')
+        self.assertEqual(installed['installed'], ['acme-base', 'acme-local'])
+        skills = operations.load(self.other)[1]['skills']
+        skill = skills['acme-local']
+        for name in installed['installed']:
+            self.assertEqual(skills[name]['assigned_agents'], [])
+            self.assertEqual(skills[name]['entries'], [])
         self.assertEqual(set(skill['source']), {'source', 'team'})
         self.assertEqual(normalize(skill['source'])['label'], '团队商店 · 示例成员 A')
         destination = self.other / '.skill-pilot/store/acme-local'
@@ -168,34 +203,45 @@ class TeamTests(unittest.TestCase):
         self.assertEqual((destination / 'example.bin').read_bytes(), b'\x00\xff\x01')
         self.assertTrue((destination / 'example.sh').stat().st_mode & 0o111)
         self.assertEqual(self.cards()['acme-local']['local']['status'], 'installed')
+        self.assertEqual(self.cards()['acme-local']['local']['agents'], [])
         self.assertTrue(self.cards()['acme-local']['can_rate'])
-        with tarfile.open(self.other / '.skill-pilot/backups' / installed['backup_id'] / 'files.tar') as archive:
+        record = next(r for r in operations.history(self.other) if r['id'] == installed['operation'])
+        self.assertEqual(record['agents'], [])
+        with tarfile.open(self.other / '.skill-pilot/backups' / record['backup_id'] / 'files.tar') as archive:
             self.assertNotIn('.skill-pilot/team.json', archive.getnames())
-        self.ok(self.b, '/api/undo', {'id': installed['id'], 'confirmed': True, 'revision': operations.table(self.other)['revision']})
+        self.ok(self.b, '/api/undo', {'id': installed['operation'], 'confirmed': True, 'revision': operations.table(self.other)['revision']})
         self.assertEqual(self.library(self.other), before)
-        with self.local_github():
-            plan = self.install('acme-main', apply=False)
-        self.assertEqual({r['name'] for r in plan['install']}, {'acme-main', 'acme-base'})
-        installed = self.ok(self.b, '/api/team/install/apply', {'review': plan['review']})
+        with patch.object(github, 'inspect', side_effect=AssertionError('installation must use the hub')):
+            installed = self.install('acme-main')
+        self.assertEqual(installed['installed'], ['acme-base', 'acme-main'])
         skills = operations.load(self.other)[1]['skills']
-        self.assertEqual(skills['acme-base']['assigned_agents'], ['claude'])
+        self.assertEqual(skills['acme-main']['requires'], ['acme-base'])
+        self.assertEqual(skills['acme-base']['assigned_agents'], [])
         self.assertEqual(normalize(skills['acme-main']['source'])['kind'], 'github')
-        self.ok(self.b, '/api/undo', {'id': installed['id'], 'confirmed': True, 'revision': operations.table(self.other)['revision']})
+        self.ok(self.b, '/api/undo', {'id': installed['operation'], 'confirmed': True, 'revision': operations.table(self.other)['revision']})
         self.assertEqual(self.library(self.other), before)
 
-    def test_preview_keeps_downloaded_version_even_after_author_updates_or_removes_it(self):
+    def test_queue_reads_the_current_listing_when_work_starts(self):
         self.configure()
         self.publish(('acme-local',))
-        old = (self.home / '.skill-pilot/store/acme-local/SKILL.md').read_bytes()
-        plan = self.install(apply=False)
-        path = self.home / '.skill-pilot/store/acme-local/SKILL.md'
-        path.write_bytes(old + b'\nnew version\n')
-        self.publish(('acme-local',))
-        self.ok(self.a, '/api/team/listings/remove', {'names': ['acme-local']})
-        with patch.object(github, 'inspect', side_effect=AssertionError('apply must use the preview')):
-            self.ok(self.b, '/api/team/install/apply', {'review': plan['review']})
-        self.assertEqual((self.other / '.skill-pilot/store/acme-local/SKILL.md').read_bytes(), old)
-        self.assertEqual(self.request(self.b, '/api/team/install/apply', {'review': plan['review']})[0], 409)
+        entered, release = threading.Event(), threading.Event()
+        install = team.install
+        def delayed(home, key):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return install(home, key)
+        with patch.object(team, 'install', side_effect=delayed):
+            self.enqueue()
+            try:
+                self.assertTrue(entered.wait(2))
+                path = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+                path.write_text(path.read_text() + '\nnew version\n')
+                self.publish(('acme-local',))
+            finally:
+                release.set()
+            item = self.wait_queue()[0]
+        self.assertEqual(item['status'], 'done', item)
+        self.assertEqual((self.other / '.skill-pilot/store/acme-local/SKILL.md').read_bytes(), path.read_bytes())
 
     def test_all_local_states_and_dependency_blockers(self):
         self.configure()
@@ -224,41 +270,361 @@ class TeamTests(unittest.TestCase):
             blocked = self.cards()['needs-conflict']
             self.assertEqual(blocked['local']['status'], 'blocked')
             self.assertIn('作者没有上架', blocked['local']['reason'])
-            plan = self.ok(self.b, '/api/team/install/preview', {'key': blocked['key'], 'agents': ['claude']})
-            self.assertEqual(plan['install'], [])
-            self.assertTrue(plan['skipped'])
+            self.enqueue('needs-conflict')
+            item = self.wait_queue()[0]
+            self.assertEqual(item['status'], 'failed')
+            self.assertIn('作者没有上架', item['message'])
+            self.assertNotIn('operation', item)
 
-    def test_existing_dependencies_and_their_dependencies_are_assigned_without_replacing(self):
+    def test_existing_dependencies_are_reused_without_assignment_or_replacement(self):
         self.configure()
         self.registry(self.home, lambda skills: skills['acme-local'].update(requires=['acme-other']))
         self.publish(('acme-local',))
         self.registry(self.other, lambda skills: skills['acme-other'].update(source={'source': '自制'}))
         before = (self.other / '.skill-pilot/store/acme-other/SKILL.md').read_bytes()
-        plan = self.install(apply=False)
-        self.assertEqual(plan['reuse'], ['acme-other'])
-        self.assertEqual([r['name'] for r in plan['install']], ['acme-local'])
-        self.ok(self.b, '/api/team/install/apply', {'review': plan['review']})
+        item = self.install()
+        self.assertEqual(item['reuse'], ['acme-other'])
+        self.assertEqual(item['installed'], ['acme-local'])
         self.assertEqual((self.other / '.skill-pilot/store/acme-other/SKILL.md').read_bytes(), before)
-        self.assertEqual(operations.load(self.other)[1]['skills']['acme-local']['requires'], ['acme-other'])
+        skills = operations.load(self.other)[1]['skills']
+        self.assertEqual(skills['acme-local']['requires'], ['acme-other'])
+        self.assertEqual(skills['acme-local']['assigned_agents'], [])
+        self.assertEqual(skills['acme-other']['assigned_agents'], ['claude'])
 
-    def test_install_revision_permissions_and_download_tampering_require_new_preview(self):
+    def test_install_reloads_the_registry_in_the_lock_and_cleans_downloads(self):
         self.configure()
         self.publish(('acme-local',))
-        plan = self.install(apply=False)
-        saved = self.b.team_import_reviews[plan['review']]
-        path = Path(saved['items'][0]['path']) / 'SKILL.md'
-        path.chmod(0o755)
-        before = self.library(self.other)
-        self.assertEqual(self.request(self.b, '/api/team/install/apply', {'review': plan['review']})[0], 409)
-        self.assertEqual(self.library(self.other), before)
-        plan = self.install(apply=False)
-        local = self.other / '.skill-pilot/store/acme-other/SKILL.md'
-        local.chmod(0o755)
-        changed = self.library(self.other)
-        status, result = self.request(self.b, '/api/team/install/apply', {'review': plan['review'], 'revision': operations.table(self.other)['revision']})
-        self.assertEqual(status, 409)
-        self.assertIn('重新预览', result['error'])
-        self.assertEqual(self.library(self.other), changed)
+        package = team.package
+        temporary = []
+        def download(*args):
+            path = package(*args)
+            temporary.append(path.parent)
+            operations.apply_assign([{'skill': 'acme-other', 'agent': 'claude', 'enabled': False}], home=self.other)
+            return path
+        with patch.object(team, 'package', side_effect=download):
+            self.install()
+        skills = operations.load(self.other)[1]['skills']
+        self.assertEqual(skills['acme-other']['assigned_agents'], [])
+        self.assertEqual(skills['acme-local']['assigned_agents'], [])
+        self.assertTrue(temporary)
+        self.assertTrue(all(not path.exists() for path in temporary))
+
+    def test_queue_order_duplicates_failure_retry_clear_and_busy(self):
+        self.configure()
+        self.publish(('acme-local', 'acme-main', 'acme-extra'))
+        entered, release = threading.Event(), threading.Event()
+        install, calls = team.install, []
+        def delayed(home, key):
+            calls.append(key)
+            if len(calls) == 1:
+                entered.set()
+                self.assertTrue(release.wait(8))
+            return install(home, key)
+        with patch.object(team, 'install', side_effect=delayed):
+            first = self.enqueue()
+            try:
+                self.assertTrue(entered.wait(2))
+                second = self.enqueue('acme-main')
+                third = self.enqueue('acme-extra')
+                with patch.object(team, '_fetch', side_effect=AssertionError('duplicates must not fetch')):
+                    for queued in (first, second):
+                        items = self.ok(self.b, '/api/team/queue', {'key': queued['key']})['items']
+                        self.assertEqual(next(i['id'] for i in items if i['key'] == queued['key']), queued['id'])
+                self.assertEqual([i['status'] for i in items], ['running', 'waiting', 'waiting'])
+                self.assertEqual(len(self.ok(self.b, '/api/team/queue/clear', {})['items']), 3)
+                self.assertTrue(self.b.background_busy())
+                self.ok(self.a, '/api/team/listings/remove', {'names': ['acme-main']})
+            finally:
+                release.set()
+            items = self.wait_queue()
+        self.assertEqual(calls, [i['key'] for i in (first, second, third)])
+        self.assertEqual([i['status'] for i in items], ['done', 'failed', 'done'])
+        self.assertEqual(items[1]['message'], '这个技能已经下架。')
+        self.assertNotIn('operation', items[1])
+        self.assertFalse(self.b.background_busy())
+        retried = self.ok(self.b, '/api/team/queue', {'key': second['key']})['items'][-1]
+        self.assertNotEqual(retried['id'], second['id'])
+        self.assertEqual(self.wait_queue()[-1]['status'], 'failed')
+        self.assertEqual(self.ok(self.b, '/api/team/queue/clear', {}), {'items': []})
+        self.publish(('acme-main',))
+        retried = self.install('acme-main')
+        self.assertNotEqual(retried['id'], second['id'])
+        self.assertEqual([i['name'] for i in self.wait_queue()], ['acme-main'])
+        before = operations.history(self.other)
+        again = self.install('acme-main')
+        self.assertNotEqual(again['id'], retried['id'])
+        self.assertEqual(again['message'], '本机已经有了。')
+        self.assertEqual(again['installed'], [])
+        self.assertNotIn('operation', again)
+        self.assertEqual(operations.history(self.other), before)
+        self.assertEqual(self.ok(self.b, '/api/team/queue/clear', {}), {'items': []})
+
+    def test_queue_does_not_replace_an_installed_skill_with_an_author_update(self):
+        self.configure()
+        self.publish(('acme-local',))
+        self.install()
+        local = self.other / '.skill-pilot/store/acme-local/SKILL.md'
+        before = local.read_bytes()
+        author = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+        author.write_text(author.read_text() + '\n新版\n')
+        self.publish(('acme-local',))
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'update')
+        history = operations.history(self.other)
+        item = self.install()
+        self.assertEqual(item['message'], '本机已经有了。')
+        self.assertNotIn('operation', item)
+        self.assertEqual(local.read_bytes(), before)
+        self.assertEqual(operations.history(self.other), history)
+
+    def test_refresh_waits_for_the_queue(self):
+        self.configure()
+        self.publish(('acme-local',))
+        entered, release, replaced = threading.Event(), threading.Event(), threading.Event()
+        install = team.install
+        def delayed(home, key):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return install(home, key)
+        self.b.reload_callback = replaced.set
+        with patch.object(team, 'install', side_effect=delayed), patch.object(runtime, 'version', return_value='changed'):
+            self.enqueue()
+            try:
+                self.assertTrue(entered.wait(2))
+                result = self.ok(self.b, '/api/runtime/refresh', {})
+                self.assertTrue(result['busy'])
+                self.assertFalse(replaced.wait(.05))
+            finally:
+                release.set()
+            self.assertEqual(self.wait_queue()[0]['status'], 'done')
+            self.assertTrue(replaced.wait(2))
+
+    def test_server_close_waits_for_its_queue_thread(self):
+        self.configure()
+        self.publish(('acme-local',))
+        dashboard = Dashboard({'home': str(self.other)})
+        self.addCleanup(dashboard.server_close)
+        entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+        install = team.install
+        def delayed(home, key):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return install(home, key)
+        def close():
+            dashboard.server_close()
+            closed.set()
+        with patch.object(team, 'install', side_effect=delayed):
+            dashboard.queue_team(self.cards()['acme-local']['key'])
+            try:
+                self.assertTrue(entered.wait(2))
+                thread = threading.Thread(target=close)
+                thread.start()
+                self.assertFalse(closed.wait(.05))
+            finally:
+                release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(closed.is_set())
+        self.assertEqual(dashboard.team_queue_status()['items'][0]['status'], 'done')
+
+    def test_server_close_does_not_start_waiting_items(self):
+        self.configure()
+        self.publish(('acme-local', 'acme-main', 'acme-extra'))
+        legacy = listing('acme-main')
+        legacy['source']['commit'] = self.commit
+        self.raw_put([legacy])  # A queued legacy listing would require GitHub.
+        cards = self.cards()
+        dashboard = Dashboard({'home': str(self.other)})
+        self.addCleanup(dashboard.server_close)
+        entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+        install = team.install
+        def delayed(home, key):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return install(home, key)
+        def close():
+            dashboard.server_close()
+            closed.set()
+        with patch.object(team, 'install', side_effect=delayed) as work, patch.object(
+                github, 'inspect', side_effect=AssertionError('closing must not start a GitHub download')) as download:
+            dashboard.queue_team(cards['acme-local']['key'])
+            try:
+                self.assertTrue(entered.wait(2))
+                for name in ('acme-main', 'acme-extra'):
+                    dashboard.queue_team(cards[name]['key'])
+                thread = threading.Thread(target=close)
+                thread.start()
+                deadline = time.monotonic() + 2
+                while not dashboard.closing and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(dashboard.closing)
+                self.assertFalse(closed.wait(.05))
+            finally:
+                release.set()
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(closed.is_set())
+            self.assertEqual(work.call_count, 1)
+            download.assert_not_called()
+        self.assertEqual([i['status'] for i in dashboard.team_queue_status()['items']], ['done', 'waiting', 'waiting'])
+        skills = operations.load(self.other)[1]['skills']
+        self.assertIn('acme-local', skills)
+        self.assertNotIn('acme-main', skills)
+        self.assertNotIn('acme-extra', skills)
+
+    def test_packaged_github_updates_preserve_the_raw_and_normalized_baselines(self):
+        self.configure()
+        self.publish(('acme-main',))
+        row = next(r for c in team._catalog(team._connection(self.home)) for r in c['listings'] if r['name'] == 'acme-main')
+        self.assertIn('version', row['source'])
+        self.assertEqual(row['source']['tree_sha'], github.git(self.repository, 'rev-parse', self.commit + ':skills/acme-main'))
+        with patch.object(github, 'inspect', side_effect=AssertionError('must not contact GitHub')), \
+                patch.object(github, 'api', side_effect=AssertionError('must not contact GitHub')):
+            self.install('acme-main')
+        path = self.other / '.skill-pilot/store/acme-main'
+        self.assertFalse((path / 'examples/SKILL.md').exists())
+        self.assertTrue((path / 'examples/SKILL.example.md').is_file())
+        self.assertIn('examples/SKILL.example.md', (path / 'SKILL.md').read_text())
+        skills = operations.load(self.other)[1]['skills']
+        for name in ('acme-main', 'acme-base'):
+            self.assertEqual(skills[name]['assigned_agents'], [])
+            self.assertEqual(normalize(skills[name]['source'])['kind'], 'github')
+            self.assertNotIn('team', skills[name]['source'])
+        self.assertNotEqual(skills['acme-main']['base_tree_sha'], skills['acme-main']['base_normalized_tree_sha'])
+        self.enable('acme-main')
+        latest, current = Reader.latest, Reader.current
+        def local_latest(reader, source):
+            return latest(reader, {**source, 'repository': self.repository.as_uri()})
+        def local_current(reader, source, *args):
+            return current(reader, {**source, 'repository': self.repository.as_uri()}, *args)
+        def check():
+            review = updates.check(self.other)
+            self.addCleanup(shutil.rmtree, review['temporary'], True)
+            self.assertFalse(review['errors'], review['errors'])
+            row = next(r for r in review['skills'] if r['name'] == 'acme-main')
+            self.assertFalse(row['local_modified'])
+            self.assertFalse(row['baseline_uncertain'])
+            return row
+        with patch.object(Reader, 'latest', local_latest), patch.object(Reader, 'current', local_current), \
+                patch.object(github, 'api', side_effect=AssertionError('updates must use the local repository')):
+            row = check()
+            self.assertEqual(row['status'], '已是最新')
+            self.assertFalse(row['has_update'])
+            author = self.repository / 'skills/acme-main/SKILL.md'
+            author.write_text(author.read_text() + '\nupstream version two\n')
+            github.git(self.repository, 'add', '.')
+            github.git(self.repository, '-c', 'user.name=Example', '-c', 'user.email=example@local.invalid',
+                       '-c', 'commit.gpgsign=false', 'commit', '-qm', 'upstream version two')
+            row = check()
+            self.assertEqual(row['status'], '有更新')
+            self.assertTrue(row['has_update'])
+            self.assertEqual(row['your_changes']['file_count'], 0)
+
+    def test_legacy_github_fallback_scopes_the_folder_even_with_duplicate_names(self):
+        self.configure()
+        duplicate = self.repository / 'another location'
+        self.skill(duplicate, 'acme-main')
+        (duplicate / 'SKILL.md').write_text((duplicate / 'SKILL.md').read_text() + '\nwrong copy\n')
+        github.git(self.repository, 'add', '.')
+        github.git(self.repository, '-c', 'user.name=Example', '-c', 'user.email=example@local.invalid',
+                   '-c', 'commit.gpgsign=false', 'commit', '-qm', 'duplicate name')
+        self.commit = github.git(self.repository, 'rev-parse', 'HEAD')
+        self.raw_put([listing('acme-main')])  # Old listings may also omit the commit.
+        inspected, temporary = github.inspect, []
+        def inspect(url):
+            result = inspected(url)
+            temporary.append(Path(result['temporary']))
+            self.assertEqual([s['name'] for s in result['skills']], ['acme-main'])
+            return result
+        with self.local_github(), patch.object(github, 'inspect', side_effect=inspect) as download:
+            installed = self.install('acme-main')
+        download.assert_called_once_with('https://github.com/Acme/skills/tree/' + self.commit + '/skills/acme-main')
+        self.assertEqual(installed['installed'], ['acme-main'])
+        self.assertNotIn('wrong copy', (self.other / '.skill-pilot/store/acme-main/SKILL.md').read_text())
+        self.assertTrue(all(not path.exists() for path in temporary))
+
+    def test_legacy_github_root_folder_omits_the_folder_suffix(self):
+        self.configure()
+        self.skill(self.repository / 'root staging', 'root-example')
+        shutil.move(self.repository / 'root staging/SKILL.md', self.repository / 'SKILL.md')
+        (self.repository / 'root staging').rmdir()
+        github.git(self.repository, 'add', '.')
+        github.git(self.repository, '-c', 'user.name=Example', '-c', 'user.email=example@local.invalid',
+                   '-c', 'commit.gpgsign=false', 'commit', '-qm', 'root skill')
+        self.commit = github.git(self.repository, 'rev-parse', 'HEAD')
+        row = listing('root-example')
+        row['source'].update(path='.', commit=self.commit)
+        self.raw_put([row])
+        with self.local_github(), patch.object(github, 'inspect', wraps=github.inspect) as download:
+            self.install('root-example')
+        download.assert_called_once_with('https://github.com/Acme/skills/tree/' + self.commit)
+
+    def test_github_missing_package_is_changed_until_republished(self):
+        self.configure()
+        self.raw_put([listing('acme-main')])
+        def changed():
+            return next(r['changed'] for r in self.ok(self.a, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-main')
+        self.assertTrue(changed())
+        key = self.cards()['acme-main']['key']
+        self.publish(('acme-main',))
+        self.assertFalse(changed())
+        self.assertEqual(self.cards()['acme-main']['key'], key)
+
+    def test_github_incomplete_files_do_not_offer_republishing(self):
+        self.configure()
+        def candidate():
+            return next(r for r in self.ok(self.a, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-main')
+        for error in (OSError('incomplete read'), ValueError('SKILL.md 疑似含有密钥。')):
+            with self.subTest(error=type(error).__name__), patch.object(team, '_files', side_effect=error):
+                self.publish(('acme-main',))
+                self.assertEqual(candidate()['kind'], 'github')
+                self.assertFalse(candidate()['changed'])
+        self.assertTrue(candidate()['changed'])
+        self.publish(('acme-main',))
+        self.assertFalse(candidate()['changed'])
+        for folder in ('store', 'bases'):
+            (self.home / '.skill-pilot' / folder / 'acme-main/README.md').write_text('new upstream file\n')
+        self.assertEqual(candidate()['kind'], 'github')
+        self.assertTrue(candidate()['changed'])
+
+    def test_github_secret_and_size_count_limits_publish_without_a_package(self):
+        self.configure()
+        root = self.home / '.skill-pilot/store/acme-main'
+        base = self.home / '.skill-pilot/bases/acme-main'
+        for scenario in ('secret', 'size', 'count'):
+            if scenario == 'secret':
+                for folder in (root, base, self.repository / 'skills/acme-main'):
+                    (folder / '.env').write_text('example private value')
+                github.git(self.repository, 'add', '.')
+                github.git(self.repository, '-c', 'user.name=Example', '-c', 'user.email=example@local.invalid',
+                           '-c', 'commit.gpgsign=false', 'commit', '-qm', 'secret file')
+                self.commit = github.git(self.repository, 'rev-parse', 'HEAD')
+                self.registry(self.home, lambda skills: skills['acme-main']['source'].update(commit=self.commit))
+            elif scenario == 'size':
+                for folder in (root, base):
+                    (folder / '.env').unlink()
+                    (folder / 'big.bin').write_bytes(b'\x00' * team_hub.MAX_SIZE)
+            else:
+                for folder in (root, base):
+                    (folder / 'big.bin').unlink()
+                    for i in range(300):
+                        (folder / str(i)).touch()
+            with self.subTest(scenario=scenario):
+                preview = self.publish(('acme-main',))
+                row = next(r for r in preview['listings'] if r['name'] == 'acme-main')
+                self.assertEqual(row['kind'], 'github')
+                self.assertIsNone(row['version'])
+                self.assertEqual(row['download_note'], '同事装的时候从 GitHub 下载。')
+                shared = next(r for c in team._catalog(team._connection(self.home)) for r in c['listings'] if r['name'] == 'acme-main')
+                self.assertNotIn('version', shared['source'])
+                self.assertNotIn('files', shared['source'])
+                candidate = next(r for r in self.ok(self.a, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-main')
+                self.assertEqual(candidate['kind'], 'github')
+                self.assertFalse(candidate['changed'])
+                if scenario == 'secret':
+                    self.assertEqual(row['files']['blocked'][0]['path'], '.env')
+                    with self.local_github(), patch.object(github, 'inspect', wraps=github.inspect) as download:
+                        self.install('acme-main')
+                    download.assert_called_once()
 
     def test_candidates_kind_changed_in_use_and_foreign_team_skill(self):
         self.configure()
@@ -275,6 +641,7 @@ class TeamTests(unittest.TestCase):
         path.write_text(path.read_text() + '\n本机改过\n')
         self.assertEqual(next(r for r in self.ok(self.a, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-main')['kind'], 'files')
         self.install()
+        self.enable()
         foreign = next(r for r in self.ok(self.b, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-local')
         self.assertIn('别人的', foreign['unavailable'])
         preview = self.ok(self.b, '/api/team/listings/preview', {'skills': [{'name': 'acme-local'}]})
@@ -414,6 +781,7 @@ class TeamTests(unittest.TestCase):
         self.configure()
         self.publish(('acme-local',))
         installed = self.install()
+        enabled = self.enable()
         author = self.home / '.skill-pilot/store/acme-local/SKILL.md'
         author.write_text(author.read_text() + '\n作者新版\n')
         self.publish(('acme-local',))
@@ -444,9 +812,11 @@ class TeamTests(unittest.TestCase):
         # Undo protects edits made outside the dashboard. Restore the original
         # installed content before removing that installation.
         local.write_bytes((self.other / '.skill-pilot/bases/acme-local/SKILL.md').read_bytes())
-        operations.undo(installed['id'], home=self.other)
+        operations.undo(enabled['id'], home=self.other)
+        operations.undo(installed['operation'], home=self.other)
         self.assertNotIn('acme-local', operations.load(self.other)[1]['skills'])
         self.install()
+        self.enable()
         self.ok(self.a, '/api/team/listings/remove', {'names': ['acme-local']})
         review = updates.check(self.other)
         self.addCleanup(lambda: shutil.rmtree(review['temporary'], ignore_errors=True))
@@ -459,6 +829,7 @@ class TeamTests(unittest.TestCase):
         self.configure()
         self.publish(('acme-local',))
         self.install()
+        self.enable()
         author = self.home / '.skill-pilot/store/acme-local/SKILL.md'
         author.write_text(author.read_text() + '\n作者新版\n')
         self.publish(('acme-local',))
@@ -474,13 +845,13 @@ class TeamTests(unittest.TestCase):
     def test_readonly_browses_previews_and_rejects_every_write(self):
         self.configure()
         self.publish(('acme-local',))
-        installed = self.install(apply=False)
+        key = self.cards()['acme-local']['key']
         uploaded = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-local'}]})
         before = [store.physical_state(h) for h in (self.home, self.other, self.hub.store.data)]
         writes = [('/api/team/settings', {'url': self.url}),
                   ('/api/team/listings/apply', {'review': uploaded['review']}),
                   ('/api/team/listings/remove', {'names': ['acme-local']}),
-                  ('/api/team/install/apply', {'review': installed['review']}),
+                  ('/api/team/queue', {'key': key}), ('/api/team/queue/clear', {}),
                   ('/api/team/ratings', {'key': 'example', 'stars': 5}), ('/api/team/ratings/remove', {'key': 'example'})]
         for readonly in (patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}),
                          patch.object(store, 'write_allowed', return_value=False)):
@@ -488,16 +859,16 @@ class TeamTests(unittest.TestCase):
                 self.ok(self.b, '/api/team')
                 self.ok(self.b, '/api/team/catalog')
                 self.ok(self.b, '/api/team/listings/candidates')
-                self.install(apply=False)
+                self.ok(self.b, '/api/team/queue')
                 self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-local'}]})
                 for path, body in writes:
                     self.assertEqual(self.request(self.b, path, body)[0], 403)
         self.assertEqual([store.physical_state(h) for h in (self.home, self.other, self.hub.store.data)], before)
 
     def test_all_routes_require_dashboard_identity_and_origin_legacy_routes_disappear(self):
-        gets = ['/api/team', '/api/team/catalog', '/api/team/listings/candidates']
+        gets = ['/api/team', '/api/team/catalog', '/api/team/listings/candidates', '/api/team/queue']
         posts = ['/api/team/settings', '/api/team/listings/preview', '/api/team/listings/apply', '/api/team/listings/remove',
-                 '/api/team/install/preview', '/api/team/install/apply', '/api/team/ratings', '/api/team/ratings/remove']
+                 '/api/team/queue', '/api/team/queue/clear', '/api/team/ratings', '/api/team/ratings/remove']
         before = store.physical_state(self.home)
         with patch.object(team, '_request') as network:
             for path, body in [(p, None) for p in gets] + [(p, {}) for p in posts]:
@@ -509,6 +880,8 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(self.request(self.a, path)[0], 404)
         for path in ('/api/team/upload/preview', '/api/team/upload/apply', '/api/team/withdraw', '/api/team/import/preview', '/api/team/import/apply'):
             self.assertEqual(self.request(self.a, path, {})[0], 404)
+        for path in ('/api/team/install/preview', '/api/team/install/apply'):
+            self.assertEqual(self.request(self.a, path, {})[0], 405)
 
     def test_invalid_selections_and_review_handles_never_write_or_download(self):
         self.configure()
@@ -519,11 +892,13 @@ class TeamTests(unittest.TestCase):
             for skills in (None, [], 'acme-local', ['acme-local'], [{'name': 'missing'}], [{'name': []}],
                            [{'name': 'acme-local', 'note': 'bad\ntext'}], [{'name': 'acme-local'}, {'name': 'acme-local'}]):
                 self.assertEqual(self.request(self.a, '/api/team/listings/preview', {'skills': skills})[0], 409)
-            for agents in (None, [], 'claude', ['missing'], [[]]):
-                self.assertEqual(self.request(self.b, '/api/team/install/preview', {'key': key, 'agents': agents})[0], 409)
+            for invalid in (None, '', [], {}, 1):
+                self.assertEqual(self.request(self.b, '/api/team/queue', {'key': invalid})[0], 409)
+            status, result = self.request(self.b, '/api/team/queue', {'key': 'missing'})
+            self.assertEqual(status, 409)
+            self.assertEqual(result['error'], '这个技能已经下架。')
             for review in (None, '', 'missing', []):
-                for route in ('/api/team/listings/apply', '/api/team/install/apply'):
-                    self.assertEqual(self.request(self.b, route, {'review': review})[0], 409)
+                self.assertEqual(self.request(self.b, '/api/team/listings/apply', {'review': review})[0], 409)
             download.assert_not_called()
         self.assertEqual([store.physical_state(h) for h in (self.home, self.other, self.hub.store.data)], before)
 
@@ -851,7 +1226,10 @@ class TeamTests(unittest.TestCase):
             return data
         key = self.cards()['acme-local']['key']
         with patch.object(team, '_request', side_effect=request):
-            self.assertEqual(self.request(self.b, '/api/team/install/preview', {'key': key, 'agents': ['claude']})[0], 409)
+            self.ok(self.b, '/api/team/queue', {'key': key})
+            item = self.wait_queue()[0]
+            self.assertEqual(item['status'], 'failed')
+            self.assertNotIn('operation', item)
         self.assertEqual(self.library(self.other), before)
 
     def test_fake_home_skips_team_settings_and_saving_cannot_follow_outside_link(self):

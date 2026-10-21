@@ -20,11 +20,18 @@ class TeamStaticTests(unittest.TestCase):
     def test_store_page_parts_exist(self):
         html = (STATIC / 'index.html').read_text()
         for marker in ('id="page-team"', 'id="block-team"', 'data-block="team"', 'id="store-publish-dialog"',
-                       'id="store-search"', 'id="store-shelves"', 'id="store-list"', 'id="sp-team"', 'id="sp-star"'):
+                       'id="store-search"', 'id="store-shelves"', 'id="store-list"', 'id="store-queue"',
+                       'id="sp-team"', 'id="sp-star"'):
             self.assertIn(marker, html)
         # 第一期按人看名单的页面和对话框已经换成商店。
         for old in ('team-upload-dialog', 'team-import-dialog', 'team-shares', 'team-detail'):
             self.assertNotIn(old, html)
+        # 安装队列夹在错误提示和推荐卡片之间，状态区域用礼貌播报。
+        positions = [html.index(f'id="{name}"') for name in ('store-error', 'store-queue', 'store-shelves')]
+        self.assertEqual(positions, sorted(positions), '安装队列要放在 #store-error 和 #store-shelves 之间')
+        queue_items = re.search(r'<div[^>]*id="store-queue-items"[^>]*>', html)
+        self.assertIsNotNone(queue_items, '安装队列的状态区域不见了')
+        self.assertIn('aria-live="polite"', queue_items.group(0))
         self.assertRegex((STATIC / 'app.js').read_text(), r"const SETTINGS_BLOCKS = \[[^\]]*'team'")
 
     def test_team_settings_support_open_join(self):
@@ -52,6 +59,7 @@ class TeamStaticTests(unittest.TestCase):
             line(source, 'const escape = value => '),
             line(source, 'const icon = (name'),
             line(source, 'const storeTitle = '),
+            line(source, 'const storeQueueItem = '),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             line(source, 'const starIcon = '),
             extract_function(source, 'function storeRatingHtml('),
@@ -67,6 +75,7 @@ class TeamStaticTests(unittest.TestCase):
         ]
         script = '\n'.join(parts) + r'''
 function fail(message) { console.error(message); process.exit(1); }
+const state = {queue: null};
 const member = name => ({id: name, name});
 const cards = [
   {key: 'a', name: 'acme-a', title: '<b>示例</b>', summary: '周报', group: '写作', updated_at: '2026-10-01T00:00:00Z',
@@ -97,6 +106,78 @@ if (sorted('latest') !== 'acme-b,acme-c,acme-a') fail('最新上架排序不对�
 if (sorted('rating') !== 'acme-c,acme-a,acme-b') fail('最受好评排序不对，没评价的应排最后：' + sorted('rating'));
 if (sorted('popular') !== 'acme-b,acme-c,acme-a') fail('推荐最多排序不对：' + sorted('popular'));
 if (JSON.stringify(storeGroups(cards)) !== JSON.stringify([['写作', 2], ['-', 1]])) fail('分组计数不对，没分组的排最后');
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_store_queue_rows_escape_and_tag_waiting(self):
+        source = (STATIC / 'app.js').read_text()
+        # 旧的“先核对、再确认装上”已经去掉，页面只走安装队列。
+        for old in ('/api/team/install/preview', '/api/team/install/apply',
+                    'data-store-agent', 'data-store-install-apply', 'data-store-plan-cancel'):
+            self.assertNotIn(old, source)
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const storeQueueItem = '),
+            extract_function(source, 'const STORE_STATUS = {') + ';',
+            extract_function(source, 'function storeStatusTag('),
+            extract_function(source, 'function storeQueueRowHtml('),
+        ]
+        script = '\n'.join(parts) + r'''
+function fail(message) { console.error(message); process.exit(1); }
+const state = {queue: {items: [
+  {key: 'a', name: 'acme-a', title: '<b>示例</b>', status: 'waiting'},
+  {key: 'b', name: 'acme-b', status: 'failed', message: '<img src=x onerror=alert(1)> 连不上分享站'},
+]}};
+const waiting = storeQueueRowHtml(state.queue.items[0]);
+if (waiting.includes('<b>') || !waiting.includes('&lt;b&gt;示例')) fail('队列里的中文名没有转成纯文字：' + waiting);
+if (!waiting.includes('排队中')) fail('排队中的技能应写“排队中”');
+const failed = storeQueueRowHtml(state.queue.items[1]);
+if (failed.includes('<img') || !failed.includes('&lt;img')) fail('队列里的失败原因没有转成纯文字：' + failed);
+if (!failed.includes('没装上：') || !failed.includes('data-store-queue-retry="b"')) fail('失败的行要写原因并能重试：' + failed);
+const tag = storeStatusTag({key: 'a', local: {status: 'installable'}});
+if (!tag.includes('排队中') || tag.includes('可以装')) fail('排队中的卡片标签应盖过“可以装”：' + tag);
+state.queue = {items: [{key: 'a', status: 'running'}]};
+if (!storeStatusTag({key: 'a', local: {status: 'installable'}}).includes('正在装')) fail('正在装时应写“正在装”');
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_store_review_and_source_describe_github_files(self):
+        source = (STATIC / 'app.js').read_text()
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const icon = (name'),
+            line(source, 'const number = value => '),
+            line(source, 'const sizeText = '),
+            extract_function(source, 'function storeSourceText('),
+            extract_function(source, 'function storeReviewHtml('),
+        ]
+        script = '\n'.join(parts) + r'''
+function fail(message) { console.error(message); process.exit(1); }
+const html = storeReviewHtml({listings: [
+  {kind: 'github', name: 'gh-files', title: '网上带文件', version: 'v1',
+   files: {count: 3, size: 2048}, note: ''},
+  {kind: 'github', name: 'gh-note', title: '网上不带文件', version: null,
+   download_note: '同事装的时候从 GitHub 下载。', note: ''},
+  {kind: 'files', name: 'mine', title: '自制的', files: {count: 2, size: 1024,
+   blocked: [{path: '.env', reason: '像密钥'}, {path: 'key.txt', reason: '像密码'}]}, note: ''},
+  {kind: 'github', name: 'gh-blocked', title: '网上被拦', version: null,
+   download_note: '同事装的时候从 GitHub 下载。', files: {blocked: [{path: 'secret.txt', reason: '像密钥'}]}, note: ''},
+]});
+for (const text of [
+  '网上的公开技能，连文件一起传：3 个文件，2 KB；同事装的时候不用连 GitHub',
+  '网上的公开技能，只传名字和来源。同事装的时候从 GitHub 下载。',
+  '连文件一起传：2 个文件，1 KB',
+  '拦下 2 个疑似密钥或密码的文件，不会上传',
+  '拦下 1 个疑似密钥或密码的文件，所以这个技能不传文件',
+]) {
+  if (!html.includes(text)) fail('上架核对缺了：' + text);
+}
+const shared = storeSourceText({kind: 'github', listings: [{file_count: 3, size: 2048}]});
+if (shared !== '网上的公开技能，上架时连文件存到了分享站，装的时候从分享站下载。') fail('来源说明不对：' + shared);
+const online = storeSourceText({kind: 'github', listings: [{}]});
+if (online !== '网上的公开技能，装的时候从原作者那里下载。') fail('没有文件时来源说明不对：' + online);
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
