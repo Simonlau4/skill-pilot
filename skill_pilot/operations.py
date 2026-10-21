@@ -3,6 +3,7 @@ import copy
 import fcntl
 import hashlib
 import json
+import logging
 import re
 import shutil
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from . import profiles
 from .scan import SKIP_CONTENT, content_digest, metadata, scan_root, tokens, read_disabled, is_disabled
-from .store import (PROJECT, _restore, backup, check_links, git_tree, guard, physical_state,
+from .store import (PROJECT, _restore, backup, backup_kind, check_links, git_tree, guard, physical_state, remove,
                     target_home, transaction, write_allowed, write_json)
 from .sync import assignment_entries, reconcile_assignments, visibility, cell_notes, notes, disabled_lists
 from .sources import github, normalize
@@ -372,7 +373,41 @@ def _recheck_assignment(changes, home, registry, agents):
 def _snapshot(home, agents, checked, extra_paths=None):
     roots = sorted({r for p in profiles.managed(home, agents) for r in p['skill_roots']})
     return backup(home, {'roots': roots + profiles.config_paths(home, agents) + ['.skill-pilot/logs'] + (extra_paths or []),
-                         'plan_id': revision(home, agents), 'before': visibility(home)}, checked)
+                         'plan_id': revision(home, agents), 'before': visibility(home)}, checked, kind='operation')
+
+
+def _discard_backup(directory, checked):
+    try:
+        remove(directory, checked)
+    except (OSError, ValueError):
+        logging.getLogger(__name__).warning('旧备份没能清理，将在下次操作后重试。')
+
+
+def _prune_backups(home, checked):
+    groups, retained = set(), set()
+    for record in history(home):
+        if record['undone'] or record.get('undo_of'):
+            continue
+        group = ('batch', record['batch']) if record.get('batch') else ('operation', record['id'])
+        if group in groups or len(groups) < 10:
+            groups.add(group)
+            retained.add(record['backup_id'])
+    for directory in (home / '.skill-pilot/backups').iterdir():
+        try:
+            if (not re.fullmatch(r'[0-9]{8}T[0-9]{12}', directory.name) or not directory.is_dir()
+                    or not (directory / 'manifest.json').is_file()):
+                continue
+            manifest = json.loads((directory / 'manifest.json').read_text())
+            if not isinstance(manifest['paths'], list) or any(not isinstance(p, str) for p in manifest['paths']):
+                raise ValueError()
+            kind = backup_kind(manifest)
+            if kind not in ('organize', 'operation', 'undo'):
+                raise ValueError()
+        except Exception:
+            logging.getLogger(__name__).warning('备份 %s 的说明没能读出，已原样保留并跳过。', directory.name)
+            continue
+        if directory.name not in retained and kind != 'organize' and not manifest.get('preserve'):
+            _discard_backup(directory, checked)
 
 
 def _validate(home, registry, agents, expected_visibility=None):
@@ -401,7 +436,7 @@ def _commit(home, registry, names, content_names, message):
     return github.git(store, 'rev-parse', 'HEAD')
 
 
-def _run(home, registry, agents, expected, message, mutation, undo_of=None, extra_paths=None):
+def _run(home, registry, agents, expected, message, mutation, undo_of=None, extra_paths=None, batch=None):
     checked = lambda p: guard(p, home)
     checked(home / '.skill-pilot')
     with transaction(home) as lock:
@@ -443,16 +478,28 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
                       }
             if result.get('_assignment_before') is not None:
                 record['assignment_before'] = result.pop('_assignment_before')
+            if batch is not None:
+                record['batch'] = batch
             write_json(home / '.skill-pilot/logs' / (commit + '.json'), record, checked)
-            return {**result, 'id': commit, 'message': message, 'backup_id': snapshot['backup_id']}
         except Exception as error:
             try:
                 _restore(home, snapshot['backup_id'], checked)
             except Exception as rollback:
+                snapshot['preserve'] = True
+                try:
+                    write_json(home / '.skill-pilot/backups' / snapshot['backup_id'] / 'manifest.json', snapshot, checked)
+                except (OSError, ValueError):
+                    logging.getLogger(__name__).warning('恢复失败的备份没能写入保留标记，请先用备份还原。')
                 raise RollbackError('这项操作没能完全恢复，后续更新已停止，请先用备份还原。') from rollback
+            _discard_backup(home / '.skill-pilot/backups' / snapshot['backup_id'], checked)
             if isinstance(error, ValueError):
                 raise
             raise ValueError('操作没能完成，已经自动恢复原样。') from error
+        try:
+            _prune_backups(home, checked)
+        except Exception:
+            logging.getLogger(__name__).warning('旧备份没能清理，将在下次操作后重试。')
+        return {**result, 'id': commit, 'message': message, 'backup_id': snapshot['backup_id']}
 
 
 def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=False):
@@ -729,6 +776,8 @@ def undo(operation_id, expected=None, home=None):
     if record is None or record['undone'] or record.get('undo_of'):
         raise ValueError('这条记录不能再次撤销。')
     before_file = home / '.skill-pilot/backups' / record['backup_id'] / 'files.tar'
+    if not before_file.is_file() or not (before_file.parent / 'manifest.json').is_file():
+        raise ValueError('这次操作太早了，备份已经清掉，不能再撤销。')
     import tarfile
 
     def extract_prefix(relative):
@@ -783,17 +832,21 @@ def undo(operation_id, expected=None, home=None):
             filtered = {**snapshot, 'paths': [p for p in original_paths if p != excluded],
                         'existing': [p for p in snapshot['existing'] if p != excluded]}
             # Extract only the allowed members to a temporary backup, never rewrite the original.
-            scratch = _snapshot(home, agents, checked)
-            directory = home / '.skill-pilot/backups' / scratch['backup_id']
-            filtered['backup_id'] = scratch['backup_id']
+            scratch_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f')
+            directory = checked(home / '.skill-pilot/backups' / scratch_id)
+            directory.mkdir()
+            filtered.update(backup_id=scratch_id, kind='undo')
             filtered['paths'] = [p for p in filtered['paths'] if p != '.skill-pilot/logs']
             filtered['existing'] = [p for p in filtered['existing'] if p != '.skill-pilot/logs']
-            write_json(directory / 'manifest.json', filtered, checked)
-            with tarfile.open(before_file) as source, tarfile.open(directory / 'files.tar', 'w') as target:
-                for member in source.getmembers():
-                    if any(member.name == p or member.name.startswith(p + '/') for p in filtered['paths']):
-                        target.addfile(member, source.extractfile(member) if member.isfile() else None)
-            _restore(home, scratch['backup_id'], checked)
+            try:
+                write_json(directory / 'manifest.json', filtered, checked)
+                with tarfile.open(before_file) as source, tarfile.open(checked(directory / 'files.tar'), 'w') as target:
+                    for member in source.getmembers():
+                        if any(member.name == p or member.name.startswith(p + '/') for p in filtered['paths']):
+                            target.addfile(member, source.extractfile(member) if member.isfile() else None)
+                _restore(home, scratch_id, checked)
+            finally:
+                _discard_backup(directory, checked)
             current.clear(); current.update(before)
         else:
             if record.get('extra_paths'):

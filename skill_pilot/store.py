@@ -244,13 +244,25 @@ def write_json(path, value, checked):
     checked(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
+def backup_kind(manifest):
+    if "kind" in manifest:
+        return manifest["kind"]
+    paths = manifest["paths"]
+    if ".skill-pilot/store" in paths and ".skill-pilot/logs" not in paths:
+        return "organize"
+    if ".skill-pilot/store" not in paths and ".skill-pilot/logs" not in paths:
+        return "undo"
+    return "operation"
+
+
 def backups(home=None):
     home = target_home() if home is None else Path(home).resolve()
     root = home / ".skill-pilot/backups"
-    return [json.loads(p.read_text()) for p in sorted(root.glob("*/manifest.json"), reverse=True)]
+    manifests = [json.loads(p.read_text()) for p in sorted(root.glob("*/manifest.json"), reverse=True)]
+    return [m for m in manifests if backup_kind(m) == "organize"]
 
 
-def backup(home, plan, checked):
+def backup(home, plan, checked, kind="organize"):
     backup_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     directory = checked(home / ".skill-pilot/backups" / backup_id)
     directory.mkdir(parents=True)
@@ -263,7 +275,7 @@ def backup(home, plan, checked):
     protected_roots = profiles.readonly_roots(home)
     protected = sorted(protected_roots | {str((home / p).resolve().relative_to(home)) for p in protected_roots
                                           if (home / p).resolve().is_relative_to(home)})
-    manifest = {"backup_id": backup_id, "home": str(home), "plan_id": plan["plan_id"], "paths": paths,
+    manifest = {"backup_id": backup_id, "kind": kind, "home": str(home), "plan_id": plan["plan_id"], "paths": paths,
                 "existing": [r for r in paths if (home / r).exists() or (home / r).is_symlink()],
                 "before": plan["before"], "protected": protected}
     with tarfile.open(checked(directory / "files.tar"), "w", dereference=False) as archive:
