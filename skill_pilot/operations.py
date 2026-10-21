@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import profiles
-from .scan import SKIP_CONTENT, content_digest, metadata, scan_root, tokens
+from .scan import SKIP_CONTENT, content_digest, metadata, scan_root, tokens, read_disabled, is_disabled
 from .store import (PROJECT, _restore, backup, check_links, git_tree, guard, physical_state,
                     target_home, transaction, write_allowed, write_json)
-from .sync import assignment_entries, reconcile_assignments, visibility, cell_notes, notes
+from .sync import assignment_entries, reconcile_assignments, visibility, cell_notes, notes, disabled_lists
 from .sources import github, normalize
 from . import labels, tags, normalization
 
@@ -21,6 +21,10 @@ DEPENDENCY_DECISIONS = PROJECT / 'docs/dependency-decisions.json'
 
 class RollbackError(ValueError):
     """A failed operation could not be restored; later writes must stop."""
+
+
+class AssignmentChanged(ValueError):
+    """The page should recheck its pending assignments against the latest state."""
 
 
 def curated_dependencies():
@@ -115,7 +119,7 @@ def table(home=None):
     rows = []
     for name, skill in sorted(registry['skills'].items()):
         path = home / '.skill-pilot/store' / name
-        info = metadata((path / 'SKILL.md').read_text())
+        info = metadata((path / 'SKILL.md').read_text()) if (path / 'SKILL.md').is_file() else {}
         label = display.get(name, blank)
         rows.append({'name': name, 'title': label['title'], 'summary': label['summary'], 'description': info.get('description', ''),
                      'description_zh': label['description'], 'tags': user_tags.get(name, []),
@@ -125,7 +129,9 @@ def table(home=None):
                      'update_watch': skill.get('update_watch') or 'all',
                      'local_modified': normalization.tree(path) != normalization.tree(home / '.skill-pilot/bases' / name),
                      'cell_notes': cells[name]})
+    actual = visibility(home, profiles.managed(home, agents))
     return {'home': str(home), 'revision': revision(home, agents), 'write_allowed': write_allowed(home), 'skills': rows,
+            'actual_assignments': {n: [a for a in agents if n in actual[a]['available']] for n in registry['skills']},
             'agents': [{'id': a, 'name': catalog[a]['name'],
                         'activation': '目录改变后会动态刷新' if catalog[a]['activation'] == 'immediate' else '新会话生效',
                         'activation_text': profiles.activation_text(catalog[a]),
@@ -270,8 +276,10 @@ def assignment_plan(registry, agents, changes, home=None):
             'message': '、'.join(summary) or '分配没有变化'}
 
 
-def preview_assign(changes, home=None):
+def preview_assign(changes, home=None, recheck=False):
     home, registry, agents = load(home)
+    if recheck:
+        return _recheck_assignment(changes, home, registry, agents)[0]
     plan = assignment_plan(registry, agents, changes, home)
     cost = {n: listing_tokens(n, metadata((home / '.skill-pilot/store' / n / 'SKILL.md').read_text()))
             for n in registry['skills']}
@@ -283,18 +291,98 @@ def preview_assign(changes, home=None):
                   for a in agents}}
 
 
+def _recheck_assignment(changes, home, registry, agents):
+    """Reapply only explicit intent to observed assignments, without adopting files."""
+    start = revision(home, agents)
+    actual = visibility(home, profiles.managed(home, agents))
+    before = {a: actual[a]['available'] for a in agents}
+    live = copy.deepcopy(registry)
+    for name, skill in live['skills'].items():
+        skill['assigned_agents'] = sorted(a for a in agents if name in before[a])
+    base = {n: s['assigned_agents'] for n, s in live['skills'].items()}
+    conflicts, valid = [], []
+    def conflict(change, message):
+        conflicts.append({'skill': change['skill'], 'agent': change['agent'], 'message': message})
+    for change in changes:
+        name, agent, enabled = change['skill'], change['agent'], change['enabled']
+        if type(enabled) is not bool:
+            raise ValueError('请选择要添加或撤下的技能。')
+        if agent not in agents:
+            conflict(change, '这个 agent 已不再接入，无法应用这处选择。')
+        elif name not in live['skills']:
+            if enabled:
+                conflict(change, '这个技能已经不在名单里，无法添加。')
+        elif enabled and not (home / '.skill-pilot/store' / name / 'SKILL.md').is_file():
+            conflict(change, '这个技能的文件已经不在，无法添加。')
+        else:
+            valid.append(change)
+    try:
+        plan = assignment_plan(live, agents, valid, home)
+    except ValueError as error:
+        for change in valid:
+            conflict(change, str(error))
+        plan = assignment_plan(live, agents, [], home)
+    # Any external replacement of a selected entry needs a source decision.
+    foreign = {s['name'] for s in new_skills(home, agents)}
+    for name in plan['changed']:
+        target = home / '.skill-pilot/store' / name
+        info = metadata((target / 'SKILL.md').read_text()) if (target / 'SKILL.md').is_file() else {}
+        affected = [c for c in valid if c['skill'] == name] or valid
+        if plan['registry']['skills'][name]['assigned_agents'] and (
+                info.get('name') != name or not info.get('description')):
+            for change in affected:
+                conflict(change, '「' + name + '」的技能文件已不完整或名称变了，无法安全添加。')
+        entries = set(registry['skills'][name].get('entries', [])) | set(
+            assignment_entries(name, plan['registry']['skills'][name]['assigned_agents'], home))
+        replaced = name in foreign or any((p.exists() or p.is_symlink()) and
+            (not p.is_symlink() or p.resolve() != target.resolve()) for p in (home / e for e in entries))
+        if replaced:
+            for change in affected:
+                conflict(change, '「' + name + '」的位置被其他文件替换，请先在新装技能里核对来源，或不改这处。')
+    # Dry-run the same lossless config editor used by the write, before any backup or mutation.
+    try:
+        desired = disabled_lists(plan['registry'], home)
+        for profile in profiles.managed(home, agents):
+            if profile['disable']:
+                adapter = profiles.adapter(profile)
+                path = home / adapter.CONFIG_PATH
+                rendered, _ = adapter.render(path.read_bytes() if path.exists() else b'',
+                                            plan['registry'].get(profile['disable']), desired[profile['id']])
+                disabled = read_disabled(path, home, text=rendered.decode('utf-8'))
+                for name in plan['changed']:
+                    if profile['id'] not in plan['registry']['skills'][name]['assigned_agents']:
+                        continue
+                    entries = assignment_entries(name, plan['registry']['skills'][name]['assigned_agents'], home)
+                    readable = [entry for entry in entries if profiles.reads(profile, entry)]
+                    if readable and all(is_disabled({'name': name, 'path': str(home / entry)}, disabled) for entry in readable):
+                        for change in [c for c in valid if c['skill'] == name] or valid:
+                            conflict(change, profile['name'] + ' 的独立停用设置仍关着「' + name + '」，无法应用这处选择。')
+    except ValueError:
+        for change in valid:
+            conflict(change, 'Codex 的停用设置已被别处改过，无法安全合并，请先核对停用设置，或不改这处。')
+    assignments = {n: s['assigned_agents'] for n, s in plan['registry']['skills'].items()}
+    effects = [{'skill': n, 'agent': a, 'enabled': a in assignments[n]}
+               for n in assignments for a in agents if (a in base[n]) != (a in assignments[n])]
+    result = {k: v for k, v in plan.items() if k != 'registry'} | {
+        'revision': start, 'base_assignments': base, 'assignments': assignments, 'changes': effects,
+        'conflicts': conflicts, 'cell_notes': cell_notes(plan['registry'], home, agents)}
+    return result, plan, before
+
+
 def _snapshot(home, agents, checked, extra_paths=None):
     roots = sorted({r for p in profiles.managed(home, agents) for r in p['skill_roots']})
     return backup(home, {'roots': roots + profiles.config_paths(home, agents) + ['.skill-pilot/logs'] + (extra_paths or []),
                          'plan_id': revision(home, agents), 'before': visibility(home)}, checked)
 
 
-def _validate(home, registry, agents):
+def _validate(home, registry, agents, expected_visibility=None):
     current = visibility(home)
     managed = set(registry['skills'])
     for agent in agents:
         expected = {n for n, s in registry['skills'].items() if agent in s['assigned_agents']}
-        if set(current[agent]['available']) & managed != expected:
+        mismatch = (set(current[agent]['available']) != set(expected_visibility[agent]) if expected_visibility is not None
+                    else set(current[agent]['available']) & managed != expected)
+        if mismatch:
             raise ValueError(f'{profiles.by_id(home)[agent]["name"]} 的实际技能名单与勾选结果不一致，已经恢复原样。原有停用设置可能限制了这次分配。')
 
 
@@ -329,7 +417,7 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
         try:
             names, content, result = mutation(registry, checked)
             agents = [p['id'] for p in profiles.managed(home)]
-            _validate(home, registry, agents)
+            _validate(home, registry, agents, result.pop('_expected_visibility', None))
             original_registry = result.pop('_registry_bytes', None)
             if original_registry is None:
                 write_json(home / '.skill-pilot/registry.json', registry, checked)
@@ -353,6 +441,8 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
                       'extra_state': {p: physical_state(home / p) for p in extra_paths or []},
                       'agents_changed': agents_changed,
                       }
+            if result.get('_assignment_before') is not None:
+                record['assignment_before'] = result.pop('_assignment_before')
             write_json(home / '.skill-pilot/logs' / (commit + '.json'), record, checked)
             return {**result, 'id': commit, 'message': message, 'backup_id': snapshot['backup_id']}
         except Exception as error:
@@ -365,9 +455,39 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
             raise ValueError('操作没能完成，已经自动恢复原样。') from error
 
 
-def apply_assign(changes, expected=None, confirmed=False, home=None):
+def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=False):
     home, registry, agents = load(home)
     guard(home / '.skill-pilot', home)
+    if recheck:
+        review, plan, before = _recheck_assignment(changes, home, registry, agents)
+        if expected != review['revision']:
+            raise AssignmentChanged('状态又有变化，正在重新核对；你的选择已保留。')
+        if review['conflicts']:
+            return {'needs_attention': True, **review}
+        if (plan['dependency_warnings'] or plan['path_warnings']) and not confirmed:
+            return {'needs_confirmation': True, **review}
+        if not plan['changed']:
+            return {'message': '这些改动已经完成，已与最新状态对齐。'}
+        had_drift = any((set(before[a]) & set(registry['skills'])) !=
+            {n for n, s in registry['skills'].items() if a in s['assigned_agents']} for a in agents)
+        def check_current():
+            if revision(home, agents) != expected:
+                raise AssignmentChanged('状态又有变化，正在重新核对；你的选择已保留。')
+            return registry
+        def apply_latest(current, checked):
+            working = plan['registry']
+            reconcile_assignments(working, home, checked, plan['changed'])
+            for name in plan['changed']:
+                current['skills'][name] = working['skills'][name]
+            if 'codex_config' in working:
+                current['codex_config'] = working['codex_config']
+            expected_visibility = {a: sorted((set(before[a]) - set(plan['changed'])) |
+                {n for n in plan['changed'] if a in working['skills'][n]['assigned_agents']}) for a in agents}
+            result = {'reasons': plan['reasons'], '_expected_visibility': expected_visibility}
+            if had_drift:
+                result['_assignment_before'] = before
+            return plan['changed'], [], result
+        return _run(home, registry, agents, check_current, plan['message'], apply_latest)
     plan = assignment_plan(registry, agents, changes, home)
     if (plan['dependency_warnings'] or plan['path_warnings']) and not confirmed:
         return {'needs_confirmation': True, **{k: v for k, v in plan.items() if k != 'registry'}}
@@ -623,6 +743,8 @@ def undo(operation_id, expected=None, home=None):
     def mutate(current, checked):
         store = home / '.skill-pilot/store'
         later = [r for r in history(home) if r['time'] > record['time'] and not r.get('undone') and not r.get('undo_of')]
+        if later and record.get('assignment_before'):
+            raise ValueError('这次分配保留了已有的外部调整，请先撤销后来的操作，再撤销这次分配。')
         if later and (record.get('agents_changed') or any(r.get('agents_changed') for r in later)):
             raise ValueError('后来的操作涉及 agent 接入或退出，请先撤销后来的操作。文件没有改动。')
         if any(set(record['skills']) & set(r['skills']) for r in later):
@@ -699,6 +821,7 @@ def undo(operation_id, expected=None, home=None):
             reconcile_assignments(current, home, checked, [n for n in names if n in current['skills']],
                                   {n: before['skills'][n].get('entries', []) for n in names if n in before['skills']})
         return names, [], {'_commit': github.git(store, 'rev-parse', 'HEAD'),
+                           **({'_expected_visibility': record['assignment_before']} if record.get('assignment_before') else {}),
                            **({'_registry_bytes': before_bytes} if not later else {})}
     return _run(home, registry, agents, expected or revision(home, agents), '撤销：' + record['message'], mutate,
                 operation_id, extra_paths=record.get('extra_paths'))

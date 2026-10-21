@@ -123,16 +123,24 @@ def clean_listing(row, packaged=False):
     if kind == 'github':
         result['source'] = {k: source[k] for k in ('kind', 'repository', 'path', 'commit') if k in source}
         result['source']['path'] = str(Path(source['path']))
+        if 'tree_sha' in source:
+            if not isinstance(source['tree_sha'], str) or not re.fullmatch(r'[0-9a-f]{40}', source['tree_sha']):
+                raise ValueError('技能来源的版本记录不正确。')
+            result['source']['tree_sha'] = source['tree_sha']
     elif kind == 'lark':
         result['source'] = {'kind': 'lark'}
-    elif packaged:
-        if (not isinstance(source.get('version'), str) or not re.fullmatch(r'[0-9a-f]{64}', source['version']) or
-                type(source.get('file_count')) is not int or not 1 <= source['file_count'] <= MAX_FILES or
-                type(source.get('size')) is not int or not 0 <= source['size'] <= MAX_SIZE):
-            raise ValueError('技能文件的版本或大小记录不正确。')
-        result['source'] = {k: source[k] for k in ('kind', 'version', 'file_count', 'size')}
     else:
-        result['source'] = {'kind': 'files', 'files': clean_files(source.get('files'))}
+        result['source'] = {'kind': 'files'}
+    if kind == 'files' or (kind == 'github' and
+            (any(k in source for k in ('version', 'file_count', 'size')) if packaged else 'files' in source)):
+        if packaged:
+            if (not isinstance(source.get('version'), str) or not re.fullmatch(r'[0-9a-f]{64}', source['version']) or
+                    type(source.get('file_count')) is not int or not 1 <= source['file_count'] <= MAX_FILES or
+                    type(source.get('size')) is not int or not 0 <= source['size'] <= MAX_SIZE):
+                raise ValueError('技能文件的版本或大小记录不正确。')
+            result['source'].update({k: source[k] for k in ('version', 'file_count', 'size')})
+        else:
+            result['source']['files'] = clean_files(source.get('files'))
     return result
 
 
@@ -278,12 +286,12 @@ class HubStore:
             name, source = row['name'], row['source']
             path = self.data / 'packages' / member_id / (name + '.json')
             receipt = {'name': name, 'key': listing_key(member_id, row), 'updated_at': updated_at}
-            if source['kind'] == 'files':
-                files = source['files']
+            if 'files' in source:
+                files = source.pop('files')
                 version = package_version(files)
                 changes[path] = {'name': name, 'version': version, 'files': files}
-                row['source'] = {'kind': 'files', 'version': version, 'file_count': len(files),
-                                 'size': sum(len(base64.b64decode(f['content'])) for f in files)}
+                source.update(version=version, file_count=len(files),
+                              size=sum(len(base64.b64decode(f['content'])) for f in files))
                 receipt['version'] = version
             else:
                 changes[path] = None
@@ -307,7 +315,7 @@ class HubStore:
 
     def _package(self, member_id, name, version=None):
         row = self._listings(member_id).get(name)
-        if row is None or row['source']['kind'] != 'files':
+        if row is None or row['source']['kind'] not in {'files', 'github'} or 'version' not in row['source']:
             raise HubError(404, '这个技能没有可取的文件，或已经下架。')
         if version is not None and version != row['source']['version']:
             raise HubError(409, '作者已经上架了新版，请重新预览。')
