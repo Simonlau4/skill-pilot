@@ -13,6 +13,7 @@ import unittest
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -223,6 +224,24 @@ server.run(json_output=True)
         self.assertEqual(self.before, store.physical_state(self.home))
 
     def test_refresh_preserves_team_uploads_and_discards_the_completed_queue(self):
+        def discovery_after_scan():
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                if not self.request('/api/agents')[1]['discovery']['running']:
+                    return json.loads((self.home / '.skill-pilot/agent-discovery.json').read_text())
+                time.sleep(.01)
+            self.fail('agent discovery did not finish')
+
+        def state_without_discovery():
+            entries = [p for p in self.home.iterdir() if p.name != '.skill-pilot']
+            entries += [p for p in (self.home / '.skill-pilot').iterdir()
+                        if p.name != 'agent-discovery.json']
+            state = {str(p.relative_to(self.home)): store.physical_state(p) for p in entries}
+            state['.'] = self.home.stat().st_mode
+            state['.skill-pilot'] = (self.home / '.skill-pilot').stat().st_mode
+            state['.skill-pilot/agent-discovery.json'] = (self.home / '.skill-pilot/agent-discovery.json').stat().st_mode
+            return state
+
         plan = store.preview(self.home, ['codex'])
         store.apply(plan['plan_id'], self.home, ['codex'])
         hub = team_hub.HubServer(self.root / 'Team share data', '127.0.0.1', 0)
@@ -259,7 +278,8 @@ server.run(json_output=True)
             time.sleep(.01)
         self.assertEqual(queued['items'][0]['status'], 'done', queued)
         self.assertEqual(operations.load(self.home)[1]['skills']['acme-incoming']['assigned_agents'], [])
-        before = store.physical_state(self.home)
+        discovery_before = discovery_after_scan()
+        before = state_without_discovery()
         self.change_backend()
         path = self.code / 'skill_pilot/web/server.py'
         source = path.read_text()
@@ -270,7 +290,12 @@ server.run(json_output=True)
         current = self.wait_status(lambda s: s.get('test_marker') == 'new-program')
         self.assertEqual(current['test_team_uploads'][upload['review']]['listings'][0]['name'], 'sample')
         self.assertEqual(self.request('/api/team/queue'), (200, {'items': []}))
-        self.assertEqual(store.physical_state(self.home), before)
+        # Restarting legitimately refreshes the discovery time, not the skill data.
+        discovery_after = discovery_after_scan()
+        self.assertEqual({**discovery_after, 'checked_at': ''}, {**discovery_before, 'checked_at': ''})
+        self.assertGreaterEqual(datetime.fromisoformat(discovery_after['checked_at']),
+                                datetime.fromisoformat(discovery_before['checked_at']))
+        self.assertEqual(state_without_discovery(), before)
 
     def test_unloadable_update_keeps_old_program_available_then_allows_retry(self):
         self.start()
