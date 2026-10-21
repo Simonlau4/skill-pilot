@@ -1921,10 +1921,11 @@ let programFailedAction = '';   // 本次打开页面里哪一步没成；左栏
 function renderProgram() {
   const progress = programUpdate;
   const date = value => value ? new Date(value).toLocaleString('zh-CN') : '首次安装版本';
+  const message = (progress.message || '从 Skill Pilot 官方项目获取新版').replace(/\bSP\b/g, 'Skill Pilot');
   $('program-version').hidden = !progress.current && !progress.latest;
   $('program-version').textContent = `已安装：${date(progress.current)}`
     + (progress.available ? ` · 新版：${date(progress.latest)}` : '');
-  $('program-message').textContent = progress.message || '从 Skill Pilot 官方项目获取新版';
+  $('program-message').textContent = message;
   $('program-error').textContent = progress.error || '';
   $('program-error').hidden = !progress.error;
   $('program-check').disabled = progress.running || Boolean(writeBusy);
@@ -1939,7 +1940,7 @@ function renderProgram() {
   $('program-refresh').disabled = Boolean(writeBusy);
   // 打开看板时的自动检查不占页头任务条（左栏照常提醒）；手动检查和升级照旧显示。
   const quiet = progress.phase === 'check' && progress.automatic && !programActionRunning;
-  if (progress.running && !quiet && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: progress.message});
+  if (progress.running && !quiet && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: message});
   else clearTask('self-update');
   renderRailNotes();
   if (homeVisible) renderHomeTodos();

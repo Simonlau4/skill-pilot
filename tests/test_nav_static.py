@@ -101,6 +101,37 @@ if (!written.endsWith('#skills/Acme')) { console.error('技能页地址没写对
         self.assertNotIn("$('home-map').addEventListener('focusin'", source)
         self.assertNotIn("$('home-map').addEventListener('focusout'", source)
 
+    def test_program_messages_use_full_name_without_changing_backend_state(self):
+        source = (STATIC / 'app.js').read_text()
+        function = extract_function(source, 'function renderProgram(')
+        script = function + r'''
+const elements = new Map();
+function $(id) {
+  if (!elements.has(id)) elements.set(id, {setAttribute() {}, querySelector() { return this; }});
+  return elements.get(id);
+}
+const tasks = new Map();
+const setTask = (key, task) => tasks.set(key, task);
+const clearTask = key => tasks.delete(key);
+const renderRailNotes = () => {};
+const homeVisible = false, programActionRunning = false, writeBusy = false;
+let programUpdate = {phase: 'latest', message: 'SP 已是最新版本', write_allowed: true};
+renderProgram();
+if ($('program-message').textContent !== 'Skill Pilot 已是最新版本') throw new Error('版本提示仍显示旧简称');
+if (programUpdate.message !== 'SP 已是最新版本') throw new Error('不应改写后台返回的数据');
+programUpdate = {...programUpdate, phase: 'check', running: true, message: '正在检查 SP 版本'};
+renderProgram();
+if (tasks.get('self-update').text !== '正在检查 Skill Pilot 版本') throw new Error('页头进度仍显示旧简称');
+programUpdate = {phase: 'latest', message: 'Skill Pilot 已是最新版本'};
+renderProgram();
+if ($('program-message').textContent !== programUpdate.message) throw new Error('完整名称不应重复替换');
+programUpdate = {phase: 'idle'};
+renderProgram();
+if ($('program-message').textContent !== '从 Skill Pilot 官方项目获取新版') throw new Error('缺少默认提示');
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_home_todo_rules(self):
         source = (STATIC / 'app.js').read_text()
         function = extract_function(source, 'function homeTodos(')
