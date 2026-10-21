@@ -207,8 +207,9 @@ class M3WebTests(MigrationWebTests):
         self.assertEqual(self.request('/api/assignment/preview', {'changes': changes})[0], 200)
         extra = '\n[projects."/tmp/example workspace"]\ntrust_level = "trusted"\n'
         config.write_text(config.read_text() + extra)
+        _, review = self.request('/api/assignment/preview', {'changes': changes, 'recheck': True})
         status, result = self.request('/api/assignment/apply', {
-            'changes': changes, 'revision': table['assignment_revision'], 'confirmed': True})
+            'changes': changes, 'revision': review['revision'], 'recheck': True, 'confirmed': True})
         self.assertEqual(status, 200, result)
         self.assertTrue(config.read_text().endswith(extra))
         _, refreshed = self.request('/api/table')
@@ -222,10 +223,26 @@ class M3WebTests(MigrationWebTests):
         before = physical_state(self.home)
         status, result = self.request('/api/assignment/apply', {
             'changes': [{'skill': 'sample', 'agent': 'claude', 'enabled': True}],
-            'revision': table['assignment_revision'], 'confirmed': True})
+            'revision': table['revision'], 'confirmed': True})
         self.assertEqual(status, 409)
         self.assertIn('刷新', result['error'])
         self.assertEqual(physical_state(self.home), before)
+
+    def test_recheck_reports_race_and_allows_latest_plan(self):
+        changes = [{'skill': 'sample', 'agent': 'claude', 'enabled': True}]
+        status, review = self.request('/api/assignment/preview', {'changes': changes, 'recheck': True})
+        self.assertEqual(status, 200, review)
+        path = self.home / '.skill-pilot/store/sample/SKILL.md'
+        path.write_text(path.read_text() + '\nexternal edit\n')
+        status, result = self.request('/api/assignment/apply', {
+            'changes': changes, 'revision': review['revision'], 'recheck': True, 'confirmed': True})
+        self.assertEqual(status, 409)
+        self.assertTrue(result['recheck'])
+        _, latest = self.request('/api/assignment/preview', {'changes': changes, 'recheck': True})
+        status, result = self.request('/api/assignment/apply', {
+            'changes': changes, 'revision': latest['revision'], 'recheck': True, 'confirmed': True})
+        self.assertEqual(status, 200, result)
+        self.assertIn('external edit', path.read_text())
 
     def test_changed_choice_applies_and_confirmed_restore_recovers(self):
         from skill_pilot.sources import github

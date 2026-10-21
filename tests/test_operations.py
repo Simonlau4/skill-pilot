@@ -94,13 +94,14 @@ class OperationsTests(unittest.TestCase):
             self.assign('other', 'claude', expected=view['revision'])
 
     def test_pending_assignment_preserves_unrelated_codex_changes(self):
-        view = operations.table(self.home)
+        operations.table(self.home)
         config = self.home / '.codex/config.toml'
         extra = '\n[projects."/tmp/example workspace"]\ntrust_level = "trusted"\n[features]\nexample = true\n'
         changed = 'model = "example"\n# new comment\n' + config.read_text() + extra
         config.write_text(changed)
-        result = self.assign('other', 'codex', False,
-                             expected=view['assignment_revision'], confirmed=True)
+        changes = [{'skill': 'other', 'agent': 'codex', 'enabled': False}]
+        review = operations.preview_assign(changes, self.home, recheck=True)
+        result = operations.apply_assign(changes, review['revision'], True, self.home, recheck=True)
         self.assertNotIn('other', visibility(self.home)['codex']['available'])
         self.assertEqual(config.read_text().replace(', { name = "other", enabled = false }', ''), changed)
         operations.undo(result['id'], home=self.home)
@@ -113,7 +114,7 @@ class OperationsTests(unittest.TestCase):
         config.write_text(config.read_text().replace('plugin:original', 'other'))
         before = self.fingerprint()
         with self.assertRaisesRegex(ValueError, '刷新'):
-            self.assign('grilling', 'claude', expected=view['assignment_revision'], confirmed=True)
+            self.assign('grilling', 'claude', expected=view['revision'], confirmed=True)
         self.assertEqual(self.fingerprint(), before)
 
     def test_pending_assignment_rejects_changed_skill_files(self):
@@ -122,7 +123,7 @@ class OperationsTests(unittest.TestCase):
         skill.write_text(skill.read_text() + '\nexternal edit\n')
         before = self.fingerprint()
         with self.assertRaisesRegex(ValueError, '刷新'):
-            self.assign('other', 'codex', False, expected=view['assignment_revision'], confirmed=True)
+            self.assign('other', 'codex', False, expected=view['revision'], confirmed=True)
         self.assertEqual(self.fingerprint(), before)
 
     def test_pending_assignment_cannot_bypass_config_modes_or_invalid_content(self):
@@ -139,13 +140,13 @@ class OperationsTests(unittest.TestCase):
                     config.write_text('[skills]\nconfig = [ broken')
                 before = self.fingerprint()
                 with self.assertRaises(ValueError):
-                    self.assign('other', 'claude', expected=view['assignment_revision'], confirmed=True)
+                    self.assign('other', 'claude', expected=view['revision'], confirmed=True)
                 self.assertEqual(self.fingerprint(), before)
 
     def test_assignment_revision_does_not_relax_undo_guard(self):
         view = operations.table(self.home)
         result = self.assign('other', 'codex', False,
-                             expected=view['assignment_revision'], confirmed=True)
+                             expected=view['revision'], confirmed=True)
         config = self.home / '.codex/config.toml'
         config.write_text(config.read_text() + '\n[projects."/tmp/later workspace"]\ntrust_level = "trusted"\n')
         before = self.fingerprint()

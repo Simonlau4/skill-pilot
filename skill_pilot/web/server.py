@@ -524,7 +524,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, result)
                 return
             if path == '/api/assignment/preview':
-                self.reply(200, operations.preview_assign(body['changes'], self.server.home))
+                self.reply(200, operations.preview_assign(body['changes'], self.server.home, body.get('recheck') is True))
                 return
             if path == '/api/config/preview':
                 self.reply(200, sharing.preview_import(body.get('config'), body.get('agents'), self.server.home))
@@ -586,7 +586,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/restore':
                 result = restore(body["backup_id"], self.server.home)
             elif path == '/api/assignment/apply':
-                result = operations.apply_assign(body['changes'], body['revision'], True, self.server.home)
+                result = operations.apply_assign(body['changes'], body['revision'], True, self.server.home,
+                                                 body.get('recheck') is True)
             elif path == '/api/config/apply':
                 result = sharing.import_config(body.get('config'), body.get('agents'), self.server.home, body['revision'])
             elif path == '/api/agents/join/apply':
@@ -625,7 +626,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError, KeyError, TypeError, StopIteration) as error:
             message = ('团队操作没能完成，请重新预览后重试。' if path.startswith('/api/team/') and not isinstance(error, ValueError) else
                        '设置没能保存，请核对后再试。' if path in settings_routes and not isinstance(error, ValueError) else str(error))
-            self.reply(400 if path == '/api/cleanup/preview' else 409, {"error": message or "操作没能完成，请重新预览。"})
+            self.reply(400 if path == '/api/cleanup/preview' else 409, {
+                "error": message or "操作没能完成，请重新预览。",
+                **({'recheck': True} if isinstance(error, operations.AssignmentChanged) else {})})
 
     def team_post(self, path, body):
         home = self.server.home
