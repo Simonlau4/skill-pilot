@@ -65,6 +65,21 @@ def skill_state(home, name, skill):
     return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
 
 
+def _unchecked(registry):
+    no_source = unused = 0
+    for skill in registry.values():
+        if not skill['assigned_agents']:
+            unused += 1
+        else:
+            try:
+                no_source += normalize(skill['source'])['kind'] == 'skip'
+            except ValueError:
+                pass
+    return [item for item in (
+        {'reason': '没有上游来源', 'count': no_source}, {'reason': '没有 agent 在用', 'count': unused},
+    ) if item['count']]
+
+
 def create(home=None):
     home, registry, _ = operations.load(home)
     temporary = tempfile.mkdtemp(prefix='skill-pilot-updates-')
@@ -73,24 +88,18 @@ def create(home=None):
               'skills': [], 'errors': [], 'lark': None, 'running': True, 'done': 0, 'current': [],
               'update_count': 0, 'latest_count': 0, 'api_calls': 0, '_groups': {}}
     # 没查的只记已经跳过的原因，不扩大检查范围。
-    no_source = unused = 0
     for name, skill in sorted(registry['skills'].items()):
         if not skill['assigned_agents']:
-            unused += 1
             continue  # 没有 agent 在用的不查
         try:
             source = normalize(skill['source'])
             if source['kind'] == 'skip':
-                no_source += 1
                 continue  # 自制的没有上游，不列出也不计数
         except ValueError as error:
             source = {'kind': 'skip', 'label': '没查清楚', 'error': str(error)}
         group = source.get('repository', source['kind'])
         result['_groups'].setdefault(group, []).append((name, skill, source))
-    result['unchecked'] = [item for item in (
-        {'reason': '没有上游来源', 'count': no_source},
-        {'reason': '没有 agent 在用', 'count': unused},
-    ) if item['count']]
+    result['unchecked'] = _unchecked(registry['skills'])
     result['total'] = sum(map(len, result['_groups'].values()))
     result['remaining'] = result['total']
     result['repositories'] = sum(g not in {'skip', 'lark', 'team'} for g in result['_groups'])
@@ -239,12 +248,27 @@ def set_watch(name, mode, expected=None, home=None, confirmed=False):
 
 
 def public(review):
-    return {k: ([{key: value for key, value in row.copy().items() if not key.startswith('_') and key != 'package'}
+    result = {k: ([{key: value for key, value in row.copy().items() if not key.startswith('_') and key != 'package'}
                  for row in list(v)] if k == 'skills' else list(v) if isinstance(v, list) else v)
             for k, v in review.copy().items() if not k.startswith('_') and k not in {'temporary', 'home'}}
+    if 'home' not in review:
+        return result
+    registry = operations.load(review['home'])[1]['skills']
+    result['skills'] = [row for row in result['skills'] if row['name'] in registry]
+    result['errors'] = [row for row in result['errors'] if row['name'] in registry]
+    groups = {key: [n for n, _, _ in items if n in registry] for key, items in review['_groups'].items()}
+    result.update(total=sum(map(len, groups.values())), done=len(result['skills']),
+                  update_count=sum(bool(row['has_update']) for row in result['skills']),
+                  latest_count=sum(row['status'] == '已是最新' for row in result['skills']),
+                  repositories=sum(bool(names) and key not in {'skip', 'lark', 'team'} for key, names in groups.items()))
+    result['remaining'] = result['total'] - result['done']
+    result['unchecked'] = _unchecked(registry)
+    return result
 
 
 def selected_row(review, name):
+    if name not in operations.load(review['home'])[1]['skills']:
+        raise ValueError('这个技能已经删除，请刷新后重新检查。')
     row = next((r for r in review['skills'] if r['name'] == name and r['has_update']), None)
     if row is None:
         raise ValueError('这个技能没有可更新的已核对版本，请重新检查。')
@@ -328,17 +352,17 @@ def _validate_name(incoming, local):
 def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_lark=False):
     if not confirmed:
         raise ValueError('请先核对选中的更新，再确认执行。')
-    home, _, _ = operations.load(review['home'])
+    home, registry, _ = operations.load(review['home'])
     # Check before any preparation or CLI subprocess can write.
     from .store import guard
     guard(home / '.skill-pilot', home)
-    names = sorted(set(names)); choices, merge_ids = choices or {}, merge_ids or {}
+    names = sorted(set(names) & registry['skills'].keys()); choices, merge_ids = choices or {}, merge_ids or {}
     if not names:
         raise ValueError('请先勾选要更新的技能。')
     by_name = {row['name']: row for row in review['skills']}
     lark_names = {name for name in names if by_name.get(name, {}).get('source', {}).get('kind') == 'lark'}
     if lark_names:
-        all_lark = {n for n, _, _ in review['_groups']['lark']}
+        all_lark = {n for n, _, _ in review['_groups']['lark'] if n in registry['skills']}
         if lark_names != all_lark or not confirm_lark:
             raise ValueError('飞书技能需要一起更新，并单独确认同时升级 lark-cli。')
     # Each independent update keeps its own backup and undo record. A failed
@@ -431,7 +455,8 @@ def _apply_group(review, names, choices, merge_ids, batch):
         return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names}}
     def current_registry():
         current = operations.load(home)[1]
-        if any(skill_state(home, row['name'], current['skills'][row['name']]) != row['_state'] for row in rows):
+        if any(row['name'] not in current['skills'] or
+               skill_state(home, row['name'], current['skills'][row['name']]) != row['_state'] for row in rows):
             raise ValueError('这个技能的内容或分配已经变了，请刷新后重新检查。')
         return current
     result = operations._run(home, registry, agents, current_registry, f'核对并更新了 {len(names)} 个技能', mutate,

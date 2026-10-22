@@ -1,5 +1,6 @@
 """Private settings and display-only names from an explicitly configured service."""
 import json
+import copy
 import os
 import secrets
 import time
@@ -194,9 +195,22 @@ def run(home, mode, progress):
             groups[:] = [g for g in groups if g['skills']]
             if mode == 'all':
                 groups.sort(key=lambda g: -len(g['skills']))
-            atomic_write(home, 'labels.json', json.dumps({'groups': groups}, ensure_ascii=False) + '\n')
+            saved = copy.deepcopy(groups)
+            # Keep deleted skills' display labels available for a later undo.
+            for group in read(home):
+                hidden = {n: v for n, v in group['skills'].items() if n not in current}
+                if hidden:
+                    target = next((g for g in saved if g['name'] == group['name']), None)
+                    if target is None:
+                        target = {'name': group['name'], 'skills': {}}
+                        saved.append(target)
+                    target['skills'].update(hidden)
+            atomic_write(home, 'labels.json', json.dumps({'groups': saved}, ensure_ascii=False) + '\n')
         while True:
             registry = load(home)[1]['skills']
+            removed = [s for s in skills if s['name'] not in registry]
+            skills[:] = [s for s in skills if s['name'] in registry]
+            progress['total'] -= len(removed)
             added = describe(sorted(registry.keys() - have.keys() - scheduled))
             skills[:0] = added
             scheduled.update(s['name'] for s in added)

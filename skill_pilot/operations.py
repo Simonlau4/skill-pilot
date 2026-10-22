@@ -128,11 +128,17 @@ def table(home=None):
         path = home / '.skill-pilot/store' / name
         info = metadata((path / 'SKILL.md').read_text()) if (path / 'SKILL.md').is_file() else {}
         label = display.get(name, blank)
+        try:
+            source = normalize(skill['source'])
+        except ValueError:
+            source = {'kind': 'skip', 'label': '没查清楚'}
         rows.append({'name': name, 'title': label['title'], 'summary': label['summary'], 'description': info.get('description', ''),
                      'description_zh': label['description'], 'tags': user_tags.get(name, []),
                      'description_tokens': listing_tokens(name, info), 'source': skill['source'],
-                     'source_label': normalize(skill['source'])['label'],
+                     'source_label': source['label'], 'source_kind': source['kind'],
                      'assigned_agents': active[name], 'requires': skill.get('requires', []),
+                     'withdrawn': bool(skill.get('withdrawn')), 'withdrawn_at': skill.get('withdrawn_at'),
+                     'previous_agents': [a for a in skill.get('withdrawn_agents', []) if a in agents],
                      'update_watch': skill.get('update_watch') or 'all',
                      'local_modified': normalization.tree(path) != normalization.tree(home / '.skill-pilot/bases' / name),
                      'cell_notes': cells[name]})
@@ -145,7 +151,8 @@ def table(home=None):
                         'count': sum(a in s['assigned_agents'] for s in rows),
                         'description_tokens': sum(s['description_tokens'] for s in rows if a in s['assigned_agents'])}
                        for a in agents], 'notes': notes(home, agents), 'new_skills': new_skills(home, agents),
-            'groups': [{'name': group['name'], 'skills': list(group['skills'])} for group in groups],
+            'groups': [{'name': group['name'], 'skills': [n for n in group['skills'] if n in registry['skills']]}
+                       for group in groups if any(n in registry['skills'] for n in group['skills'])],
             'labels_pending': sum(labels.needs_work(display.get(row['name'])) for row in rows),
             'llm_configured': bool(labels.settings(home).get('api_key'))}
 
@@ -438,11 +445,15 @@ def _validate(home, registry, agents, expected_visibility=None):
 
 def _commit(home, registry, names, content_names, message):
     store = home / '.skill-pilot/store'
-    for name in names:
+    present = [name for name in names if name in registry['skills']]
+    for name in present:
         write_json(store / '.skill-pilot-state' / (name + '.json'), registry['skills'][name], lambda p: guard(p, home))
-    paths = ['.skill-pilot-state/' + n + '.json' for n in names] + list(content_names)
+    paths = ['.skill-pilot-state/' + n + '.json' for n in present] + list(content_names)
     if not (store / '.git').exists():
         github.git(store, 'init', '-q')
+    deleted = ['.skill-pilot-state/' + n + '.json' for n in names if n not in registry['skills']]
+    if deleted:
+        paths += github.git(store, 'ls-files', '-z', '--', *deleted).split('\0')[:-1]
     if paths:
         github.git(store, 'add', '--', *paths)
     github.git(store, '-c', 'user.name=Skill Pilot', '-c', 'user.email=local@skill-pilot.invalid',
@@ -797,9 +808,15 @@ def undo(operation_id, expected=None, home=None):
 
     def extract_prefix(relative):
         with tarfile.open(before_file) as source:
-            for member in source.getmembers():
-                if member.name == relative or member.name.startswith(relative + '/'):
-                    source.extract(member, home, filter='data')
+            members = [member for member in source.getmembers()
+                       if member.name == relative or member.name.startswith(relative + '/')]
+            for member in members:
+                source.extract(member, home, filter='data')
+            # The data filter adjusts permissions; restore the user's original
+            # modes after writing children so private directories remain usable.
+            for member in reversed(members):
+                if member.isfile() or member.isdir():
+                    guard(home / member.name, home).chmod(member.mode)
 
     with tarfile.open(before_file) as archive:
         before_bytes = archive.extractfile('.skill-pilot/registry.json').read()
@@ -874,7 +891,7 @@ def undo(operation_id, expected=None, home=None):
                     if base.exists():
                         rmtree(base)
                     extract_prefix('.skill-pilot/bases/' + name)
-                    old_entries = current['skills'][name].get('entries', [])
+                    old_entries = current['skills'].get(name, {}).get('entries', [])
                     current['skills'][name] = copy.deepcopy(before['skills'][name])
                     current['skills'][name]['entries'] = sorted(set(old_entries) | set(current['skills'][name].get('entries', [])))
                 else:

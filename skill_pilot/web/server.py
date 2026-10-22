@@ -500,12 +500,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.server.program_progress['running'] and self.server.program_progress['phase'] == 'apply':
             self.reply(503, {'error': '正在升级 SP，请完成后刷新页面再操作。'})
             return
-        read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/install/inspect', '/api/incoming/compare',
+        read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/cleanup/delete/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
                        '/api/agents/scan', '/api/team/listings/preview'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
-                        '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply','/api/withdrawn/restore',
+                        '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/queue', '/api/team/queue/clear',
                         '/api/team/ratings', '/api/team/ratings/remove'}
@@ -615,6 +615,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/cleanup/preview':
                 self.reply(200, cleanup.preview(body.get('skills'), self.server.home))
                 return
+            if path == '/api/cleanup/delete/preview':
+                self.reply(200, cleanup.delete_preview(body.get('skills'), self.server.home))
+                return
             if path == '/api/agents/join/preview':
                 self.reply(200, agent_management.preview_join(body['agents'], self.server.home))
                 return
@@ -655,13 +658,14 @@ class Handler(BaseHTTPRequestHandler):
             if not preview_allowed(self.server.home):
                 self.reply(403, {"error": "当前处于只读模式，文件没有改动。"})
                 return
-            if path == '/api/cleanup/apply':
+            if path in {'/api/cleanup/apply', '/api/cleanup/delete/apply'}:
                 try:
-                    cleanup.preview(body.get('skills'), self.server.home)
+                    action = cleanup.delete_preview if path == '/api/cleanup/delete/apply' else cleanup.preview
+                    action(body.get('skills'), self.server.home)
                 except ValueError as error:
                     self.reply(400, {'error': str(error)})
                     return
-            if path in {'/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/cleanup/apply', '/api/config/apply'} and (not isinstance(body.get('revision'), str) or not body['revision']):
+            if path in {'/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/config/apply'} and (not isinstance(body.get('revision'), str) or not body['revision']):
                 raise ValueError('请先读取当前状态，再确认这次操作。')
             if path == "/api/migration/apply":
                 result = apply(body["plan_id"], self.server.home, body["agents"], body.get("choices"), body.get("sources"))
@@ -695,6 +699,8 @@ class Handler(BaseHTTPRequestHandler):
                                            body.get('merge_ids'), body.get('confirm_lark_cli', False))
             elif path == '/api/cleanup/apply':
                 result = cleanup.apply(body.get('skills'), True, self.server.home, body['revision'])
+            elif path == '/api/cleanup/delete/apply':
+                result = cleanup.delete(body.get('skills'), True, self.server.home, body['revision'])
             elif path == '/api/withdrawn/restore':
                 result = cleanup.restore(body['skills'],self.server.home,body['revision'])
             else:
@@ -709,7 +715,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, OSError, KeyError, TypeError, StopIteration) as error:
             message = ('团队操作没能完成，请重新预览后重试。' if path.startswith('/api/team/') and not isinstance(error, ValueError) else
                        '设置没能保存，请核对后再试。' if path in settings_routes and not isinstance(error, ValueError) else str(error))
-            self.reply(400 if path == '/api/cleanup/preview' else 409, {
+            self.reply(400 if path in {'/api/cleanup/preview', '/api/cleanup/delete/preview'} else 409, {
                 "error": message or "操作没能完成，请重新预览。",
                 **({'recheck': True} if isinstance(error, operations.AssignmentChanged) else {})})
 
