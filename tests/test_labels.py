@@ -222,7 +222,8 @@ class LabelsTests(unittest.TestCase):
         groups = labels.read(self.home)
         self.assertEqual([g['name'] for g in groups], ['整理', '新组'])
         self.assertEqual(groups[0]['skills']['skill-00'], {'title': '旧中文名', 'summary': '旧说明', 'description': '翻译好的说明'})
-        self.assertEqual(list(groups[0]['skills']), ['skill-00', 'skill-01'])  # deleted 已清掉
+        self.assertEqual(list(groups[0]['skills']), ['skill-00', 'skill-01', 'deleted'])  # 已删除的显示信息留给撤销
+        self.assertNotIn('deleted', operations.table(self.home)['groups'][0]['skills'])
         self.assertEqual(groups[1]['skills']['skill-02']['title'], '另一个')
         payload = json.loads(self.ai.calls[0]['body']['messages'][1]['content'])
         self.assertEqual(payload['existing_groups'], ['整理'])
