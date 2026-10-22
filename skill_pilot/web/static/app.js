@@ -433,7 +433,12 @@ async function runWrite({button = null, busyText, taskText = busyText, success =
 }
 
 /* 底部固定操作栏：只在有事情可做时出现。 */
+let actionBarHideTimer = null;
+
 function showActionBar({text, note = '', buttons = [], items = '', extra = ''}) {
+  // 收起是延后 200ms 做的；这期间又出现新内容时，取消那次隐藏，别把刚打开的托盘藏掉。
+  clearTimeout(actionBarHideTimer);
+  actionBarHideTimer = null;
   $('action-summary').textContent = text;
   $('action-note').textContent = note;
   $('action-note').hidden = !note;
@@ -466,7 +471,11 @@ function hideActionBar() {
   $('action-buttons').innerHTML = '';
   $('action-list').innerHTML = '';
   $('action-extra').innerHTML = '';
-  setTimeout(() => { if (!$('action-bar').classList.contains('is-open')) bar.hidden = true; }, 200);
+  clearTimeout(actionBarHideTimer);
+  actionBarHideTimer = setTimeout(() => {
+    actionBarHideTimer = null;
+    if (!bar.classList.contains('is-open')) bar.hidden = true;
+  }, 200);
 }
 
 /* 心跳：看板关掉后立刻告诉用户。
@@ -4801,22 +4810,16 @@ const CLEANUP_FILTERS = ['agent', 'group', 'tag', 'source'];
 const cleanupSelection = () => state.cleanupTab === 'on' ? state.cleanupSelected : state.idleSelected;
 const cleanupLocked = () => Boolean(writeBusy) || !state.table?.write_allowed;
 const cleanupFiltersActive = () => Object.values(state.cleanupFilters).some(Boolean);
-const cleanupSourceKind = skill => skill?.source_kind || skill?.source?.kind || '';
+const cleanupSourceKind = skill => skill?.source_kind || '';
 const cleanupSourceLabel = kind => CLEANUP_SOURCES[kind] || kind;
 
-/* 撤下前给了谁、什么时候撤下的：优先用技能表里的新字段；
-   接口还没补上时，用 /api/cleanup 的名单兜底，页面不会空一块。 */
+/* 撤下前给了谁、什么时候撤下的，都直接看技能表这一行。 */
 function cleanupMeta(skill) {
-  const old = state.cleanup?.withdrawn?.find(item => item.name === skill?.name) || {};
-  const has = key => Boolean(skill) && Object.prototype.hasOwnProperty.call(skill, key);
-  const previous = has('previous_agents')
-    ? (Array.isArray(skill.previous_agents) ? skill.previous_agents : [])
-    : (old.previous_agents || []);
-  const withdrawn = skill && typeof skill.withdrawn === 'boolean'
-    ? skill.withdrawn
-    : previous.length > 0 || Boolean(old.withdrawn_at);
-  const withdrawnAt = has('withdrawn_at') ? skill.withdrawn_at : (old.withdrawn_at ?? null);
-  return {withdrawn, withdrawn_at: withdrawnAt, previous_agents: previous};
+  return {
+    withdrawn: Boolean(skill?.withdrawn),
+    withdrawn_at: skill?.withdrawn_at ?? null,
+    previous_agents: Array.isArray(skill?.previous_agents) ? skill.previous_agents : [],
+  };
 }
 
 /* 在用：至少给了一个 agent。未启用：哪个 agent 都没给，包括撤下来的和从没启用过的。 */

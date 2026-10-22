@@ -181,8 +181,10 @@ function fail(message) { console.error(message); process.exit(1); }
 const skills = [
   {name: 'a', title: '甲', summary: '写', tags: ['工作'], description_tokens: 100, source_kind: 'github'},
   {name: 'b', title: '乙', summary: '读', tags: ['学习'], description_tokens: 300, source_kind: 'lark'},
-  {name: 'c', title: '丙', summary: '旧', tags: ['工作'], description_tokens: 200, source_kind: 'skip'},
-  {name: 'd', title: '丁', summary: '团队', tags: [], description_tokens: 50, source_kind: 'team'},
+  {name: 'c', title: '丙', summary: '旧', tags: ['工作'], description_tokens: 200, source_kind: 'skip',
+    withdrawn: true, withdrawn_at: '2026-10-20T10:00:00Z', previous_agents: ['codex']},
+  {name: 'd', title: '丁', summary: '团队', tags: [], description_tokens: 50, source_kind: 'team',
+    withdrawn: true, withdrawn_at: '2026-10-21T10:00:00Z', previous_agents: ['claude']},
   {name: 'e', title: '戊', summary: '没用过', tags: [], description_tokens: 400, source_kind: 'github'},
 ];
 let searchValue = '';
@@ -192,10 +194,6 @@ const state = {
   saved: {a: ['codex'], b: ['codex', 'claude'], c: [], d: [], e: []},
   skillIndex: new Map(skills.map(skill => [skill.name, skill])),
   groupIndex: new Map([['a', '写作'], ['c', '写作']]),
-  cleanup: {withdrawn: [
-    {name: 'c', previous_agents: ['codex'], withdrawn_at: '2026-10-20T10:00:00Z'},
-    {name: 'd', previous_agents: ['claude'], withdrawn_at: '2026-10-21T10:00:00Z'},
-  ]},
   table: {skills, groups: [{name: '写作', skills: ['a', 'c']}]},
   agents: [{id: 'codex'}, {id: 'claude'}],
 };
@@ -207,6 +205,12 @@ const matchesQuery = (skill, query) => !query || [skill.name, skill.title, skill
   .some(text => (text || '').toLowerCase().includes(query));
 const names = rows => rows.map(skill => skill.name).join(',');
 function fail(message) { console.error(message); process.exit(1); }
+
+const blank = cleanupMeta({name: 'blank'});
+if (blank.withdrawn !== false || blank.withdrawn_at !== null || blank.previous_agents.length) {
+  fail('缺少撤下字段时应按 false、null、空名单处理：' + JSON.stringify(blank));
+}
+if (cleanupSourceKind({source: {kind: 'github'}}) !== '') fail('来源只应看技能行的 source_kind');
 
 if (names(cleanupTabSkills()) !== 'a,b') fail('在用栏应为 a,b：' + names(cleanupTabSkills()));
 if (names(cleanupTabSkills('off')) !== 'c,d,e') fail('未启用栏应为 c,d,e：' + names(cleanupTabSkills('off')));
@@ -237,6 +241,61 @@ if (counts(off.source) !== 'skip:1,team:1,github:1') fail('未启用栏的来源
 const on = cleanupFilterOptions(cleanupTabSkills('on'));
 if (counts(on.group) !== '写作:1,未分组:1') fail('在用栏的分组数量不对：' + counts(on.group));
 if (counts(on.tag) !== '工作:1,学习:1') fail('在用栏的标签数量不对：' + counts(on.tag));
+''',
+        ])
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_action_bar_show_cancels_pending_hide(self):
+        source = (STATIC / 'app.js').read_text()
+        show = source[source.index('function showActionBar('):source.index('function hideActionBar(')].rstrip()
+        script = '\n'.join([
+            'let actionBarHideTimer = null;',
+            show,
+            extract_function(source, 'function hideActionBar('),
+            r'''
+class ClassList {
+  constructor() { this.values = new Set(); }
+  add(name) { this.values.add(name); }
+  remove(name) { this.values.delete(name); }
+  contains(name) { return this.values.has(name); }
+}
+function element(extra = {}) {
+  return {hidden: false, innerHTML: '', textContent: '', classList: new ClassList(), append() {}, querySelector() { return null; }, ...extra};
+}
+const bar = element({hidden: true});
+const byId = {
+  'action-bar': bar,
+  'action-summary': element(),
+  'action-note': element(),
+  'action-buttons': element(),
+  'action-list': element(),
+  'action-extra': element(),
+};
+function $(id) { return byId[id]; }
+const document = {body: {classList: new ClassList()}, createElement: () => element({addEventListener() {}})};
+const frames = [];
+function requestAnimationFrame(callback) { frames.push(callback); return frames.length; }
+function runFrames() { while (frames.length) frames.shift()(); }
+const timers = new Map();
+let nextTimer = 1;
+function setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; }
+function clearTimeout(id) { timers.delete(id); }
+function runTimers() { const pending = [...timers.values()]; timers.clear(); for (const callback of pending) callback(); }
+function fail(message) { console.error(message); process.exit(1); }
+
+hideActionBar();
+showActionBar({text: '已选 1 个技能'});
+if (bar.hidden) fail('重新显示托盘时不应留着旧的隐藏状态');
+runTimers();
+if (bar.hidden) fail('显示托盘后应取消尚未执行的隐藏');
+runFrames();
+if (!bar.classList.contains('is-open')) fail('显示托盘后应加上打开状态');
+
+hideActionBar();
+if (bar.classList.contains('is-open')) fail('收起托盘时应先移除打开状态');
+runTimers();
+if (!bar.hidden) fail('收起 200 毫秒后应真正隐藏');
 ''',
         ])
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
