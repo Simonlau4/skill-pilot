@@ -45,6 +45,12 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.request(headers={**headers, "Origin":"https://attacker.example"})[0], 403)
         self.assertEqual(self.request(headers={**headers, "Sec-Fetch-Site":"cross-site"})[0], 403)
 
+    def test_protected_page_allows_own_data_images(self):
+        with urllib.request.urlopen(self.server.origin + '/?token=' + self.server.token) as response:
+            policy = response.headers.get("Content-Security-Policy", "")
+        self.assertIn("img-src 'self' data:", policy)
+        self.assertIn("script-src 'self'", policy)
+
     def test_only_heartbeat_post_is_allowed(self):
         headers = {"X-Skill-Pilot-Token": self.server.token, "Origin":self.server.origin}
         self.assertEqual(self.request("/api/heartbeat", headers, "POST")[0], 200)

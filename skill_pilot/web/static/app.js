@@ -3985,6 +3985,9 @@ function closeDetail() {
 
 function onDetailKey(event) {
   if (document.querySelector('dialog[open]')) return;
+  // 新式下拉框展开时，Esc 先让浏览器收起列表；不支持新式下拉框的浏览器没有 :open，先确认支持再判断。
+  if (event.key === 'Escape' && CSS.supports('appearance', 'base-select')
+      && event.target.closest?.('select')?.matches(':open')) return;
   if (event.key === 'Tab') trapDetailTab(event);
   else if (event.key === 'Escape' && !$('detail-panel').hidden) closeDetail();
 }

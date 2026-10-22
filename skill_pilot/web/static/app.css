@@ -405,7 +405,71 @@ dl, dd, dt { margin: 0; }
 .search-field .input { width: 100%; min-width: 0; min-height: 34px; padding: 0; background: transparent; border: 0; box-shadow: none; }
 .search-field:focus-within { outline: 2px solid var(--ink); outline-offset: 2px; }
 .search-field .input:focus { outline: none; }
-select.input { padding-right: var(--sp-6); }
+/* 下拉框：箭头自己画，右侧留 12px 边距、16px 箭头和 8px 文字间距。 */
+select.input {
+  --select-arrow-gap: calc(var(--sp-3) + 16px + var(--sp-2));
+  --select-arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23465163' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: var(--select-arrow-gap);
+  background-image: var(--select-arrow);
+  background-repeat: no-repeat;
+  background-position: right var(--sp-3) center;
+  background-size: 16px 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+select.input:disabled { opacity: 0.5; cursor: default; }
+select.input:disabled:hover { box-shadow: inset 0 0 0 1px var(--line-strong), inset 0 2px 4px rgba(24, 32, 46, 0.025); }
+
+/* 支持可自定义下拉框的浏览器（Chromium 135 起）：展开列表也用看板样式。 */
+@supports (appearance: base-select) {
+  select.input,
+  select.input::picker(select) {
+    appearance: base-select;
+  }
+  /* 收起状态继续用上面画的箭头，关掉浏览器自带的箭头。 */
+  select.input::picker-icon { display: none; }
+  /* base-select 下选中文字默认贴在顶部，长文字会伸进右侧留白；
+     让文字垂直居中，并在内容区边缘裁掉，右侧留白只留背景箭头。 */
+  select.input {
+    align-items: center;
+    overflow: clip;
+    overflow-clip-margin: content-box;
+  }
+  select.input::picker(select) {
+    margin-block-start: var(--sp-1);
+    padding: var(--sp-1);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    box-shadow: 0 0 0 1px var(--line), var(--shadow-2);
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  select.input option {
+    padding: var(--sp-2) var(--sp-3);
+    border-radius: 6px;
+    font: inherit;
+    color: var(--ink);
+  }
+  select.input option:hover,
+  select.input option:focus-visible {
+    background: var(--panel-soft);
+  }
+  select.input option:checked {
+    background: var(--panel-deep);
+    font-weight: 600;
+  }
+  select.input option:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: -2px;
+  }
+  select.input option::checkmark { display: none; }
+  select.input option:disabled { color: var(--muted); }
+}
 textarea.input { padding: var(--sp-2) var(--sp-3); }
 .settings-form { display: grid; gap: var(--sp-2); max-width: 560px; }
 .settings-form .input { width: 100%; min-width: 0; }
@@ -947,7 +1011,7 @@ input[type="checkbox"]:disabled { cursor: default; }
 }
 .cleanup-filters { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
 .cleanup-filter { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: var(--fs-small); }
-.cleanup-filter select.input { width: auto; min-width: 96px; max-width: 220px; min-height: 34px; padding-right: var(--sp-6); }
+.cleanup-filter select.input { width: auto; min-width: 96px; max-width: 220px; min-height: 34px; }
 .cleanup-result-count { margin-left: auto; color: var(--muted); font-size: var(--fs-small); white-space: nowrap; }
 .cleanup-agents { display: inline-flex; align-items: center; flex-wrap: wrap; }
 .cleanup-agents .agent-tag { margin-right: var(--sp-2); }

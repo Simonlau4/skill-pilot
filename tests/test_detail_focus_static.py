@@ -90,7 +90,7 @@ function setTimeout(fn) { pending.push(fn); return pending.length; }
 function requestAnimationFrame(fn) { frames.push(fn); return frames.length; }
 function flush() { while (pending.length) pending.shift()(); }
 function flushFrames() { const queued = frames.splice(0); for (const fn of queued) fn(); }
-const CSS = {escape: value => value};
+const CSS = {escape: value => value, supports: () => false};
 
 function matches(node, selector) {
   if (selector === '*') return true;
