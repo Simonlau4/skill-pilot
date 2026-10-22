@@ -90,12 +90,15 @@ function setTimeout(fn) { pending.push(fn); return pending.length; }
 function requestAnimationFrame(fn) { frames.push(fn); return frames.length; }
 function flush() { while (pending.length) pending.shift()(); }
 function flushFrames() { const queued = frames.splice(0); for (const fn of queued) fn(); }
-const CSS = {escape: value => value, supports: () => false};
+let supportsBaseSelect = false;
+const CSS = {escape: value => value, supports: () => supportsBaseSelect};
 
 function matches(node, selector) {
   if (selector === '*') return true;
   if (selector === '[hidden]') return node.hidden;
   if (selector === 'summary') return node.tagName === 'SUMMARY';
+  if (selector === 'select') return node.tagName === 'SELECT';
+  if (selector === ':open') return node.open;
   if (selector === '#skills-list') return node.id === 'skills-list';
   if (selector === 'dialog[open]') return node.tagName === 'DIALOG' && node.open;
   const data = selector.match(/^\[data-open="(.*)"\]$/);
@@ -138,6 +141,7 @@ function createElement(tag) {
     while (current) { if (matches(current, selector)) return current; current = current.parentElement; }
     return null;
   };
+  node.matches = selector => matches(node, selector);
   node.querySelectorAll = selector => {
     const found = [];
     const walk = current => {
@@ -247,8 +251,8 @@ function moveFocus(shift) {
     : items[(index + (shift ? -1 : 1) + items.length) % items.length];
   next.focus();
 }
-function press(key, shift) {
-  const event = {key, shiftKey: Boolean(shift), defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }};
+function press(key, shift, target) {
+  const event = {key, shiftKey: Boolean(shift), target, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }};
   onDetailKey(event);
   if (!event.defaultPrevented && key === 'Tab' && !document.querySelector('dialog[open]')) moveFocus(shift);
   return event;
@@ -302,6 +306,29 @@ for (let step = 0; step < 8; step += 1) {
   assert(cycle.includes(document.activeElement.id), '焦点落到了不该走到的控件 ' + document.activeElement.id);
   assert(window.scrollY === 400, '连续按 Tab 时后面的页面滚动了');
 }
+
+// 新式下拉框展开时，Esc 只收起列表，不关详情；收起后仍应正常关详情。
+const depSelect = $('dep-select');
+const depOption = h('option');
+depSelect.append(depOption);
+supportsBaseSelect = true;
+depSelect.open = true;
+const focusBeforeSelectEsc = document.activeElement;
+const openSelectEsc = press('Escape', false, depOption);
+assert(state.detail === 'skill-01', '下拉框展开时按 Esc，详情被关掉了');
+assert(panel.hidden === false && panel.className.includes('is-open'), '下拉框展开时按 Esc，详情面板收起了');
+assert(document.activeElement === focusBeforeSelectEsc, '下拉框展开时按 Esc，焦点被移走了');
+assert(openSelectEsc.defaultPrevented === false, '下拉框展开时按 Esc 不该由详情拦截');
+depSelect.open = false;
+press('Escape', false, depSelect);
+assert(state.detail === null, '下拉框收起后按 Esc，详情没有关闭');
+assert(document.activeElement === skill, '下拉框收起后按 Esc，焦点没有回到打开详情的技能');
+supportsBaseSelect = false;
+document.activeElement = skill;
+openDetail('skill-01');
+flushFrames();
+assert(state.detail === 'skill-01' && panel.hidden === false && panel.className.includes('is-open'),
+  '补完下拉框案例后，详情没有回到打开状态');
 
 dialog.open = true;
 const duringDialog = document.activeElement;

@@ -187,6 +187,68 @@ class ProgramUpdateErrorTests(unittest.TestCase):
                 self.assertIn('Permission denied', detail)
                 self.assertEqual(str(error), original)
 
+    def test_profile_ancestor_does_not_reveal_paths_outside_the_managed_home(self):
+        # Windows keeps temporary folders inside the user profile. Abbreviating
+        # that shorter profile must not leave the rest of an outside path visible.
+        inside = self.home / 'Library' / 'Logs' / 'update.log'
+        sibling = self.home.parent / 'Other User' / 'secret' / 'notes.txt'
+        foreign = f'{self.home}X/secret/notes.txt'
+        cases = {
+            'inside': (
+                f'Permission denied: {inside}',
+                f'Permission denied: ~{os.sep}{inside.relative_to(self.home)}'),
+            'sibling': (f'cannot open {sibling}', 'cannot open [路径已隐藏]'),
+            'quoted': (f"Permission denied: '{foreign}'", "Permission denied: '[路径已隐藏]'"),
+            'plain': (f'Permission denied: {foreign}', 'Permission denied: [路径已隐藏]'),
+            'same-prefix': (
+                f'cannot read {self.home}X/secret/one.txt and {self.home}2/secret/two.txt',
+                'cannot read [路径已隐藏] and [路径已隐藏]'),
+            'backslash': (
+                str(self.home.parent) + '\\secret\\notes.txt',
+                '[路径已隐藏]'),
+        }
+        with patch.object(self_update.Path, 'home', return_value=self.home.parent):
+            for name, (original, expected) in cases.items():
+                with self.subTest(name=name):
+                    error = ValueError(original)
+                    self_update.record_failure(self.home, 'check', error)
+                    detail = json.loads((self.home / '.skill-pilot/logs/program-update.jsonl')
+                                         .read_text().splitlines()[-1])['detail']
+                    self.assertEqual(detail, expected)
+                    self.assertNotIn('notes.txt', detail)
+                    self.assertNotIn('one.txt', detail)
+                    self.assertNotIn('two.txt', detail)
+                    self.assertEqual(str(error), original)
+
+    def test_windows_drive_outside_managed_home_is_hidden_when_profile_is_shorter(self):
+        managed = PureWindowsPath(r'C:\Users\Test Person\AppData\Local\Temp\skill pilot batch abc\Another User')
+        profile = PureWindowsPath(r'C:\Users\Test Person')
+        foreign = str(managed) + 'X/secret/notes.txt'
+        inside = str(managed / 'Library' / 'Logs' / 'update.log')
+        sibling = str(profile / 'Documents' / 'secret.txt')
+        cases = {
+            'quoted': (f"Permission denied: '{foreign}'", "Permission denied: '[路径已隐藏]'"),
+            'plain': (f'Permission denied: {foreign}', 'Permission denied: [路径已隐藏]'),
+            'same-prefix': (
+                f'cannot read {managed}X/secret/one.txt and {managed}2/secret/two.txt',
+                'cannot read [路径已隐藏] and [路径已隐藏]'),
+            'inside': (f'Permission denied: {inside}', r'Permission denied: ~\Library\Logs\update.log'),
+            'sibling': (f'cannot open {sibling}', 'cannot open [路径已隐藏]'),
+            'lower-drive': (
+                'c:/users/test person/documents/secret.txt',
+                '[路径已隐藏]'),
+        }
+        with patch.object(self_update.Path, 'home', return_value=profile):
+            for name, (original, expected) in cases.items():
+                with self.subTest(name=name):
+                    detail = self_update._hide_paths_outside_home(
+                        self_update._abbreviate_home(original, managed))
+                    self.assertEqual(detail, expected)
+                    self.assertNotIn('notes.txt', detail)
+                    self.assertNotIn('secret.txt', detail)
+                    self.assertNotIn(r'Test PersonX', detail)
+                    self.assertNotIn('Another UserX', detail)
+
     def test_following_words_are_not_swallowed_into_the_path(self):
         cases = {
             'spaced': (

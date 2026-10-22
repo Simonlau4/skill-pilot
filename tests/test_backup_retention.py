@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -258,10 +257,10 @@ class BackupRetentionTests(unittest.TestCase):
 
 class UpdateBatchRetentionTests(unittest.TestCase):
     def test_twelve_updates_stay_together_and_undo_exactly(self):
+        # 夹具目录名里已经有空格。不要把全进程的临时目录都换成同一个：
+        # Windows 整理前会另建一个临时目录检查链接，用完就删，换掉之后会把夹具主目录一起删掉。
         fixture = test_update_batch.UpdateBatchTests()
-        temporary = tempfile.TemporaryDirectory(prefix='skill pilot batch ')
-        with patch.object(test_update_batch.test_updates.tempfile, 'TemporaryDirectory', return_value=temporary):
-            fixture.setUp()
+        fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.assertIn(' ', str(fixture.home))
         for index in range(11):

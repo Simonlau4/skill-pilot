@@ -164,13 +164,48 @@ def _home_ends(detail, index):
     return False
 
 
+def _extended_path(text):
+    if text.startswith('\\\\?\\UNC\\'):
+        return '\\\\' + text[8:]
+    return text.removeprefix('\\\\?\\')
+
+
+def _path_parts(text):
+    return [part for part in _extended_path(text).replace('\\', '/').split('/') if part not in ('', '.')]
+
+
+def _windows_style(text):
+    bare = _extended_path(text)
+    return bare.startswith('\\\\') or bare.startswith('//') or bool(re.match(r'^[A-Za-z]:[\\/]', bare))
+
+
+def _strictly_inside(parent, child):
+    """True when child is a directory inside parent, not parent itself or a longer name."""
+    parent_parts, child_parts = _path_parts(parent), _path_parts(child)
+    if not parent_parts or len(child_parts) <= len(parent_parts):
+        return False
+    pairs = zip(parent_parts, child_parts)
+    if _windows_style(parent) or _windows_style(child):
+        return all(left.casefold() == right.casefold() for left, right in pairs)
+    return all(left == right for left, right in pairs)
+
+
 def _abbreviate_home(detail, home):
-    """Shorten a home directory only where that directory actually ends."""
-    for directory in sorted({str(home), str(Path.home())}, key=len, reverse=True):
+    """Shorten a home directory only where that directory actually ends.
+
+    The managed home can live inside the user profile (Windows keeps temporary
+    folders there). Abbreviating that shorter profile would turn every other
+    folder into a tilde path and leave its name in the log.
+    """
+    managed, profile = str(home), str(Path.home())
+    directories = {managed}
+    if profile and not _strictly_inside(profile, managed):
+        directories.add(profile)
+    for directory in sorted(directories, key=len, reverse=True):
         if not directory:
             continue
         pattern, flags = re.escape(directory), 0
-        if '\\' in directory:
+        if '\\' in directory or _windows_style(directory):
             pattern, flags = pattern.replace(r'\\', r'[\\/]'), re.IGNORECASE
         detail = re.sub(pattern, lambda match: '~' if _home_ends(match.string, match.end()) else match[0],
                         detail, flags=flags)
