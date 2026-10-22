@@ -331,6 +331,16 @@ dl, dd, dt { margin: 0; }
 .btn-quiet { background: transparent; border-color: transparent; color: var(--ink-2); box-shadow: none; }
 .btn-quiet:hover { background: var(--panel-deep); border-color: transparent; color: var(--ink); box-shadow: none; }
 
+/* 删除是次要按钮，只用提醒色字，不铺大片红色。 */
+.btn-danger-ink { background: transparent; border-color: transparent; color: var(--danger-ink); box-shadow: none; }
+.btn-danger-ink:hover { background: var(--danger-bg); border-color: transparent; color: var(--danger-ink); box-shadow: none; }
+.btn-danger-ink:disabled:hover { background: transparent; border-color: transparent; }
+
+/* 确认框里的删除按钮：小范围用提醒色，关掉确认框时由 confirmDialog 还原。 */
+.btn-danger-solid { background: var(--danger-ink); border-color: var(--danger-ink); color: #FFFFFF; font-weight: 600; }
+.btn-danger-solid:hover { background: #8F1F17; border-color: #8F1F17; }
+.btn-danger-solid:disabled:hover { background: var(--danger-ink); border-color: var(--danger-ink); }
+
 .btn-small { min-height: 28px; padding: 0 10px; font-size: var(--fs-small); }
 .btn-icon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex: none; pointer-events: none; }
 .btn-small .btn-icon { width: 16px; height: 16px; }
@@ -536,6 +546,7 @@ input[type="checkbox"]:disabled { cursor: default; }
 }
 .seg:hover { color: var(--ink); }
 .seg[aria-pressed="true"] { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-1); }
+.seg:disabled { opacity: 0.55; cursor: default; }
 .seg .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
 
 .tag {
@@ -919,6 +930,33 @@ input[type="checkbox"]:disabled { cursor: default; }
 /* 原名跟在中文名后面，小号等宽灰字。 */
 .agent-tag { display: inline-flex; align-items: center; gap: 6px; margin-right: var(--sp-3); white-space: nowrap; font-size: var(--fs-small); }
 #cleanup-rows tr { cursor: pointer; }
+#cleanup-rows tr.is-selected td { background: var(--panel-soft); }
+
+/* ---------- 清理页：两栏表、筛选和选择 ---------- */
+
+#cleanup-search { min-width: 150px; }
+#cleanup-tabs { flex: none; }
+.cleanup-legend { margin: 0 0 var(--sp-3); }
+.cleanup-result-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  flex-wrap: wrap;
+  min-height: 36px;
+  margin-bottom: var(--sp-2);
+}
+.cleanup-filters { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; min-width: 0; }
+.cleanup-filter { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: var(--fs-small); }
+.cleanup-filter select.input { width: auto; min-width: 96px; max-width: 220px; min-height: 34px; padding-right: var(--sp-6); }
+.cleanup-result-count { margin-left: auto; color: var(--muted); font-size: var(--fs-small); white-space: nowrap; }
+.cleanup-agents { display: inline-flex; align-items: center; flex-wrap: wrap; }
+.cleanup-agents .agent-tag { margin-right: var(--sp-2); }
+.cleanup-agents .agent-tag:last-child { margin-right: 0; }
+.cleanup-agent-cell { display: flex; flex-direction: column; gap: 2px; }
+.cleanup-was { color: var(--ink-2); font-size: var(--fs-small); margin-right: 2px; }
+.cleanup-picked { margin: 0; }
+.cleanup-picked > summary { cursor: pointer; padding: 4px 0; }
+.cleanup-picked .action-list { max-height: 30vh; border-top: 0; padding: 0; }
 
 .skill-id { color: var(--muted); font-family: var(--font-mono); font-size: var(--fs-tiny); font-weight: 400; }
 
@@ -969,6 +1007,14 @@ table.grid tbody tr:hover td { background: var(--panel-soft); }
 .col-check { text-align: center; width: 64px; }
 .col-last { white-space: nowrap; }
 .num { text-align: right; }
+
+/* 清理表固定列宽：技能名可以换行、Agent 可以折行，1024 到 1920 像素宽都不横向滚动。 */
+#cleanup-table { table-layout: fixed; }
+#cleanup-table th:nth-child(1), #cleanup-table td:nth-child(1) { width: 56px; }
+#cleanup-table th:nth-child(2), #cleanup-table td:nth-child(2) { width: auto; overflow-wrap: anywhere; }
+#cleanup-table th:nth-child(3), #cleanup-table td:nth-child(3) { width: 30%; }
+#cleanup-table th:nth-child(4), #cleanup-table td:nth-child(4) { width: 124px; }
+#cleanup-rows td:nth-child(3) { vertical-align: middle; }
 
 .skill-line { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .skill-desc { margin: 2px 0 0; color: var(--ink-2); font-size: var(--fs-small); }

@@ -85,6 +85,13 @@ class CleanupBeforeOrganizeTests(unittest.TestCase):
         self.assertIn('完成首次整理后，即可查看和清理已启用的技能', page)
         self.assertIn('开始整理技能库', page)
         self.assertIn("$('cleanup-organize').addEventListener('click', () => showPage('skills'));", source)
+        self.assertIn('撤下：保留文件，随时可恢复；删除：从技能库删掉文件。', page)
+        self.assertIn('id="cleanup-tabs"', page)
+        self.assertIn('id="cleanup-select-all"', page)
+        self.assertIn('id="cleanup-filter-agent"', page)
+        self.assertIn('id="cleanup-filter-source"', page)
+        self.assertNotIn('id="withdrawn-list"', page)
+        self.assertNotIn('id="withdrawn-refresh"', page)
         self.assertNotIn('首次迁移', page)
         self.assertNotIn('正在读取', page)
         script = '\n'.join([
@@ -95,11 +102,16 @@ class CleanupBeforeOrganizeTests(unittest.TestCase):
 const elements = new Map();
 function $(id) {
   if (!elements.has(id)) elements.set(id, {
-    hidden: id === 'cleanup-pending', innerHTML: '', value: '', textContent: '', disabled: false,
+    hidden: id === 'cleanup-pending', innerHTML: '', value: '', textContent: '', title: '',
+    disabled: false, dataset: {}, setAttribute() {}, removeAttribute() {}, querySelectorAll() { return []; },
   });
   return elements.get(id);
 }
-const state = {page: 'cleanup', table: null, cleanup: null, saved: {}, cleanupSelected: new Set(), agentsView: null};
+const state = {
+  page: 'cleanup', table: null, cleanup: null, saved: {}, cleanupSelected: new Set(), idleSelected: new Set(),
+  cleanupTab: 'on', cleanupFilters: {agent: '', group: '', tag: '', source: ''}, skillIndex: new Map(), agents: [],
+  agentsView: null,
+};
 let writeBusy = null;
 let homeVisible = false;
 const calls = [];
@@ -107,7 +119,12 @@ const toasts = [];
 function toast(item) { toasts.push(item.text); }
 function hideActionBar() {}
 function renderCleanupActionBar() { hideActionBar(); }
-function cleanupRows() { return []; }
+function renderCleanupTabs() {}
+function renderCleanupFilters() {}
+function cleanupTabSkills() { return []; }
+function cleanupVisibleRows() { return []; }
+function syncCleanupSelectAll() {}
+function cleanupFiltersActive() { return false; }
 function escape(value) { return String(value); }
 function nameHtml(value) { return String(value); }
 function tokenText() { return ''; }
@@ -125,12 +142,11 @@ function fail(message) { console.error(message); process.exit(1); }
 (async () => {
   await loadCleanup();
   const rows = $('cleanup-rows').innerHTML;
-  const withdrawn = $('withdrawn-list').innerHTML;
   if (calls.includes('/api/cleanup')) fail('还没整理过不应去读清理名单：' + calls.join(','));
   if (toasts.length) fail('不应弹出报错：' + toasts.join('；'));
   if ($('cleanup-pending').hidden) fail('应显示还没整理过的说明');
   if (!$('cleanup-ready').hidden) fail('还没整理过时不应展示清理名单');
-  if (rows.includes('正在读取') || withdrawn.includes('正在读取')) fail('列表不应停在正在读取');
+  if (rows.includes('正在读取')) fail('列表不应停在正在读取');
 
   calls.length = 0;
   toasts.length = 0;
@@ -140,6 +156,87 @@ function fail(message) { console.error(message); process.exit(1); }
   if (!calls.includes('/api/cleanup')) fail('整理过以后仍应读取清理名单');
   if ($('cleanup-pending').hidden !== true) fail('整理过以后不应再显示首次整理说明');
 })().catch(error => { console.error(error); process.exit(1); });
+''',
+        ])
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cleanup_rows_sort_and_filters(self):
+        source = (STATIC / 'app.js').read_text()
+        start = source.index('const cleanupSourceKind')
+        source_kind = source[start:source.index('\n', start)]
+        start = source.index('const cleanupAgentIds')
+        agent_ids = source[start:source.index('\n\n', start)]
+        script = '\n'.join([
+            "const CLEANUP_SOURCES = {github: 'GitHub', lark: '飞书官方', team: '团队商店', skip: '自制'};",
+            extract_function(source, 'function cleanupMeta('),
+            source_kind,
+            extract_function(source, 'function cleanupTabSkills('),
+            agent_ids,
+            extract_function(source, 'function cleanupMatchesFilters('),
+            extract_function(source, 'function cleanupVisibleRows('),
+            extract_function(source, 'function cleanupFilterOptions('),
+            extract_function(source, 'function cleanupOptionEntries('),
+            r'''
+const skills = [
+  {name: 'a', title: '甲', summary: '写', tags: ['工作'], description_tokens: 100, source_kind: 'github'},
+  {name: 'b', title: '乙', summary: '读', tags: ['学习'], description_tokens: 300, source_kind: 'lark'},
+  {name: 'c', title: '丙', summary: '旧', tags: ['工作'], description_tokens: 200, source_kind: 'skip'},
+  {name: 'd', title: '丁', summary: '团队', tags: [], description_tokens: 50, source_kind: 'team'},
+  {name: 'e', title: '戊', summary: '没用过', tags: [], description_tokens: 400, source_kind: 'github'},
+];
+let searchValue = '';
+const state = {
+  cleanupTab: 'on',
+  cleanupFilters: {agent: '', group: '', tag: '', source: ''},
+  saved: {a: ['codex'], b: ['codex', 'claude'], c: [], d: [], e: []},
+  skillIndex: new Map(skills.map(skill => [skill.name, skill])),
+  groupIndex: new Map([['a', '写作'], ['c', '写作']]),
+  cleanup: {withdrawn: [
+    {name: 'c', previous_agents: ['codex'], withdrawn_at: '2026-10-20T10:00:00Z'},
+    {name: 'd', previous_agents: ['claude'], withdrawn_at: '2026-10-21T10:00:00Z'},
+  ]},
+  table: {skills, groups: [{name: '写作', skills: ['a', 'c']}]},
+  agents: [{id: 'codex'}, {id: 'claude'}],
+};
+function $(id) { return {value: id === 'cleanup-search' ? searchValue : ''}; }
+const titleOf = name => state.skillIndex.get(name).title;
+const groupOf = name => state.groupIndex.get(name) || '未分组';
+const nameOf = id => id;
+const matchesQuery = (skill, query) => !query || [skill.name, skill.title, skill.summary, ...(skill.tags || [])]
+  .some(text => (text || '').toLowerCase().includes(query));
+const names = rows => rows.map(skill => skill.name).join(',');
+function fail(message) { console.error(message); process.exit(1); }
+
+if (names(cleanupTabSkills()) !== 'a,b') fail('在用栏应为 a,b：' + names(cleanupTabSkills()));
+if (names(cleanupTabSkills('off')) !== 'c,d,e') fail('未启用栏应为 c,d,e：' + names(cleanupTabSkills('off')));
+if (names(cleanupVisibleRows()) !== 'b,a') fail('在用栏应按 Token 从高到低：' + names(cleanupVisibleRows()));
+
+state.cleanupTab = 'off';
+if (names(cleanupVisibleRows()) !== 'd,c,e') fail('未启用栏应按撤下时间新的在前、没用过的按 Token：' + names(cleanupVisibleRows()));
+state.cleanupFilters.agent = 'codex';
+if (names(cleanupVisibleRows()) !== 'c') fail('按 Agent 筛选应看撤下前的分配：' + names(cleanupVisibleRows()));
+state.cleanupFilters.agent = '';
+state.cleanupFilters.group = '写作';
+if (names(cleanupVisibleRows()) !== 'c') fail('按分组筛选未生效：' + names(cleanupVisibleRows()));
+state.cleanupFilters.group = '';
+state.cleanupFilters.tag = '工作';
+if (names(cleanupVisibleRows()) !== 'c') fail('按标签筛选未生效：' + names(cleanupVisibleRows()));
+state.cleanupFilters.tag = '';
+state.cleanupFilters.source = 'github';
+if (names(cleanupVisibleRows()) !== 'e') fail('按来源筛选未生效：' + names(cleanupVisibleRows()));
+state.cleanupFilters.source = '';
+searchValue = '没';
+if (names(cleanupVisibleRows()) !== 'e') fail('搜索说明未生效：' + names(cleanupVisibleRows()));
+searchValue = '';
+
+const off = cleanupFilterOptions(cleanupTabSkills());
+const counts = map => [...map.entries()].map(([key, count]) => `${key}:${count}`).join(',');
+if (counts(off.agent) !== 'codex:1,claude:1') fail('未启用栏的 Agent 数量不对：' + counts(off.agent));
+if (counts(off.source) !== 'skip:1,team:1,github:1') fail('未启用栏的来源数量不对：' + counts(off.source));
+const on = cleanupFilterOptions(cleanupTabSkills('on'));
+if (counts(on.group) !== '写作:1,未分组:1') fail('在用栏的分组数量不对：' + counts(on.group));
+if (counts(on.tag) !== '工作:1,学习:1') fail('在用栏的标签数量不对：' + counts(on.tag));
 ''',
         ])
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)

@@ -29,7 +29,7 @@ function renderButtons(container, markup, key) {
     if (container.children[index] !== button) container.insertBefore(button, container.children[index] || null);
   }
   for (const button of existing.values()) button.remove();
-  if (container.matches('#agent-rail, #skills-tabs, .filter-group-list, .filter-tag-list')) glideSelection(container);
+  if (container.matches('#agent-rail, #skills-tabs, #cleanup-tabs, .filter-group-list, .filter-tag-list')) glideSelection(container);
 }
 
 const selectionMotions = new WeakMap();
@@ -143,15 +143,20 @@ function confirmGroupsHtml(groups) {
   }).join('');
 }
 
-function confirmDialog({title = '确认这次操作', lines = [], groups = [], note = '', okText = '确认'}) {
+function confirmDialog({title = '确认这次操作', lines = [], groups = [], note = '', okText = '确认', danger = false}) {
   const dialog = $('confirm-dialog');
+  const ok = $('confirm-ok');
   $('confirm-title').textContent = title;
   $('confirm-body').innerHTML = lines.filter(Boolean).map(line => `<p class="confirm-line">${escape(line)}</p>`).join('')
     + confirmGroupsHtml(groups)
     + (note ? `<p class="confirm-note">${escape(note)}</p>` : '');
-  $('confirm-ok').textContent = okText;
+  ok.textContent = okText;
+  ok.classList.toggle('btn-danger-solid', danger);
   return new Promise(resolve => {
-    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'ok'), {once: true});
+    dialog.addEventListener('close', () => {
+      ok.classList.remove('btn-danger-solid');
+      resolve(dialog.returnValue === 'ok');
+    }, {once: true});
     dialog.showModal();
   });
 }
@@ -344,7 +349,7 @@ const WRITE_LOCK_SELECTORS = [
   '#store-shelves [data-store-publish]', '#store-publish-dialog input', '#store-publish-dialog button:not(.hint)',
   '#skills-list button[data-skill]', '#skills-list button[data-update-up]', '#action-bar button', '#skills-refresh',
   '#install-url', '#install-rail button:not(.hint)',
-  '#cleanup-rows input[data-cleanup]', '#withdrawn-list button', '#withdrawn-refresh',
+  '#cleanup-rows input[data-cleanup]', '#cleanup-select-all', '#cleanup-filters select', '#cleanup-clear-filters', '#cleanup-tabs button',
   '#updates-check', '#updates-all',
   '#program-check', '#program-apply', '#program-refresh', '#rail-notes button',
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
@@ -545,7 +550,10 @@ const state = {
   tag: '',    // 标签筛选，'' 是不筛
   filtersCollapsed: false,
   cleanup: null,
+  cleanupTab: 'on',        // 清理页的分段：on 是用在栏，off 是未启用栏
   cleanupSelected: new Set(),
+  idleSelected: new Set(),
+  cleanupFilters: {agent: '', group: '', tag: '', source: ''},
   logs: [],
   team: null,          // /api/team：有没有连上分享站、我是谁
   store: null,         // /api/team/catalog：团队技能商店的全部卡片；null 是还没读
@@ -1766,11 +1774,11 @@ $('page-skills').addEventListener('click', event => {
   if (target) gotoPlace(target.dataset.goto);
 });
 
-$('action-list').addEventListener('click', event => {
+$('action-bar').addEventListener('click', event => {
   const revert = event.target.closest('[data-revert-skill]');
   if (revert) { revertChange(revert.dataset.revertSkill, revert.dataset.revertAgent); return; }
   const unpick = event.target.closest('[data-cleanup-unpick]');
-  if (unpick) { state.cleanupSelected.delete(unpick.dataset.cleanupUnpick); renderCleanup(); }
+  if (unpick) { cleanupSelection().delete(unpick.dataset.cleanupUnpick); renderCleanup(); }
 });
 
 $('skills-search').addEventListener('input', renderSkillTable);
@@ -4785,20 +4793,194 @@ async function applyUpdates(names, button = null) {
   return result;
 }
 
-/* ==================== 清理页：自己挑要从所有 agent 撤下的技能 ==================== */
+/* ==================== 清理页：一张表，分「在用」和「未启用」两栏 ==================== */
 
-/* 能撤下的：至少给了一个 agent 的技能，占用 Token 多的排前面，可以按名字或用途搜。 */
-function cleanupRows() {
+const CLEANUP_SOURCES = {github: 'GitHub', lark: '飞书官方', team: '团队商店', skip: '自制'};
+const CLEANUP_FILTERS = ['agent', 'group', 'tag', 'source'];
+
+const cleanupSelection = () => state.cleanupTab === 'on' ? state.cleanupSelected : state.idleSelected;
+const cleanupLocked = () => Boolean(writeBusy) || !state.table?.write_allowed;
+const cleanupFiltersActive = () => Object.values(state.cleanupFilters).some(Boolean);
+const cleanupSourceKind = skill => skill?.source_kind || skill?.source?.kind || '';
+const cleanupSourceLabel = kind => CLEANUP_SOURCES[kind] || kind;
+
+/* 撤下前给了谁、什么时候撤下的：优先用技能表里的新字段；
+   接口还没补上时，用 /api/cleanup 的名单兜底，页面不会空一块。 */
+function cleanupMeta(skill) {
+  const old = state.cleanup?.withdrawn?.find(item => item.name === skill?.name) || {};
+  const has = key => Boolean(skill) && Object.prototype.hasOwnProperty.call(skill, key);
+  const previous = has('previous_agents')
+    ? (Array.isArray(skill.previous_agents) ? skill.previous_agents : [])
+    : (old.previous_agents || []);
+  const withdrawn = skill && typeof skill.withdrawn === 'boolean'
+    ? skill.withdrawn
+    : previous.length > 0 || Boolean(old.withdrawn_at);
+  const withdrawnAt = has('withdrawn_at') ? skill.withdrawn_at : (old.withdrawn_at ?? null);
+  return {withdrawn, withdrawn_at: withdrawnAt, previous_agents: previous};
+}
+
+/* 在用：至少给了一个 agent。未启用：哪个 agent 都没给，包括撤下来的和从没启用过的。 */
+function cleanupTabSkills(tab = state.cleanupTab) {
+  return (state.table?.skills || []).filter(skill => {
+    const assigned = (state.saved[skill.name] || []).length > 0;
+    return tab === 'on' ? assigned : !assigned;
+  });
+}
+
+const cleanupAgentIds = (skill, tab = state.cleanupTab) =>
+  tab === 'on' ? (state.saved[skill.name] || []) : cleanupMeta(skill).previous_agents;
+
+function cleanupMatchesFilters(skill) {
+  const {agent, group, tag, source} = state.cleanupFilters;
+  return (!agent || cleanupAgentIds(skill).includes(agent))
+    && (!group || groupOf(skill.name) === group)
+    && (!tag || (skill.tags || []).includes(tag))
+    && (!source || cleanupSourceKind(skill) === source);
+}
+
+/* 在用栏占用多的在前；未启用栏按撤下时间新的在前，没撤下过的排后面。 */
+function cleanupVisibleRows() {
   const query = $('cleanup-search').value.trim().toLowerCase();
-  return (state.table?.skills || [])
-    .filter(skill => (state.saved[skill.name] || []).length)
+  const rows = cleanupTabSkills()
     .filter(skill => matchesQuery(skill, query))
-    .sort((a, b) => b.description_tokens - a.description_tokens || titleOf(a.name).localeCompare(titleOf(b.name), 'zh-CN'));
+    .filter(cleanupMatchesFilters);
+  const byTitle = (a, b) => titleOf(a.name).localeCompare(titleOf(b.name), 'zh-CN');
+  if (state.cleanupTab === 'on') {
+    return rows.sort((a, b) => b.description_tokens - a.description_tokens || byTitle(a, b));
+  }
+  const when = skill => {
+    const time = Date.parse(cleanupMeta(skill).withdrawn_at || '');
+    return Number.isNaN(time) ? 0 : time;
+  };
+  return rows.sort((a, b) => {
+    const aw = cleanupMeta(a).withdrawn, bw = cleanupMeta(b).withdrawn;
+    if (aw !== bw) return aw ? -1 : 1;
+    if (aw) {
+      const byDate = when(b) - when(a);
+      if (byDate) return byDate;
+    }
+    return b.description_tokens - a.description_tokens || byTitle(a, b);
+  });
+}
+
+function cleanupFilterOptions(skills) {
+  const options = {agent: new Map(), group: new Map(), tag: new Map(), source: new Map()};
+  const add = (map, key) => { if (key) map.set(key, (map.get(key) || 0) + 1); };
+  const hasGroups = Boolean(state.table?.groups?.length);
+  for (const skill of skills) {
+    for (const id of cleanupAgentIds(skill)) add(options.agent, id);
+    if (hasGroups) add(options.group, groupOf(skill.name));
+    for (const tag of skill.tags || []) add(options.tag, tag);
+    const source = cleanupSourceKind(skill);
+    if (CLEANUP_SOURCES[source]) add(options.source, source);
+  }
+  return options;
+}
+
+function cleanupOptionEntries(key, map) {
+  const entries = [...map.entries()].filter(([, count]) => count > 0);
+  if (key === 'agent') {
+    const order = new Map(state.agents.map((agent, index) => [agent.id, index]));
+    entries.sort((a, b) => (order.get(a[0]) ?? 999) - (order.get(b[0]) ?? 999)
+      || nameOf(a[0]).localeCompare(nameOf(b[0]), 'zh-CN'));
+  } else if (key === 'source') {
+    const order = Object.keys(CLEANUP_SOURCES);
+    entries.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+  } else {
+    const groupLast = value => key === 'group' && value === '未分组' ? 1 : 0;
+    entries.sort((a, b) => groupLast(a[0]) - groupLast(b[0])
+      || b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'));
+  }
+  return entries;
+}
+
+const cleanupOptionLabel = (key, value) =>
+  key === 'agent' ? nameOf(value) : key === 'source' ? cleanupSourceLabel(value) : value;
+
+/* 筛选只在当前栏真有可选项时出现，选项后面带数量。下拉框不重画，键盘选择不会丢焦点。 */
+function renderCleanupFilters(skills) {
+  const options = cleanupFilterOptions(skills);
+  let visible = false;
+  for (const key of CLEANUP_FILTERS) {
+    const wrap = $(`cleanup-filter-${key}-wrap`);
+    const select = $(`cleanup-filter-${key}`);
+    const entries = cleanupOptionEntries(key, options[key]);
+    if (!entries.length) {
+      state.cleanupFilters[key] = '';
+      wrap.hidden = true;
+      select.innerHTML = '';
+      delete select.dataset.signature;
+      continue;
+    }
+    visible = true;
+    wrap.hidden = false;
+    const total = skills.length;
+    const signature = `${total}|${entries.map(([value, count]) => `${value}:${count}:${cleanupOptionLabel(key, value)}`).join('|')}`;
+    if (select.dataset.signature !== signature) {
+      select.innerHTML = `<option value="">全部（${total}）</option>` + entries.map(([value, count]) =>
+        `<option value="${escape(value)}">${escape(cleanupOptionLabel(key, value))}（${count}）</option>`).join('');
+      select.dataset.signature = signature;
+    }
+    if (state.cleanupFilters[key] && !options[key].has(state.cleanupFilters[key])) state.cleanupFilters[key] = '';
+    select.value = state.cleanupFilters[key];
+    select.disabled = Boolean(writeBusy);
+  }
+  $('cleanup-filters').hidden = !visible;
+  $('cleanup-clear-filters').hidden = !cleanupFiltersActive();
+  $('cleanup-clear-filters').disabled = Boolean(writeBusy);
+}
+
+function renderCleanupTabs(allSkills) {
+  const nOn = allSkills.filter(skill => (state.saved[skill.name] || []).length).length;
+  const disabled = Boolean(writeBusy) ? ' disabled' : '';
+  renderButtons($('cleanup-tabs'), `<button type="button" class="seg" data-cleanup-tab="on" aria-pressed="${state.cleanupTab === 'on'}"${disabled}>在用<span class="n">${nOn}</span></button>
+    <button type="button" class="seg" data-cleanup-tab="off" aria-pressed="${state.cleanupTab === 'off'}"${disabled}>未启用<span class="n">${allSkills.length - nOn}</span></button>`, 'data-cleanup-tab');
+}
+
+const cleanupAgentTags = ids =>
+  ids.map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('');
+
+function cleanupRowHtml(skill, locked) {
+  const selected = cleanupSelection().has(skill.name);
+  const meta = cleanupMeta(skill);
+  const agents = state.cleanupTab === 'on'
+    ? `<div class="cleanup-agents">${cleanupAgentTags(state.saved[skill.name] || [])}</div>`
+    : meta.previous_agents.length
+      ? `<div class="cleanup-agent-cell">
+          <div><span class="cleanup-was">撤下前：</span><span class="cleanup-agents">${cleanupAgentTags(meta.previous_agents)}</span></div>
+          ${meta.withdrawn_at ? `<span class="cell-note">撤下于 ${escape(friendlyDate(meta.withdrawn_at))}</span>` : ''}
+        </div>`
+      : '<span class="muted">尚未在任何 Agent 启用</span>';
+  const label = state.cleanupTab === 'on' ? `选择要撤下的 ${titleOf(skill.name)}` : `选择 ${titleOf(skill.name)}`;
+  return `<tr${selected ? ' class="is-selected"' : ''}>
+    <td class="col-check"><label class="check-hit"><input type="checkbox" data-cleanup="${escape(skill.name)}"
+      aria-label="${escape(label)}" ${selected ? 'checked' : ''} ${locked ? 'disabled' : ''}></label></td>
+    <td><strong>${nameHtml(skill.name)}</strong>${skill.summary ? `<p class="skill-desc">${escape(skill.summary)}</p>` : ''}</td>
+    <td>${agents}</td>
+    <td class="col-num">${tokenText(skill.description_tokens)}</td>
+  </tr>`;
+}
+
+function cleanupEmptyHtml() {
+  if ($('cleanup-search').value.trim() || cleanupFiltersActive()) return emptyInner('search', '未找到匹配技能');
+  return state.cleanupTab === 'on'
+    ? emptyInner('check-circle', '没有可撤下的技能')
+    : emptyInner('cleanup', '暂无未启用的技能');
+}
+
+function syncCleanupSelectAll(rows) {
+  const box = $('cleanup-select-all');
+  const selected = cleanupSelection();
+  const chosen = rows.filter(skill => selected.has(skill.name)).length;
+  box.disabled = cleanupLocked() || !rows.length;
+  box.checked = rows.length > 0 && chosen === rows.length;
+  box.indeterminate = chosen > 0 && chosen < rows.length;
+  box.setAttribute('aria-label', rows.length ? `全选当前列表的 ${rows.length} 个技能` : '全选当前列表的技能');
 }
 
 function renderCleanup() {
   if (state.page !== 'cleanup') return;
-  // 还没整理过就没有可清理的名单。先说明，不去读，免得报错后两个列表一直停在“正在读取…”。
+  // 还没整理过就没有可清理的名单。先说明，不去读，免得报错后列表一直停在“正在读取…”。
   const pending = awaitingFirstOrganization();
   $('cleanup-pending').hidden = !pending;
   $('cleanup-ready').hidden = pending;
@@ -4806,52 +4988,81 @@ function renderCleanup() {
     hideActionBar();
     return;
   }
-  const locked = Boolean(writeBusy) || !state.table?.write_allowed;
-  // 已经不再分给任何 agent 的（比如刚在技能页撤掉了）不算选中。
-  for (const name of [...state.cleanupSelected]) {
-    if (!(state.saved[name] || []).length) state.cleanupSelected.delete(name);
+  const known = new Map((state.table?.skills || []).map(skill => [skill.name, skill]));
+  // 已经不符合所在栏的选择自动去掉：在用的现在没分给任何 Agent，未启用的又被分配回去了。
+  if (state.table) {
+    for (const name of [...state.cleanupSelected]) {
+      if (!known.has(name) || !(state.saved[name] || []).length) state.cleanupSelected.delete(name);
+    }
+    for (const name of [...state.idleSelected]) {
+      if (!known.has(name) || (state.saved[name] || []).length) state.idleSelected.delete(name);
+    }
   }
-  const searching = Boolean($('cleanup-search').value.trim());
-  $('cleanup-rows').innerHTML = !state.table ? '<tr><td class="empty" colspan="4">正在读取技能列表…</td></tr>'
-    : cleanupRows().map(skill => `<tr>
-      <td class="col-check"><label class="check-hit"><input type="checkbox" data-cleanup="${escape(skill.name)}"
-        aria-label="${escape('撤下 ' + titleOf(skill.name))}" ${state.cleanupSelected.has(skill.name) ? 'checked' : ''} ${locked ? 'disabled' : ''}></label></td>
-      <td><strong>${nameHtml(skill.name)}</strong>${skill.summary ? `<p class="skill-desc">${escape(skill.summary)}</p>` : ''}</td>
-      <td>${(state.saved[skill.name] || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('')}</td>
-      <td class="col-num">${tokenText(skill.description_tokens)}</td>
-    </tr>`).join('') || `<tr><td class="empty" colspan="4">${searching ? emptyInner('search', '未找到匹配技能') : emptyInner('check-circle', '没有可撤下的技能')}</td></tr>`;
-
-  // 已撤下的：原来给了谁用颜色块和名字，和上面“现在给了谁”一个样子
-  const view = state.cleanup;
-  const was = row => (row.previous_agents || []).map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('') || '未记录';
-  $('withdrawn-list').innerHTML = !view ? '<p class="item-note">正在读取…</p>' : view.withdrawn.map(row => `<div class="item-row">
-    <div>
-      <div class="item-title">${nameHtml(row.name)}</div>
-      <div class="item-note">曾分配给 ${was(row)}${row.withdrawn_at ? ` · 撤下于 ${escape(friendlyDate(row.withdrawn_at))}` : ''}</div>
-    </div>
-    <span class="item-end"><button class="btn btn-small" data-restore-withdrawn="${escape(row.name)}" ${view.write_allowed && !writeBusy ? '' : 'disabled'}>${icon('undo')}<span>恢复…</span></button></span>
-  </div>`).join('') || `<div class="empty">${emptyInner('cleanup', '暂无已撤下技能')}</div>`;
+  renderCleanupTabs(state.table?.skills || []);
+  renderCleanupFilters(cleanupTabSkills());
+  const rows = cleanupVisibleRows();
+  $('cleanup-result-count').textContent = state.table ? `${rows.length} 个技能` : '';
+  const on = state.cleanupTab === 'on';
+  $('cleanup-token-head').setAttribute('aria-sort', on ? 'descending' : 'none');
+  $('cleanup-token-head').title = on ? '按 Token 占用从高到低排列' : '未启用栏按撤下时间从新到旧排列';
+  $('cleanup-token-sort').hidden = !on;
+  $('cleanup-rows').innerHTML = !state.table
+    ? '<tr><td class="empty" colspan="4">正在读取技能列表…</td></tr>'
+    : rows.map(skill => cleanupRowHtml(skill, cleanupLocked())).join('')
+      || `<tr><td class="empty" colspan="4">${cleanupEmptyHtml()}</td></tr>`;
+  syncCleanupSelectAll(rows);
   renderCleanupActionBar();
 }
 
-/* 底部托盘：选了哪些、各 agent 每次新对话能少占多少 Token；每个都能单独“不撤这个”。 */
+function cleanupPickHtml(name) {
+  const meta = cleanupMeta(state.skillIndex.get(name));
+  const detail = state.cleanupTab === 'on'
+    ? (state.saved[name] || []).map(nameOf).join('、')
+    : meta.previous_agents.map(nameOf).join('、') || '尚未启用过';
+  return `<li><p>「${escape(titleOf(name))}」<small>${escape(detail)}</small></p>
+    <button class="btn btn-quiet btn-small" data-cleanup-unpick="${escape(name)}"${cleanupLocked() ? ' disabled' : ''}>取消选择</button></li>`;
+}
+
+/* 底部托盘：两栏各记各的选择。在用栏说能释放多少 Token；未启用栏说哪几个能恢复。 */
 function renderCleanupActionBar() {
   if (state.page !== 'cleanup') return;
-  const names = [...state.cleanupSelected];
+  if (awaitingFirstOrganization()) return hideActionBar();
+  const names = [...cleanupSelection()];
   if (!names.length) return hideActionBar();
-  const savings = state.agents.map(agent => {
-    const cost = names.filter(name => (state.saved[name] || []).includes(agent.id))
-      .reduce((sum, name) => sum + (state.skillIndex.get(name)?.description_tokens || 0), 0);
-    return cost ? `${agent.name} 可释放约 ${tokenText(cost)} Token 开销` : '';
-  }).filter(Boolean);
+  const locked = cleanupLocked();
+  const restorable = state.cleanupTab === 'off'
+    ? names.filter(name => cleanupMeta(state.skillIndex.get(name)).withdrawn)
+    : [];
+  let note = '';
+  if (state.cleanupTab === 'on') {
+    const savings = state.agents.map(agent => {
+      const cost = names.filter(name => (state.saved[name] || []).includes(agent.id))
+        .reduce((sum, name) => sum + (state.skillIndex.get(name)?.description_tokens || 0), 0);
+      return cost ? `${agent.name} 可释放约 ${tokenText(cost)} Token 开销` : '';
+    }).filter(Boolean);
+    note = [savings.join('、'), '撤下后保留本地文件，随时可恢复'].filter(Boolean).join('。');
+  } else if (!restorable.length) {
+    note = '尚未启用过的技能请到技能页启用。';
+  } else if (restorable.length < names.length) {
+    note = `其中 ${restorable.length} 个可恢复；尚未启用过的技能请到技能页启用。`;
+  } else {
+    note = '恢复后按撤下前的分配重新启用。';
+  }
+  const picked = names.map(cleanupPickHtml).join('');
+  const collapsed = names.length > 6;
   showActionBar({
-    text: `已选 ${names.length} 个待撤下技能`,
-    note: [savings.join('、'), '保留本地文件，随时可恢复'].filter(Boolean).join('。'),
-    items: names.map(name => `<li><p>「${escape(titleOf(name))}」<small>${escape((state.saved[name] || []).map(nameOf).join('、'))}</small></p>
-      <button class="btn btn-quiet btn-small" data-cleanup-unpick="${escape(name)}">取消选择</button></li>`).join(''),
-    buttons: [
-      {label: '全部取消', kind: 'btn btn-quiet', action: () => { state.cleanupSelected.clear(); renderCleanup(); }},
-      {label: `确认撤下 (${names.length})`, kind: 'btn btn-primary', disabled: !state.table?.write_allowed || Boolean(writeBusy), action: button => applyCleanup(button)},
+    text: `已选 ${names.length} 个技能`,
+    note,
+    items: collapsed ? '' : picked,
+    extra: collapsed ? `<details class="fold fold-inner cleanup-picked"><summary>已选名单（${names.length}）</summary><ul class="action-list">${picked}</ul></details>` : '',
+    buttons: state.cleanupTab === 'on' ? [
+      {label: '全部取消', kind: 'btn btn-quiet', disabled: locked, action: () => { state.cleanupSelected.clear(); renderCleanup(); }},
+      {label: `删除 (${names.length})`, kind: 'btn btn-danger-ink', disabled: locked, action: button => applyCleanupDelete(button)},
+      {label: `确认撤下 (${names.length})`, kind: 'btn btn-primary', disabled: locked, action: button => applyCleanup(button)},
+    ] : [
+      {label: '全部取消', kind: 'btn btn-quiet', disabled: locked, action: () => { state.idleSelected.clear(); renderCleanup(); }},
+      {label: `删除 (${names.length})`, kind: 'btn btn-danger-ink', disabled: locked, action: button => applyCleanupDelete(button)},
+      {label: `恢复 (${restorable.length})`, kind: 'btn btn-primary', disabled: locked || !restorable.length, action: button => applyCleanupRestore(button)},
     ],
   });
 }
@@ -4869,13 +5080,13 @@ async function loadCleanup() {
   try {
     state.cleanup = await api('/api/cleanup');
   } catch (error) {
-    toast({text: '已撤下技能读取失败：' + error.message, tone: 'error'});
+    toast({text: '清理信息读取失败：' + error.message, tone: 'error'});
   }
   renderCleanup();
   if (homeVisible) renderHomeTodos();
 }
 
-/* 先请后台核对一遍（依赖、你的文件里提到的位置），确认后再撤下。 */
+/* 撤下：先请后台核对一遍（依赖、你的文件里提到的位置），确认后再撤。 */
 async function applyCleanup(button) {
   const skills = [...state.cleanupSelected];
   if (!skills.length) return;
@@ -4912,50 +5123,134 @@ async function applyCleanup(button) {
   });
 }
 
-$('cleanup-search').addEventListener('input', renderCleanup);
-
-$('cleanup-rows').addEventListener('change', event => {
-  const name = event.target.dataset.cleanup;
-  if (!name) return;
-  if (event.target.checked) state.cleanupSelected.add(name); else state.cleanupSelected.delete(name);
-  renderCleanupActionBar();
-});
-
-$('cleanup-rows').addEventListener('click', event => {
-  const row = event.target.closest('tr');
-  if (row && !event.target.closest('input, label')) row.querySelector('input')?.click();
-});
-
-$('withdrawn-refresh').addEventListener('click', event => withBusy(event.currentTarget, '正在刷新…', loadCleanup));
-$('cleanup-organize').addEventListener('click', () => showPage('skills'));
-
-$('withdrawn-list').addEventListener('click', async event => {
-  const button = event.target.closest('button');
-  const name = button?.dataset.restoreWithdrawn;
-  if (!name) return;
-  const row = state.cleanup.withdrawn.find(item => item.name === name);
-  const back = (row?.previous_agents || []).map(nameOf).join('、') || '原 Agent';
+/* 删除：先核对。核对失败只弹提示，不弹确认框；确认按钮用提醒色。 */
+async function applyCleanupDelete(button) {
+  const tab = state.cleanupTab;
+  const selection = tab === 'on' ? state.cleanupSelected : state.idleSelected;
+  const skills = [...selection];
+  if (!skills.length) return;
+  let plan;
+  try {
+    plan = await withBusy(button, '正在核对…', () => api('/api/cleanup/delete/preview', {skills}));
+  } catch (error) {
+    toast({text: error.message, tone: 'error', sticky: true});
+    return;
+  }
+  const targets = Array.isArray(plan.skills) && plan.skills.length ? plan.skills : skills;
+  const files = new Set((plan.path_warnings || []).map(warning => warning.file));
+  const irreplaceable = new Set(plan.irreplaceable || []).size;
   const ok = await confirmDialog({
-    title: '恢复这个技能',
-    lines: [`将重新分配给 ${back}。`],
-    groups: [{label: '要恢复的技能', items: [{name}]}],
-    note: '可以在操作记录里撤销。', okText: '恢复',
+    title: '删除这些技能',
+    lines: [
+      `将从技能库删除这 ${targets.length} 个技能，所有 Agent 都不能再使用。`,
+      ...(plan.dependency_warnings || []),
+      irreplaceable ? `其中 ${irreplaceable} 个是自制或改过的技能，删除后无法从网上重新获取。` : '',
+      files.size ? `有 ${files.size} 份文件引用了当前技能位置，删除后可能需要调整引用。` : '',
+    ],
+    groups: [{label: '要删除的技能', items: targets.map(name => ({name}))}],
+    note: '可通过提示条或操作记录撤销。只能撤销最近 10 次操作。',
+    okText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
+  await runWrite({
+    button,
+    busyText: '正在删除…',
+    work: async () => {
+      const written = await api('/api/cleanup/delete/apply', {skills: targets, revision: plan.revision, confirmed: true});
+      selection.clear();
+      await refreshEverything();
+      return written;
+    },
+    success: written => ({
+      text: `已删除 ${targets.length} 个技能`,
+      undo: written.id ? undoButton => undoOperation(written.id, {skills: targets, message: written.message, button: undoButton}) : null,
+    }),
+  });
+}
+
+/* 恢复：只提交选中里确实撤下过的，按撤下前的分配重新启用。 */
+async function applyCleanupRestore(button) {
+  const skills = [...state.idleSelected].filter(name => cleanupMeta(state.skillIndex.get(name)).withdrawn);
+  if (!skills.length) return;
+  const ok = await confirmDialog({
+    title: '恢复这些技能',
+    lines: [`将按撤下前的分配重新启用这 ${skills.length} 个技能。`],
+    groups: [{label: '要恢复的技能', items: skills.map(name => ({name}))}],
+    note: '可通过提示条或操作记录撤销本次操作。', okText: '恢复',
   });
   if (!ok) return;
   await runWrite({
     button,
     busyText: '正在恢复…',
     work: async () => {
-      const written = await api('/api/withdrawn/restore', {skills: [name], revision: state.cleanup.revision, confirmed: true});
+      const revision = state.table?.revision ?? state.cleanup?.revision;
+      const written = await api('/api/withdrawn/restore', {skills, revision, confirmed: true});
+      state.idleSelected.clear();
       await refreshEverything();
       return written;
     },
     success: written => ({
-      text: '已恢复原分配',
-      undo: undoButton => undoOperation(written.id, {skills: [name], message: written.message, button: undoButton}),
+      text: `已恢复 ${skills.length} 个技能`,
+      undo: written.id ? undoButton => undoOperation(written.id, {skills, message: written.message, button: undoButton}) : null,
     }),
   });
+}
+
+$('cleanup-search').addEventListener('input', renderCleanup);
+
+$('cleanup-tabs').addEventListener('click', event => {
+  const button = event.target.closest('[data-cleanup-tab]');
+  if (!button) return;
+  state.cleanupTab = button.dataset.cleanupTab === 'off' ? 'off' : 'on';
+  renderCleanup();
 });
+
+$('cleanup-filters').addEventListener('change', event => {
+  const select = event.target.closest('select[data-cleanup-filter]');
+  if (!select) return;
+  state.cleanupFilters[select.dataset.cleanupFilter] = select.value;
+  renderCleanup();
+});
+
+$('cleanup-clear-filters').addEventListener('click', () => {
+  for (const key of Object.keys(state.cleanupFilters)) state.cleanupFilters[key] = '';
+  renderCleanup();
+});
+
+$('cleanup-select-all').addEventListener('change', event => {
+  const names = cleanupVisibleRows().map(skill => skill.name);
+  const selection = cleanupSelection();
+  for (const name of names) {
+    if (event.target.checked) selection.add(name); else selection.delete(name);
+  }
+  for (const input of $('cleanup-rows').querySelectorAll('input[data-cleanup]')) {
+    if (!names.includes(input.dataset.cleanup)) continue;
+    input.checked = event.target.checked;
+    input.closest('tr')?.classList.toggle('is-selected', event.target.checked);
+  }
+  syncCleanupSelectAll(cleanupVisibleRows());
+  renderCleanupActionBar();
+});
+
+$('cleanup-rows').addEventListener('change', event => {
+  const name = event.target.dataset.cleanup;
+  if (!name) return;
+  if (event.target.checked) cleanupSelection().add(name); else cleanupSelection().delete(name);
+  event.target.closest('tr')?.classList.toggle('is-selected', event.target.checked);
+  syncCleanupSelectAll(cleanupVisibleRows());
+  renderCleanupActionBar();
+});
+
+$('cleanup-rows').addEventListener('click', event => {
+  const row = event.target.closest('tr');
+  if (!row || event.target.closest('input, label, button, a')) return;
+  const box = row.querySelector('input[data-cleanup]');
+  if (box && !box.disabled) box.click();
+});
+
+$('cleanup-organize').addEventListener('click', () => showPage('skills'));
+
 
 /* ==================== 操作记录页 ==================== */
 
@@ -6019,6 +6314,14 @@ function homeGoto(target) {
     state.tag = '';
     showPage('skills');
     renderSkillTable();
+    return;
+  }
+  // 首页「查看闲置技能」直接打开未启用栏，清掉上次留下的搜索和筛选。
+  if (target === 'cleanup') {
+    state.cleanupTab = 'off';
+    for (const key of Object.keys(state.cleanupFilters)) state.cleanupFilters[key] = '';
+    $('cleanup-search').value = '';
+    showPage('cleanup');
     return;
   }
   gotoPlace(target);

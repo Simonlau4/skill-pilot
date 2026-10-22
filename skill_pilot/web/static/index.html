@@ -321,32 +321,48 @@
     </div>
     <div id="cleanup-ready">
     <div class="toolbar">
-      <input id="cleanup-search" type="search" class="input input-search" placeholder="搜索技能名称或用途" aria-label="搜索要撤下的技能" autocomplete="off" spellcheck="false">
-      <span class="page-note">
-        <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg>撤下后释放上下文占用，保留本地文件，可随时恢复。
-        <button type="button" class="hint" data-hint="按 Token 占用由高到低排列，便于从全部 Agent 中撤下长期不用的技能。"></button>
-      </span>
+      <label class="search-field">
+        <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
+        <input id="cleanup-search" type="search" class="input input-search" placeholder="搜索技能名称或用途" aria-label="搜索技能" autocomplete="off" spellcheck="false">
+      </label>
+      <div id="cleanup-tabs" class="segmented" role="group" aria-label="清理范围"></div>
+    </div>
+    <p class="page-note cleanup-legend">撤下：保留文件，随时可恢复；删除：从技能库删掉文件。</p>
+    <div class="cleanup-result-row">
+      <div id="cleanup-filters" class="cleanup-filters" hidden>
+        <label id="cleanup-filter-agent-wrap" class="cleanup-filter" hidden>
+          <span>Agent</span>
+          <select id="cleanup-filter-agent" class="input" data-cleanup-filter="agent" aria-label="按 Agent 筛选"></select>
+        </label>
+        <label id="cleanup-filter-group-wrap" class="cleanup-filter" hidden>
+          <span>分组</span>
+          <select id="cleanup-filter-group" class="input" data-cleanup-filter="group" aria-label="按分组筛选"></select>
+        </label>
+        <label id="cleanup-filter-tag-wrap" class="cleanup-filter" hidden>
+          <span>标签</span>
+          <select id="cleanup-filter-tag" class="input" data-cleanup-filter="tag" aria-label="按标签筛选"></select>
+        </label>
+        <label id="cleanup-filter-source-wrap" class="cleanup-filter" hidden>
+          <span>来源</span>
+          <select id="cleanup-filter-source" class="input" data-cleanup-filter="source" aria-label="按来源筛选"></select>
+        </label>
+        <button id="cleanup-clear-filters" type="button" class="link-btn" hidden>清除筛选</button>
+      </div>
+      <span id="cleanup-result-count" class="cleanup-result-count" role="status" aria-atomic="true"></span>
     </div>
     <div class="table-wrap">
-      <table class="grid">
+      <table id="cleanup-table" class="grid">
         <thead>
           <tr>
-            <th class="col-check">选择</th>
+            <th class="col-check"><label class="check-hit" title="全选当前列表"><input id="cleanup-select-all" type="checkbox" aria-label="全选当前列表的技能"></label></th>
             <th>技能</th>
-            <th>当前使用 Agent</th>
-            <th class="col-num" aria-sort="descending" title="按 Token 占用从高到低排列">占用 Token <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-sort"/></svg></th>
+            <th>Agent</th>
+            <th id="cleanup-token-head" class="col-num" aria-sort="descending" title="在用栏按 Token 占用从高到低排列">占用 Token <span id="cleanup-token-sort"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-sort"/></svg></span></th>
           </tr>
         </thead>
         <tbody id="cleanup-rows"></tbody>
       </table>
     </div>
-
-    <div class="section-head">
-      <h2>已撤下的技能</h2>
-      <button type="button" class="hint" data-hint="恢复后将重新分配给原 Agent，支持撤销。"></button>
-      <button id="withdrawn-refresh" class="btn btn-small btn-quiet"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg><span>刷新</span></button>
-    </div>
-    <div id="withdrawn-list" class="list"></div>
     </div>
   </section>
 
