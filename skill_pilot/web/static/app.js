@@ -681,6 +681,8 @@ function showPage(page) {
     renderHome({animate: homeIntroPlayed ? 'fade' : 'intro'});
     homeSetScrollEnabled(true);
     ensureHomeCleanup();
+    // 打开、刷新或回到首页都顺便问一次新版，后台会按时间间隔去重。
+    autoCheckProgram();
   } else {
     // 首页藏着时别让 ScrollTrigger 把下面两栏提前放出来，回来时还要滚到眼前才出现。
     homeSetScrollEnabled(false);
@@ -1970,6 +1972,18 @@ async function refreshProgramUpdate() {
   } catch (error) {
     $('program-error').textContent = error.message;
     $('program-error').hidden = false;
+  }
+}
+
+/* 回首页时请后台看看有没有新版；查不查、多久查一次由后台决定。
+   查不到也不打扰用户，只把现在的进度读出来照常显示。 */
+async function autoCheckProgram() {
+  try {
+    const result = await api('/api/program/auto-check', {});
+    programUpdate = {...programUpdate, ...result};
+    renderProgram();
+  } catch {
+    await refreshProgramUpdate();
   }
 }
 

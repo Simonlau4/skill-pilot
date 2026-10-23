@@ -132,6 +132,91 @@ if ($('program-message').textContent !== '从 Skill Pilot 官方项目获取新�
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_home_navigation_auto_checks_program(self):
+        source = (STATIC / 'app.js').read_text()
+        function = extract_function(source, 'function showPage(')
+        script = function + r'''
+let checks = 0;
+async function autoCheckProgram() { checks++; }
+function fail(message) { console.error(message); process.exit(1); }
+const state = {page: 'skills', agent: 'Acme'};
+let homeVisible = true;
+let homeIntroPlayed = true;
+const window = {scrollTo() {}};
+const document = {
+  querySelectorAll: () => [],
+  querySelector: () => null,
+};
+const requestAnimationFrame = () => {};
+function rememberPlace() {}
+function glideSelection() {}
+function renderCleanup() {}
+function loadCleanup() {}
+function renderSettings() {}
+function enterTeam() {}
+function renderHome() {}
+function homeSetScrollEnabled() {}
+function ensureHomeCleanup() {}
+function homeHideTip() {}
+function renderActionBar() {}
+function fitFilterRail() {}
+function refreshHomeScroll() {}
+
+showPage('home');
+if (checks !== 1) fail('回到首页应自动检查一次新版，实际 ' + checks);
+showPage('skills');
+showPage('cleanup');
+showPage('settings');
+showPage('team');
+if (checks !== 1) fail('切到其他页不应再检查新版，实际 ' + checks);
+showPage('home');
+if (checks !== 2) fail('再次回到首页应再问一次，实际 ' + checks);
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_auto_check_program_posts_and_falls_back_quietly(self):
+        source = (STATIC / 'app.js').read_text()
+        function = extract_function(source, 'async function autoCheckProgram(')
+        script = function + r'''
+const requests = [];
+let mode = 'ok';
+async function api(path, body) {
+  if (body === undefined) throw new Error('自动检查应发 POST');
+  requests.push({path, body});
+  if (mode === 'fail') throw new Error('网络断了');
+  return {available: true, running: false, phase: 'available', write_allowed: true};
+}
+let programUpdate = {running: false, phase: 'idle', available: false, write_allowed: false};
+let renders = 0;
+function renderProgram() { renders++; }
+let refreshes = 0;
+async function refreshProgramUpdate() { refreshes++; }
+const touched = [];
+function $(id) { touched.push(id); return {textContent: '', hidden: true}; }
+function fail(message) { console.error(message); process.exit(1); }
+
+(async () => {
+  await autoCheckProgram();
+  if (requests.length !== 1) fail('自动检查应只发一次请求，实际 ' + requests.length);
+  if (requests[0].path !== '/api/program/auto-check') fail('自动检查的接口不对：' + requests[0].path);
+  if (JSON.stringify(requests[0].body) !== '{}') fail('自动检查的请求体应为空对象：' + JSON.stringify(requests[0].body));
+  if (programUpdate.available !== true) fail('后台返回的新版进度没有并进来');
+  if (renders !== 1) fail('拿到进度后应重画一次，实际 ' + renders);
+  if (refreshes !== 0) fail('成功时不应再读一次进度');
+
+  mode = 'fail';
+  renders = 0;
+  await autoCheckProgram();
+  if (refreshes !== 1) fail('接口出错时应退回读一次当前进度，实际 ' + refreshes);
+  if (renders !== 0) fail('接口出错时不应重画成错误');
+  if (touched.includes('program-error')) fail('接口出错时不应写页头错误');
+  if (programUpdate.available !== true) fail('出错不应丢掉已有的新版进度');
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_home_todo_rules(self):
         source = (STATIC / 'app.js').read_text()
         function = extract_function(source, 'function homeTodos(')

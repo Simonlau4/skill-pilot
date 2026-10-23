@@ -42,8 +42,7 @@ def run(json_output=False):
             json.dump({'pid': os.getpid(), 'url': server.url}, lock)
             lock.flush()
             if state is None:
-                if module.preview_allowed(server.home):
-                    server.start_program('check', automatic=True)
+                server.auto_check_program()
                 webbrowser.open(server.url)
                 print(json.dumps({'message': '看板已打开；程序更新后刷新页面即可应用。', 'pid': os.getpid(), 'url': server.url}, ensure_ascii=False)
                       if json_output else '看板已打开；程序更新后刷新页面即可应用。', flush=True)

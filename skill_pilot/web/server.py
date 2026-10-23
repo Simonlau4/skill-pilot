@@ -27,6 +27,7 @@ from . import runtime
 
 STATIC = Path(__file__).parent / "static"
 HEARTBEAT_TIMEOUT = 30
+PROGRAM_AUTO_CHECK_INTERVAL = 600
 # Browsers slow or pause timers in background tabs, so an open page keeps the
 # dashboard alive until it says goodbye or has been silent this long.
 OPEN_PAGE_TIMEOUT = 24 * 3600
@@ -181,6 +182,16 @@ class Dashboard(ThreadingHTTPServer):
                     item.update(status='failed', message=str(error) if isinstance(error, ValueError) else
                                 '安装没能完成，请稍后重试。')
 
+    def auto_check_program(self):
+        with self.runtime_lock:
+            progress = self.program_progress.copy()
+            checked_at = progress.get('checked_at')
+            elapsed = time.time() - checked_at if checked_at is not None else PROGRAM_AUTO_CHECK_INTERVAL
+            if (not preview_allowed(self.home) or progress['running'] or progress['phase'] in {'available', 'ready'}
+                    or 0 <= elapsed < PROGRAM_AUTO_CHECK_INTERVAL):
+                return progress
+        return self.start_program('check', automatic=True)
+
     def start_program(self, action, target=None, automatic=False):
         with self.runtime_lock:
             if self.program_progress['running']:
@@ -230,6 +241,8 @@ class Dashboard(ThreadingHTTPServer):
                     error=str(error) if isinstance(error, ValueError) else 'SP 更新没有完成，请检查网络和文件夹权限后重试。',
                     message='SP 更新没有完成')
         finally:
+            if action == 'check':
+                self.program_progress['checked_at'] = time.time()
             self.program_progress['running'] = False
 
     def request_reload(self):
@@ -497,13 +510,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.server.reload_pending:
             self.reply(503, {'error': '正在应用新版，请稍候再操作。'})
             return
-        if self.server.program_progress['running'] and self.server.program_progress['phase'] == 'apply':
+        if (path != '/api/program/auto-check' and self.server.program_progress['running']
+                and self.server.program_progress['phase'] == 'apply'):
             self.reply(503, {'error': '正在升级 SP，请完成后刷新页面再操作。'})
             return
         read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/cleanup/delete/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan', '/api/team/listings/preview'}
+                       '/api/agents/scan', '/api/team/listings/preview', '/api/program/auto-check'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
@@ -533,6 +547,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == '/api/agents/scan':
                 self.reply(200, self.server.start_agents_scan(full=True))
+                return
+            if path == '/api/program/auto-check':
+                self.reply(200, {**self.server.auto_check_program(), 'write_allowed': preview_allowed(self.server.home)})
                 return
             if path in program_routes:
                 if path.endswith('apply'):
@@ -826,8 +843,7 @@ def run(json_output=False):
             lock.truncate()
             json.dump({"pid": os.getpid(), "url": server.url}, lock)
             lock.flush()
-            if preview_allowed(server.home):
-                server.start_program('check', automatic=True)
+            server.auto_check_program()
         server.last_heartbeat = time.monotonic()
         threading.Thread(target=server.watch, daemon=True).start()
         if not resume:
