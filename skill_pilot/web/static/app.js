@@ -2545,10 +2545,10 @@ function storeRatingHtml(rating) {
   return `<span class="rating" aria-label="${rating.average.toFixed(1)} 分，${rating.count} 人评价">${starIcon(true)}<b>${rating.average.toFixed(1)}</b><span>${rating.count} 人评</span></span>`;
 }
 
-/* 几个人装了：旧版分享站没有这个字段，0 也不显示，免得留下空位或分隔点。 */
+/* 安装人数：旧版分享站没有这个字段，0 也不显示，免得留下空位或分隔点。 */
 function storeInstallsHtml(card) {
   return Number.isInteger(card.installs) && card.installs > 0
-    ? `<span class="store-installs">${number(card.installs)} 人装了</span>`
+    ? `<span class="store-installs">${number(card.installs)} 人已安装</span>`
     : '';
 }
 

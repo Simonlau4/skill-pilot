@@ -1678,7 +1678,9 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .store-card .store-card-quote { display: -webkit-box; margin-top: auto; padding-top: var(--sp-2); border-top: 1px solid var(--line); color: var(--ink); }
 .store-card-quote .by { color: var(--muted); }
 .store-card .store-card-foot { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-tiny); color: var(--muted); }
-.store-card-foot > span + span::before { content: "·"; margin-right: var(--sp-2); color: var(--line-strong); }
+.store-card-foot > span + span::before,
+.store-facts > span + span::before,
+.store-row-rating > span + span::before { content: "·"; margin-right: var(--sp-2); color: var(--line-strong); }
 .store-card.is-skeleton { min-height: 176px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); cursor: default; animation: skeleton 1.4s var(--ease) infinite alternate; }
 @keyframes skeleton { from { opacity: 0.55; } to { opacity: 1; } }
 
@@ -1718,8 +1720,9 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .store-list > .empty { border-radius: var(--radius-lg); }
 .store-list-inner { background: var(--panel); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); overflow: clip; }
 .store-row {
+  --store-rating-col: 184px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 168px 150px 116px;
+  grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 150px 116px;
   gap: var(--sp-4);
   align-items: center;
   padding: 0 var(--sp-5) 0 0;
@@ -1728,7 +1731,7 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 }
 .store-row:last-child { border-bottom: 0; }
 .store-row:hover { background: var(--panel-soft); }
-.store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) 168px 150px 196px; }
+.store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 150px 196px; }
 .store-row-main {
   display: grid;
   gap: 1px;
@@ -1747,13 +1750,14 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .store-row-name .skill-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .store-row-main:hover .t { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line-strong); }
 .store-row-sub { color: var(--ink-2); font-size: var(--fs-small); line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.store-row-rating, .store-row-by { font-size: var(--fs-small); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.store-row-rating .store-installs::before { content: "·"; margin: 0 var(--sp-2); color: var(--line-strong); }
+.store-row-by { font-size: var(--fs-small); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.store-row-rating { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; overflow: hidden; font-size: var(--fs-small); color: var(--muted); }
+.store-row-rating .rating { flex: none; }
+.store-row-rating .store-installs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .store-row-end { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); }
 
 /* 详情：评分一行、能不能装的一块、推荐、评价、说明。 */
 .store-facts { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); margin: var(--sp-3) 0 0; font-size: var(--fs-small); color: var(--ink-2); }
-.store-facts > span + span::before { content: "·"; margin-right: var(--sp-2); color: var(--line-strong); }
 
 .store-get { margin: var(--sp-5) 0 0; padding: var(--sp-4); background: var(--panel-soft); border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); }
 .store-get-line { display: flex; align-items: center; gap: var(--sp-2); margin: 0; }
@@ -1833,8 +1837,8 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
   .shelf-cards > :nth-child(4) { display: none; }
 }
 @media (max-width: 1023px) {
-  .store-row { grid-template-columns: minmax(0, 1fr) 168px 116px; }
-  .store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) 168px 196px; }
+  .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 116px; }
+  .store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 196px; }
   .store-row-by { display: none; }
 }
 @media (max-width: 720px) {
