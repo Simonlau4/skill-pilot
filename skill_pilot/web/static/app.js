@@ -2545,6 +2545,17 @@ function storeRatingHtml(rating) {
   return `<span class="rating" aria-label="${rating.average.toFixed(1)} 分，${rating.count} 人评价">${starIcon(true)}<b>${rating.average.toFixed(1)}</b><span>${rating.count} 人评</span></span>`;
 }
 
+/* 几个人装了：旧版分享站没有这个字段，0 也不显示，免得留下空位或分隔点。 */
+function storeInstallsHtml(card) {
+  return Number.isInteger(card.installs) && card.installs > 0
+    ? `<span class="store-installs">${number(card.installs)} 人装了</span>`
+    : '';
+}
+
+function storeFactsHtml(card) {
+  return `<p class="store-facts">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}<span>${escape(storeRecommenders(card))}</span>${card.group ? `<span>${escape(card.group)}</span>` : ''}</p>`;
+}
+
 function storeStatusTag(card) {
   const queued = storeQueueItem(card.key);
   if (queued?.status === 'waiting') return '<span class="tag tag-quiet">排队中</span>';
@@ -2564,7 +2575,7 @@ function storeCardHtml(card) {
     <span class="store-card-quote">${quote
       ? `“${escape(quote.note)}”<span class="by"> — ${escape(quote.member.name)}</span>`
       : `<span class="by">${escape(storeRecommenders(card))}</span>`}</span>
-    <span class="store-card-foot">${storeRatingHtml(card.rating)}${people}${card.group ? `<span>${escape(card.group)}</span>` : ''}</span>
+    <span class="store-card-foot">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}${people}${card.group ? `<span>${escape(card.group)}</span>` : ''}</span>
   </button>`;
 }
 
@@ -2581,7 +2592,7 @@ function storeRowHtml(card) {
       <span class="store-row-name"><span class="t">${escape(storeTitle(card))}</span>${card.title ? `<span class="skill-id">${escape(card.name)}</span>` : ''}</span>
       <span class="store-row-sub">${escape(storeSummary(card) || card.listings.find(item => item.note)?.note || '')}</span>
     </button>
-    <span class="store-row-rating">${storeRatingHtml(card.rating)}</span>
+    <span class="store-row-rating">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}</span>
     <span class="store-row-by">${escape(mine ? `${friendlyDate(storeMyListing(card)?.updated_at)}上架` : storeRecommenders(card))}</span>
     <span class="store-row-end">${end}</span>
   </div>`;
@@ -2888,7 +2899,7 @@ function renderStoreDetail(fresh = false) {
   body.innerHTML = `
     ${card.title ? `<p class="detail-id">${escape(card.name)}</p>` : ''}
     ${storeSummary(card) ? `<p class="detail-summary">${escape(storeSummary(card))}</p>` : ''}
-    <p class="store-facts">${storeRatingHtml(card.rating)}<span>${escape(storeRecommenders(card))}</span>${card.group ? `<span>${escape(card.group)}</span>` : ''}</p>
+    ${storeFactsHtml(card)}
     ${storeGetHtml(card)}
     <h3 class="sub-title">推荐人</h3>
     <ul class="store-recs">${card.listings.map(item => `<li>

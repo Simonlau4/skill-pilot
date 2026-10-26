@@ -21,6 +21,7 @@ from . import sharing
 
 MAX_BODY = 20 * 1024 * 1024
 MAX_RATING_BODY = 64 * 1024
+MAX_INSTALL_BODY = 64 * 1024
 MAX_JOIN_BODY = 4096
 MAX_FILES = 300
 MAX_SIZE = 5 * 1024 * 1024
@@ -201,9 +202,12 @@ class HubStore:
                 ratings[key].pop(member_id, None)
                 if key.startswith('team:' + member_id + ':') or not ratings[key]:
                     del ratings[key]
+            installs = self._installs()
+            installs.pop(member_id, None)
             changes = {p: None for p in (self.data / 'packages' / member_id).glob('*.json')}
             changes.update({self._listing_path(member_id): None,
                             self.data / 'ratings.json': {'ratings': ratings},
+                            self.data / 'installs.json': {'installs': installs},
                             self.data / 'members.json': {'members': [m for m in members if m['id'] != member_id]}})
             self._save(changes)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
@@ -230,6 +234,9 @@ class HubStore:
     def _ratings(self):
         return self._read(self.data / 'ratings.json', 'ratings')
 
+    def _installs(self):
+        return self._read(self.data / 'installs.json', 'installs')
+
     def _save(self, changes):
         # Readers hold the same lock. Roll back completed writes if any later write fails.
         previous = {p: json.loads(p.read_text(encoding='utf-8')) if p.exists() else None for p in changes}
@@ -249,12 +256,13 @@ class HubStore:
                     atomic_write(path, previous[path])
             raise
 
-    def _catalog(self):
+    def _catalog(self, member_id=None):
         cards = {}
         members = {m['id']: {k: m[k] for k in ('id', 'name')} for m in self._members()}
-        for member_id, member in members.items():
-            for row in self._listings(member_id).values():
-                key = listing_key(member_id, row)
+        installs = self._installs()
+        for author_id, member in members.items():
+            for row in self._listings(author_id).values():
+                key = listing_key(author_id, row)
                 cards.setdefault(key, {'key': key, 'listings': [], 'ratings': []})['listings'].append(
                     {**row, 'member': member})
         for key, ratings in self._ratings().items():
@@ -263,7 +271,26 @@ class HubStore:
         for card in cards.values():
             card['listings'].sort(key=lambda r: r['updated_at'], reverse=True)
             card['ratings'].sort(key=lambda r: r['updated_at'], reverse=True)
-        return {'cards': sorted(cards.values(), key=lambda c: c['listings'][0]['updated_at'], reverse=True)}
+            authors = {row['member']['id'] for row in card['listings']}
+            card['installs'] = sum(card['key'] in keys for member, keys in installs.items()
+                                   if member in members and member not in authors)
+        return {'cards': sorted(cards.values(), key=lambda c: c['listings'][0]['updated_at'], reverse=True),
+                'my_installs': sorted(set(installs.get(member_id, [])) & cards.keys())}
+
+    def _put_installs(self, member_id, data):
+        if (not isinstance(data, dict) or not isinstance(data.get('keys'), list) or
+                any(not isinstance(key, str) for key in data['keys'])):
+            raise HubError(400, '上报内容须为技能卡片编号的文字列表。')
+        allowed = {card['key'] for card in self._catalog()['cards']
+                   if all(row['member']['id'] != member_id for row in card['listings'])}
+        keys = sorted(set(data['keys']) & allowed)
+        installs = self._installs()
+        if keys:
+            installs[member_id] = keys
+        else:
+            installs.pop(member_id, None)
+        atomic_write(self.data / 'installs.json', {'installs': installs})
+        return {'keys': keys}
 
     def _put_listings(self, member_id, data):
         if not isinstance(data, dict) or not isinstance(data.get('listings'), list) or not data['listings']:
@@ -389,7 +416,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _read_body(self, limit):
+    def _read_body(self, limit, too_large=None):
         lengths = self.headers.get_all('Content-Length', [])
         if self.headers.get('Transfer-Encoding') or len(lengths) > 1:
             raise HubError(400, '上传方式不支持，请直接发送完整内容。')
@@ -402,9 +429,9 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0:
             raise HubError(400, '上传文件的长度不正确。')
         if length > limit:
-            raise HubError(413, '上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
+            raise HubError(413, too_large or ('上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
                            '评价内容超过 64 KB，请缩短后重试。' if limit == MAX_RATING_BODY else
-                           '加入信息超过 4096 字节，请缩短后重试。')
+                           '加入信息超过 4096 字节，请缩短后重试。'))
         try:
             body = self.rfile.read(length)
         except TimeoutError:
@@ -435,7 +462,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             allowed = ({'POST'} if path == '/api/join' else
                        {'GET'} if path in {'/api/me', '/api/catalog'} or package else
-                       {'PUT'} if path == '/api/listings/me' else {'DELETE'} if listing else
+                       {'PUT'} if path in {'/api/listings/me', '/api/installs/me'} else {'DELETE'} if listing else
                        {'PUT', 'DELETE'} if path == '/api/ratings' else set())
             if not allowed:
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
@@ -455,7 +482,9 @@ class Handler(BaseHTTPRequestHandler):
                                  'member': {key: member[key] for key in ('id', 'name')},
                                  'token': member['token']})
                 return
-            data = (self._read_body(MAX_BODY if path == '/api/listings/me' else MAX_RATING_BODY)
+            data = (self._read_body(MAX_INSTALL_BODY, '上报内容超过 64 KB，请缩短后重试。')
+                    if path == '/api/installs/me' else
+                    self._read_body(MAX_BODY if path == '/api/listings/me' else MAX_RATING_BODY)
                     if self.command == 'PUT' or path == '/api/ratings' else None)
             store = self.server.store
             with store.locked():
@@ -464,9 +493,11 @@ class Handler(BaseHTTPRequestHandler):
                 if path == '/api/me':
                     result = {'service': 'skill-pilot-team', 'api': 2, 'member': member}
                 elif path == '/api/catalog':
-                    result = store._catalog()
+                    result = store._catalog(member['id'])
                 elif path == '/api/listings/me':
                     result = store._put_listings(member['id'], data)
+                elif path == '/api/installs/me':
+                    result = store._put_installs(member['id'], data)
                 elif listing:
                     result = store._remove_listing(member['id'], listing[1])
                 elif package:

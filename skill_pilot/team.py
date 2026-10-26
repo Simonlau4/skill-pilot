@@ -15,7 +15,7 @@ import urllib.request
 from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 
-from . import labels, operations, sharing, team_hub
+from . import labels, operations, sharing, store, team_hub
 from .scan import SKIP_CONTENT, metadata
 from .sources import github, normalize
 from .store import git_tree, guard
@@ -88,9 +88,11 @@ def _redact(value, key):
 def _request(config, path, method='GET', data=None):
     body = json.dumps(data, ensure_ascii=False).encode('utf-8') if data is not None else None
     limit = (team_hub.MAX_JOIN_BODY if path == '/api/join' else
-             team_hub.MAX_RATING_BODY if path == '/api/ratings' else MAX_BODY)
+             team_hub.MAX_RATING_BODY if path == '/api/ratings' else
+             team_hub.MAX_INSTALL_BODY if path == '/api/installs/me' else MAX_BODY)
     if body is not None and len(body) > limit:
-        raise ValueError('上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
+        raise ValueError('上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
+                         '上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
                          '评价内容超过 64 KB。' if limit == team_hub.MAX_RATING_BODY else
                          '加入信息超过 4096 字节，请缩短后重试。')
     key = config.get('key', '')
@@ -216,11 +218,18 @@ def _catalog(config):
     try:
         if not isinstance(data.get('cards'), list):
             raise ValueError
+        has_installs = 'my_installs' in data
+        if has_installs and (not isinstance(data['my_installs'], list) or
+                            any(not isinstance(key, str) for key in data['my_installs'])):
+            raise ValueError
         result, seen = [], set()
         for card in data['cards']:
             if (not isinstance(card, dict) or not isinstance(card.get('key'), str) or card['key'] in seen or
                     not isinstance(card.get('listings'), list) or not card['listings'] or
                     not isinstance(card.get('ratings'), list)):
+                raise ValueError
+            if ('installs' in card) != has_installs or (has_installs and
+                    (type(card['installs']) is not int or card['installs'] < 0)):
                 raise ValueError
             rows, members, ratings, raters = [], set(), [], set()
             for row in card['listings']:
@@ -243,15 +252,20 @@ def _catalog(config):
                 raters.add(member['id'])
             result.append({'key': card['key'], 'listings': sorted(rows, key=lambda r: r['updated_at'], reverse=True),
                            'ratings': sorted(ratings, key=lambda r: r['updated_at'], reverse=True)})
+            if has_installs:
+                result[-1]['installs'] = card['installs']
             seen.add(card['key'])
-        return sorted(result, key=lambda c: c['listings'][0]['updated_at'], reverse=True)
+        catalog = {'cards': sorted(result, key=lambda c: c['listings'][0]['updated_at'], reverse=True)}
+        if has_installs:
+            catalog['my_installs'] = data['my_installs']
+        return catalog
     except (ValueError, TypeError, KeyError, AttributeError):
         raise ValueError(FORMAT_ERROR) from None
 
 
 def _fetch(home):
     config = _connection(home)
-    return config, _me(config), _catalog(config)
+    return config, _me(config), _catalog(config)['cards']
 
 
 def _owned(cards, member):
@@ -320,9 +334,12 @@ def _plan(card, cards, registry):
 
 
 def catalog(home):
-    _, member, cards = _fetch(home)
+    config = _connection(home)
+    member = _me(config)
+    data = _catalog(config)
+    cards = data['cards']
     _, registry, _ = operations.load(home)
-    result = []
+    result, current = [], set()
     for card in cards:
         row = card['listings'][0]
         state, local_name = _local(row, registry)
@@ -337,6 +354,8 @@ def catalog(home):
                 reason = next(r['reason'] for r in skipped if r['name'] == row['name'])
         if state in {'lark', 'conflict'}:
             reason = LOCAL_LABELS[state] + '。'
+        if state in {'installed', 'update'} and not registry['skills'].get(local_name, {}).get('withdrawn'):
+            current.add(card['key'])
         local = {'status': state, 'label': LOCAL_LABELS[state], 'reason': reason,
                  'agents': registry['skills'].get(local_name, {}).get('assigned_agents', [])}
         details = {}
@@ -356,6 +375,20 @@ def catalog(home):
                        'count': len(reviews)}, 'reviews': reviews, 'my_rating': my_rating,
             'can_rate': not mine and state in {'installed', 'update'}, 'local': local,
             'tokens': operations.listing_tokens(row['name'], details)})
+        if 'installs' in card:
+            result[-1]['installs'] = card['installs']
+    if 'my_installs' in data and store.write_allowed(home):
+        previous = set(data['my_installs'])
+        if current != previous:
+            try:
+                _request(config, '/api/installs/me', 'PUT', {'keys': sorted(current)})
+            except (ValueError, OSError):
+                pass
+            else:
+                for card in result:
+                    key = card['key']
+                    counted_before = key in previous and card['local']['status'] != 'mine'
+                    card['installs'] = max(0, card['installs'] - counted_before + (key in current))
     return {'member': member, 'cards': result}
 
 

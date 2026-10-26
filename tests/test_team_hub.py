@@ -98,6 +98,7 @@ class TeamHubTests(unittest.TestCase):
 
     def test_every_path_and_method_authenticates(self):
         routes = [('/api/me', 'GET'), ('/api/catalog', 'GET'), ('/api/listings/me', 'PUT'),
+                  ('/api/installs/me', 'PUT'),
                   ('/api/listings/me/example', 'DELETE'), ('/api/ratings', 'PUT'), ('/api/ratings', 'DELETE'),
                   ('/api/packages/' + self.first['id'] + '/example', 'GET'), ('/members.json', 'GET'), ('/api/me', 'BREW')]
         for path, method in routes:
@@ -383,19 +384,130 @@ class TeamHubTests(unittest.TestCase):
         self.assertEqual(self.request('/api/ratings', 'DELETE', {'key': key}, self.second['token'])[0], 404)
         self.assertEqual(self.cards()[0]['ratings'], [])
 
-    def test_remove_member_cleans_listings_packages_and_authored_ratings(self):
+    def test_installs_count_people_replace_records_and_exclude_publishers(self):
+        third = self.store.add_member('Acme 示例成员三')
+        self.put([listing(), listing('another')])
+        keys = sorted(card['key'] for card in self.cards())
+        key = keys[0]
+        self.assertEqual(self.request('/api/catalog')[1]['my_installs'], [])
+        self.assertTrue(all(card['installs'] == 0 for card in self.cards()))
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': keys}), (200, {'keys': []}))
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [*keys, key]}, self.second['token']),
+                         (200, {'keys': keys}))
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, third['token']),
+                         (200, {'keys': [key]}))
+        for member, expected in ((self.first, []), (self.second, keys), (third, [key])):
+            catalog = self.request('/api/catalog', token=member['token'])[1]
+            self.assertEqual(catalog['my_installs'], expected)
+            card = next(card for card in catalog['cards'] if card['key'] == key)
+            self.assertEqual(card['installs'], 2)
+            self.assertEqual(set(card), {'key', 'listings', 'ratings', 'installs'})
+            self.assertNotIn(self.second['id'], json.dumps(catalog))
+            self.assertNotIn(third['id'], json.dumps(catalog))
+        for _ in range(2):
+            self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
+                             (200, {'keys': [key]}))
+            counts = {card['key']: card['installs'] for card in self.cards()}
+            self.assertEqual(counts, {keys[0]: 2, keys[1]: 0})
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': []}, self.second['token']),
+                         (200, {'keys': []}))
+        self.assertEqual(next(card for card in self.cards() if card['key'] == key)['installs'], 1)
+        saved = json.loads((self.data / 'installs.json').read_text())
+        self.assertEqual(saved, {'installs': {third['id']: [key]}})
+
+    def test_installs_filter_missing_removed_and_coalesced_own_cards(self):
+        self.put()
+        key = self.cards()[0]['key']
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': ['missing', key]}, self.second['token']),
+                         (200, {'keys': [key]}))
+        self.assertEqual(self.request('/api/listings/me/example', 'DELETE')[0], 200)
+        self.assertEqual(self.request('/api/catalog', token=self.second['token'])[1],
+                         {'cards': [], 'my_installs': []})
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
+                         (200, {'keys': []}))
+        self.put()
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token'])[0], 200)
+        self.put(token=self.second['token'])
+        self.assertEqual(self.cards()[0]['installs'], 0)
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
+                         (200, {'keys': []}))
+        team_hub.atomic_write(self.data / 'installs.json', {'installs': {
+            self.first['id']: [key], '0' * 32: [key]}})
+        self.assertEqual(self.cards()[0]['installs'], 0)
+
+    def test_installs_validate_string_list_without_changing_previous_record(self):
+        self.put()
+        key = self.cards()[0]['key']
+        self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token'])
+        before = self.state()
+        for data in ({}, {'keys': None}, {'keys': key}, {'keys': {}}, {'keys': 1},
+                     *({'keys': [key, value]} for value in (None, 1, True, [], {}))):
+            with self.subTest(data=data):
+                self.assertEqual(self.request('/api/installs/me', 'PUT', data, self.second['token'])[0], 400)
+                self.assertEqual(self.state(), before)
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key], 'private': 'ignored'},
+                                      self.second['token']), (200, {'keys': [key]}))
+        self.assertEqual(self.state(), before)
+
+    def test_installs_body_limit_has_its_own_message_and_accepts_boundary(self):
+        before = self.state()
+        status, body = self.raw_upload([('Content-Length', str(team_hub.MAX_INSTALL_BODY + 1))],
+                                       path='/api/installs/me')
+        self.assertEqual(status, 413)
+        self.assertEqual(body, {'error': '上报内容超过 64 KB，请缩短后重试。'})
+        self.assertEqual(self.state(), before)
+        body = b'{"keys": []}'
+        self.assertEqual(self.raw_upload([('Content-Length', str(team_hub.MAX_INSTALL_BODY))],
+            body + b' ' * (team_hub.MAX_INSTALL_BODY - len(body)), '/api/installs/me'), (200, {'keys': []}))
+        for method in ('GET', 'POST', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'):
+            self.assertEqual(self.request('/api/installs/me', method)[0], 405)
+
+    def test_simultaneous_install_reports_keep_both_members(self):
+        third = self.store.add_member('Acme 示例成员三')
+        self.put()
+        key = self.cards()[0]['key']
+        barrier = threading.Barrier(2)
+        def report(member):
+            barrier.wait(timeout=3)
+            return self.request('/api/installs/me', 'PUT', {'keys': [key]}, member['token'])
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(report, (self.second, third)))
+        self.assertEqual(results, [(200, {'keys': [key]})] * 2)
+        self.assertEqual(self.cards()[0]['installs'], 2)
+
+    def test_remove_member_cleans_listings_packages_ratings_and_installs(self):
         self.put([listing(kind='files')])
         self.put([listing('second')], self.second['token'])
         key = 'github:acme/skills:skills/second'
         self.request('/api/ratings', 'PUT', {'key': key, 'stars': 5})
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]})[0], 200)
+        self.assertEqual(next(card for card in self.cards() if card['key'] == key)['installs'], 1)
         self.store.remove_member(self.first['id'])
         self.assertEqual(self.request()[0], 401)
         self.assertFalse((self.data / 'listings' / (self.first['id'] + '.json')).exists())
         self.assertFalse((self.data / 'packages' / self.first['id']).exists())
         self.assertNotIn(self.first['id'], (self.data / 'ratings.json').read_text())
+        self.assertEqual(json.loads((self.data / 'installs.json').read_text()), {'installs': {}})
         cards = self.request('/api/catalog', token=self.second['token'])[1]['cards']
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]['ratings'], [])
+        self.assertEqual(cards[0]['installs'], 0)
+
+    def test_remove_member_restores_installs_if_save_fails(self):
+        self.put([listing(kind='files')])
+        key = self.cards()[0]['key']
+        self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token'])
+        before = self.state()
+        write = team_hub.atomic_write
+        def fail_members(path, data):
+            if path.name == 'members.json':
+                raise OSError('example write failure')
+            return write(path, data)
+        with patch.object(team_hub, 'atomic_write', side_effect=fail_members):
+            with self.assertRaises(OSError):
+                self.store.remove_member(self.second['id'])
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.cards()[0]['installs'], 1)
 
     def test_simultaneous_upserts_keep_both_and_complete_packages(self):
         barrier = threading.Barrier(2)
@@ -468,9 +580,11 @@ class TeamHubTests(unittest.TestCase):
             self.request(token='wrong')
         self.assertEqual(log.getvalue(), '')
 
-    def test_restart_keeps_members_listings_packages_and_ratings_ignores_old_shares(self):
+    def test_restart_keeps_members_listings_packages_ratings_and_installs_ignores_old_shares(self):
         self.put([listing(kind='files')])
         self.request('/api/ratings', 'PUT', {'key': self.cards()[0]['key'], 'stars': 4}, self.second['token'])
+        key = self.cards()[0]['key']
+        self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token'])
         old = self.data / 'shares' / (self.first['id'] + '.json')
         old.parent.mkdir()
         old.write_text('old data is deliberately not JSON')
@@ -479,6 +593,7 @@ class TeamHubTests(unittest.TestCase):
             with restarted.store.locked():
                 self.assertEqual(restarted.store._authenticate('Bearer ' + self.first['token'])['id'], self.first['id'])
                 self.assertEqual(restarted.store._catalog()['cards'], before)
+                self.assertEqual(restarted.store._catalog(self.second['id'])['my_installs'], [key])
                 self.assertEqual(restarted.store._package(self.first['id'], 'example')['files'], listing(kind='files')['source']['files'])
 
 
