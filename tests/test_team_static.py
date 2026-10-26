@@ -58,11 +58,13 @@ class TeamStaticTests(unittest.TestCase):
         parts = [
             line(source, 'const escape = value => '),
             line(source, 'const icon = (name'),
+            line(source, 'const number = value => '),
             line(source, 'const storeTitle = '),
             line(source, 'const storeQueueItem = '),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             line(source, 'const starIcon = '),
             extract_function(source, 'function storeRatingHtml('),
+            extract_function(source, 'function storeInstallsHtml('),
             extract_function(source, 'function storeStatusTag('),
             extract_function(source, 'function storeSummary('),
             extract_function(source, 'function storeRecommenders('),
@@ -109,6 +111,85 @@ if (JSON.stringify(storeGroups(cards)) !== JSON.stringify([['写作', 2], ['-', 
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_store_install_counts_only_show_above_zero(self):
+        source = (STATIC / 'app.js').read_text()
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const number = value => '),
+            line(source, 'const starIcon = '),
+            line(source, 'const storeTitle = '),
+            line(source, 'const storeQueueItem = '),
+            extract_function(source, 'const STORE_STATUS = {') + ';',
+            extract_function(source, 'function storeRatingHtml('),
+            extract_function(source, 'function storeInstallsHtml('),
+            extract_function(source, 'function storeSummary('),
+            extract_function(source, 'function storeRecommenders('),
+            extract_function(source, 'function storeFactsHtml('),
+            extract_function(source, 'function storeStatusTag('),
+            extract_function(source, 'function storeCardHtml('),
+            extract_function(source, 'function storeRowHtml('),
+        ]
+        script = '\n'.join(parts) + r'''
+function fail(message) { console.error(message); process.exit(1); }
+const state = {queue: {items: []}, storeMine: false};
+const teamCanWrite = () => true;
+function card(installs) {
+  const item = {key: 'a', name: 'acme-a', title: '示例', summary: '周报', group: '',
+    listings: [{member: {id: 'm1', name: 'Acme 甲'}, note: '好用'}],
+    rating: {average: 4.5, count: 3}, local: {status: 'installable'}};
+  if (installs !== undefined) item.installs = installs;
+  return item;
+}
+const html = card => ({卡片: storeCardHtml(card), 列表: storeRowHtml(card), 详情: storeFactsHtml(card)});
+
+for (const installs of [0, undefined]) {
+  const views = html(card(installs));
+  for (const [where, text] of Object.entries(views)) {
+    if (text.includes('人已安装')) fail(`${where}不该显示 0 或没有字段的人数：` + text);
+    if (text.includes('store-installs')) fail(`${where}不该留下人数空位：` + text);
+  }
+}
+
+const views = html(card(2));
+for (const [where, text] of Object.entries(views)) {
+  if (!text.includes('<span class="store-installs">2 人已安装</span>')) fail(`${where}没有显示“2 人已安装”：` + text);
+  if (text.indexOf('2 人已安装') < text.indexOf('4.5')) fail(`${where}的人数应排在评分后面：` + text);
+}
+if (!storeCardHtml(card(1200)).includes('1,200 人已安装')) fail('人数要沿用现有的数字格式');
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        detail = extract_function(source, 'function renderStoreDetail(')
+        self.assertIn('${storeFactsHtml(card)}', detail)
+
+    def test_store_row_rating_aligns_and_shares_separator(self):
+        css = (STATIC / 'app.css').read_text()
+
+        rating_rule = re.search(r'\.store-row-rating\s*\{([^}]*)\}', css)
+        self.assertIsNotNone(rating_rule, '列表里的评分栏样式不见了')
+        self.assertIn('display: flex', rating_rule.group(1), '评分和人数的容器应横向排列')
+        self.assertIn('align-items: center', rating_rule.group(1), '评分和人数应垂直居中')
+        self.assertIn('gap: var(--sp-2)', rating_rule.group(1), '评分和人数之间应留统一间距')
+
+        installs_rule = re.search(r'\.store-row-rating \.store-installs\s*\{([^}]*)\}', css)
+        self.assertIsNotNone(installs_rule, '人数那一段的收缩样式不见了')
+        self.assertIn('min-width: 0', installs_rule.group(1), '人数应能收缩，不挤到推荐人那一栏')
+        self.assertIn('text-overflow: ellipsis', installs_rule.group(1), '人数太长时应收成省略号')
+
+        # 卡片底部、详情和列表评分栏共用同一条分隔点规则，不再各写一套。
+        separator_rule = re.search(r'([^{}]+)\{\s*content:\s*"·"[^}]*\}', css)
+        self.assertIsNotNone(separator_rule, '人数前的分隔样式不见了')
+        self.assertEqual(css.count('content: "·"'), 1, '分隔点只保留一套规则')
+        for selector in ('.store-card-foot > span + span::before',
+                         '.store-facts > span + span::before',
+                         '.store-row-rating > span + span::before'):
+            self.assertIn(selector, separator_rule.group(1), f'分隔点规则漏了：{selector}')
+        self.assertNotIn('.store-row-rating .store-installs::before', css, '不要再用单独两边留白的分隔写法')
+
+        # 「人已安装」比原来多一个字，评分栏一起加宽，四种排法共用同一个列宽。
+        self.assertIn('--store-rating-col: 184px', css)
+        self.assertEqual(css.count('var(--store-rating-col)'), 4, '普通列表、「我的上架」和窄屏两种排法都要用新列宽')
 
     def test_store_queue_rows_escape_and_tag_waiting(self):
         source = (STATIC / 'app.js').read_text()

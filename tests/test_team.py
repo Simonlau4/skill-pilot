@@ -1,5 +1,6 @@
 """Team exchanges use two synthetic homes and loopback services only."""
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -18,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import operations, sharing, store, team, team_hub, updates, research, self_update
+from skill_pilot import cleanup, operations, sharing, store, team, team_hub, updates, research, self_update
 from skill_pilot.sources import github, normalize
 from tests.test_team_hub import listing, file as package_file
 from skill_pilot.web import runtime
@@ -162,6 +163,234 @@ class TeamTests(unittest.TestCase):
                 github, 'api', side_effect=AssertionError('fallback must not require the GitHub CLI')):
             yield
 
+    def test_catalog_parser_accepts_additional_install_fields(self):
+        self.configure()
+        key = self.raw_put([listing('acme-other')])['listings'][0]['key']
+        request = team._request
+        def with_installs(config, path, *args):
+            data = request(config, path, *args)
+            if path == '/api/catalog':
+                data['my_installs'] = [key]
+                for card in data['cards']:
+                    card['installs'] = 1
+            return data
+        with patch.object(team, '_request', side_effect=with_installs):
+            _, member, cards = team._fetch(self.other)
+        self.assertEqual(member['id'], self.second['id'])
+        self.assertEqual([card['key'] for card in cards], [key])
+
+    def test_catalog_parser_validates_and_preserves_install_fields(self):
+        self.configure()
+        self.raw_put([listing('acme-other'), listing('acme-extra')])
+        config = team._connection(self.other)
+        data = team._request(config, '/api/catalog')
+        key = data['cards'][0]['key']
+        data['my_installs'] = [key]
+        data['cards'][0]['installs'] = 3
+        with patch.object(team, '_request', return_value=data):
+            parsed = team._catalog(config)
+        self.assertEqual(parsed['my_installs'], [key])
+        self.assertEqual({card['key']: card['installs'] for card in parsed['cards']},
+                         {card['key']: card['installs'] for card in data['cards']})
+        invalid = []
+        for value in (None, 'key', 1, {}, [1], [True], [[]], [key, None]):
+            invalid.append({**data, 'my_installs': value})
+        for value in (None, -1, True, 1.5, '1', [], {}):
+            changed = copy.deepcopy(data)
+            changed['cards'][0]['installs'] = value
+            invalid.append(changed)
+        counts_only = copy.deepcopy(data)
+        del counts_only['my_installs']
+        invalid.append(counts_only)
+        for card_count in (1, len(data['cards'])):
+            changed = copy.deepcopy(data)
+            for card in changed['cards'][:card_count]:
+                del card['installs']
+            invalid.append(changed)
+        for changed in invalid:
+            with self.subTest(data=changed), patch.object(team, '_request', return_value=changed):
+                with self.assertRaisesRegex(ValueError, team.FORMAT_ERROR):
+                    team._catalog(config)
+        for empty in ({'cards': []}, {'cards': [], 'my_installs': []}):
+            with patch.object(team, '_request', return_value=empty):
+                self.assertEqual(team._catalog(config), empty)
+
+    def test_catalog_reports_changed_local_installs_once_and_skips_unchanged_or_own_cards(self):
+        self.configure()
+        key = self.raw_put([listing('acme-other'), listing('not-installed')])['listings'][0]['key']
+        before = self.library(self.other)
+        with patch.object(team, '_request', wraps=team._request) as network:
+            cards = self.cards()
+            self.assertEqual(cards['acme-other']['installs'], 1)
+            self.assertEqual(cards['not-installed']['installs'], 0)
+            self.assertEqual(cards['acme-other']['local']['status'], 'installed')
+            reports = [call for call in network.call_args_list if call.args[1] == '/api/installs/me']
+            self.assertEqual(len(reports), 1)
+            self.assertEqual(reports[0].args[2:], ('PUT', {'keys': [key]}))
+            network.reset_mock()
+            self.assertEqual(self.cards()['acme-other']['installs'], 1)
+            own = self.cards(self.a)['acme-other']
+            self.assertEqual(own['local']['status'], 'mine')
+            self.assertEqual(own['installs'], 1)
+            self.assertFalse(any(call.args[1] == '/api/installs/me' for call in network.call_args_list))
+        with self.hub.store.locked():
+            self.assertEqual(self.hub.store._installs(), {self.second['id']: [key]})
+        self.assertEqual(self.library(self.other), before)
+
+    def test_catalog_corrects_counts_for_added_and_removed_installs_with_a_zero_floor(self):
+        self.configure()
+        rows = self.raw_put([listing('acme-other'), listing('not-installed')])['listings']
+        keys = {row['name']: row['key'] for row in rows}
+        third = self.hub.store.add_member('Acme 示例成员 C')
+        team._request({'url': self.url, 'key': third['token']}, '/api/installs/me', 'PUT',
+                      {'keys': [keys['acme-other']]})
+        team._request(team._connection(self.other), '/api/installs/me', 'PUT',
+                      {'keys': [keys['not-installed']]})
+        request = team._request
+        def with_zero_count(config, path, *args):
+            data = request(config, path, *args)
+            if path == '/api/catalog':
+                for card in data['cards']:
+                    if card['key'] == keys['not-installed']:
+                        card['installs'] = 0
+            return data
+        with patch.object(team, '_request', side_effect=with_zero_count):
+            cards = self.cards()
+        self.assertEqual(cards['acme-other']['installs'], 2)
+        self.assertEqual(cards['not-installed']['installs'], 0)
+        catalog = team._request(team._connection(self.other), '/api/catalog')
+        self.assertEqual(catalog['my_installs'], [keys['acme-other']])
+        self.assertEqual({card['key']: card['installs'] for card in catalog['cards']},
+                         {keys['acme-other']: 2, keys['not-installed']: 0})
+
+    def test_catalog_reporting_failures_keep_remote_counts_and_allow_retry(self):
+        self.configure()
+        self.raw_put([listing('acme-other')])
+        request = team._request
+        for error in (ValueError('连不上分享站'), OSError('example failure'),
+                      team.RequestError(403, 'example rejected'), team.RequestError(500, 'example unavailable')):
+            def failed_report(config, path, *args):
+                if path == '/api/installs/me':
+                    raise error
+                return request(config, path, *args)
+            with self.subTest(error=error), patch.object(team, '_request', side_effect=failed_report) as network:
+                card = self.cards()['acme-other']
+                self.assertEqual(card['installs'], 0)
+                self.assertEqual(card['local']['status'], 'installed')
+                self.assertEqual(sum(call.args[1] == '/api/installs/me' for call in network.call_args_list), 1)
+            self.assertFalse((self.hub.store.data / 'installs.json').exists())
+        self.assertEqual(self.cards()['acme-other']['installs'], 1)
+
+    def test_catalog_stops_counting_withdrawn_skills_and_counts_restored_skills_again(self):
+        self.configure()
+        self.raw_put([listing('acme-other')])
+        self.assertEqual(self.cards()['acme-other']['installs'], 1)
+        cleanup.apply(['acme-other'], True, self.other)
+        self.assertTrue((self.other / '.skill-pilot/store/acme-other/SKILL.md').is_file())
+        self.assertEqual(self.cards()['acme-other']['installs'], 0)
+        with self.hub.store.locked():
+            self.assertEqual(self.hub.store._installs(), {})
+        cleanup.restore(['acme-other'], self.other)
+        self.assertEqual(self.cards()['acme-other']['installs'], 1)
+
+    def test_installer_who_later_publishes_does_not_subtract_other_members(self):
+        self.configure()
+        key = self.raw_put([listing('acme-other')])['listings'][0]['key']
+        self.assertEqual(self.cards()['acme-other']['installs'], 1)
+        third = self.hub.store.add_member('Acme 示例成员 C')
+        team._request({'url': self.url, 'key': third['token']}, '/api/installs/me', 'PUT', {'keys': [key]})
+        self.raw_put([listing('acme-other')], self.second)
+        with patch.object(team, '_request', wraps=team._request) as network:
+            card = self.cards()['acme-other']
+            self.assertEqual(card['local']['status'], 'mine')
+            self.assertEqual(card['installs'], 1)
+            reports = [call for call in network.call_args_list if call.args[1] == '/api/installs/me']
+            self.assertEqual(len(reports), 1)
+            self.assertEqual(reports[0].args[2:], ('PUT', {'keys': []}))
+        self.assertEqual(self.cards()['acme-other']['installs'], 1)
+        self.assertEqual(self.cards(self.a)['acme-other']['installs'], 1)
+        with self.hub.store.locked():
+            self.assertEqual(self.hub.store._installs(), {third['id']: [key]})
+
+    def test_readonly_catalog_does_not_report_local_installs(self):
+        self.configure()
+        self.raw_put([listing('acme-other')])
+        before = [store.physical_state(home) for home in (self.other, self.hub.store.data)]
+        for readonly in (patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}),
+                         patch.object(store, 'write_allowed', return_value=False)):
+            with readonly, patch.object(team, '_request', wraps=team._request) as network:
+                card = self.cards()['acme-other']
+                self.assertEqual(card['local']['status'], 'installed')
+                self.assertEqual(card['installs'], 0)
+                self.assertFalse(any(call.args[1] == '/api/installs/me' for call in network.call_args_list))
+        self.assertEqual([store.physical_state(home) for home in (self.other, self.hub.store.data)], before)
+
+    def test_old_hub_catalog_omits_counts_and_never_reports_installs(self):
+        self.configure()
+        self.raw_put([listing('acme-other')])
+        request = team._request
+        def legacy(config, path, *args):
+            self.assertNotEqual(path, '/api/installs/me')
+            data = request(config, path, *args)
+            if path == '/api/catalog':
+                del data['my_installs']
+                for card in data['cards']:
+                    del card['installs']
+            return data
+        with patch.object(team, '_request', side_effect=legacy):
+            card = self.cards()['acme-other']
+        self.assertEqual(card['local']['status'], 'installed')
+        self.assertNotIn('installs', card)
+        self.assertFalse((self.hub.store.data / 'installs.json').exists())
+
+    def test_install_report_request_enforces_its_own_body_limit_before_connecting(self):
+        with patch.object(urllib.request.OpenerDirector, 'open') as opened:
+            with self.assertRaisesRegex(ValueError, '上报内容超过 64 KB'):
+                team._request({'url': self.url, 'key': self.first['token']}, '/api/installs/me', 'PUT',
+                              {'keys': ['x' * team_hub.MAX_INSTALL_BODY]})
+            opened.assert_not_called()
+
+    def test_three_homes_install_undo_reinstall_update_and_remove_member_counts(self):
+        self.configure()
+        third_home = self.root / 'Example C'
+        self.make_home(third_home, 'claude', ('acme-other',))
+        third = self.hub.store.add_member('Acme 示例成员 C')
+        c = self.start(Dashboard({'home': str(third_home)}))
+        self.ok(c, '/api/team/settings', {'url': self.url, 'key': third['token']})
+        self.publish(('acme-local',))
+        key = self.cards()['acme-local']['key']
+        installed = self.install()
+        self.assertEqual(self.cards()['acme-local']['installs'], 1)
+        self.ok(c, '/api/team/queue', {'key': key})
+        self.assertEqual(self.wait_queue(c)[0]['status'], 'done')
+        self.assertEqual(self.cards(c)['acme-local']['installs'], 2)
+        for dashboard in (self.a, self.b, c):
+            self.assertEqual(self.cards(dashboard)['acme-local']['installs'], 2)
+        self.ok(self.b, '/api/undo', {'id': installed['operation'], 'confirmed': True,
+                                    'revision': operations.table(self.other)['revision']})
+        self.assertEqual(self.cards()['acme-local']['installs'], 1)
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'installable')
+        self.install()
+        self.assertEqual(self.cards()['acme-local']['installs'], 2)
+        self.assertEqual(self.install()['message'], '本机已经有了。')
+        self.assertEqual(self.cards()['acme-local']['installs'], 2)
+        author = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+        author.write_text(author.read_text() + '\nAcme 新版示例\n')
+        self.publish(('acme-local',))
+        card = self.cards()['acme-local']
+        self.assertEqual(card['local']['status'], 'update')
+        self.assertEqual(card['installs'], 2)
+        self.enable()
+        review = updates.check(self.other)
+        self.addCleanup(lambda: shutil.rmtree(review['temporary'], ignore_errors=True))
+        self.assertTrue(updates.apply(review, ['acme-local'], confirmed=True)['complete'])
+        self.assertEqual(self.cards()['acme-local']['local']['status'], 'installed')
+        self.assertEqual(self.cards()['acme-local']['installs'], 2)
+        self.hub.store.remove_member(third['id'])
+        self.assertEqual(self.cards()['acme-local']['installs'], 1)
+        with self.hub.store.locked():
+            self.assertNotIn(third['id'], self.hub.store._installs())
+
     def test_team_descriptions_use_translation_without_changing_files_or_config_export(self):
         self.configure()
         before = self.library(self.home)
@@ -301,7 +530,7 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(self.cards()['acme-other']['local']['status'], 'conflict')
         # A faulty station may omit a dependency: report the missing author listing.
         data = team._catalog(team._connection(self.home))
-        card = next(c for c in data if c['listings'][0]['name'] == 'needs-conflict')
+        card = next(c for c in data['cards'] if c['listings'][0]['name'] == 'needs-conflict')
         card['listings'][0]['requires'] = ['not-listed']
         with patch.object(team, '_catalog', return_value=data):
             blocked = self.cards()['needs-conflict']
@@ -536,7 +765,7 @@ class TeamTests(unittest.TestCase):
     def test_packaged_github_updates_preserve_the_raw_and_normalized_baselines(self):
         self.configure()
         self.publish(('acme-main',))
-        row = next(r for c in team._catalog(team._connection(self.home)) for r in c['listings'] if r['name'] == 'acme-main')
+        row = next(r for c in team._catalog(team._connection(self.home))['cards'] for r in c['listings'] if r['name'] == 'acme-main')
         self.assertIn('version', row['source'])
         self.assertEqual(row['source']['tree_sha'], github.git(self.repository, 'rev-parse', self.commit + ':skills/acme-main'))
         with patch.object(github, 'inspect', side_effect=AssertionError('must not contact GitHub')), \
@@ -676,7 +905,7 @@ class TeamTests(unittest.TestCase):
                 self.assertEqual(row['kind'], 'github')
                 self.assertIsNone(row['version'])
                 self.assertEqual(row['download_note'], '同事装的时候从 GitHub 下载。')
-                shared = next(r for c in team._catalog(team._connection(self.home)) for r in c['listings'] if r['name'] == 'acme-main')
+                shared = next(r for c in team._catalog(team._connection(self.home))['cards'] for r in c['listings'] if r['name'] == 'acme-main')
                 self.assertNotIn('version', shared['source'])
                 self.assertNotIn('files', shared['source'])
                 candidate = next(r for r in self.ok(self.a, '/api/team/listings/candidates')['skills'] if r['name'] == 'acme-main')
