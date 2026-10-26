@@ -103,6 +103,11 @@
     <symbol id="sp-close" viewBox="0 0 24 24">
       <path d="M6 6l12 12 M18 6 6 18"/>
     </symbol>
+    <symbol id="sp-jobs" viewBox="0 0 24 24">
+      <path d="M4 6h16 M4 12h10 M4 18h7"/>
+      <circle cx="17" cy="16" r="3.5"/>
+      <path d="M17 14.5V16l1 1"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -121,10 +126,38 @@
       <button class="nav-item" data-page="team" hidden><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>团队</span></button>
       <button class="nav-item" data-page="settings"><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-settings"/></svg><span>设置</span></button>
     </nav>
-    <span id="mode-badge" class="tag tag-quiet" hidden>只读预览</span>
+    <div class="topbar-end">
+      <button id="jobs-toggle" class="jobs-toggle" type="button" aria-expanded="false" aria-controls="jobs-panel" hidden>
+        <svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-jobs"/></svg>
+        <span id="jobs-toggle-text">后台任务</span>
+      </button>
+      <span id="mode-badge" class="tag tag-quiet" hidden>只读预览</span>
+    </div>
   </div>
 
+  <section id="jobs-panel" class="jobs-panel" role="region" aria-labelledby="jobs-panel-title" hidden>
+    <div class="jobs-head">
+      <h2 id="jobs-panel-title" tabindex="-1">后台任务</h2>
+      <button id="jobs-close" class="btn btn-quiet btn-iconic" type="button" aria-label="关闭后台任务列表" title="关闭">
+        <svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-close"/></svg>
+      </button>
+    </div>
+    <p id="jobs-empty" class="item-note" hidden>暂无后台任务。</p>
+    <ul id="jobs-list" class="jobs-list"></ul>
+    <div class="jobs-foot">
+      <button id="jobs-clear" class="btn btn-small btn-quiet" type="button" hidden>清除已结束</button>
+    </div>
+  </section>
+  <p id="jobs-live" class="sr-only" role="status" aria-live="polite"></p>
+
   <div id="task-bar" class="task-bar" role="status" aria-live="polite" hidden></div>
+
+  <div id="jobs-blocked" class="banner banner-danger banner-topbar jobs-blocked" role="alert" hidden>
+    <div class="banner-row">
+      <p id="jobs-blocked-text"></p>
+      <div class="banner-actions"><button id="jobs-blocked-go" class="btn btn-small" type="button">前往还原</button></div>
+    </div>
+  </div>
 
   <div id="connection" class="banner banner-danger banner-topbar" role="alert" hidden>
     看板已关闭或连接中断。重新双击 Skill Pilot 即可继续。

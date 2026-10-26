@@ -100,6 +100,7 @@ async function api(path, body) {
     const error = new Error((result && result.error) || '操作没能完成，请稍后再试。');
     error.retry = Boolean(result && result.retry);
     error.recheck = Boolean(result && result.recheck);
+    error.blocked = Boolean(result && result.blocked);
     throw error;
   }
   return result;
@@ -358,6 +359,7 @@ const WRITE_LOCK_SELECTORS = [
   '#agents-scan', '#agent-add-submit', '#agents-managed button:not(.hint)', '#agents-suggested button:not(.hint)', '#agents-ignored button:not(.hint)', '#agents-join-dialog input', '#agents-join-dialog button:not(.hint)',
   '#migration-preview', '#migration-apply', '#migration-back', '#migration-agents input',
   '#migration-versions input', '#migration-backups', '#migration-restore', '#migration-backup-list button',
+  '#jobs-list button:not([data-job-action="compare"])', '#jobs-clear',
 ];
 
 let writeBusy = null;
@@ -375,6 +377,7 @@ function lockControls(selectors) {
 /* 正在写入时把各区重画一遍，让新画出来的控件也是禁用的。 */
 function renderBusyAreas() {
   renderProgram();
+  renderJobs();
   renderConfigExport();
   renderSkillTable();
   renderSkillsActionBar();
@@ -430,6 +433,568 @@ async function runWrite({button = null, busyText, taskText = busyText, success =
   const notice = success?.(result);
   if (notice) toast(notice);
   return result;
+}
+
+/* ==================== 后台任务：提交、轮询和任务列表 ==================== */
+
+/* 技能、清理和团队安装共用一个后台队列。页面只负责提交和读取状态，
+   写入过程由后台按提交顺序完成，页面在任务执行期间照常搜索、筛选和继续提交。 */
+const JOB_ACTIVE = new Set(['waiting', 'running']);
+const CLEANUP_JOB_KINDS = new Set(['cleanup_withdraw', 'cleanup_delete', 'restore']);
+let jobsReadSequence = 0;   // 作废还在路上的旧读取，免得刚提交的任务被旧列表盖掉
+let jobsPollTimer = null;
+let jobsPanelOpen = false;
+let jobsPanelReturnFocus = null;
+let jobsRenderSignature = '';
+let detailJobsSignature = '';
+
+const jobsBlocked = () => Boolean(state.jobsBlocked);
+const jobsWritable = () => state.table ? Boolean(state.table.write_allowed) : Boolean(state.writeAllowed);
+const jobActive = job => JOB_ACTIVE.has(job.status);
+const jobsHasActive = (items = state.jobs || []) => items.some(jobActive);
+
+function latestActiveJob(predicate) {
+  const jobs = (state.jobs || []).filter(job => jobActive(job) && predicate(job));
+  return jobs.length ? jobs[jobs.length - 1] : null;
+}
+
+/* 分配用 changes 精确到技能和 Agent；清理和更新用 skills。 */
+function assignmentJobAt(skill, agent) {
+  return latestActiveJob(job => job.kind === 'assignment'
+    && (job.changes || []).some(change => change.skill === skill && change.agent === agent));
+}
+
+function assignmentJobChange(job, skill, agent) {
+  return (job?.changes || []).find(change => change.skill === skill && change.agent === agent) || null;
+}
+
+const cleanupJobFor = name => latestActiveJob(job => CLEANUP_JOB_KINDS.has(job.kind)
+  && (job.skills || []).includes(name));
+const updateJobFor = name => latestActiveJob(job => job.kind === 'update' && (job.skills || []).includes(name));
+
+const jobStatusInfo = job => ({
+  waiting: {tone: 'tag-quiet', label: '排队中'},
+  running: {tone: 'tag', label: '处理中'},
+  done: {tone: 'tag-ok', label: '已完成'},
+  failed: {tone: 'tag-danger', label: '没完成'},
+  attention: {tone: 'tag-warn', label: '需要处理'},
+}[job.status] || {tone: 'tag-quiet', label: '未知状态'});
+
+function jobStatusLine(job) {
+  const message = job.message || '';
+  if (job.status === 'failed') return `没完成：${message || '原因未知'}`;
+  if (job.status === 'attention') return `需要处理：${message || '请查看下面的原因。'}`;
+  if (job.status === 'done') return pastTense(message || '任务已完成');
+  return message || (job.status === 'running' ? '正在处理…' : '等待处理。');
+}
+
+/* 操作记录里已经撤销过的条目不再给「撤销」，免得重复点。 */
+function jobUndoAvailable(job) {
+  if (!(job.operations || []).length) return false;
+  return job.operations.some(id => {
+    const record = (state.logs || []).find(item => item.id === id);
+    return !record || !record.undone;
+  });
+}
+
+function jobActions(job) {
+  if (job.status === 'done') return job.operations?.length && jobUndoAvailable(job) ? ['undo'] : [];
+  if (job.status === 'failed') return ['retry'];
+  if (job.status === 'attention' && job.attention === 'confirmation') return ['confirm'];
+  if (job.status === 'attention' && job.attention === 'conflict') {
+    if (job.kind === 'assignment') return ['retry'];
+    if (job.kind === 'install') return ['compare'];
+  }
+  return [];
+}
+
+/* 需要重新确认时，把新增影响的说明和具体内容按类别列出来。 */
+function jobImpactGroups(impacts) {
+  const groups = new Map();
+  const add = (label, item) => {
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(item);
+  };
+  for (const impact of impacts || []) {
+    const value = impact.value;
+    if (impact.field === 'changes' && value && typeof value === 'object') {
+      add('新的分配改动', {name: value.skill, note: `${nameOf(value.agent)}：${value.enabled ? '启用' : '撤下'}`});
+    } else if (impact.field === 'dependency_warnings') {
+      add('新的依赖提醒', {name: String(value || '')});
+    } else if (impact.field === 'path_warnings') {
+      add('新的文件引用提醒', {name: value?.file || '文件引用', note: (value?.entries || []).join('、')});
+    } else if (impact.field === 'irreplaceable') {
+      add('删除后无法重新获取', {name: String(value || '')});
+    }
+  }
+  return [...groups].map(([label, items]) => ({label, items}));
+}
+
+function jobImpactText(impact) {
+  const value = impact.value;
+  if (impact.field === 'changes' && value && typeof value === 'object') {
+    return `给 ${nameOf(value.agent)} ${value.enabled ? '启用' : '撤下'}「${titleOf(value.skill)}」`;
+  }
+  if (impact.field === 'dependency_warnings') return String(value || '');
+  if (impact.field === 'path_warnings') {
+    const entries = (value?.entries || []).join('、');
+    return `${value?.file || '文件引用'}${entries ? `（${entries}）` : ''}`;
+  }
+  if (impact.field === 'irreplaceable') return `「${titleOf(value)}」`;
+  return '';
+}
+
+function jobConflictHtml(job) {
+  const conflicts = job.conflicts || [];
+  if (!conflicts.length) return '';
+  return `<ul class="job-details">${conflicts.map(conflict => {
+    const who = conflict.agent ? `${nameOf(conflict.agent)}：` : '';
+    const name = conflict.skill || conflict.name || '';
+    return `<li>${who}${escape(titleOf(name))}：${escape(conflict.message || '原因未知')}</li>`;
+  }).join('')}</ul>`;
+}
+
+function jobFailedHtml(job) {
+  if (job.status !== 'failed' || !(job.failed || []).length) return '';
+  return `<ul class="job-details">${job.failed.map(item => `<li>${escape(titleOf(item.name))}：${escape(item.error || '原因未知')}</li>`).join('')}</ul>`;
+}
+
+function jobImpactHtml(job) {
+  if (job.status !== 'attention' || job.attention !== 'confirmation' || !(job.new_impacts || []).length) return '';
+  return `<ul class="job-details">${job.new_impacts.map(impact => {
+    const reason = String(impact.reason || '影响有变化。').replace(/[。.]$/, '');
+    const detail = jobImpactText(impact);
+    return `<li>${escape(detail ? `${reason}：${detail}` : reason)}</li>`;
+  }).join('')}</ul>`;
+}
+
+function jobActionButton(job, action) {
+  const labels = {undo: '撤销', retry: '重试', confirm: '重新确认', compare: '对比同名技能'};
+  const label = labels[action];
+  if (!label) return '';
+  const tone = action === 'undo' ? ' btn-quiet' : action === 'confirm' ? ' btn-primary' : '';
+  const locked = action !== 'compare' && (!jobsWritable() || jobsBlocked() || Boolean(writeBusy));
+  return `<button class="btn btn-small${tone}" type="button" data-job-action="${action}" data-job-id="${escape(job.id)}"
+    aria-label="${escape(label + '：' + (job.summary || '后台任务'))}" ${locked ? 'disabled' : ''}>${label}</button>`;
+}
+
+function jobItemHtml(job) {
+  const status = jobStatusInfo(job);
+  const actions = jobActions(job);
+  return `<li class="job-item job-${escape(job.status)}" data-job-id="${escape(job.id)}">
+    <div class="job-head">
+      <p class="job-summary">${escape(job.summary || '后台任务')}</p>
+      <span class="tag ${status.tone}">${escape(status.label)}</span>
+    </div>
+    <p class="job-status">${escape(jobStatusLine(job))}</p>
+    ${jobConflictHtml(job)}${jobFailedHtml(job)}${jobImpactHtml(job)}
+    ${actions.length ? `<div class="job-actions">${actions.map(action => jobActionButton(job, action)).join('')}</div>` : ''}
+  </li>`;
+}
+
+/* 任务列表重画时保留滚动、焦点和正在操作的那个按钮。 */
+function renderJobs({force = false} = {}) {
+  const items = state.jobs || [];
+  if (!items.length && jobsPanelOpen) {
+    const hadFocus = $('jobs-panel').contains(document.activeElement);
+    closeJobsPanel({focus: false});
+    if (hadFocus) $('brand-home').focus();
+  }
+  const signature = JSON.stringify({
+    items,
+    blocked: state.jobsBlocked,
+    write: Boolean(state.table?.write_allowed),
+    allowed: Boolean(state.writeAllowed),
+    busy: Boolean(writeBusy),
+    logs: (state.logs || []).map(record => [record.id, Boolean(record.undone)]),
+  });
+  if (!force && signature === jobsRenderSignature) return;
+  jobsRenderSignature = signature;
+
+  const active = items.filter(jobActive).length;
+  const toggle = $('jobs-toggle');
+  toggle.hidden = !items.length;
+  $('jobs-toggle-text').textContent = active
+    ? `后台任务：${active} 项进行中`
+    : `后台任务：${items.length} 项已结束`;
+  toggle.setAttribute('aria-label', active
+    ? `后台任务：${active} 项进行中，打开任务列表`
+    : `后台任务：${items.length} 项已结束，打开任务列表`);
+
+  const list = $('jobs-list');
+  const focusInList = list.contains(document.activeElement);
+  const focusWasClear = document.activeElement === $('jobs-clear');
+  const focusButton = focusInList && document.activeElement?.dataset?.jobAction
+    ? {action: document.activeElement.dataset.jobAction, id: document.activeElement.dataset.jobId}
+    : null;
+  const scrollTop = list.scrollTop;
+  list.innerHTML = items.map(jobItemHtml).join('');
+  list.scrollTop = scrollTop;
+  $('jobs-empty').hidden = Boolean(items.length);
+  const ended = items.filter(job => !jobActive(job)).length;
+  $('jobs-clear').hidden = !ended;
+  $('jobs-clear').disabled = !jobsWritable();
+  // 状态变化用读屏读出来；数量和每个条目的当前状态都写在同一处。
+  $('jobs-live').textContent = items.length
+    ? items.map(job => `${job.summary || '后台任务'}：${jobStatusInfo(job).label}`).join('；')
+    : '后台任务列表为空。';
+
+  if (jobsPanelOpen && focusInList) {
+    const target = focusButton
+      ? list.querySelector(`[data-job-action="${CSS.escape(focusButton.action)}"][data-job-id="${CSS.escape(focusButton.id)}"]`)
+      : null;
+    (target && !target.disabled ? target : $('jobs-panel-title')).focus({preventScroll: true});
+  } else if (jobsPanelOpen && focusWasClear && $('jobs-clear').hidden) {
+    $('jobs-panel-title').focus({preventScroll: true});
+  }
+}
+
+function renderJobBlocked() {
+  $('jobs-blocked').hidden = !state.jobsBlocked;
+  $('jobs-blocked-text').textContent = state.jobsBlocked || '';
+}
+
+/* 停止队列时，本次范围内的提交按钮一起不可用；范围外的写入照旧走 runWrite。 */
+function renderJobAvailability() {
+  if (state.table) {
+    renderSkillTable();
+    renderSkillsActionBar();
+    if (state.detail) renderDetail();
+    renderInstallRail();
+  }
+  if (state.page === 'cleanup') { renderCleanup(); renderCleanupActionBar(); }
+  if (state.page === 'team') renderTeam();
+  renderUpdateBar();
+  if ($('install-dialog').open) renderInstallApply();
+}
+
+/* 任务状态变化时只更新受影响的地方，不整页重画成初始状态。 */
+function renderJobState() {
+  if (state.table) {
+    renderSkillTable();
+    renderDetailJobState();
+  }
+  if (state.page === 'cleanup') { renderCleanup(); renderCleanupActionBar(); }
+  renderUpdateBar();
+  if ($('install-dialog').open) renderInstallApply();
+}
+
+function renderDetailJobState() {
+  if (!state.detail) return;
+  const jobs = (state.jobs || []).filter(job => jobActive(job) && (
+    (job.kind === 'assignment' && (job.changes || []).some(change => change.skill === state.detail))
+    || (job.kind === 'update' && (job.skills || []).includes(state.detail))));
+  const signature = JSON.stringify([state.detail, jobs.map(job => [job.id, job.status, job.changes || null])]);
+  if (signature === detailJobsSignature) return;
+  detailJobsSignature = signature;
+  renderDetail();
+}
+
+function openJobsPanel() {
+  if (!(state.jobs || []).length) return;
+  jobsPanelReturnFocus = document.activeElement;
+  jobsPanelOpen = true;
+  document.body.classList.add('jobs-open');
+  $('jobs-panel').hidden = false;
+  $('jobs-toggle').setAttribute('aria-expanded', 'true');
+  renderJobs({force: true});
+  $('jobs-close').focus();
+}
+
+function closeJobsPanel({focus = true} = {}) {
+  if (!jobsPanelOpen) return;
+  jobsPanelOpen = false;
+  document.body.classList.remove('jobs-open');
+  $('jobs-panel').hidden = true;
+  $('jobs-toggle').setAttribute('aria-expanded', 'false');
+  if (focus) {
+    const target = jobsPanelReturnFocus?.isConnected && !jobsPanelReturnFocus.hidden
+      ? jobsPanelReturnFocus : $('jobs-toggle');
+    target?.focus();
+  }
+  jobsPanelReturnFocus = null;
+}
+
+$('jobs-toggle').addEventListener('click', () => {
+  if (jobsPanelOpen) closeJobsPanel(); else openJobsPanel();
+});
+$('jobs-close').addEventListener('click', () => closeJobsPanel());
+document.addEventListener('pointerdown', event => {
+  if (!jobsPanelOpen || event.target.closest('#jobs-panel, #jobs-toggle')) return;
+  closeJobsPanel({focus: false});
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || !jobsPanelOpen) return;
+  // 确认框和技能详情盖在任务列表上面时，Esc 先处理更上层的它们。
+  if (document.querySelector('dialog[open]') || !$('detail-panel').hidden) return;
+  event.preventDefault();
+  closeJobsPanel();
+});
+$('jobs-blocked-go').addEventListener('click', () => {
+  showPage('settings');
+  showSettingsBlock('diagnostics');
+  const box = $('diag-migration-box');
+  if (!box) return;
+  box.open = true;
+  box.scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start'});
+  box.querySelector('summary')?.focus({preventScroll: true});
+});
+
+function adoptJob(job, {replaces = null, duplicate = false} = {}) {
+  if (!job) return;
+  jobsReadSequence += 1;   // 还在路上的旧读取作废
+  let items = (state.jobs || []).filter(item => item.id !== replaces);
+  if (duplicate && items.some(item => item.id === job.id)) {
+    items = items.map(item => item.id === job.id ? job : item);
+  } else {
+    items = items.filter(item => item.id !== job.id);
+    items.push(job);
+  }
+  state.jobs = items;
+  state.jobsVersion = -1;   // 以这次返回的条目为准，下一次读取再校正
+  renderJobs();
+  renderJobState();
+  scheduleJobsPoll();
+}
+
+/* 提交任务：只把被点的按钮置忙，页面其他控件照常可用。 */
+async function submitJob(parameters, {button = null, busyText = '正在提交…', replaces = null, onError = null} = {}) {
+  return withBusy(button, busyText, async () => {
+    try {
+      const result = await api('/api/jobs', {kind: parameters.kind, confirmed: true, ...parameters});
+      if (!result?.job) throw new Error('任务没有加入队列，请稍后再试。');
+      adoptJob(result.job, {replaces, duplicate: result.duplicate});
+      toast({text: result.duplicate ? '这项已在队列中' : '已加入队列'});
+      readJobs();
+      return result;
+    } catch (error) {
+      if (error.blocked) {
+        state.jobsBlocked = error.message;
+        renderJobBlocked();
+        renderJobAvailability();
+        readJobs();
+      }
+      onError?.(error);
+      toast({text: error.message, tone: 'error', sticky: true});
+      return null;
+    }
+  });
+}
+
+function scheduleJobsPoll() {
+  if (jobsPollTimer) return;
+  jobsPollTimer = setTimeout(() => {
+    jobsPollTimer = null;
+    readJobs();
+  }, 1000);
+}
+
+function stopJobsPolling() {
+  clearTimeout(jobsPollTimer);
+  jobsPollTimer = null;
+}
+
+function readJobs({force = false} = {}) {
+  const sequence = ++jobsReadSequence;
+  return api('/api/jobs').then(result => {
+    if (sequence !== jobsReadSequence) return null;
+    applyJobs(result, {force});
+    return result;
+  }).catch(() => {
+    if (sequence !== jobsReadSequence) return null;
+    // 队列读不到不弹错，打断正在做的事；还有没结束的任务就过一秒再读。
+    if (jobsHasActive()) scheduleJobsPoll(); else stopJobsPolling();
+    return null;
+  });
+}
+
+function applyJobs(result, {force = false} = {}) {
+  const items = Array.isArray(result?.items) ? result.items : [];
+  const version = Number(result?.version);
+  const blocked = typeof result?.blocked === 'string' ? result.blocked : '';
+  const before = state.jobs || [];
+  const beforeStatus = new Map(before.map(job => [job.id, job.status]));
+  const blockedChanged = blocked !== state.jobsBlocked;
+  const changed = force || version !== state.jobsVersion || blockedChanged || JSON.stringify(items) !== JSON.stringify(before);
+  if (!changed) {
+    if (jobsHasActive(items)) scheduleJobsPoll(); else stopJobsPolling();
+    return;
+  }
+  const finished = items.filter(job => !jobActive(job)
+    && beforeStatus.has(job.id) && JOB_ACTIVE.has(beforeStatus.get(job.id)));
+  state.jobs = items;
+  state.jobsVersion = version;
+  state.jobsBlocked = blocked;
+  renderJobs();
+  renderJobBlocked();
+  renderJobState();
+  if (blockedChanged) renderJobAvailability();
+  if (finished.length) finishJobs(finished);
+  if (jobsHasActive(items)) scheduleJobsPoll(); else stopJobsPolling();
+}
+
+async function undoJob(job, button = null) {
+  const ids = [...(job.operations || [])].reverse();
+  if (!ids.length) return false;
+  const done = await undoOperation(ids, {skills: job.skills || [], message: job.summary || pastTense(job.message || ''), button});
+  if (done) renderJobs();
+  return done;
+}
+
+async function retryJob(job, button = null) {
+  await withBusy(button, '正在重试…', async () => {
+    try {
+      const body = {id: job.id};
+      if (job.kind === 'update') {
+        // 先把页面上记得的检查结果更新到最新，再判断那个预览编号是不是还有效。
+        await refreshUpdates();
+        if (!updateState.review || updateState.review.id !== job.review_id) {
+          if (button) button.textContent = '正在重新检查更新…';
+          await checkUpdatesForRetry();
+        }
+        if (!updateState.review) throw new Error('更新检查没有完成，请稍后再试。');
+        body.review_id = updateState.review.id;
+        if (button) button.textContent = '正在重试…';
+      }
+      const result = await api('/api/jobs/retry', body);
+      if (!result?.job) throw new Error('任务没有重新加入队列，请稍后再试。');
+      adoptJob(result.job, {replaces: job.id, duplicate: result.duplicate});
+      toast({text: result.duplicate ? '这项已在队列中' : '已加入队列'});
+      readJobs();
+    } catch (error) {
+      if (error.blocked) {
+        state.jobsBlocked = error.message;
+        renderJobBlocked();
+        renderJobAvailability();
+        readJobs();
+      }
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+async function checkUpdatesForRetry() {
+  updateState.starting = true;
+  renderUpdateBar();
+  setTask('updates', {text: '正在准备检查名单…'});
+  try {
+    showReview(await api('/api/updates/check', {}));
+    while (updateState.review?.running) {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      const progress = await api('/api/updates/progress');
+      if (progress) showReview(progress);
+    }
+  } catch (error) {
+    setTask('updates', {text: error.message, tone: 'error', retry: () => refreshUpdates()});
+    throw error;
+  } finally {
+    updateState.starting = false;
+    renderUpdateBar();
+  }
+}
+
+async function confirmRetryJob(job, button = null) {
+  if (!job.preview) {
+    toast({text: '这项任务的确认信息已经失效，请重新提交。', tone: 'error', sticky: true});
+    return;
+  }
+  const reasons = [...new Set((job.new_impacts || []).map(impact => impact.reason).filter(Boolean))];
+  const ok = await confirmDialog({
+    title: '影响有变化，重新确认',
+    lines: [job.message || '文件没有改动，请重新核对并确认。', ...reasons],
+    groups: jobImpactGroups(job.new_impacts),
+    note: '确认后会继续处理这项任务；取消时这项任务保持原样。',
+    okText: '确认并继续',
+  });
+  if (!ok) return;
+  await withBusy(button, '正在提交…', async () => {
+    try {
+      const result = await api('/api/jobs/retry', {id: job.id, seen: job.preview});
+      if (!result?.job) throw new Error('任务没有重新加入队列，请稍后再试。');
+      adoptJob(result.job, {replaces: job.id, duplicate: result.duplicate});
+      toast({text: result.duplicate ? '这项已在队列中' : '已加入队列'});
+      readJobs();
+    } catch (error) {
+      if (error.blocked) {
+        state.jobsBlocked = error.message;
+        renderJobBlocked();
+        renderJobAvailability();
+        readJobs();
+      }
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+async function compareJobConflict(job, button = null) {
+  if (!job.review_id) {
+    toast({text: '这份安装预览已经失效，请重新读取安装链接。', tone: 'error', sticky: true});
+    return;
+  }
+  await withBusy(button, '正在对比…', async () => {
+    openInstall(null);
+    $('install-message').textContent = '有同名技能需要先对比，请看下面的差别。';
+    const shown = await showIncomingConflicts({conflicts: job.conflicts || []}, job.review_id);
+    if (!shown) $('install-message').textContent = '这份安装预览已经失效，请关闭后重新读取安装链接。';
+  });
+}
+
+async function clearEndedJobs(button) {
+  await withBusy(button, '正在清除…', async () => {
+    try {
+      const result = await api('/api/jobs/clear', {});
+      jobsReadSequence += 1;
+      applyJobs(result, {force: true});
+      readQueue();   // 团队页的安装队列和这里是同一份记录，清理完一起刷新
+      toast({text: '已清除结束的任务'});
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+$('jobs-list').addEventListener('click', event => {
+  const button = event.target.closest('[data-job-action]');
+  if (!button) return;
+  const job = (state.jobs || []).find(item => item.id === button.dataset.jobId);
+  if (!job) return;
+  if (button.dataset.jobAction === 'undo') undoJob(job, button);
+  else if (button.dataset.jobAction === 'retry') retryJob(job, button);
+  else if (button.dataset.jobAction === 'confirm') confirmRetryJob(job, button);
+  else if (button.dataset.jobAction === 'compare') compareJobConflict(job, button);
+});
+$('jobs-clear').addEventListener('click', event => clearEndedJobs(event.currentTarget));
+
+/* 任务从等待或处理中变成结束时，在后台刷新受影响的数据，并提示结果。
+   不重画整页，用户正在搜索、筛选、输入的内容都不动。 */
+function finishJobs(finished) {
+  for (const job of finished) {
+    if (job.status === 'done') {
+      toast({
+        text: pastTense(job.message || '任务已完成'),
+        undo: job.operations?.length && jobUndoAvailable(job) ? button => undoJob(job, button) : null,
+      });
+    } else if (job.status === 'failed') {
+      toast({text: jobStatusLine(job), tone: 'error', sticky: true});
+    } else if (job.status === 'attention') {
+      toast({text: jobStatusLine(job), tone: 'error', sticky: true});
+    }
+  }
+  const updatesFinished = finished.some(job => job.kind === 'update');
+  const installed = finished.some(job => job.kind === 'install' && job.status === 'done');
+  (async () => {
+    const results = await Promise.allSettled([refreshTable(), refreshLog(), loadCleanup()]);
+    if (updatesFinished) await refreshUpdates();
+    if (installed && state.table?.llm_configured) startLabels('missing');
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed) toast({text: '任务结果刷新失败：' + (failed.reason?.message || '请刷新页面后再看。'), tone: 'error', sticky: true});
+    // 任务写入期间失败的预览，现在再读一次。
+    if (!jobsHasActive() && !assignmentSubmitting && state.assignmentIntents.size) {
+      invalidatePreview();
+      schedulePreview();
+    }
+    renderJobs();
+  })();
 }
 
 /* 底部固定操作栏：只在有事情可做时出现。 */
@@ -549,6 +1114,9 @@ const state = {
   saved: {},
   draft: {},
   pending: null,
+  jobs: [],          // 后台任务：技能、清理、更新和团队安装共用一份队列
+  jobsVersion: -1,
+  jobsBlocked: '',
   assignmentIntents: new Map(), // 只记用户亲手选的改动，依赖始终根据最新状态重算。
   autoAdded: new Map(),   // 「技能|agent」→ 需要它的那个技能（预览的 auto_added）
   detail: null,
@@ -816,6 +1384,8 @@ function renderActionBar() {
 const PREVIEW_DEBOUNCE_MS = 100;
 let previewBusy = false;
 let previewSequence = 0;
+let assignmentSubmitting = false;   // 提交分配任务期间不让托盘再改，避免提交的不是眼前这份
+let submittingAssignmentKeys = new Set();   // 只锁这次正在提交的那几处开关
 let previewTimer = null;
 
 /* agent 的颜色：按表里的顺序从一组颜色里取，全页同一个 agent 用同一种颜色。 */
@@ -986,19 +1556,24 @@ function pendingNote(name, agentId) {
   return because ? `待应用：关联依赖，因「${titleOf(because)}」需要已自动勾选` : '待应用：即将启用';
 }
 
-function switchHtml(skill, agent, on, pending, locked) {
-  return `<button class="switch${pending ? ' is-pending' : ''}" role="switch" aria-checked="${on}" style="--c:${agentColor(agent.id)}"
+function switchHtml(skill, agent, on, pending, locked, job = null) {
+  const queued = job ? (job.status === 'running' ? '处理中' : '排队中') : '';
+  return `<button class="switch${pending ? ' is-pending' : ''}${job ? ' is-job' : ''}" role="switch" aria-checked="${on}" style="--c:${agentColor(agent.id)}"
         data-skill="${escape(skill.name)}" data-agent="${escape(agent.id)}"
-        aria-label="${escape(agent.name + ' 使用 ' + titleOf(skill.name))}" ${locked ? 'disabled' : ''}></button>`;
+        aria-label="${escape(agent.name + ' 使用 ' + titleOf(skill.name) + (queued ? '，' + queued : ''))}" ${locked ? 'disabled' : ''}></button>`;
 }
 
 function skillRowHtml(skill, agent) {
-  const on = assignedAfter(skill.name, agent.id);
-  const pending = on !== assignedNow(skill.name, agent.id);
+  const job = assignmentJobAt(skill.name, agent.id);
+  const jobChange = job ? assignmentJobChange(job, skill.name, agent.id) : null;
+  const on = jobChange ? jobChange.enabled : assignedAfter(skill.name, agent.id);
+  const pending = !job && on !== assignedNow(skill.name, agent.id);
   const error = state.pending?.conflicts?.find(c => c.skill === skill.name && c.agent === agent.id)?.message;
   const note = cellNote(skill, agent);
   const locked = Boolean(writeBusy) || !state.table.write_allowed;
-  const status = error ? `<span class="row-note is-error">${escape(error)}</span>`
+  const jobNote = job ? (job.status === 'running' ? '处理中：正在写入' : '排队中：已提交，等待处理') : '';
+  const status = job ? `<span class="row-note is-job">${escape(jobNote)}</span>`
+    : error ? `<span class="row-note is-error">${escape(error)}</span>`
     : pending ? `<span class="row-note is-pending">${escape(pendingNote(skill.name, agent.id))}</span>`
     : note ? `<span class="row-note">${escape(note)}</span>` : '';
   // 小标记：图标加两三个字，完整的意思在鼠标移上去的提示里；详情里也有同样的信息。
@@ -1009,7 +1584,12 @@ function skillRowHtml(skill, agent) {
   ].join('');
   const tags = (skill.tags || []).map(tag => tagPickHtml(tag)).join('');
   const sum = skill.summary || skill.description;
-  return `<div class="skill-row${pending ? ' is-pending' : ''}" data-row="${escape(skill.name)}">
+  const updateJob = updateJobFor(skill.name);
+  const updateEnd = updateJob
+    ? `<span class="update-job-note">${updateJob.status === 'running' ? '处理中' : '排队中'}</span>`
+    : updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有可用更新"
+        aria-label="${escape('更新「' + titleOf(skill.name) + '」')}" ${writeBusy || jobsBlocked() ? 'disabled' : ''}><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg></button>` : '';
+  return `<div class="skill-row${pending ? ' is-pending' : ''}${job ? ' is-job' : ''}" data-row="${escape(skill.name)}">
     <div class="skill-cell">
       <button class="skill-name" data-open="${escape(skill.name)}"><span class="t">${escape(skill.title || skill.name)}</span>${skill.title ? `<span class="skill-id">${escape(skill.name)}</span>` : ''}${flags}</button>
       <span class="skill-sub"><span class="skill-sum" title="${escape(sum)}">${escape(sum)}</span>${tags ? `<span class="row-tags">${tags}</span>` : ''}</span>
@@ -1017,9 +1597,8 @@ function skillRowHtml(skill, agent) {
     </div>
     <span class="meta num" data-hint="${escape(TOKEN_HINT)}">${tokenText(skill.description_tokens)} Token</span>
     <span class="row-end">
-      ${updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有可用更新"
-        aria-label="${escape('更新「' + titleOf(skill.name) + '」')}" ${writeBusy ? 'disabled' : ''}><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg></button>` : ''}
-      ${switchHtml(skill, agent, on, pending, locked)}
+      ${updateEnd}
+      ${switchHtml(skill, agent, on, pending, locked || Boolean(job), job)}
     </span>
   </div>`;
 }
@@ -1512,6 +2091,8 @@ function pastTense(message) {
 
 /* 底部托盘：每一处改动一行，自动带上的写明原因；手动改的每处都能单独“不改这处”。 */
 function renderSkillsActionBar() {
+  // 清理页有勾选时，底部只归清理页：后台任务结束后的分配预览不能把它换成技能页托盘。
+  if (state.page === 'cleanup' && cleanupSelection().size) return renderCleanupActionBar();
   const changes = pendingChanges();
   if (!changes.length || !state.table) return hideActionBar();
   const items = changes.map(change => {
@@ -1526,7 +2107,7 @@ function renderSkillsActionBar() {
       : users.length ? `<small class="warn">注意：${escape(users.join(''))}仍依赖此技能</small>` : '';
     return `<li><span class="action-agent">${swatch(change.agent)}${escape(agent?.name || change.agent)}</span>
       <p>${change.enabled ? '启用' : '<span class="verb-off">撤下</span>'}「${escape(titleOf(change.skill))}」${why}</p>
-      ${because && !conflict ? '' : `<button class="btn btn-quiet btn-small" data-revert-skill="${escape(change.skill)}" data-revert-agent="${escape(change.agent)}">放弃此项</button>`}</li>`;
+      ${because && !conflict ? '' : `<button class="btn btn-quiet btn-small" data-revert-skill="${escape(change.skill)}" data-revert-agent="${escape(change.agent)}" ${assignmentSubmitting ? 'disabled' : ''}>放弃此项</button>`}</li>`;
   }).join('');
   const paths = state.pending?.path_warnings || [];
   const extra = paths.length ? `<details><summary>有 ${paths.length} 份文件引用了当前技能位置，应用后可能需要调整引用</summary>
@@ -1539,8 +2120,8 @@ function renderSkillsActionBar() {
     items,
     extra,
     buttons: [
-      {label: '全部放弃', kind: 'btn btn-quiet', action: () => discardPending()},
-      {label: `应用更改 (${changes.length})`, kind: 'btn btn-primary', disabled: previewBusy || Boolean(writeBusy) || !state.table.write_allowed, action: button => applyAssignment(button)},
+      {label: '全部放弃', kind: 'btn btn-quiet', disabled: assignmentSubmitting, action: () => discardPending()},
+      {label: `应用更改 (${changes.length})`, kind: 'btn btn-primary', disabled: previewBusy || assignmentSubmitting || Boolean(writeBusy) || jobsBlocked() || !state.table.write_allowed, action: button => applyAssignment(button)},
     ],
   });
 }
@@ -1577,7 +2158,8 @@ async function runPreview() {
     if (sequence !== previewSequence) return;
     // 网络或读取失败不撤销用户的选择；再次应用时会重新读取。
     state.pending ||= {changed: pendingChanges().map(c => c.skill)};
-    toast({text: error.message, tone: 'error'});
+    // 任务写入期间预览偶尔读不到，先安静等着，任务结束后 finishJobs 会再预览一次。
+    if (!jobsHasActive()) toast({text: error.message, tone: 'error'});
   } finally {
     // 只有最新那次请求负责收起忙碌态；被作废的旧请求什么都不动。
     if (sequence === previewSequence) previewBusy = false;
@@ -1622,7 +2204,8 @@ function revertAutos(name, agentId) {
 }
 
 function changeAssignment(name, agentId, enabled) {
-  if (writeBusy || !state.table?.write_allowed) return;
+  if (writeBusy || submittingAssignmentKeys.has(name + '|' + agentId)
+      || !state.table?.write_allowed || assignmentJobAt(name, agentId)) return;
   const active = document.activeElement;
   const refocus = active?.dataset?.skill === name && active?.dataset?.agent === agentId
     ? (active.closest('#detail-body') ? '#detail-body' : '#skills-list') : null;
@@ -1655,69 +2238,110 @@ function assignmentGroups(changes) {
   return groups;
 }
 
+/* 提交成功后只移除这次提交的分配选择，其他没提交的改动仍留在托盘里。 */
+function dropSubmittedAssignment(changes) {
+  for (const change of changes) {
+    const key = change.skill + '|' + change.agent;
+    const current = state.assignmentIntents.get(key);
+    if (current && current.enabled === change.enabled) state.assignmentIntents.delete(key);
+  }
+  state.pending = null;
+  state.autoAdded = new Map();
+  state.draft = clone(state.saved);
+  for (const intent of state.assignmentIntents.values()) setDraft(intent.skill, intent.agent, intent.enabled);
+  if (state.assignmentIntents.size) {
+    invalidatePreview();
+    renderAssignmentViews();
+    schedulePreview();
+  } else {
+    discardPending();
+  }
+}
+
 async function applyAssignment(button) {
-  if (!state.assignmentIntents.size) return;
-  const previous = state.pending || {};
-  const effectKey = c => c.skill + '|' + c.agent + '|' + c.enabled;
-  const seenEffects = new Set((previous.changes || pendingChanges()).map(effectKey));
-  const seenWarnings = new Set(previous.dependency_warnings || []);
-  const seenPaths = new Set((previous.path_warnings || []).map(w => JSON.stringify(w)));
-  clearTimeout(previewTimer);
-  invalidatePreview();
-  previewBusy = false;
-  const written = await runWrite({
-    button,
-    busyText: '正在应用…',
-    work: async () => {
-      let consent = '';
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const plan = await api('/api/assignment/preview', {changes: [...state.assignmentIntents.values()], recheck: true});
-          acceptAssignmentPlan(plan);
-          renderAssignmentViews();
-          if (plan.conflicts?.length) return {needs_attention: true, message: '有几处无法直接应用，原因已列在对应改动下；其他选择已保留。'};
-          const changes = plan.changes || pendingChanges();
-          const removed = changes.filter(c => !c.enabled);
-          const extra = changes.filter(c => !seenEffects.has(effectKey(c)));
-          const newWarnings = (plan.dependency_warnings || []).filter(w => !seenWarnings.has(w));
-          const newPaths = (plan.path_warnings || []).filter(w => !seenPaths.has(JSON.stringify(w)));
-          const newImpact = extra.length || newWarnings.length || newPaths.length;
-          const review = JSON.stringify([changes, plan.dependency_warnings, plan.path_warnings]);
-          if (changes.length && review !== consent && (removed.length || newImpact)) {
-            const ok = await confirmDialog({
-              title: newImpact ? '最新状态里有新的影响' : '撤下这些技能',
-              lines: [changeSummary(changes) + (removed.length ? '（撤下的技能保留在本地，随时可恢复）。' : ''), ...(plan.dependency_warnings || []), ...(newPaths.length ? ['新发现有文件引用会受影响，位置提示已保留在改动托盘里。'] : [])],
-              groups: [...assignmentGroups(removed), ...(extra.filter(c => c.enabled).length ? [{label: '需要一并启用的依赖', items: extra.filter(c => c.enabled).map(c => ({name: c.skill, note: nameOf(c.agent)}))}] : [])],
-              note: '你的选择已保留；取消也不用重选。应用后仍可撤销。',
-              okText: newImpact ? '继续应用' : '撤下',
-            });
-            if (!ok) return {cancelled: true};
-            consent = review;
-          }
-          const result = await api('/api/assignment/apply', {changes: [...state.assignmentIntents.values()], revision: plan.revision, recheck: true, confirmed: true});
-          if (result.needs_attention) {
-            acceptAssignmentPlan(result);
-            renderAssignmentViews();
-            return {...result, message: '有几处无法直接应用，原因已列在对应改动下；其他选择已保留。'};
-          }
-          state.assignmentIntents.clear();
-          state.pending = null;
-          await refreshEverything();
-          return {...result, appliedSkills: plan.changed};
-        } catch (error) {
-          if (!error.recheck) throw error;
-        }
+  if (!state.assignmentIntents.size || jobsBlocked() || assignmentSubmitting) return;
+  assignmentSubmitting = true;
+  try {
+    const previous = state.pending || {};
+    const effectKey = c => c.skill + '|' + c.agent + '|' + c.enabled;
+    const seenEffects = new Set((previous.changes || pendingChanges()).map(effectKey));
+    const seenWarnings = new Set(previous.dependency_warnings || []);
+    const seenPaths = new Set((previous.path_warnings || []).map(w => JSON.stringify(w)));
+    clearTimeout(previewTimer);
+    invalidatePreview();
+    // 核对期间和提交前都保持忙碌，重画后新画出来的「应用更改」也不会被连点。
+    previewBusy = true;
+
+    let plan;
+    try {
+      plan = await withBusy(button, '正在核对…', () => api('/api/assignment/preview', {
+        changes: [...state.assignmentIntents.values()], recheck: true,
+      }));
+    } catch (error) {
+      previewBusy = false;
+      // 其他任务正在写入时预览偶尔读不到，先安静留着选择；任务结束后会再预览。
+      if (!jobsHasActive()) toast({text: error.message, tone: 'error', sticky: true});
+      renderAssignmentViews();
+      return;
+    }
+    acceptAssignmentPlan(plan);
+    renderAssignmentViews();
+    if (plan.conflicts?.length) {
+      previewBusy = false;
+      renderAssignmentViews();
+      toast({text: '有几处无法直接应用，原因已列在对应改动下；其他选择已保留。', tone: 'error', sticky: true});
+      $('action-summary').tabIndex = -1;
+      $('action-summary').focus();
+      return;
+    }
+
+    const changes = plan.changes || pendingChanges();
+    const removed = changes.filter(c => !c.enabled);
+    const extra = changes.filter(c => !seenEffects.has(effectKey(c)));
+    const newWarnings = (plan.dependency_warnings || []).filter(w => !seenWarnings.has(w));
+    const newPaths = (plan.path_warnings || []).filter(w => !seenPaths.has(JSON.stringify(w)));
+    const newImpact = extra.length || newWarnings.length || newPaths.length;
+    if (changes.length && (removed.length || newImpact)) {
+      const ok = await confirmDialog({
+        title: newImpact ? '最新状态里有新的影响' : '撤下这些技能',
+        lines: [changeSummary(changes) + (removed.length ? '（撤下的技能保留在本地，随时可恢复）。' : ''), ...(plan.dependency_warnings || []), ...(newPaths.length ? ['新发现有文件引用会受影响，位置提示已保留在改动托盘里。'] : [])],
+        groups: [...assignmentGroups(removed), ...(extra.filter(c => c.enabled).length ? [{label: '需要一并启用的依赖', items: extra.filter(c => c.enabled).map(c => ({name: c.skill, note: nameOf(c.agent)}))}] : [])],
+        note: '你的选择已保留；取消也不用重选。处理完成后仍可撤销。',
+        okText: newImpact ? '继续应用' : '撤下',
+      });
+      if (!ok) {
+        previewBusy = false;
+        renderAssignmentViews();
+        return;
       }
-      return {needs_attention: true, message: '其他调整仍在进行，暂时无法保存。你的选择已保留，稍后再点应用即可。'};
-    },
-    success: result => result.cancelled ? null : result.needs_attention ? {text: result.message, tone: 'error', sticky: true} : ({
-      text: pastTense(result.message || '技能分配已保存'),
-      undo: result.id ? undoButton => undoOperation(result.id, {skills: result.appliedSkills || [], message: pastTense(result.message), button: undoButton}) : null,
-    }),
-  });
-  if (written?.needs_attention) {
-    $('action-summary').tabIndex = -1;
-    $('action-summary').focus();
+    }
+
+    const submitted = [...state.assignmentIntents.values()];
+    if (!submitted.length) {
+      previewBusy = false;
+      renderAssignmentViews();
+      return;
+    }
+    submittingAssignmentKeys = new Set(submitted.map(change => change.skill + '|' + change.agent));
+    const result = await submitJob({
+      kind: 'assignment',
+      changes: submitted,
+      seen: {
+        changes,
+        dependency_warnings: plan.dependency_warnings || [],
+        path_warnings: plan.path_warnings || [],
+      },
+    }, {button, busyText: '正在提交…'});
+    if (!result) {
+      previewBusy = false;
+      renderAssignmentViews();
+      return;
+    }
+    dropSubmittedAssignment(submitted);
+  } finally {
+    assignmentSubmitting = false;
+    submittingAssignmentKeys = new Set();
+    renderSkillsActionBar();
   }
 }
 
@@ -1725,7 +2349,7 @@ $('skills-list').addEventListener('click', event => {
   const toggle = event.target.closest('button[data-skill][data-agent]');
   if (toggle) { toggleAssignment(toggle.dataset.skill, toggle.dataset.agent); return; }
   const up = event.target.closest('[data-update-up]');
-  if (up) { clickUpdateUp(up.dataset.updateUp); return; }
+  if (up) { clickUpdateUp(up.dataset.updateUp, up); return; }
   const tag = event.target.closest('[data-tag-pick]');
   if (tag) { toggleTag(tag.dataset.tagPick); return; }
   const empty = event.target.closest('[data-empty]');
@@ -1907,6 +2531,7 @@ async function refreshTable(preserveDraft = true) {
     labelsAutoAttempted = true;
     startLabels('missing');
   }
+  renderJobs();
   renderFooter();
   if (homeVisible) renderHome();
 }
@@ -2438,6 +3063,8 @@ function applyQueue(result, {force = false} = {}) {
     if (state.page === 'team') renderTeam();
     else renderStoreQueue();
     if (state.storeDetail) renderStoreDetail();
+    // 团队安装也是后台任务之一，页头任务列表要跟着出现和结束。
+    readJobs();
   }
   if (afterActive) scheduleQueuePoll();
   else stopQueuePolling();
@@ -2626,7 +3253,7 @@ function renderStoreQueue() {
   $('store-queue-left').textContent = active ? `待安装 ${active} 个` : '';
   $('store-queue-clear').hidden = !items.some(item => item.status === 'done' || item.status === 'failed');
   $('store-queue-clear').disabled = teamReadOnly();
-  const html = items.map(item => storeQueueRowHtml(item, teamReadOnly())).join('');
+  const html = items.map(item => storeQueueRowHtml(item, teamReadOnly() || jobsBlocked())).join('');
   const changed = list.innerHTML !== html;
   if (changed) list.innerHTML = html;
   // 队列每秒重画一次：刚按过的按钮可能没了，焦点放回同一处或队列标题。
@@ -2959,7 +3586,7 @@ function storeGetHtml(card) {
 
 function storeInstallHtml(card) {
   const get = storeGet;
-  const readOnly = teamReadOnly();
+  const readOnly = teamReadOnly() || jobsBlocked();
   const queued = storeQueueItem(card.key);
   const cost = `启用后，每个 Agent 的单次对话预占增加约 <b>${tokenText(card.tokens)} Token</b>${hint(TOKEN_HINT)}`;
   let status = '';
@@ -3049,7 +3676,7 @@ $('detail-body').addEventListener('submit', event => {
    加入失败时把原因留在这块里，按钮还能再按。 */
 async function queueStoreInstall(card) {
   const get = storeGet;
-  if (!get || get.key !== card.key) return;
+  if (!get || get.key !== card.key || jobsBlocked()) return;
   get.error = '';
   try {
     applyQueue(await addToStoreQueue(card), {force: true});
@@ -3417,6 +4044,7 @@ async function refreshLog() {
   try {
     state.logs = await api('/api/log');
     renderLog();
+    renderJobs();   // 已撤销的记录不再给任务列表里的「撤销」
   } catch (error) {
     toast({text: error.message, tone: 'error', sticky: true});
   }
@@ -3750,16 +4378,19 @@ function renderDetail(assignmentsOnly = false) {
   const disabledFor = new Set(state.agents.filter(agent => (state.inventory?.disabled?.[agent.id]?.names || []).includes(skill.name)).map(agent => agent.id));
 
   const who = state.agents.map(agent => {
-    const on = assignedAfter(skill.name, agent.id);
-    const pending = on !== assignedNow(skill.name, agent.id);
+    const job = assignmentJobAt(skill.name, agent.id);
+    const jobChange = job ? assignmentJobChange(job, skill.name, agent.id) : null;
+    const on = jobChange ? jobChange.enabled : assignedAfter(skill.name, agent.id);
+    const pending = !job && on !== assignedNow(skill.name, agent.id);
     let text;
-    if (pending) text = pendingNote(skill.name, agent.id);
+    if (job) text = job.status === 'running' ? '处理中：已提交，正在写入' : '排队中：已提交，等待处理';
+    else if (pending) text = pendingNote(skill.name, agent.id);
     else if (!on) text = cellNote(skill, agent) || (disabledFor.has(agent.id) ? `${agent.name} 中已停用` : '未启用');
     else text = '已启用';
-    return `<div class="who-row${pending ? ' is-pending' : ''}">
+    return `<div class="who-row${pending ? ' is-pending' : ''}${job ? ' is-job' : ''}">
       <span class="who-name">${swatch(agent.id)}${escape(agent.name)}</span>
       <p${pending ? ' class="is-pending"' : ''}>${escape(text)}</p>
-      ${switchHtml(skill, agent, on, pending, locked)}
+      ${switchHtml(skill, agent, on, pending, locked || Boolean(job), job)}
     </div>`;
   }).join('');
 
@@ -3776,6 +4407,7 @@ function renderDetail(assignmentsOnly = false) {
         const button = row.querySelector('.switch'), updated = next[index].querySelector('.switch');
         button.className = updated.className;
         button.setAttribute('aria-checked', updated.getAttribute('aria-checked'));
+        button.setAttribute('aria-label', updated.getAttribute('aria-label'));
         button.disabled = updated.disabled;
       });
       return;
@@ -4197,7 +4829,7 @@ const installDismissButton = () =>
 /* 左栏安装区：粘贴框下面按状态显示一张卡片（正在读取 / 概要 / 没读成），读取不挡住页面。 */
 function renderInstallRail() {
   const card = $('install-card');
-  const writable = Boolean(state.table?.write_allowed) && !writeBusy;
+  const writable = Boolean(state.table?.write_allowed) && !writeBusy && !jobsBlocked();
   $('install-url').disabled = !writable;
   if (installReadingUrl) {
     card.hidden = false;
@@ -4285,30 +4917,16 @@ async function installAllForCurrent(button) {
   const review = railReview;
   const agent = currentAgent();
   const skills = review && agent ? installReadyNames(review) : [];
-  if (!skills.length) return;
-  const result = await runWrite({
-    button,
-    busyText: '正在安装…',
-    work: async () => {
-      const written = await api('/api/install/apply', {review_id: review.id, skills, agents: [agent.id], revision: state.table.revision, confirmed: true});
-      if (written.conflicts?.length) return written;
-      clearInstallRail(true);
-      await refreshEverything();
-      // 装完不用刷新：配了 AI 服务就让后台接着补中文名，正在整理的那批做完就轮到新技能。
-      if (state.table.llm_configured) startLabels('missing');
-      return written;
-    },
-    success: written => (written.conflicts?.length ? null : {
-      text: installDoneText(skills, [agent.id]),
-      undo: undoButton => undoOperation(written.id, {skills, message: written.message, button: undoButton}),
-    }),
-  });
-  if (result?.conflicts?.length) {
-    // 能直接装的都不在同名名单里，正常不会走到这里；真遇到就打开窗口让用户对比。
-    openInstall(review);
-    $('install-message').textContent = '有同名技能需要先对比，请看下面的差别。';
-    await showIncomingConflicts(result, review.id);
-  }
+  if (!skills.length || jobsBlocked()) return;
+  const result = await submitJob({
+    kind: 'install',
+    review_id: review.id,
+    skills,
+    agents: [agent.id],
+  }, {button, busyText: '正在提交…'});
+  if (!result) return;
+  // 只清掉这次提交的那份读取结果；用户如果已经读了另一个链接，那份留着。
+  if (railReview?.id === review.id) clearInstallRail(true);
 }
 
 $('install-url').addEventListener('input', () => {
@@ -4371,7 +4989,7 @@ function renderInstallSkills(review) {
 
 /* 至少勾了一个技能、而且当前能改也没在写入，才能点「安装」。 */
 function renderInstallApply() {
-  $('install-apply').disabled = !dialogReview || Boolean(writeBusy) || !state.table?.write_allowed
+  $('install-apply').disabled = !dialogReview || Boolean(writeBusy) || jobsBlocked() || !state.table?.write_allowed
     || !document.querySelector('[data-install-skill]:checked');
 }
 
@@ -4381,7 +4999,9 @@ $('install-close').addEventListener('click', () => $('install-dialog').close());
 async function showIncomingConflicts(result, reviewId) {
   $('incoming-conflicts').hidden = false;
   $('incoming-comparisons').innerHTML = '';
-  for (const conflict of result.conflicts || []) {
+  const conflicts = result.conflicts || [];
+  let shown = 0;
+  for (const conflict of conflicts) {
     const incoming = state.table?.new_skills?.find(s => s.name === conflict.name);
     try {
       const comparison = await api('/api/incoming/compare', {name: conflict.name, review_id: reviewId, relative: incoming?.relative});
@@ -4394,48 +5014,35 @@ async function showIncomingConflicts(result, reviewId) {
       pre.textContent = comparison.comparison;
       item.append(summary, pre);
       $('incoming-comparisons').append(item);
+      shown += 1;
     } catch (error) {
       toast({text: error.message, tone: 'error', sticky: true});
     }
   }
-}
-
-/* 完成提示：一个技能写名字，多个写数量；给谁用照 agent 的名字写。 */
-function installDoneText(skills, agents) {
-  const what = skills.length === 1 ? `已安装 ${skills[0]}` : `已安装 ${skills.length} 个技能`;
-  return what + (agents.length ? `，已分配给 ${agents.map(nameOf).join('、')}` : '，尚未分配给 Agent');
+  return shown === conflicts.length;
 }
 
 /* 只点一次安装：不再弹确认框，装完直接关窗、刷新列表，中文名在后台补。 */
 $('install-apply').addEventListener('click', async event => {
   const button = event.currentTarget;
-  if (!dialogReview) return;
+  const review = dialogReview;
+  if (!review) return;
   const skills = [...document.querySelectorAll('[data-install-skill]:checked')].map(input => input.dataset.installSkill);
   const agents = [...document.querySelectorAll('[data-install-agent]:checked')].map(input => input.dataset.installAgent);
   if (!skills.length) { $('install-message').textContent = '请至少勾选一个技能。'; return; }
-  const result = await runWrite({
+  const result = await submitJob({
+    kind: 'install',
+    review_id: review.id,
+    skills,
+    agents,
+  }, {
     button,
-    busyText: '正在安装…',
+    busyText: '正在提交…',
     onError: error => { $('install-message').textContent = error.message; },
-    work: async () => {
-      const written = await api('/api/install/apply', {review_id: dialogReview.id, skills, agents, revision: state.table.revision, confirmed: true});
-      if (written.conflicts?.length) return written;
-      $('install-dialog').close();
-      clearInstallRail(true);
-      await refreshEverything();
-      // 装完不用刷新：配了 AI 服务就让后台接着补中文名，正在整理的那批做完就轮到新技能。
-      if (state.table.llm_configured) startLabels('missing');
-      return written;
-    },
-    success: written => (written.conflicts?.length ? null : {
-      text: installDoneText(skills, agents),
-      undo: undoButton => undoOperation(written.id, {skills, message: written.message, button: undoButton}),
-    }),
   });
-  if (result?.conflicts?.length) {
-    $('install-message').textContent = '有同名技能需要先对比，请看下面的差别。';
-    await showIncomingConflicts(result, dialogReview.id);
-  }
+  if (!result) return;
+  $('install-dialog').close();
+  if (railReview?.id === review.id) clearInstallRail(true);
 });
 
 /* ==================== 检查更新：结果显示在技能列表和详情里 ==================== */
@@ -4469,7 +5076,7 @@ const updateRow = name => {
 const isSimpleUpdate = row => row.local_modified === false && !row.script_files?.length
   && row.source?.kind !== 'lark' && !row.blocked_reason;
 
-const updatesWritable = () => Boolean(state.table?.write_allowed && updateState.review?.write_allowed);
+const updatesWritable = () => Boolean(state.table?.write_allowed && updateState.review?.write_allowed) && !jobsBlocked();
 
 async function refreshUpdates() {
   try {
@@ -4562,7 +5169,7 @@ function renderUpdateBar() {
   const checking = updateState.starting || Boolean(review?.running);
   const rows = review?.skills || [];
   const waiting = rows.filter(row => row.has_update);
-  const batch = waiting.filter(row => !row.blocked_reason);
+  const batch = waiting.filter(row => !row.blocked_reason && !updateJobFor(row.name));
   const failed = rows.filter(row => row.error);
   const notUpdated = rows.filter(row => row.update_error || (row.has_update && row.blocked_reason));
   const problems = [...failed, ...notUpdated];
@@ -4623,10 +5230,10 @@ $('updates-all').addEventListener('click', event => {
 });
 
 /* 列表里的小箭头。 */
-function clickUpdateUp(name) {
+function clickUpdateUp(name, button = null) {
   const row = updateRow(name);
-  if (!row) return;
-  if (isSimpleUpdate(row) && updatesWritable()) applyUpdates([name]);
+  if (!row || updateJobFor(name)) return;
+  if (isSimpleUpdate(row) && updatesWritable()) applyUpdates([name], button);
   else openDetail(name);
 }
 
@@ -4638,11 +5245,13 @@ function detailUpdateHtml(row) {
   const merge = updateState.merges.get(row.name);
   const notice = updateState.notices.get(row.name);
   const explanation = updateState.explanations.get(row.name);
-  const canAct = updatesWritable() && !row.blocked_reason && !updateState.busy && !writeBusy;
+  const job = updateJobFor(row.name);
+  const canAct = updatesWritable() && !row.blocked_reason && !updateState.busy && !writeBusy && !job;
   const asks = row.local_modified !== false;   // 改过、或拿不准时，让用户选这份怎么处理
   return `<section class="detail-update" aria-labelledby="detail-update-title">
     <h3 id="detail-update-title"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg>有新版</h3>
     <p class="update-summary">${row.file_count ? `${number(row.file_count)} 个文件有变化，新增 ${number(row.added_lines)} 行，删除 ${number(row.removed_lines)} 行` : escape(row.status)}${row.updated_at ? ' · 上游 ' + escape(friendlyDate(row.updated_at)) + '更新' : ''}</p>
+    ${job ? `<p class="item-note is-job">这项更新已加入队列，${job.status === 'running' ? '处理中。' : '排队中。'}</p>` : ''}
     ${row.blocked_reason ? `<div class="risk-block"><p>${escape(row.blocked_reason)}</p></div>` : ''}
     ${row.script_files?.length ? `<div class="risk-block">
       <p><strong>脚本或执行权限发生变化，请先核对</strong></p>
@@ -4662,7 +5271,7 @@ function detailUpdateHtml(row) {
           <option value="keep" ${choice === 'keep' ? 'selected' : ''}>保留本地版本</option>
           ${merge ? `<option value="merge" ${choice === 'merge' ? 'selected' : ''}>采用已核对的合并结果</option>` : ''}
         </select></label>` : '<span></span>'}
-      <button class="btn btn-primary btn-small" data-update-one="${escape(row.name)}" ${canAct ? '' : 'disabled'}>${row.source?.kind === 'lark' ? '更新整组飞书技能' : '更新'}</button>
+      <button class="btn btn-primary btn-small" data-update-one="${escape(row.name)}" ${canAct ? '' : 'disabled'}>${job ? (job.status === 'running' ? '处理中' : '排队中') : row.source?.kind === 'lark' ? '更新整组飞书技能' : '更新'}</button>
     </div>
     ${explanation ? `<div class="update-extra"><p>${escape(explanation)}</p></div>` : ''}
     ${notice ? `<div class="update-extra">${notice.pre ? `<pre>${escape(notice.pre)}</pre>` : `<p class="item-note">${escape(notice.text)}</p>`}</div>` : ''}
@@ -4747,9 +5356,18 @@ async function handleUpdateButton(button) {
 /* 一次更新一个直接做（能撤销）；一次多个、或飞书整组，先列出来问一句。 */
 async function applyUpdates(names, button = null) {
   const review = updateState.review;
-  if (!review || updateState.busy || !names.length) return null;
+  if (!review || updateState.busy || !names.length || jobsBlocked()) return null;
   const lark = names.some(name => updateState.rows.get(name)?.source?.kind === 'lark');
-  if (lark) names = [...new Set([...names, ...review.skills.filter(s => s.has_update && s.source?.kind === 'lark').map(s => s.name)])];
+  if (lark) {
+    names = [...new Set([...names, ...review.skills.filter(s => s.has_update && s.source?.kind === 'lark').map(s => s.name)])];
+    if (names.some(name => updateJobFor(name))) {
+      toast({text: '这组飞书技能正在更新，请等这项完成后再试。', tone: 'error', sticky: true});
+      return null;
+    }
+  } else {
+    names = names.filter(name => !updateJobFor(name));
+    if (!names.length) return null;
+  }
   const choices = {};
   const mergeIds = {};
   for (const name of names) {
@@ -4785,35 +5403,14 @@ async function applyUpdates(names, button = null) {
     });
     if (!ok) return null;
   }
-  // 只置防重入标记，不在这里重画：重画会把刚拿到的那颗按钮换成新节点，
-  // 后面 runWrite 的「正在更新…」就写到旧节点上了。
-  updateState.busy = true;
-  const result = await runWrite({
-    button,
-    busyText: '正在更新…',
-    work: async () => {
-      const written = await api('/api/updates/apply', {
-        review_id: review.id, skills: names, choices, merge_ids: mergeIds,
-        confirm_lark_cli: lark, confirmed: true,
-      });
-      if (written.failed?.length) updateState.failedOpen = true;
-      await refreshEverything();
-      await refreshUpdates();
-      return written;
-    },
-    success: written => {
-      const updated = written.updated || names;
-      const ids = written.operations ? written.operations.map(operation => operation.id).reverse() : [written.id];
-      return {
-        text: written.failed?.length ? written.message : names.length > 1 ? `${updated.length} 个技能已更新到新版`
-          : choices[names[0]] === 'keep' ? `「${titleOf(names[0])}」保留了你的版本` : `「${titleOf(names[0])}」已更新到新版`,
-        tone: written.failed?.length ? 'error' : 'ok',
-        sticky: Boolean(written.failed?.length),
-        undo: updated.length && ids.length ? undoButton => undoOperation(ids, {skills: updated, message: written.message, button: undoButton}) : null,
-      };
-    },
-  });
-  updateState.busy = false;
+  const result = await submitJob({
+    kind: 'update',
+    review_id: review.id,
+    skills: names,
+    choices,
+    merge_ids: mergeIds,
+    confirm_lark_cli: lark,
+  }, {button, busyText: '正在提交…'});
   renderUpdateBar();
   if (state.detail) renderDetail();
   return result;
@@ -4825,7 +5422,8 @@ const CLEANUP_SOURCES = {github: 'GitHub', lark: '飞书官方', team: '团队�
 const CLEANUP_FILTERS = ['agent', 'group', 'tag', 'source'];
 
 const cleanupSelection = () => state.cleanupTab === 'on' ? state.cleanupSelected : state.idleSelected;
-const cleanupLocked = () => Boolean(writeBusy) || !state.table?.write_allowed;
+const cleanupLocked = () => Boolean(writeBusy) || jobsBlocked() || !state.table?.write_allowed;
+const cleanupSelectableRows = rows => rows.filter(skill => !cleanupJobFor(skill.name));
 const cleanupFiltersActive = () => Object.values(state.cleanupFilters).some(Boolean);
 const cleanupSourceKind = skill => skill?.source_kind || '';
 const cleanupSourceLabel = kind => CLEANUP_SOURCES[kind] || kind;
@@ -4961,7 +5559,8 @@ const cleanupAgentTags = ids =>
   ids.map(id => `<span class="agent-tag">${swatch(id)}${escape(nameOf(id))}</span>`).join('');
 
 function cleanupRowHtml(skill, locked) {
-  const selected = cleanupSelection().has(skill.name);
+  const job = cleanupJobFor(skill.name);
+  const selected = !job && cleanupSelection().has(skill.name);
   const meta = cleanupMeta(skill);
   const agents = state.cleanupTab === 'on'
     ? `<div class="cleanup-agents">${cleanupAgentTags(state.saved[skill.name] || [])}</div>`
@@ -4972,10 +5571,13 @@ function cleanupRowHtml(skill, locked) {
         </div>`
       : '<span class="muted">尚未在任何 Agent 启用</span>';
   const label = state.cleanupTab === 'on' ? `选择要撤下的 ${titleOf(skill.name)}` : `选择 ${titleOf(skill.name)}`;
-  return `<tr${selected ? ' class="is-selected"' : ''}>
+  const jobNote = job
+    ? `<p class="row-note is-job">${job.status === 'running' ? '处理中：正在写入' : '排队中：已提交，等待处理'}</p>`
+    : '';
+  return `<tr${selected ? ' class="is-selected"' : ''}${job ? ' class="is-job"' : ''}>
     <td class="col-check"><label class="check-hit"><input type="checkbox" data-cleanup="${escape(skill.name)}"
-      aria-label="${escape(label)}" ${selected ? 'checked' : ''} ${locked ? 'disabled' : ''}></label></td>
-    <td><strong>${nameHtml(skill.name)}</strong>${skill.summary ? `<p class="skill-desc">${escape(skill.summary)}</p>` : ''}</td>
+      aria-label="${escape(label + (job ? '，' + (job.status === 'running' ? '处理中' : '排队中') : ''))}" ${selected ? 'checked' : ''} ${locked || job ? 'disabled' : ''}></label></td>
+    <td><strong>${nameHtml(skill.name)}</strong>${jobNote}${skill.summary ? `<p class="skill-desc">${escape(skill.summary)}</p>` : ''}</td>
     <td>${agents}</td>
     <td class="col-num">${tokenText(skill.description_tokens)}</td>
   </tr>`;
@@ -4991,11 +5593,12 @@ function cleanupEmptyHtml() {
 function syncCleanupSelectAll(rows) {
   const box = $('cleanup-select-all');
   const selected = cleanupSelection();
-  const chosen = rows.filter(skill => selected.has(skill.name)).length;
-  box.disabled = cleanupLocked() || !rows.length;
-  box.checked = rows.length > 0 && chosen === rows.length;
-  box.indeterminate = chosen > 0 && chosen < rows.length;
-  box.setAttribute('aria-label', rows.length ? `全选当前列表的 ${rows.length} 个技能` : '全选当前列表的技能');
+  const selectable = cleanupSelectableRows(rows);
+  const chosen = selectable.filter(skill => selected.has(skill.name)).length;
+  box.disabled = cleanupLocked() || !selectable.length;
+  box.checked = selectable.length > 0 && chosen === selectable.length;
+  box.indeterminate = chosen > 0 && chosen < selectable.length;
+  box.setAttribute('aria-label', selectable.length ? `全选当前列表的 ${selectable.length} 个技能` : '当前列表没有可选择的技能');
 }
 
 function renderCleanup() {
@@ -5012,10 +5615,10 @@ function renderCleanup() {
   // 已经不符合所在栏的选择自动去掉：在用的现在没分给任何 Agent，未启用的又被分配回去了。
   if (state.table) {
     for (const name of [...state.cleanupSelected]) {
-      if (!known.has(name) || !(state.saved[name] || []).length) state.cleanupSelected.delete(name);
+      if (!known.has(name) || !(state.saved[name] || []).length || cleanupJobFor(name)) state.cleanupSelected.delete(name);
     }
     for (const name of [...state.idleSelected]) {
-      if (!known.has(name) || (state.saved[name] || []).length) state.idleSelected.delete(name);
+      if (!known.has(name) || (state.saved[name] || []).length || cleanupJobFor(name)) state.idleSelected.delete(name);
     }
   }
   renderCleanupTabs(state.table?.skills || []);
@@ -5106,10 +5709,19 @@ async function loadCleanup() {
   if (homeVisible) renderHomeTodos();
 }
 
-/* 撤下：先请后台核对一遍（依赖、你的文件里提到的位置），确认后再撤。 */
+/* 提交成功后去掉这次提交的勾选；别的栏、别的技能的选择都留着。 */
+function dropCleanupSelection(names) {
+  for (const name of names) {
+    state.cleanupSelected.delete(name);
+    state.idleSelected.delete(name);
+  }
+  renderCleanup();
+}
+
+/* 撤下：先请后台核对一遍（依赖、你的文件里提到的位置），确认后再提交任务。 */
 async function applyCleanup(button) {
   const skills = [...state.cleanupSelected];
-  if (!skills.length) return;
+  if (!skills.length || cleanupLocked()) return;
   let plan;
   try {
     plan = await withBusy(button, '正在核对…', () => api('/api/cleanup/preview', {skills}));
@@ -5127,20 +5739,15 @@ async function applyCleanup(button) {
     note: '可通过提示条或操作记录撤销本次操作。', okText: '撤下',
   });
   if (!ok) return;
-  await runWrite({
-    button,
-    busyText: '正在撤下…',
-    work: async () => {
-      const written = await api('/api/cleanup/apply', {skills, revision: plan.revision, confirmed: true});
-      state.cleanupSelected.clear();
-      await refreshEverything();
-      return written;
+  const result = await submitJob({
+    kind: 'cleanup_withdraw',
+    skills,
+    seen: {
+      dependency_warnings: plan.dependency_warnings || [],
+      path_warnings: plan.path_warnings || [],
     },
-    success: written => ({
-      text: pastTense(written.message || `撤下了 ${skills.length} 个技能`),
-      undo: undoButton => undoOperation(written.id, {skills, message: pastTense(written.message), button: undoButton}),
-    }),
-  });
+  }, {button, busyText: '正在提交…'});
+  if (result) dropCleanupSelection(skills);
 }
 
 /* 删除：先核对。核对失败只弹提示，不弹确认框；确认按钮用提醒色。 */
@@ -5148,7 +5755,7 @@ async function applyCleanupDelete(button) {
   const tab = state.cleanupTab;
   const selection = tab === 'on' ? state.cleanupSelected : state.idleSelected;
   const skills = [...selection];
-  if (!skills.length) return;
+  if (!skills.length || cleanupLocked()) return;
   let plan;
   try {
     plan = await withBusy(button, '正在核对…', () => api('/api/cleanup/delete/preview', {skills}));
@@ -5173,26 +5780,22 @@ async function applyCleanupDelete(button) {
     danger: true,
   });
   if (!ok) return;
-  await runWrite({
-    button,
-    busyText: '正在删除…',
-    work: async () => {
-      const written = await api('/api/cleanup/delete/apply', {skills: targets, revision: plan.revision, confirmed: true});
-      selection.clear();
-      await refreshEverything();
-      return written;
+  const result = await submitJob({
+    kind: 'cleanup_delete',
+    skills: targets,
+    seen: {
+      dependency_warnings: plan.dependency_warnings || [],
+      path_warnings: plan.path_warnings || [],
+      irreplaceable: plan.irreplaceable || [],
     },
-    success: written => ({
-      text: `已删除 ${targets.length} 个技能`,
-      undo: written.id ? undoButton => undoOperation(written.id, {skills: targets, message: written.message, button: undoButton}) : null,
-    }),
-  });
+  }, {button, busyText: '正在提交…'});
+  if (result) dropCleanupSelection([...new Set([...skills, ...targets])]);
 }
 
 /* 恢复：只提交选中里确实撤下过的，按撤下前的分配重新启用。 */
 async function applyCleanupRestore(button) {
   const skills = [...state.idleSelected].filter(name => cleanupMeta(state.skillIndex.get(name)).withdrawn);
-  if (!skills.length) return;
+  if (!skills.length || cleanupLocked()) return;
   const ok = await confirmDialog({
     title: '恢复这些技能',
     lines: [`将按撤下前的分配重新启用这 ${skills.length} 个技能。`],
@@ -5200,21 +5803,8 @@ async function applyCleanupRestore(button) {
     note: '可通过提示条或操作记录撤销本次操作。', okText: '恢复',
   });
   if (!ok) return;
-  await runWrite({
-    button,
-    busyText: '正在恢复…',
-    work: async () => {
-      const revision = state.table?.revision ?? state.cleanup?.revision;
-      const written = await api('/api/withdrawn/restore', {skills, revision, confirmed: true});
-      state.idleSelected.clear();
-      await refreshEverything();
-      return written;
-    },
-    success: written => ({
-      text: `已恢复 ${skills.length} 个技能`,
-      undo: written.id ? undoButton => undoOperation(written.id, {skills, message: written.message, button: undoButton}) : null,
-    }),
-  });
+  const result = await submitJob({kind: 'restore', skills}, {button, busyText: '正在提交…'});
+  if (result) dropCleanupSelection(skills);
 }
 
 $('cleanup-search').addEventListener('input', renderCleanup);
@@ -5239,7 +5829,7 @@ $('cleanup-clear-filters').addEventListener('click', () => {
 });
 
 $('cleanup-select-all').addEventListener('change', event => {
-  const names = cleanupVisibleRows().map(skill => skill.name);
+  const names = cleanupSelectableRows(cleanupVisibleRows()).map(skill => skill.name);
   const selection = cleanupSelection();
   for (const name of names) {
     if (event.target.checked) selection.add(name); else selection.delete(name);
@@ -5588,6 +6178,8 @@ async function finishMigration(title, result) {
   }
   await refreshLog();
   await refreshMigrationStatus();
+  // 备份还原成功会解除后台队列的停止状态，页头任务入口也要跟着恢复。
+  readJobs({force: true});
   return result;
 }
 
@@ -6516,6 +7108,8 @@ async function start() {
   await refreshLog();
   refreshMigrationStatus();
   refreshUpdates();
+  // 打开或刷新看板时读一次后台任务；有等待或处理中的任务再每秒轮询。
+  readJobs({force: true});
   // 连没连上分享站决定页头有没有「团队」；分享站慢也不挡页面。
   refreshTeam();
   // 打开看板和刷新页面都先到首页，不再看地址栏停在哪一页。

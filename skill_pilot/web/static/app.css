@@ -196,7 +196,7 @@ dl, dd, dt { margin: 0; }
 
 /* ---------- 页头：离开窗口边缘的深色导航岛 ---------- */
 
-.topbar { max-width: 1440px; margin: var(--sp-5) auto 0; padding: 0 var(--sp-6); }
+.topbar { position: relative; max-width: 1440px; margin: var(--sp-5) auto 0; padding: 0 var(--sp-6); z-index: var(--z-header); }
 
 /* 页头左右留白是对称的，所以「左边一栏 + 中间自动 + 右边一栏」的中间那一列
    就是整个窗口的正中间：技能、清理、设置三项排在这里，SP 标志放左边那一栏。
@@ -254,7 +254,74 @@ dl, dd, dt { margin: 0; }
 .nav-item[aria-current="page"] { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08); }
 .topbar-row :focus-visible { outline-color: var(--shell-ink); }
 
-#mode-badge { justify-self: end; background: transparent; color: var(--shell-ink-2); box-shadow: inset 0 0 0 1px #4A5468; }
+.topbar-end { justify-self: end; display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+#mode-badge { background: transparent; color: var(--shell-ink-2); box-shadow: inset 0 0 0 1px #4A5468; }
+
+/* 页头的后台任务入口：有任务时才出现；展开后是一份可操作的任务列表。 */
+.jobs-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: 500;
+  color: var(--shell-ink);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid #3E485C;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.jobs-toggle:hover { background: var(--shell-2); border-color: #5A6478; }
+.jobs-toggle[aria-expanded="true"] { background: var(--panel); border-color: transparent; color: var(--ink); }
+.jobs-toggle .btn-icon { width: 16px; height: 16px; }
+.jobs-toggle:focus-visible { outline: 2px solid var(--shell-ink); outline-offset: 2px; }
+#jobs-toggle-text { overflow: hidden; text-overflow: ellipsis; }
+
+/* 任务是页头的下拉列表，不挡住页面；技能详情和确认框仍盖在它上面。 */
+.jobs-panel {
+  position: absolute;
+  top: calc(100% + var(--sp-2));
+  right: var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(70vh, 600px);
+  background: var(--panel);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  z-index: calc(var(--z-header) + 1);
+  overflow: hidden;
+}
+.jobs-head { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-4) var(--sp-3) var(--sp-2) var(--sp-5); }
+.jobs-head h2 { flex: 1; font-size: var(--fs-body); }
+.jobs-head h2:focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; border-radius: 4px; }
+.jobs-list { min-height: 0; overflow-y: auto; padding: 0 var(--sp-5); }
+.jobs-list:empty { display: none; }
+#jobs-empty { margin: 0 var(--sp-5) var(--sp-4); }
+.job-item { padding: var(--sp-3) 0; border-top: 1px solid var(--line); }
+.job-item:first-child { border-top: 0; }
+.job-head { display: flex; align-items: flex-start; gap: var(--sp-3); }
+.job-summary { flex: 1; margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.job-status { margin: 2px 0 0; color: var(--ink-2); font-size: var(--fs-small); overflow-wrap: anywhere; }
+.job-details { margin: var(--sp-2) 0 0; padding-left: 18px; list-style: disc; color: var(--muted); font-size: var(--fs-small); }
+.job-details li { margin: 2px 0; overflow-wrap: anywhere; }
+.job-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-2); }
+.jobs-foot { display: flex; justify-content: flex-end; padding: var(--sp-2) var(--sp-5) var(--sp-4); border-top: 1px solid var(--line); }
+.jobs-foot:has(#jobs-clear[hidden]) { display: none; }
+.banner.jobs-blocked { margin-top: var(--sp-2); }
+
+/* 任务列表打开时，提示条暂时让到页头下面，免得盖住任务列表的标题和关闭按钮。
+   提示条的位置不变，任务列表收起后恢复最上层。 */
+body.jobs-open .toasts { z-index: calc(var(--z-header) - 1); }
+
+/* 已提交的任务覆盖的行：照常显示，只注明排队或处理中，不能再改。 */
+.update-job-note { font-size: var(--fs-tiny); color: var(--ink-2); white-space: nowrap; }
+.switch.is-job { cursor: progress; }
+.row-note.is-job { color: var(--ink-2); }
 
 .task-bar {
   padding: var(--sp-2) var(--sp-5);
@@ -1571,6 +1638,7 @@ pre {
 @media (max-width: 1023px) {
   .topbar, .page, .footer { padding-left: var(--sp-4); padding-right: var(--sp-4); }
   .topbar-row { gap: var(--sp-3); }
+  .jobs-panel { right: var(--sp-4); }
   .skills-split { grid-template-columns: minmax(0, 1fr); }
   .rail { position: static; }
   .rail-list { grid-auto-flow: column; grid-auto-columns: minmax(190px, 1fr); overflow-x: auto; }
@@ -1844,6 +1912,7 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 
 @media (max-width: 720px) {
   #mode-badge { display: none; }
+  .jobs-toggle { max-width: 46vw; }
   .skill-row { grid-template-columns: minmax(0, 1fr) 88px; }
   .skill-row .meta { display: none; }
   .who-row { grid-template-columns: minmax(0, 1fr) 44px; }
