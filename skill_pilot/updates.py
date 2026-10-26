@@ -375,7 +375,9 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
     for group in groups:
         try:
             result = _apply_group(review, group, choices, merge_ids, batch)
-        except operations.RollbackError:
+        except operations.RollbackError as error:
+            error.operations = completed
+            error.updated = updated
             raise
         except (ValueError, OSError) as error:
             if len(names) == 1:

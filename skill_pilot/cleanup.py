@@ -40,12 +40,16 @@ def preview(names, home=None):
             'revision': operations.revision(home, agents)}
 
 
-def apply(names, confirmed=False, home=None, expected=None):
+def apply(names, confirmed=False, home=None, expected=None, review_check=None):
     home, registry, agents = operations.load(home)
     operations.guard(home/'.skill-pilot', home)
     view = preview(names, home)
     if expected is not None and expected != view['revision']:
         raise ValueError('目录内容已经变了，请刷新后重新核对。')
+    if review_check:
+        attention = review_check(view)
+        if attention:
+            return attention
     if confirmed is not True:
         return {'needs_confirmation': True, **view}
     selected = view['skills']
@@ -88,12 +92,16 @@ def delete_preview(names, home=None):
             'revision': operations.revision(home, agents)}
 
 
-def delete(names, confirmed=False, home=None, expected=None):
+def delete(names, confirmed=False, home=None, expected=None, review_check=None):
     home, registry, agents = operations.load(home)
     operations.guard(home / '.skill-pilot', home)
     view = delete_preview(names, home)
     if expected is not None and expected != view['revision']:
         raise ValueError('目录内容已经变了，请刷新后重新核对。')
+    if review_check:
+        attention = review_check(view)
+        if attention:
+            return attention
     if confirmed is not True:
         return {'needs_confirmation': True, **view}
     selected = view['skills']

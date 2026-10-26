@@ -1,10 +1,13 @@
 from ..platform_support import rmtree
 """Loopback dashboard; every migration write requires an explicit confirmation."""
 import difflib
+import copy
+from contextlib import contextmanager
 from ..platform_support import fcntl, user_home, user_id, check_directory_links
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -31,6 +34,77 @@ PROGRAM_AUTO_CHECK_INTERVAL = 600
 # Browsers slow or pause timers in background tabs, so an open page keeps the
 # dashboard alive until it says goodbye or has been silent this long.
 OPEN_PAGE_TIMEOUT = 24 * 3600
+ACTIVE_JOBS = {'waiting', 'running'}
+
+
+class JobInputError(ValueError):
+    """Malformed queue requests are reported as 400, before doing any work."""
+
+
+def job_parameters(body):
+    kind = body.get('kind')
+    if not isinstance(kind, str) or kind not in {
+            'assignment', 'install', 'update', 'cleanup_withdraw', 'cleanup_delete', 'restore', 'team_install'}:
+        raise JobInputError('请选择支持的任务类型。')
+    result = {'kind': kind}
+    def text(value):
+        return isinstance(value, str) and bool(value.strip())
+    def names(value, empty=False):
+        return isinstance(value, list) and (empty or bool(value)) and all(text(n) for n in value)
+    def changes(value):
+        return isinstance(value, list) and all(isinstance(c, dict) and text(c.get('skill')) and
+            text(c.get('agent')) and type(c.get('enabled')) is bool for c in value)
+    if kind == 'team_install':
+        if not text(body.get('key')):
+            raise JobInputError('请选择要装上的团队技能。')
+        result['key'] = body['key']
+        return result
+    if kind == 'assignment':
+        value = body.get('changes')
+        if not changes(value) or not value or len({(c['skill'], c['agent']) for c in value}) != len(value):
+            raise JobInputError('分配改动需逐项填写技能、Agent 和是否启用，同一处只能选择一次。')
+        result['changes'] = sorted([{k: c[k] for k in ('skill', 'agent', 'enabled')} for c in value],
+                                   key=lambda c: (c['skill'], c['agent']))
+    else:
+        if not names(body.get('skills')):
+            raise JobInputError('请选择要处理的技能，名称需放在列表中。')
+        result['skills'] = sorted(set(body['skills']))
+    if kind in {'install', 'update'}:
+        if not text(body.get('review_id')):
+            raise JobInputError('请带上这次已核对的预览编号。')
+        result['review_id'] = body['review_id']
+    if kind == 'install':
+        if not names(body.get('agents'), empty=True):
+            raise JobInputError('请把所选 Agent 放在列表中。')
+        result['agents'] = sorted(set(body['agents']))
+    if kind == 'update':
+        for field in ('choices', 'merge_ids'):
+            value = body.get(field, {})
+            if not isinstance(value, dict) or any(not text(k) or not text(v) for k, v in value.items()):
+                raise JobInputError('更新选择和合并编号需按技能名称逐项填写。')
+            if field == 'choices' and any(v not in {'keep', 'upstream', 'merge'} for v in value.values()):
+                raise JobInputError('请选择保留我的、用新版或使用已核对的合并结果。')
+            result[field] = {k: v for k, v in value.items() if k in result['skills']}
+        result['choices'] = {n: result['choices'].get(n, 'upstream') for n in result['skills']}
+        result['merge_ids'] = {n: v for n, v in result['merge_ids'].items() if result['choices'][n] == 'merge'}
+        if type(body.get('confirm_lark_cli', False)) is not bool:
+            raise JobInputError('请明确是否已确认飞书工具一起升级。')
+        result['confirm_lark_cli'] = body.get('confirm_lark_cli', False)
+    if kind in {'assignment', 'cleanup_withdraw', 'cleanup_delete'}:
+        seen = body.get('seen')
+        fields = ['dependency_warnings', 'path_warnings']
+        if kind == 'assignment': fields.append('changes')
+        if kind == 'cleanup_delete': fields.append('irreplaceable')
+        if not isinstance(seen, dict) or any(not isinstance(seen.get(k), list) for k in fields):
+            raise JobInputError('请带上确认时看到的全部改动和提醒。')
+        if (not names(seen['dependency_warnings'], empty=True) or
+                any(not isinstance(w, dict) or not text(w.get('file')) or not names(w.get('entries'), empty=True)
+                    for w in seen['path_warnings']) or
+                ('changes' in fields and not changes(seen['changes'])) or
+                ('irreplaceable' in fields and not names(seen['irreplaceable'], empty=True))):
+            raise JobInputError('确认时的改动或提醒格式不正确，请重新核对。')
+        result['seen'] = {k: copy.deepcopy(seen[k]) for k in fields}
+    return result
 
 
 class Dashboard(ThreadingHTTPServer):
@@ -44,11 +118,18 @@ class Dashboard(ThreadingHTTPServer):
         extra_sources.ensure(self.home)
         self.install_reviews = session.get('install_reviews', {})
         self.team_upload_reviews = session.get('team_upload_reviews', {})
-        self.team_queue = []
-        self.team_queue_lock = threading.RLock()
-        self.team_queue_thread = None
+        self.jobs = []
+        self.jobs_version = 0
+        self.jobs_blocked = session.get('jobs_blocked', '')
+        self.jobs_lock = threading.RLock()
+        self.jobs_thread = None
+        self.team_queue_lock = self.jobs_lock
+        # Lock order: write_lock -> update_lock -> jobs_lock. Neither metadata
+        # lock is held during filesystem work or network requests.
+        self.write_lock = threading.RLock()
         self.update_reviews = session.get('update_reviews', {})
         self.update_lock = threading.Lock()
+        self.update_users = {}
         self.update_thread = None
         self.labels_lock = threading.Lock()
         self.labels_thread = None
@@ -93,11 +174,11 @@ class Dashboard(ThreadingHTTPServer):
         self.url = f"{self.origin}/?token={self.token}"
 
     def server_close(self):
-        with self.team_queue_lock:
+        with self.jobs_lock:
             self.closing = True
         super().server_close()
-        with self.team_queue_lock:
-            queue_thread = self.team_queue_thread
+        with self.jobs_lock:
+            queue_thread = self.jobs_thread
         if queue_thread: queue_thread.join()
         if self.update_thread: self.update_thread.join()
         if self.labels_thread: self.labels_thread.join()
@@ -115,19 +196,127 @@ class Dashboard(ThreadingHTTPServer):
 
     def background_busy(self):
         return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread, self.agents_thread)) or
-                any(item['status'] in {'waiting', 'running'} for item in self.team_queue_status()['items']) or
+                self.jobs_busy() or
                 self._program_thread_blocks_exit() or
                 self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
 
+    def jobs_busy(self):
+        with self.jobs_lock:
+            return (any(item['status'] in ACTIVE_JOBS for item in self.jobs) or
+                    bool(self.jobs_thread and self.jobs_thread.is_alive()))
+
+    def jobs_status(self):
+        with self.jobs_lock:
+            return {'items': [self.public_job(item) for item in self.jobs],
+                    'version': self.jobs_version, 'blocked': self.jobs_blocked}
+
+    @staticmethod
+    def public_job(item):
+        return copy.deepcopy({k: v for k, v in item.items() if not k.startswith('_')})
+
+    @property
+    def team_queue(self):
+        return [item for item in self.jobs if item['kind'] == 'team_install']
+
+    @team_queue.setter
+    def team_queue(self, items):
+        # Keep the legacy team view backed by the single job list.
+        self.jobs = [item for item in self.jobs if item['kind'] != 'team_install'] + [
+            {**item, 'kind': 'team_install', 'skills': [item['name']], 'agents': [],
+             'summary': '安装团队技能', 'operations': [],
+             '_parameters': {'kind': 'team_install', 'key': item['key']},
+             '_intent': json.dumps({'kind': 'team_install', 'key': item['key']}, sort_keys=True)} for item in items]
+
     def team_queue_status(self):
-        with self.team_queue_lock:
-            return {'items': [{**item, 'installed': list(item['installed']), 'reuse': list(item['reuse'])}
+        fields = {'id', 'key', 'name', 'title', 'status', 'message', 'installed', 'reuse', 'operation'}
+        with self.jobs_lock:
+            return {'items': [copy.deepcopy({k: v for k, v in item.items() if k in fields})
                               for item in self.team_queue]}
+
+    def _accept_jobs(self):
+        if self.closing:
+            raise ValueError('看板正在关闭，请重新打开后再操作。')
+        if self.jobs_blocked:
+            raise ValueError(self.jobs_blocked)
+
+    def _add_job(self, parameters, previous=None, team_info=None):
+        kind = parameters['kind']
+        intent = json.dumps({k: v for k, v in parameters.items() if k != 'seen'}, sort_keys=True)
+        with self.jobs_lock:
+            self._accept_jobs()
+            existing = next((i for i in self.jobs if i.get('_intent') == intent and i['status'] in ACTIVE_JOBS), None)
+            if existing:
+                if previous:
+                    self.jobs.remove(previous)
+                    self.jobs_version += 1
+                return {'job': self.public_job(existing), 'duplicate': True, 'version': self.jobs_version}
+            skills = parameters.get('skills', sorted({c['skill'] for c in parameters.get('changes', [])}))
+            agents = parameters.get('agents', sorted({c['agent'] for c in parameters.get('changes', [])}))
+            titles = self.skill_titles()
+            action = {'assignment': '调整分配', 'install': '安装', 'update': '更新', 'cleanup_withdraw': '撤下',
+                      'cleanup_delete': '删除', 'restore': '恢复', 'team_install': '安装团队技能'}[kind]
+            item = {'id': secrets.token_urlsafe(16), 'kind': kind, 'status': 'waiting',
+                    'skills': skills, 'agents': agents, 'summary': action + ('「' + '、'.join(titles.get(n, n) for n in skills) + '」' if skills else ''),
+                    'message': '等待处理。', 'operations': [], '_parameters': copy.deepcopy(parameters), '_intent': intent}
+            if kind == 'assignment': item['changes'] = copy.deepcopy(parameters['changes'])
+            if 'review_id' in parameters: item['review_id'] = parameters['review_id']
+            if kind == 'team_install':
+                info = team_info or {}
+                item.update(key=parameters['key'], name=info.get('name', ''), installed=[], reuse=[], message='等待安装。')
+                if info.get('title') is not None: item['title'] = info['title']
+                if info.get('name'):
+                    item.update(skills=[info['name']], summary='安装「' + (info.get('title') or titles.get(info['name'], info['name'])) + '」')
+            if previous:
+                if kind == 'update':
+                    item['_completed_operations'] = list(previous['operations'])
+                    item['_updated'] = list(previous.get('updated', []))
+                    item['operations'] = list(previous['operations'])
+                self.jobs.remove(previous)
+            self.jobs.append(item)
+            self.jobs_version += 1
+            if self.jobs_thread is None:
+                self.jobs_thread = threading.Thread(target=self.jobs_work, daemon=True)
+                self.jobs_thread.start()
+            return {'job': self.public_job(item), 'duplicate': False, 'version': self.jobs_version}
+
+    def queue_job(self, body):
+        if body.get('confirmed') is not True:
+            raise JobInputError('请先核对，并确认这次操作。')
+        parameters = job_parameters(body)
+        # Enqueue and pruning use this order so a referenced review cannot be
+        # removed in the gap between validation and adding the waiting item.
+        with self.update_lock:
+            return self._add_job(parameters)
+
+    def retry_job(self, body):
+        if not isinstance(body.get('id'), str) or not body['id']:
+            raise JobInputError('请选择要重试的任务。')
+        with self.update_lock, self.jobs_lock:
+            self._accept_jobs()
+            previous = next((i for i in self.jobs if i['id'] == body['id']), None)
+            if previous is None or previous['status'] not in {'failed', 'attention'}:
+                raise JobInputError('只能重试失败或需要处理的任务。')
+            parameters = copy.deepcopy(previous['_parameters'])
+            if parameters['kind'] == 'update' and previous.get('failed'):
+                parameters['skills'] = [r['name'] for r in previous['failed']]
+            for field in ('seen', 'review_id', 'choices', 'merge_ids', 'confirm_lark_cli'):
+                if field in body: parameters[field] = body[field]
+            parameters = job_parameters(parameters)
+            return self._add_job(parameters, previous, previous)
+
+    def clear_jobs(self, team_only=False):
+        with self.jobs_lock:
+            remaining = [i for i in self.jobs if i['status'] in ACTIVE_JOBS or (team_only and i['kind'] != 'team_install')]
+            if len(remaining) != len(self.jobs):
+                self.jobs = remaining
+                self.jobs_version += 1
+            return self.team_queue_status() if team_only else self.jobs_status()
 
     def queue_team(self, key):
         if not isinstance(key, str) or not key.strip():
             raise ValueError('请选择要装上的技能。')
-        with self.team_queue_lock:
+        with self.jobs_lock:
+            self._accept_jobs()
             previous = next((item for item in self.team_queue if item['key'] == key), None)
             if previous and previous['status'] in {'waiting', 'running'}:
                 return self.team_queue_status()
@@ -140,47 +329,235 @@ class Dashboard(ThreadingHTTPServer):
                 raise ValueError('这个技能已经下架。')
             name = card['listings'][0]['name']
             title = next((r['title'] for r in card['listings'] if 'title' in r), None)
-        with self.team_queue_lock:
-            if self.closing:
-                raise ValueError('看板正在关闭，请重新打开后再装上。')
-            if any(item['key'] == key and item['status'] in {'waiting', 'running'} for item in self.team_queue):
+        with self.jobs_lock:
+            previous = next((item for item in self.team_queue if item['key'] == key), None)
+            if previous and previous['status'] in ACTIVE_JOBS:
                 return self.team_queue_status()
-            self.team_queue = [item for item in self.team_queue if item['key'] != key]
-            self.team_queue.append({'id': secrets.token_urlsafe(16), 'key': key, 'name': name,
-                **({'title': title} if title is not None else {}), 'status': 'waiting', 'message': '等待安装。',
-                'installed': [], 'reuse': []})
-            if self.team_queue_thread is None:
-                self.team_queue_thread = threading.Thread(target=self.team_queue_work, daemon=True)
-                self.team_queue_thread.start()
+            self._add_job({'kind': 'team_install', 'key': key}, previous, {'name': name, 'title': title})
             return self.team_queue_status()
 
     def clear_team_queue(self):
-        with self.team_queue_lock:
-            self.team_queue = [item for item in self.team_queue if item['status'] in {'waiting', 'running'}]
-            return self.team_queue_status()
+        return self.clear_jobs(team_only=True)
 
-    def team_queue_work(self):
-        while True:
-            with self.team_queue_lock:
-                if self.closing:
-                    self.team_queue_thread = None
-                    return
-                item = next((item for item in self.team_queue if item['status'] == 'waiting'), None)
-                if item is None:
-                    self.team_queue_thread = None
-                    return
-                item.update(status='running', message='正在装进技能库…')
+    def stop_jobs(self):
+        with self.jobs_lock:
+            self.jobs_blocked = '这项操作没能完全恢复，后续任务已停止，请先用备份还原。'
+            for item in self.jobs:
+                if item['status'] in ACTIVE_JOBS:
+                    item.update(status='failed', message=self.jobs_blocked)
+                    self.jobs_version += 1
+
+    @contextmanager
+    def local_write(self, restoring=False):
+        with self.write_lock:
+            if self.jobs_blocked and not restoring:
+                raise ValueError(self.jobs_blocked)
             try:
-                result = team.install(self.home, item['key'])
-                self.invalidate_agents()
-                with self.team_queue_lock:
-                    item.update(status='done', message=result['message'], installed=result['installed'], reuse=result['reuse'])
-                    if 'id' in result:
-                        item['operation'] = result['id']
-            except Exception as error:
-                with self.team_queue_lock:
-                    item.update(status='failed', message=str(error) if isinstance(error, ValueError) else
-                                '安装没能完成，请稍后重试。')
+                yield
+            except operations.RollbackError:
+                self.stop_jobs()
+                raise
+
+    def job_message(self, message):
+        try:
+            key = team.settings(self.home).get('key', '')
+        except ValueError:
+            key = ''
+        message = team._redact(team._redact(message, self.token), key)
+        return self_update._hide_paths_outside_home(message)
+
+    def skill_titles(self):
+        return {n: v['title'] for g in labels.read(self.home) for n, v in g['skills'].items()}
+
+    def skill_message(self, message):
+        titles = self.skill_titles()
+        if not titles:
+            return message
+        names = '|'.join(re.escape(n) for n in sorted(titles, key=len, reverse=True))
+        return re.sub(r'(?<![A-Za-z0-9_.-])(' + names + r')(?![A-Za-z0-9_.-])',
+                      lambda match: titles[match[0]], message)
+
+    def prune_update_reviews(self):
+        with self.update_lock, self.jobs_lock:
+            latest = next(reversed(self.update_reviews), None)
+            protected = {i['_parameters']['review_id'] for i in self.jobs
+                         if i['kind'] == 'update' and i['status'] in ACTIVE_JOBS}
+            obsolete = [self.update_reviews.pop(key) for key, review in list(self.update_reviews.items())
+                        if key != latest and key not in protected and not review['running'] and not self.update_users.get(key)]
+        for review in obsolete:
+            rmtree(review['temporary'], ignore_errors=True)
+
+    @contextmanager
+    def update_review(self, identifier):
+        with self.update_lock:
+            review = self.update_reviews.get(identifier)
+            if review is None:
+                raise ValueError('这次更新检查已失效，请重新检查更新。')
+            self.update_users[identifier] = self.update_users.get(identifier, 0) + 1
+        try:
+            yield review
+        finally:
+            with self.update_lock:
+                self.update_users[identifier] -= 1
+            self.prune_update_reviews()
+
+    def jobs_work(self):
+        while True:
+            with self.jobs_lock:
+                if self.closing or self.jobs_blocked or not any(i['status'] == 'waiting' for i in self.jobs):
+                    self.jobs_thread = None
+                    return
+            with self.write_lock:
+                with self.jobs_lock:
+                    if self.closing or self.jobs_blocked:
+                        continue
+                    item = next(i for i in self.jobs if i['status'] == 'waiting')
+                    item.update(status='running', message='正在处理…')
+                    self.jobs_version += 1
+                try:
+                    if not preview_allowed(self.home):
+                        raise ValueError('当前处于只读模式，文件没有改动。')
+                    result = self.execute_job(item)
+                    result['operations'] = list(dict.fromkeys(item.get('_completed_operations', []) + result.get('operations', [])))
+                    if item.get('_updated'):
+                        result['updated'] = sorted(set(item['_updated'] + result.get('updated', [])))
+                        result['message'] = '此前已更新：' + self.skill_message('、'.join(item['_updated'])) + '。' + result['message']
+                    try:
+                        records = [r for r in operations.history(self.home) if r['id'] in result.get('operations', [])]
+                    except (OSError, ValueError):
+                        records = []
+                    if records:
+                        result.update(skills=sorted(set(item['skills']) | {n for r in records for n in r['skills']}),
+                                      agents=sorted(set(item['agents']) | {a for r in records for a in r['agents']}))
+                except operations.RollbackError as error:
+                    with self.jobs_lock:
+                        item['operations'] += [r['id'] for r in getattr(error, 'operations', [])]
+                        item['updated'] = item.get('_updated', []) + getattr(error, 'updated', [])
+                    self.stop_jobs()
+                    result = None
+                except Exception as error:
+                    result = {'status': 'failed', 'message': self.job_message(str(error))
+                              if isinstance(error, ValueError) else '安装没能完成，请稍后重试。'
+                              if item['kind'] == 'team_install' else '任务没能完成，请重新核对后重试。'}
+                finally:
+                    self.invalidate_agents()
+                    try:
+                        self.inventory = scan(self.home)
+                    except (OSError, ValueError):
+                        pass  # Preserve the task's write result if a later scan fails.
+                if result is not None:
+                    with self.jobs_lock:
+                        item.update({'status': 'done', **result})
+                        self.jobs_version += 1
+            self.prune_update_reviews()
+
+    @staticmethod
+    def confirmation_changes(plan, seen):
+        reasons = {'changes': '执行前出现了新的分配改动。', 'dependency_warnings': '有技能需要使用它，影响有变化。',
+                   'path_warnings': '有新的文件引用受到影响。', 'irreplaceable': '有新增的技能删除后无法重新获取。'}
+        impacts = []
+        for field, old in seen.items():
+            for value in plan.get(field, []):
+                if value not in old:
+                    impacts.append({'field': field, 'value': value, 'reason': reasons[field]})
+        if impacts:
+            return {'status': 'attention', 'attention': 'confirmation', 'needs_confirmation': True,
+                    'message': '影响有变化，文件没有改动，请重新核对并确认。', 'new_impacts': impacts,
+                    'preview': {k: copy.deepcopy(plan[k]) for k in (*seen, 'revision') if k in plan}}
+
+    def execute_job(self, item):
+        parameters = item['_parameters']
+        kind = item['kind']
+        names = parameters.get('skills', [])
+        if kind in {'update', 'cleanup_withdraw', 'cleanup_delete', 'restore'}:
+            registry = operations.load(self.home)[1]['skills']
+            with self.jobs_lock:
+                item['agents'] = sorted({a for n in names for a in registry.get(n, {}).get('assigned_agents', [])} |
+                                        {a for n in names for a in registry.get(n, {}).get('withdrawn_agents', [])})
+        if kind == 'assignment':
+            for _ in range(3):
+                plan = operations.preview_assign(parameters['changes'], self.home, recheck=True)
+                if plan['conflicts']:
+                    return {'status': 'attention', 'attention': 'conflict', 'conflicts': plan['conflicts'],
+                            'message': '部分选择与当前状态冲突，文件没有改动，请先处理这些选择。'}
+                attention = self.confirmation_changes(plan, parameters['seen'])
+                if attention: return attention
+                try:
+                    result = operations.apply_assign(parameters['changes'], plan['revision'], True, self.home, recheck=True,
+                        review_check=lambda current: self.confirmation_changes(current, parameters['seen']))
+                except operations.AssignmentChanged:
+                    continue
+                if result.get('needs_attention'):
+                    return {'status': 'attention', 'attention': 'conflict', 'conflicts': result['conflicts'],
+                            'message': '部分选择与当前状态冲突，文件没有改动，请先处理这些选择。'}
+                if result.get('status') == 'attention': return result
+                break
+            else:
+                raise ValueError('技能状态连续发生变化，文件没有改动，请重新核对后重试。')
+        elif kind == 'install':
+            review = self.install_reviews.get(parameters['review_id'])
+            if review is None or not Path(review['temporary']).is_dir():
+                raise ValueError('安装预览已失效，请重新读取安装来源。')
+            _, _, agents = operations.load(self.home)
+            if not set(parameters['agents']) <= set(agents):
+                raise ValueError('所选 Agent 已不再接入，没有安装，请重新选择。')
+            result = operations.install(review, names, parameters['agents'], home=self.home)
+            if result.get('conflicts'):
+                return {'status': 'attention', 'attention': 'conflict', 'review_id': parameters['review_id'],
+                        'conflicts': [{'skill': c['name'], 'agent': None,
+                                       **{k: c[k] for k in ('name', 'same_content', 'message')}} for c in result['conflicts']],
+                        'message': result['message']}
+        elif kind == 'update':
+            with self.update_review(parameters['review_id']) as review:
+                if review['running']:
+                    raise ValueError('这次更新检查还没完成，请等检查完成后再提交。')
+                registry = operations.load(self.home)[1]['skills']
+                missing = [{'name': n, 'error': '这个技能已经删除，没有更新。'} for n in names if n not in registry]
+                remaining = [n for n in names if n in registry]
+                try:
+                    result = updates.apply(review, remaining, parameters['choices'], True,
+                                           parameters['merge_ids'], parameters['confirm_lark_cli']) if remaining else {
+                                               'updated': [], 'failed': [], 'operations': []}
+                except operations.RollbackError:
+                    raise
+                except (ValueError, OSError) as error:
+                    reason = str(error) if isinstance(error, ValueError) else '文件没能读写，请重新检查更新后再试。'
+                    result = {'updated': [], 'failed': [{'name': n, 'error': reason} for n in remaining], 'operations': []}
+                failed = result.get('failed', []) + missing
+                ids = [r['id'] for r in result.get('operations', [])]
+                message = '已更新：' + ('、'.join(result['updated']) or '无') + '。'
+                if failed:
+                    message += '未更新：' + '；'.join(r['name'] + '：' + r['error'] for r in failed)
+                    message += ' 请重新检查更新后再试。'
+                return {'status': 'failed' if failed else 'done', 'message': self.job_message(self.skill_message(message)),
+                        'updated': result['updated'], 'failed': [
+                            {'name': r['name'], 'error': self.job_message(self.skill_message(r['error']))} for r in failed],
+                        'operations': ids}
+        elif kind in {'cleanup_withdraw', 'cleanup_delete'}:
+            action = cleanup.delete_preview if kind == 'cleanup_delete' else cleanup.preview
+            plan = action(names, self.home)
+            attention = self.confirmation_changes(plan, parameters['seen'])
+            if attention: return attention
+            action = cleanup.delete if kind == 'cleanup_delete' else cleanup.apply
+            result = action(names, True, self.home, plan['revision'],
+                            review_check=lambda current: self.confirmation_changes(current, parameters['seen']))
+            if result.get('status') == 'attention': return result
+        elif kind == 'restore':
+            registry = operations.load(self.home)[1]['skills']
+            missing = [n for n in names if n not in registry]
+            restored = [n for n in names if n in registry and not registry[n].get('withdrawn')]
+            if missing or restored:
+                raise ValueError(self.skill_message('；'.join(filter(None, [
+                    '、'.join(missing) + '：已经删除，没有恢复。' if missing else '',
+                    '、'.join(restored) + '：已经恢复或不在已撤下列表，无需重复恢复。' if restored else '']))))
+            result = cleanup.restore(names, self.home)
+        else:
+            result = team.install(self.home, parameters['key'])
+            return {'message': result['message'], 'installed': result['installed'], 'reuse': result['reuse'],
+                    **({'skills': sorted(set(result['installed'] + result['reuse']))} if result['installed'] else {}),
+                    **({'operation': result['id']} if 'id' in result else {}),
+                    'operations': [result['id']] if 'id' in result else []}
+        return {'message': result['message'], 'operations': [result['id']] if 'id' in result else []}
 
     def auto_check_program(self):
         with self.runtime_lock:
@@ -222,7 +599,7 @@ class Dashboard(ThreadingHTTPServer):
                         idle = not self.active_requests and not (
                             any(t and t.is_alive() for t in (self.update_thread, self.labels_thread)) or
                             self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())) or
-                            any(item['status'] in {'waiting', 'running'} for item in self.team_queue_status()['items']))
+                            self.jobs_busy())
                     if idle:
                         break
                     time.sleep(.05)
@@ -422,6 +799,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(409, {'error': str(error)})
         elif path == '/api/team/queue':
             self.reply(200, self.server.team_queue_status())
+        elif path == '/api/jobs':
+            self.reply(200, self.server.jobs_status())
         elif path in {'/api/team', '/api/team/catalog', '/api/team/listings/candidates'}:
             try:
                 result = (team.status(self.server.home, strict=False) if path == '/api/team' else
@@ -523,6 +902,8 @@ class Handler(BaseHTTPRequestHandler):
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/queue', '/api/team/queue/clear',
                         '/api/team/ratings', '/api/team/ratings/remove'}
+        job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
+        write_routes |= job_routes
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
                            '/api/settings/extra-sources', '/api/tags', '/api/team/settings'}
         program_routes = {'/api/program/check', '/api/program/apply'}
@@ -533,12 +914,25 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(405, {"error": "当前阶段没有这个操作。"})
             return
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 1024 * 1024:
-                raise ValueError("请求内容不完整或太长，请重新打开核对页。")
-            body = json.loads(self.rfile.read(length))
-            if not isinstance(body, dict):
-                raise ValueError('请求内容格式不正确。')
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 1024 * 1024:
+                    raise ValueError("请求内容不完整或太长，请重新打开核对页。")
+                body = json.loads(self.rfile.read(length))
+                if not isinstance(body, dict):
+                    raise ValueError('请求内容格式不正确。')
+            except ValueError:
+                if path in job_routes:
+                    raise JobInputError('请求内容格式不正确，请逐项填写任务参数。') from None
+                raise
+            if path in job_routes:
+                if not preview_allowed(self.server.home):
+                    self.reply(403, {'error': '当前处于只读模式，任务没有加入队列，文件没有改动。'})
+                    return
+                result = (self.server.queue_job(body) if path == '/api/jobs' else
+                          self.server.retry_job(body) if path == '/api/jobs/retry' else self.server.clear_jobs())
+                self.reply(200, result)
+                return
             if path.startswith('/api/team/'):
                 if path not in read_routes and not preview_allowed(self.server.home):
                     self.reply(403, {'error': '当前处于只读模式，分享和本机文件没有改动。'})
@@ -573,14 +967,16 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == '/api/settings/llm/test':
                     self.reply(200, labels.test(self.server.home))
                 elif path == '/api/tags':
-                    self.reply(200, tags.update(self.server.home, body))
+                    result = tags.update(self.server.home, body)
+                    self.reply(200, result)
                 elif path == '/api/settings/extra-sources':
                     folder = body.get('path', '')
                     if not isinstance(folder, str):
                         raise ValueError('请填写一个文件夹。')
-                    message = (extra_sources.remove(self.server.home, folder) if body.get('remove') is True
-                               else extra_sources.add(self.server.home, folder))
-                    self.server.inventory = scan(self.server.home)
+                    with self.server.local_write():
+                        message = (extra_sources.remove(self.server.home, folder) if body.get('remove') is True
+                                   else extra_sources.add(self.server.home, folder))
+                        self.server.inventory = scan(self.server.home)
                     self.reply(200, {'message': message, 'extra_sources': extra_sources.paths(self.server.home)})
                 else:
                     mode = body.get('mode')
@@ -606,21 +1002,18 @@ class Handler(BaseHTTPRequestHandler):
                 with self.server.update_lock:
                     review = next(reversed(self.server.update_reviews.values()), None)
                     if review is None or not review['running']:
-                        # A long-lived dashboard would otherwise keep every earlier check's downloads.
-                        for old in self.server.update_reviews.values():
-                            rmtree(old['temporary'], ignore_errors=True)
-                        self.server.update_reviews.clear()
                         review = updates.create(self.server.home)
                         self.server.update_reviews[review['id']] = review
                         self.server.update_thread = threading.Thread(target=updates.check, kwargs={'review': review, 'lock': self.server.update_lock}, daemon=True)
                         self.server.update_thread.start()
-                    self.reply(200, updates.public(review))
+                    result = updates.public(review)
+                self.server.prune_update_reviews()
+                self.reply(200, result)
                 return
             if path in {'/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate'}:
-                with self.server.update_lock:
-                    review = self.server.update_reviews[body['review_id']]
-                action = updates.explain if path.endswith('explain') else updates.calibrate if path.endswith('calibrate') else updates.prepare_merge
-                result = action(review, body['name'])
+                with self.server.update_review(body['review_id']) as review:
+                    action = updates.explain if path.endswith('explain') else updates.calibrate if path.endswith('calibrate') else updates.prepare_merge
+                    result = action(review, body['name'])
                 self.reply(200, result)
                 return
             if path == '/api/assignment/preview':
@@ -675,71 +1068,78 @@ class Handler(BaseHTTPRequestHandler):
             if not preview_allowed(self.server.home):
                 self.reply(403, {"error": "当前处于只读模式，文件没有改动。"})
                 return
-            if path in {'/api/cleanup/apply', '/api/cleanup/delete/apply'}:
-                try:
-                    action = cleanup.delete_preview if path == '/api/cleanup/delete/apply' else cleanup.preview
-                    action(body.get('skills'), self.server.home)
-                except ValueError as error:
-                    self.reply(400, {'error': str(error)})
-                    return
-            if path in {'/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/config/apply'} and (not isinstance(body.get('revision'), str) or not body['revision']):
-                raise ValueError('请先读取当前状态，再确认这次操作。')
-            if path == "/api/migration/apply":
-                result = apply(body["plan_id"], self.server.home, body["agents"], body.get("choices"), body.get("sources"))
-                operations.bootstrap(self.server.home)
-            elif path == '/api/restore':
-                result = restore(body["backup_id"], self.server.home)
-            elif path == '/api/assignment/apply':
-                result = operations.apply_assign(body['changes'], body['revision'], True, self.server.home,
-                                                 body.get('recheck') is True)
-            elif path == '/api/config/apply':
-                result = sharing.import_config(body.get('config'), body.get('agents'), self.server.home, body['revision'])
-            elif path == '/api/agents/join/apply':
-                result = agent_management.join(body['agents'], body['plan_id'], body['revision'], body.get('choices'), self.server.home)
-            elif path == '/api/agents/leave/apply':
-                result = agent_management.leave(body['agent'], body['plan_id'], body['revision'], self.server.home)
-            elif path == '/api/agents/ignore/apply':
-                result = agent_management.ignore(body['agent'], body['plan_id'], body['revision'], self.server.home)
-            elif path == '/api/dependencies':
-                result = operations.decide_dependencies(body['decisions'], body['revision'], self.server.home)
-            elif path == '/api/install/apply':
-                result = operations.install(self.server.install_reviews[body['review_id']], body['skills'],
-                                            body.get('agents'), body['revision'], self.server.home)
-            elif path == '/api/absorb':
-                result = operations.absorb(body.get('all', True), body.get('selected'), body['revision'], self.server.home)
-            elif path == '/api/updates/watch':
-                result = updates.set_watch(body.get('name'), body.get('mode'), body.get('revision'), self.server.home, True)
-            elif path == '/api/updates/apply':
-                with self.server.update_lock:
-                    review = self.server.update_reviews[body['review_id']]
-                    result = updates.apply(review, body['skills'], body.get('choices'), True,
-                                           body.get('merge_ids'), body.get('confirm_lark_cli', False))
-            elif path == '/api/cleanup/apply':
-                result = cleanup.apply(body.get('skills'), True, self.server.home, body['revision'])
-            elif path == '/api/cleanup/delete/apply':
-                result = cleanup.delete(body.get('skills'), True, self.server.home, body['revision'])
-            elif path == '/api/withdrawn/restore':
-                result = cleanup.restore(body['skills'],self.server.home,body['revision'])
-            else:
-                result = operations.undo(body['id'], body['revision'], self.server.home)
-                record = next((item for item in operations.history(self.server.home) if item['id'] == body['id']), None)
-                if record:
-                    for review in self.server.update_reviews.values():
-                        updates.restore_arrows(review, record.get('skills'), body['id'])
-            self.server.invalidate_agents()
-            self.server.inventory = scan(self.server.home)
-            self.reply(200, result)
+            with self.server.local_write(restoring=path == '/api/restore'):
+                if path in {'/api/cleanup/apply', '/api/cleanup/delete/apply'}:
+                    try:
+                        action = cleanup.delete_preview if path == '/api/cleanup/delete/apply' else cleanup.preview
+                        action(body.get('skills'), self.server.home)
+                    except ValueError as error:
+                        self.reply(400, {'error': str(error)})
+                        return
+                if path in {'/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/config/apply'} and (not isinstance(body.get('revision'), str) or not body['revision']):
+                    raise ValueError('请先读取当前状态，再确认这次操作。')
+                if path == "/api/migration/apply":
+                    result = apply(body["plan_id"], self.server.home, body["agents"], body.get("choices"), body.get("sources"))
+                    operations.bootstrap(self.server.home)
+                elif path == '/api/restore':
+                    result = restore(body["backup_id"], self.server.home)
+                    with self.server.jobs_lock:
+                        self.server.jobs_blocked = ''
+                        self.server.jobs_version += 1
+                elif path == '/api/assignment/apply':
+                    result = operations.apply_assign(body['changes'], body['revision'], True, self.server.home,
+                                                     body.get('recheck') is True)
+                elif path == '/api/config/apply':
+                    result = sharing.import_config(body.get('config'), body.get('agents'), self.server.home, body['revision'])
+                elif path == '/api/agents/join/apply':
+                    result = agent_management.join(body['agents'], body['plan_id'], body['revision'], body.get('choices'), self.server.home)
+                elif path == '/api/agents/leave/apply':
+                    result = agent_management.leave(body['agent'], body['plan_id'], body['revision'], self.server.home)
+                elif path == '/api/agents/ignore/apply':
+                    result = agent_management.ignore(body['agent'], body['plan_id'], body['revision'], self.server.home)
+                elif path == '/api/dependencies':
+                    result = operations.decide_dependencies(body['decisions'], body['revision'], self.server.home)
+                elif path == '/api/install/apply':
+                    result = operations.install(self.server.install_reviews[body['review_id']], body['skills'],
+                                                body.get('agents'), body['revision'], self.server.home)
+                elif path == '/api/absorb':
+                    result = operations.absorb(body.get('all', True), body.get('selected'), body['revision'], self.server.home)
+                elif path == '/api/updates/watch':
+                    result = updates.set_watch(body.get('name'), body.get('mode'), body.get('revision'), self.server.home, True)
+                elif path == '/api/updates/apply':
+                    with self.server.update_review(body['review_id']) as review:
+                        result = updates.apply(review, body['skills'], body.get('choices'), True,
+                                               body.get('merge_ids'), body.get('confirm_lark_cli', False))
+                elif path == '/api/cleanup/apply':
+                    result = cleanup.apply(body.get('skills'), True, self.server.home, body['revision'])
+                elif path == '/api/cleanup/delete/apply':
+                    result = cleanup.delete(body.get('skills'), True, self.server.home, body['revision'])
+                elif path == '/api/withdrawn/restore':
+                    result = cleanup.restore(body['skills'],self.server.home,body['revision'])
+                else:
+                    result = operations.undo(body['id'], body['revision'], self.server.home)
+                    record = next((item for item in operations.history(self.server.home) if item['id'] == body['id']), None)
+                    if record:
+                        with self.server.update_lock:
+                            for review in self.server.update_reviews.values():
+                                updates.restore_arrows(review, record.get('skills'), body['id'])
+                self.server.invalidate_agents()
+                self.server.inventory = scan(self.server.home)
+                self.reply(200, result)
         except (ValueError, OSError, KeyError, TypeError, StopIteration) as error:
+            if isinstance(error, operations.RollbackError):
+                self.server.stop_jobs()
             message = ('团队操作没能完成，请重新预览后重试。' if path.startswith('/api/team/') and not isinstance(error, ValueError) else
                        '设置没能保存，请核对后再试。' if path in settings_routes and not isinstance(error, ValueError) else str(error))
-            self.reply(400 if path in {'/api/cleanup/preview', '/api/cleanup/delete/preview'} else 409, {
+            self.reply(400 if isinstance(error, JobInputError) or path in {'/api/cleanup/preview', '/api/cleanup/delete/preview'} else 409, {
                 "error": message or "操作没能完成，请重新预览。",
+                **({'blocked': True} if path in job_routes and self.server.jobs_blocked else {}),
                 **({'recheck': True} if isinstance(error, operations.AssignmentChanged) else {})})
 
     def team_post(self, path, body):
         home = self.server.home
         if path == '/api/team/settings':
-            return team.save_settings(home, body)
+            return team.save_settings(home, body, self.server.local_write())
         if path == '/api/team/listings/preview':
             saved, result = team.listings_preview(home, body.get('skills'))
             review = secrets.token_urlsafe(16)

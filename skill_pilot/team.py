@@ -177,7 +177,7 @@ def status(home, config=None, strict=True):
     return result
 
 
-def save_settings(home, body):
+def save_settings(home, body, write_lock=None):
     guard(Path(home) / '.skill-pilot', home)
     config = _settings({'url': body.get('url'), 'key': body.get('key', '')})
     supplied_key = bool(config['key'])
@@ -207,7 +207,9 @@ def save_settings(home, body):
         config['key'] = joined['token']
         result = status(home, config)
     # Failed connections leave the previous working settings intact.
-    labels.atomic_write(home, 'team.json', json.dumps(config, ensure_ascii=False) + '\n', 0o600)
+    from contextlib import nullcontext
+    with write_lock if write_lock is not None else nullcontext():
+        labels.atomic_write(home, 'team.json', json.dumps(config, ensure_ascii=False) + '\n', 0o600)
     return {**result, 'message': '分享站已连接，设置已保存。'}
 
 

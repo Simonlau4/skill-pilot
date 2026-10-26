@@ -32,7 +32,7 @@ def resume_state():
 def snapshot(server):
     state = {name: getattr(server, name) for name in
              ('token', 'inventory', 'install_reviews', 'team_upload_reviews',
-              'update_reviews', 'labels_progress', 'program_review', 'program_progress')}
+              'update_reviews', 'labels_progress', 'program_review', 'program_progress', 'jobs_blocked')}
     return state
 
 

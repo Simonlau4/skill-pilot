@@ -224,6 +224,47 @@ server.run(json_output=True)
         self.assertEqual(json.loads(second.stdout)['message'], '已打开正在运行的看板。')
         self.assertEqual(self.before, store.physical_state(self.home))
 
+    def test_refresh_waits_for_a_job_and_discards_completed_jobs_in_the_new_process(self):
+        plan = store.preview(self.home, ['codex'])
+        store.apply(plan['plan_id'], self.home, ['codex'])
+        shutil.copytree(store.PROJECT / 'skill', self.code / 'skill')
+        path = self.code / 'skill_pilot/web/server.py'
+        path.write_text(path.read_text() + '''
+original_job = Dashboard.execute_job
+def delayed_job(self, item):
+    Path('../queue-started').touch()
+    while not Path('../queue-release').exists(): time.sleep(.02)
+    result = original_job(self, item)
+    Path('../queue-completed').write_text('finished before replacement')
+    return result
+Dashboard.execute_job = delayed_job
+''')
+        self.env['SKILL_PILOT_READ_ONLY'] = '0'
+        self.start()
+        initial = self.request('/api/status')[1]
+        changes = [{'skill': 'sample', 'agent': 'codex', 'enabled': False}]
+        status, preview = self.request('/api/assignment/preview', {'changes': changes, 'recheck': True})
+        self.assertEqual(status, 200, preview)
+        status, submitted = self.request('/api/jobs', {'kind': 'assignment', 'confirmed': True, 'changes': changes,
+            'seen': {k: preview[k] for k in ('changes', 'dependency_warnings', 'path_warnings')}})
+        self.assertEqual(status, 200, submitted)
+        deadline = time.monotonic() + 5
+        while not (self.root / 'queue-started').exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue((self.root / 'queue-started').exists())
+        # Repeated page reads retain the same job before a program replacement.
+        self.assertEqual(self.request('/api/jobs')[1]['items'][0]['id'], submitted['job']['id'])
+        self.change_backend()
+        self.assertTrue(self.request('/api/runtime/refresh', {})[1]['busy'])
+        self.assertEqual(self.request('/api/status')[1]['version'], initial['version'])
+        self.assertFalse((self.root / 'queue-completed').exists())
+        (self.root / 'queue-release').touch()
+        current = self.wait_status(lambda s: s.get('test_marker') == 'new-program')
+        self.assertEqual(current['pid'], self.program.pid)
+        self.assertEqual((self.root / 'queue-completed').read_text(), 'finished before replacement')
+        self.assertEqual(self.request('/api/jobs'), (200, {'items': [], 'version': 0, 'blocked': ''}))
+        self.assertEqual(operations.load(self.home)[1]['skills']['sample']['assigned_agents'], [])
+
     def test_refresh_preserves_team_uploads_and_discards_the_completed_queue(self):
         def discovery_after_scan():
             deadline = time.monotonic() + 8

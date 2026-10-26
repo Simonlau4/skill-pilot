@@ -528,7 +528,7 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
         return {**result, 'id': commit, 'message': message, 'backup_id': snapshot['backup_id']}
 
 
-def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=False):
+def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=False, review_check=None):
     home, registry, agents = load(home)
     guard(home / '.skill-pilot', home)
     if recheck:
@@ -537,6 +537,10 @@ def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=Fal
             raise AssignmentChanged('状态又有变化，正在重新核对；你的选择已保留。')
         if review['conflicts']:
             return {'needs_attention': True, **review}
+        if review_check:
+            attention = review_check(review)
+            if attention:
+                return attention
         if (plan['dependency_warnings'] or plan['path_warnings']) and not confirmed:
             return {'needs_confirmation': True, **review}
         if not plan['changed']:
@@ -646,6 +650,9 @@ def install(review, names, assigned=None, expected=None, home=None):
     def mutate(current, checked):
         for item in items:
             _put(home, current, item, [], [], checked)
+        dependencies, _ = curated_dependencies()
+        for name in names:
+            current['skills'][name]['requires'] = sorted(dependencies.get(name, set()) & current['skills'].keys())
         changes = [{'skill': s['name'], 'agent': a, 'enabled': True} for s in items for a in assigned]
         plan = assignment_plan(current, agents, changes, home)
         current.update(plan['registry'])
