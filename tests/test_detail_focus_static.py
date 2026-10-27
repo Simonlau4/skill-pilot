@@ -94,12 +94,13 @@ let supportsBaseSelect = false;
 const CSS = {escape: value => value, supports: () => supportsBaseSelect};
 
 function matches(node, selector) {
+  if (selector.includes(',')) return selector.split(',').some(part => matches(node, part.trim()));
   if (selector === '*') return true;
   if (selector === '[hidden]') return node.hidden;
   if (selector === 'summary') return node.tagName === 'SUMMARY';
   if (selector === 'select') return node.tagName === 'SELECT';
   if (selector === ':open') return node.open;
-  if (selector === '#skills-list') return node.id === 'skills-list';
+  if (selector.startsWith('#')) return node.id === selector.slice(1);
   if (selector === 'dialog[open]') return node.tagName === 'DIALOG' && node.open;
   const data = selector.match(/^\[data-open="(.*)"\]$/);
   if (data) return node.dataset.open === data[1];
@@ -209,7 +210,10 @@ const scrim = h('div', {id: 'panel-scrim', hidden: true});
 const dialog = h('dialog', {id: 'confirm-dialog'}, h('button', {id: 'confirm-ok'}));
 const body = h('body', {},
   h('header', {}, h('button', {id: 'nav'})),
-  h('main', {}, h('div', {id: 'skills-list'}, skill)),
+  h('main', {},
+    h('details', {id: 'updates-unchecked', open: true},
+      h('button', {id: 'unchecked-01', 'data-open': 'unchecked-01', 'data-unchecked-detail': ''})),
+    h('div', {id: 'skills-list'}, skill)),
   h('footer', {}, footerHint),
   already,
   scrim,
@@ -363,6 +367,27 @@ document.activeElement = skill;
 press('Tab', false);
 assert(document.activeElement === footerHint, '详情关掉后，Tab 应能回到页面上的其他按钮');
 assert(window.scrollY === 1200, '焦点落到页面下方的按钮时，页面才会跟着滚');
+
+// 从未检查清单打开详情，关闭后也应回到清单；重画过时按名称找回新按钮。
+const unchecked = $('unchecked-01');
+unchecked.focus();
+openDetail('unchecked-01');
+flushFrames();
+assert(detailOpener === unchecked, '没有记住未检查清单里的入口');
+press('Escape');
+assert(document.activeElement === unchecked, '关闭详情后没有返回未检查清单');
+flush();
+unchecked.focus();
+openDetail('unchecked-01');
+flushFrames();
+const replacement = h('button', {'data-open': 'unchecked-01', 'data-unchecked-detail': ''});
+const uncheckedList = $('updates-unchecked');
+unchecked.isConnected = false;
+uncheckedList.childNodes.splice(0, 1, replacement);
+replacement.parentElement = uncheckedList;
+press('Escape');
+assert(document.activeElement === replacement, '清单重画后没有找回新的入口按钮');
+flush();
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

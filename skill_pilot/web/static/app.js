@@ -4597,7 +4597,7 @@ function holdDetailBackground(hold) {
 }
 
 function openDetail(name) {
-  if (state.detail !== name || $('detail-panel').hidden) detailOpener = document.activeElement?.closest('#skills-list') ? document.activeElement : null;
+  if (state.detail !== name || $('detail-panel').hidden) detailOpener = document.activeElement?.closest('#skills-list, #updates-unchecked') ? document.activeElement : null;
   state.detail = name;
   renderDetail();
   showDetailPanel(() => state.detail === name);
@@ -4643,8 +4643,9 @@ function closeDetail() {
   }
   // 列表可能已经重画过：按技能名找回打开详情的那一行，把焦点还给它。
   const openerName = detailOpener?.dataset?.open || detailOpener?.dataset?.updateUp;   // 从技能名或更新小箭头打开的
+  const openerList = detailOpener?.hasAttribute('data-unchecked-detail') ? $('updates-unchecked') : $('skills-list');
   const opener = detailOpener?.isConnected ? detailOpener
-    : openerName ? $('skills-list').querySelector(`[data-open="${CSS.escape(openerName)}"]`) : null;
+    : openerName ? openerList.querySelector(`[data-open="${CSS.escape(openerName)}"]`) : null;
   opener?.focus();
   detailOpener = null;
 }
@@ -5079,6 +5080,7 @@ const updateState = {
   explanations: new Map(),
   notices: new Map(),
   signature: '',
+  uncheckedHtml: '',
   failedOpen: false,
   starting: false,
   busy: false,
@@ -5139,7 +5141,7 @@ function showReview(review) {
   if (homeVisible) renderHomeTodos();
 }
 
-/* 这次没查的技能和原因。名单在开始检查时已经记下，这里只读。 */
+/* 后台给出的跳过原因和名单；兼容只有数量的旧结果。 */
 function uncheckedReasons(review) {
   const items = (Array.isArray(review.unchecked) ? review.unchecked : []).filter(item => Number(item.count) > 0);
   const count = items.reduce((sum, item) => sum + Number(item.count), 0);
@@ -5173,15 +5175,47 @@ function updateResultSentence(review) {
       const detail = skipped.single ? `${number(skipped.count)} 个技能${skipped.text}` : skipped.text;
       why = `${detail}，已跳过检查`;
     }
-    return finish(`暂无可检查的技能：${why}`);
+    return finish(`全库检查：暂无可检查的技能：${why}`);
   }
   const outcome = waiting ? `${number(waiting)} 个有可用更新`
     : (failed || skipped.count || !skipped.known) ? '未发现可用更新'
     : '均为最新版本';
-  const lead = `已检查 ${number(review.total)} 个技能，${outcome}`;
+  const lead = `全库检查：已检查 ${number(review.total)} 个技能，${outcome}`;
   if (!skipped.count) return finish(lead);
-  return finish(`${lead}；其余 ${number(skipped.count)} 个未检查：${skipped.text}`);
+  return finish(`${lead}；${number(skipped.count)} 个跳过检查：${skipped.text}`);
 }
+
+function renderUncheckedSkills(review, checking) {
+  const panel = $('updates-unchecked');
+  const groups = (Array.isArray(review?.unchecked) ? review.unchecked : []).filter(group => Number(group.count) > 0);
+  panel.hidden = checking || !groups.length;
+  if (panel.hidden) return;
+  const count = groups.reduce((sum, group) => sum + Number(group.count), 0);
+  $('updates-unchecked-summary').textContent = `查看未检查清单（${number(count)}）`;
+  const content = groups.map(group => {
+    const names = Array.isArray(group.names) ? group.names : [];
+    const rows = names.map(name => {
+      const skill = state.table?.skills.find(item => item.name === name);
+      if (!skill) return '';
+      const agents = skill.assigned_agents.map(nameOf).join('、');
+      return `<li><button class="link-btn" data-open="${escape(name)}" data-unchecked-detail>${nameHtml(name)}</button>
+        <span class="item-note">${agents ? `已启用：${escape(agents)}` : '未启用'}</span></li>`;
+    }).join('');
+    return `<section class="unchecked-group"><h3>${escape(group.reason)} · ${number(group.count)} 个</h3>
+      ${group.description ? `<p>${escape(group.description)}</p>` : ''}
+      ${rows ? `<ul>${rows}</ul>` : '<p>这次检查未记录技能名单，重新检查后即可查看。</p>'}</section>`;
+  }).join('');
+  const list = $('updates-unchecked-list');
+  if (updateState.uncheckedHtml !== content) {
+    list.innerHTML = content;
+    updateState.uncheckedHtml = content;
+  }
+}
+
+$('updates-unchecked').addEventListener('click', event => {
+  const button = event.target.closest('[data-unchecked-detail]');
+  if (button) openDetail(button.dataset.open);
+});
 
 /* 工具栏：检查按钮（带进度）和“全部更新”。
    查完后在下面写清范围；有新版时数量仍在“全部更新”上。 */
@@ -5215,6 +5249,7 @@ function renderUpdateBar() {
   const status = sentence ? `<span>${mark}${escape(sentence)}</span>` : '';
   $('updates-status').innerHTML = status
     + (problems.length && !checking ? `<button class="link-btn" data-failed-toggle aria-expanded="${updateState.failedOpen}">${icon('warning')}${failureCounts}</button>` : '');
+  renderUncheckedSkills(review, checking);
   const panel = $('updates-failed');
   panel.hidden = !problems.length || checking || !updateState.failedOpen;
   panel.innerHTML = problems.map(row => `<p><strong>${nameHtml(row.name)}</strong>：${escape(row.error || row.update_error || row.blocked_reason)}</p>`).join('');

@@ -290,8 +290,19 @@ class NormalizationTests(unittest.TestCase):
             with self.subTest(source=source):
                 normalized = normalize(source); self.assertEqual(normalized['kind'], kind)
                 if path: self.assertEqual(normalized['path'], path)
-        for text in ['自制', '本机源码', '本机文档生成', '来源不明', '没有证据']:
-            self.assertEqual(normalize({'source': text})['label'], '自制，不检查更新')
+        skipped = [
+            ({'source': '自制'}, 'self_made', '自制，不检查更新'),
+            ({'source': '本机源码'}, 'local', '本机维护，不检查外部更新'),
+            ({'source': '本机文档生成'}, 'local', '本机维护，不检查外部更新'),
+            ({'source': '来源不明'}, 'unknown', '来源未记录'),
+            ({}, 'unknown', '来源未记录'),
+            ({'source': '没有证据'}, 'unsupported', '暂不支持检查此来源'),
+            ({'record': {'sourceType': 'well-known', 'sourceUrl': 'https://example.test/skills/demo'}},
+             'unsupported', '暂不支持检查此来源'),
+        ]
+        for source, reason, label in skipped:
+            with self.subTest(source=source):
+                self.assertEqual(normalize(source), {'kind': 'skip', 'label': label, 'skip_reason': reason})
         with self.assertRaises(ValueError): normalize({'source': 'https://github.com/o/r', 'source_path': '../bad'})
 
 
