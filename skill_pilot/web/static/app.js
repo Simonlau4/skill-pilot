@@ -966,10 +966,53 @@ $('jobs-list').addEventListener('click', event => {
 });
 $('jobs-clear').addEventListener('click', event => clearEndedJobs(event.currentTarget));
 
+/* 一个包刚加入队列时，记下这一批的条目；等整批结束只提示一次。 */
+const packBatches = new Map();
+
+const packBatchToast = (title, count) => `已从团队商店装上「${title}」里的 ${count} 个技能`;
+
+function packBatchReady(batch, jobs) {
+  return Boolean(batch) && !(jobs || []).some(job => batch.ids.has(job.id) && jobActive(job));
+}
+
+function announcePackBatch(key, jobs) {
+  const batch = packBatches.get(key);
+  if (!batch || batch.announced || !packBatchReady(batch, jobs)) return '';
+  // 全部失败时先不标记，等重试成功后再补一条整包提示。
+  if (!batch.installed.size) return '';
+  batch.announced = true;
+  const text = packBatchToast(batch.title, batch.installed.size);
+  toast({text});
+  return text;
+}
+
 /* 任务从等待或处理中变成结束时，在后台刷新受影响的数据，并提示结果。
    不重画整页，用户正在搜索、筛选、输入的内容都不动。 */
 function finishJobs(finished) {
+  const packKeys = new Set();
   for (const job of finished) {
+    const isPack = job.kind === 'team_install' && Boolean(job.pack);
+    let batch = isPack ? packBatches.get(job.pack) : null;
+    if (isPack && !batch) {
+      // 刷新页面后没有记下这一批：用当前还在队列里的同包条目补一份，至少不拆成多条提示。
+      batch = {
+        ids: new Set((state.jobs || []).filter(item => item.pack === job.pack && (jobActive(item) || item.id === job.id))
+          .map(item => item.id)),
+        title: job.pack_title || '',
+        installed: new Set(),
+        announced: false,
+      };
+      packBatches.set(job.pack, batch);
+    }
+    if (isPack) {
+      batch.ids.add(job.id);
+      packKeys.add(job.pack);
+      if (job.status === 'done') {
+        const names = job.installed?.length ? job.installed : [job.name].filter(Boolean);
+        for (const name of names) batch.installed.add(name);
+        continue;
+      }
+    }
     if (job.status === 'done') {
       toast({
         text: pastTense(job.message || '任务已完成'),
@@ -981,6 +1024,7 @@ function finishJobs(finished) {
       toast({text: jobStatusLine(job), tone: 'error', sticky: true});
     }
   }
+  for (const key of packKeys) announcePackBatch(key, state.jobs);
   const updatesFinished = finished.some(job => job.kind === 'update');
   const installed = finished.some(job => job.kind === 'install' && job.status === 'done');
   (async () => {
@@ -1139,7 +1183,7 @@ const state = {
   storeSort: 'latest', // 全部技能的排序：latest / rating / popular
   storeGroup: '',      // 选中的分组；'-' 是没分组
   storeMine: false,    // 只看我上架的
-  storeDetail: null,   // 详情面板里正在看的卡片编号
+  storeDetail: null,   // 详情面板里正在看的卡片编号或技能包编号（pack: 开头）
   queue: null,         // /api/team/queue：安装队列；null 是还没读
 };
 
@@ -2994,7 +3038,7 @@ $('team-form').addEventListener('submit', event => {
       setTeamKeyOpen(false);
       state.team = result;
       state.store = null;
-      storeCandidates = null;
+      forgetCandidates();
       document.querySelector('.nav-item[data-page="team"]').hidden = false;
       toast({text: `已连上分享站，你是 ${result.member.name}。`});
     } catch (error) {
@@ -3081,9 +3125,21 @@ function applyQueue(result, {force = false} = {}) {
 
 async function addToStoreQueue(item) {
   queueVersion += 1;   // 还在路上的队列读取作废，别把刚加入的盖掉
-  const result = await api('/api/team/queue', {key: item.key});
+  const result = await api('/api/team/queue', item.pack ? {pack: item.pack, keys: item.keys} : {key: item.key});
   queueVersion += 1;   // 写入期间发出的读取也作废，以这次返回的队列为准
   return result;
+}
+
+function trackPackBatch(pack, result, beforeIds) {
+  const items = (result?.items || []).filter(item => item.pack === pack.key && (!beforeIds.has(item.id) || queueActive(item)));
+  if (!items.length) return;
+  const batch = {ids: new Set(items.map(item => item.id)), title: pack.title, installed: new Set(), announced: false};
+  for (const item of items) {
+    if (item.status !== 'done') continue;
+    const names = item.installed?.length ? item.installed : [item.name].filter(Boolean);
+    for (const name of names) batch.installed.add(name);
+  }
+  packBatches.set(pack.key, batch);
 }
 
 async function clearStoreQueue(button) {
@@ -3127,9 +3183,16 @@ async function loadStore({syncQueue = true} = {}) {
 
 /* 自己能上架的技能（含已上架的是否改过）：打开上架窗口或看“我上架的”时才读。 */
 let storeCandidates = null;
+let storeCandidateData = null;   // 上架候选、现有技能包和整理建议
 async function loadCandidates() {
-  storeCandidates = (await api('/api/team/listings/candidates')).skills;
+  storeCandidateData = await api('/api/team/listings/candidates');
+  storeCandidates = storeCandidateData.skills;
   return storeCandidates;
+}
+
+function forgetCandidates() {
+  storeCandidates = null;
+  storeCandidateData = null;
 }
 
 /* ---------- 排序与筛选：只看数据，不碰页面，方便单独测试 ---------- */
@@ -3202,6 +3265,49 @@ function storeStatusTag(card) {
 
 const sizeText = bytes => bytes < 1024 ? `${bytes} 字节` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
+const storePack = key => (state.store?.packs || []).find(pack => pack.key === key) || null;
+
+/* 卡片属于哪个技能包：目录里通常只有一个。 */
+function storePackOf(card) {
+  return (card.packs || []).map(storePack).find(Boolean) || null;
+}
+
+const storePackTime = pack => Date.parse(pack.updated_at) || 0;
+
+function storePackTitles(pack) {
+  const cards = state.store?.cards || [];
+  return (pack.cards || []).map(key => cards.find(card => card.key === key)).filter(Boolean).map(storeTitle);
+}
+
+/* 包里前三个技能的中文名，多的用省略号。 */
+function storePackSummary(pack) {
+  const titles = storePackTitles(pack);
+  return titles.slice(0, 3).join(' · ') + (titles.length > 3 ? '…' : '');
+}
+
+/* 包的状态：全装了、装了一部分、还没装，自己上架的单独写。 */
+function storePackStatus(pack) {
+  if (pack.mine) return ['tag-quiet', '我的上架'];
+  const total = pack.local?.total || (pack.cards || []).length;
+  const installed = pack.local?.installed || 0;
+  if (total && installed >= total) return ['tag-ok', '已安装'];
+  if (installed) return ['tag', `已装 ${installed}/${total}`];
+  return ['tag-quiet', `${total} 个技能`];
+}
+
+function storePackTag(pack) {
+  const [tone, label] = storePackStatus(pack);
+  return `<span class="tag ${tone}">${escape(label)}</span>`;
+}
+
+/* 安装时要一起带上的前置依赖：只数本机还没有的。 */
+function storeNeedsHtml(card) {
+  const needs = (card.needs || []).filter(item => item.status !== 'have');
+  if (!needs.length) return '';
+  const text = `安装时一起装上：${needs.map(item => item.title || item.name).join('、')}`;
+  return `<span class="flag store-needs" role="img" aria-label="${escape(text)}" data-hint="${escape(text)}">${icon('link')}需要 ${needs.length} 个</span>`;
+}
+
 function storeCardHtml(card) {
   const quote = card.listings.find(item => item.note);
   const people = card.listings.length > 1 ? `<span>${card.listings.length} 人推荐</span>` : '';
@@ -3211,22 +3317,46 @@ function storeCardHtml(card) {
     <span class="store-card-quote">${quote
       ? `“${escape(quote.note)}”<span class="by"> — ${escape(quote.member.name)}</span>`
       : `<span class="by">${escape(storeRecommenders(card))}</span>`}</span>
-    <span class="store-card-foot">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}${people}${card.group ? `<span>${escape(card.group)}</span>` : ''}</span>
+    <span class="store-card-foot">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}${people}${card.group ? `<span>${escape(card.group)}</span>` : ''}${storeNeedsHtml(card)}</span>
   </button>`;
 }
 
-function storeRowHtml(card) {
+/* 包卡片：和普通卡片同尺寸，后面露出两层边，看起来是叠起来的一摞。 */
+function storePackCardHtml(pack) {
+  const quote = pack.note
+    ? `“${escape(pack.note)}”<span class="by"> — ${escape(pack.member.name)}</span>`
+    : `<span class="by">${escape(pack.member.name)}</span>`;
+  const tokens = !pack.mine && pack.tokens > 0 && (pack.local?.installable || 0) > 0
+    ? `<span>每个 Agent 约 +${tokenText(pack.tokens)} Token</span>` : '';
+  return `<div class="store-pack">
+    <span class="store-pack-layer is-far" aria-hidden="true"></span>
+    <span class="store-pack-layer" aria-hidden="true"></span>
+    <button class="store-card store-pack-card" type="button" data-store-open="${escape(pack.key)}">
+      <span class="store-card-top"><span class="store-card-title">${icon('stack', 'store-pack-icon')}${escape(pack.title)}</span>${storePackTag(pack)}</span>
+      <span class="store-card-sum">${escape(storePackSummary(pack))}</span>
+      <span class="store-card-quote">${quote}</span>
+      ${tokens ? `<span class="store-card-foot">${tokens}</span>` : ''}
+    </button>
+  </div>`;
+}
+
+function storeRowHtml(card, options) {
+  const child = Boolean(options && options.child);
+  const hidePack = Boolean(options && options.hidePack);
   const mine = state.storeMine;
   const candidate = mine ? storeCandidates?.find(item => item.name === card.name) : null;
+  const pack = hidePack ? null : storePackOf(card);
   const locked = teamCanWrite() ? '' : ' disabled';
   const end = mine
     ? `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>` : ''}
+       ${pack && state.store?.packs_supported !== false ? `<button class="btn btn-small btn-quiet" type="button" data-store-pack-edit="${escape(pack.id)}"${locked}>改技能包</button>` : ''}
        <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`
     : storeStatusTag(card);
-  return `<div class="store-row">
+  const sub = escape(storeSummary(card) || card.listings.find(item => item.note)?.note || '');
+  return `<div class="store-row${child ? ' is-pack-child' : ''}">
     <button class="store-row-main" type="button" data-store-open="${escape(card.key)}">
-      <span class="store-row-name"><span class="t">${escape(storeTitle(card))}</span>${card.title ? `<span class="skill-id">${escape(card.name)}</span>` : ''}</span>
-      <span class="store-row-sub">${escape(storeSummary(card) || card.listings.find(item => item.note)?.note || '')}</span>
+      <span class="store-row-name"><span class="t">${escape(storeTitle(card))}</span>${card.title ? `<span class="skill-id">${escape(card.name)}</span>` : ''}${storeNeedsHtml(card)}</span>
+      <span class="store-row-sub">${sub}${pack ? `<span class="store-row-pack">属于「${escape(pack.title)}」</span>` : ''}</span>
     </button>
     <span class="store-row-rating">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}</span>
     <span class="store-row-by">${escape(mine ? `${friendlyDate(storeMyListing(card)?.updated_at)}上架` : storeRecommenders(card))}</span>
@@ -3261,25 +3391,80 @@ function storeQueueRowHtml(item, locked = false) {
   </div>`;
 }
 
+let queueExpanded = new Set();
+
+/* 带包的条目合成一组，没包的照旧一行；组按第一次出现的顺序排。 */
+function storeQueueGroups(items) {
+  const groups = [], index = new Map();
+  for (const item of items) {
+    if (!item.pack) {
+      groups.push({pack: '', pack_title: '', items: [item]});
+      continue;
+    }
+    let group = index.get(item.pack);
+    if (!group) {
+      group = {pack: item.pack, pack_title: item.pack_title || '', items: []};
+      index.set(item.pack, group);
+      groups.push(group);
+    }
+    group.items.push(item);
+  }
+  return groups;
+}
+
+function storeQueuePackStatus(group) {
+  const total = group.items.length;
+  const done = group.items.filter(item => item.status === 'done').length;
+  const failed = group.items.filter(item => item.status === 'failed').length;
+  if (done === total) return ['tag-ok', `安装完成 ${total}/${total}`];
+  if (failed && !group.items.some(queueActive)) return ['tag-danger', `${failed} 个没装上`];
+  if (group.items.every(item => item.status === 'waiting')) return ['tag-quiet', '排队中'];
+  return ['tag', `正在安装 ${done}/${total}`];
+}
+
+function storeQueuePackHtml(group, locked = false) {
+  const open = queueExpanded.has(group.pack);
+  const [tone, label] = storeQueuePackStatus(group);
+  const done = group.items.filter(item => item.status === 'done').length;
+  const action = done === group.items.length
+    ? `<button class="link-btn" type="button" data-store-goto-tag="${escape(group.pack_title)}">去启用这 ${group.items.length} 个</button>`
+    : '';
+  return `<div class="store-pack-queue" data-store-pack-queue="${escape(group.pack)}">
+    <div class="store-pack-queue-head">
+      <button class="store-pack-toggle${open ? ' is-open' : ''}" type="button" data-store-queue-pack="${escape(group.pack)}"
+        aria-expanded="${open}" aria-label="${open ? '收起' : '展开'}「${escape(group.pack_title)}」">${icon('chevron-left')}</button>
+      <span class="store-pack-queue-name">${icon('stack')}<span>${escape(group.pack_title)}</span></span>
+      <span class="store-pack-queue-state"><span class="tag ${tone}">${escape(label)}</span></span>
+      ${action ? `<span class="store-pack-queue-action">${action}</span>` : ''}
+    </div>
+    ${open ? `<div class="store-pack-queue-items">${group.items.map(item => storeQueueRowHtml(item, locked)).join('')}</div>` : ''}
+  </div>`;
+}
+
 function renderStoreQueue() {
   const box = $('store-queue');
   const list = $('store-queue-items');
   const items = state.queue?.items || [];
   const hadFocus = box.contains(document.activeElement);
-  const focusKey = document.activeElement?.dataset.storeGoto || document.activeElement?.dataset.storeQueueRetry || '';
+  const activeElement = document.activeElement;
+  const focusKey = activeElement?.dataset.storeGotoTag || activeElement?.dataset.storeGoto
+    || activeElement?.dataset.storeQueueRetry || activeElement?.dataset.storeQueuePack || '';
   const wasHidden = box.hidden;
   box.hidden = !items.length;
   const active = items.filter(queueActive).length;
   $('store-queue-left').textContent = active ? `待安装 ${active} 个` : '';
   $('store-queue-clear').hidden = !items.some(item => item.status === 'done' || item.status === 'failed');
   $('store-queue-clear').disabled = teamReadOnly();
-  const html = items.map(item => storeQueueRowHtml(item, teamReadOnly() || jobsBlocked())).join('');
+  const html = storeQueueGroups(items).map(group => group.pack
+    ? storeQueuePackHtml(group, teamReadOnly() || jobsBlocked())
+    : storeQueueRowHtml(group.items[0], teamReadOnly() || jobsBlocked())).join('');
   const changed = list.innerHTML !== html;
   if (changed) list.innerHTML = html;
   // 队列每秒重画一次：刚按过的按钮可能没了，焦点放回同一处或队列标题。
   if ((changed || wasHidden !== box.hidden) && hadFocus) {
-    const next = focusKey && [...box.querySelectorAll('[data-store-goto], [data-store-queue-retry]')]
-      .find(button => (button.dataset.storeGoto || button.dataset.storeQueueRetry) === focusKey);
+    const next = focusKey && [...box.querySelectorAll('[data-store-goto-tag], [data-store-goto], [data-store-queue-retry], [data-store-queue-pack]')]
+      .find(button => (button.dataset.storeGotoTag || button.dataset.storeGoto
+        || button.dataset.storeQueueRetry || button.dataset.storeQueuePack) === focusKey);
     (next || (box.hidden ? $('store-all-title') : $('store-queue-title'))).focus();
   }
 }
@@ -3335,13 +3520,28 @@ function renderStoreShelves(cards) {
       <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>`;
     return;
   }
-  if (!storeBrowsing() || cards.length < SHELF_MIN) {
+  if (!storeBrowsing()) {
     box.innerHTML = '';
     return;
   }
   const shown = new Set();
-  box.innerHTML = STORE_SHELVES.map(shelf => {
-    const picked = shelf.pick(cards).filter(card => !shown.has(card.key)).sort(STORE_SORTS[shelf.sort]).slice(0, SHELF_SIZE);
+  const packs = [...(state.store?.packs || [])].sort((a, b) => storePackTime(b) - storePackTime(a));
+  const packShelf = packs.length ? `<section class="shelf" aria-labelledby="shelf-packs">
+      <div class="shelf-head">
+        <h2 id="shelf-packs">技能包</h2>
+        <button class="link-btn" type="button" data-store-more="packs">查看全部</button>
+      </div>
+      <div class="shelf-cards">${packs.slice(0, SHELF_SIZE).map(storePackCardHtml).join('')}</div>
+    </section>` : '';
+  // 三排推荐仍按原来的门槛；技能包少的时候也能单独出现在前面。
+  if (cards.length < SHELF_MIN) {
+    box.innerHTML = packShelf;
+    return;
+  }
+  box.innerHTML = packShelf + STORE_SHELVES.map(shelf => {
+    // 包里的技能由包卡片代表，不再单独占一排推荐。
+    const picked = shelf.pick(cards).filter(card => !card.packs?.length && !shown.has(card.key))
+      .sort(STORE_SORTS[shelf.sort]).slice(0, SHELF_SIZE);
     for (const card of picked) shown.add(card.key);
     return picked.length ? `<section class="shelf" aria-labelledby="shelf-${shelf.sort}">
       <div class="shelf-head">
@@ -3353,8 +3553,48 @@ function renderStoreShelves(cards) {
   }).join('');
 }
 
+let storePackOpen = new Set();
+
+/* 全部技能里属于包的技能收成一组：组头一行，展开后是缩进一级的普通行。 */
+function storePackRowHtml(pack) {
+  const open = storePackOpen.has(pack.key);
+  const cards = state.store?.cards || [];
+  const members = (pack.cards || []).map(key => cards.find(card => card.key === key)).filter(Boolean);
+  return `<div class="store-pack-group" data-store-pack-group="${escape(pack.key)}">
+    <div class="store-pack-row">
+      <button class="store-pack-toggle${open ? ' is-open' : ''}" type="button" data-store-pack-toggle="${escape(pack.key)}"
+        aria-expanded="${open}" aria-label="${open ? '收起' : '展开'}「${escape(pack.title)}」">${icon('chevron-left')}</button>
+      <button class="store-pack-main" type="button" data-store-open="${escape(pack.key)}">
+        <span class="store-pack-name">${icon('stack')}<span class="t">${escape(pack.title)}</span></span>
+        <span class="store-pack-count">${number(members.length)} 个技能</span>
+      </button>
+      <span class="store-pack-by">${escape(pack.member.name)}</span>
+      <span class="store-pack-end">${storePackTag(pack)}</span>
+    </div>
+    ${open ? `<div class="store-pack-members">${members.map(card => storeRowHtml(card, {child: true, hidePack: true})).join('')}</div>` : ''}
+  </div>`;
+}
+
+/* 「我的上架」顶部的两条提示：整理技能包、补上前置依赖。 */
+function storeHintsHtml() {
+  const data = storeCandidateData;
+  if (!data) return '';
+  const suggestions = data.pack_suggestions || [];
+  const missing = (data.skills || []).filter(item => item.listed && item.missing_requires?.length);
+  const packs = suggestions.length && data.packs_supported !== false ? `<div class="banner banner-info banner-row store-hint">
+    <p>${icon('stack')} 可以把 ${number(new Set(suggestions.flatMap(item => item.skills)).size)} 个已上架的技能整理成 ${number(suggestions.length)} 个技能包</p>
+    <span class="banner-actions"><button class="btn btn-small" type="button" data-store-pack-dialog>整理成技能包</button></span>
+  </div>` : '';
+  const needs = missing.length ? `<div class="banner banner-info banner-row store-hint">
+    <p>${icon('link')} 有 ${number(missing.length)} 个上架的技能缺前置依赖</p>
+    <span class="banner-actions"><button class="btn btn-small" type="button" data-store-publish-missing>补上前置依赖</button></span>
+  </div>` : '';
+  return packs + needs;
+}
+
 function renderStoreAll(cards) {
   $('store-all').hidden = !cards?.length;
+  $('store-hints').innerHTML = cards?.length && state.storeMine ? storeHintsHtml() : '';
   if (!cards?.length) return;
   const query = storeQuery();
   const base = storeFilter(cards, {query, mine: state.storeMine});
@@ -3374,8 +3614,24 @@ function renderStoreAll(cards) {
   const empty = state.storeMine && !base.length
     ? emptyInner('team', '暂无上架技能', `<button type="button" class="link-btn" data-store-publish${teamCanWrite() ? '' : ' disabled'}>上架技能</button>`)
     : emptyInner('search', '未找到匹配技能');
-  $('store-list').innerHTML = rows.length
-    ? `<div class="store-list-inner${state.storeMine ? ' is-mine' : ''}">${rows.map(storeRowHtml).join('')}</div>`
+  let list = '';
+  if (rows.length) {
+    if (storeBrowsing()) {
+      // 组的位置取组里排得最靠前的技能：按排好的行依次收组，没进包的照常一行。
+      const seen = new Set();
+      list = rows.map(card => {
+        const pack = storePackOf(card);
+        if (!pack || (pack.cards || []).length < 2) return storeRowHtml(card);
+        if (seen.has(pack.key)) return '';
+        seen.add(pack.key);
+        return storePackRowHtml(pack);
+      }).join('');
+    } else {
+      list = rows.map(card => storeRowHtml(card)).join('');
+    }
+  }
+  $('store-list').innerHTML = list
+    ? `<div class="store-list-inner${state.storeMine ? ' is-mine' : ''}">${list}</div>`
     : `<div class="empty">${empty}</div>`;
 }
 
@@ -3412,7 +3668,7 @@ $('store-mine').addEventListener('click', async () => {
 async function reloadStorePage(button) {
   await withBusy(button, '', async () => {
     await enterTeam();
-    if (state.storeMine || storeCandidates) await loadCandidates().catch(() => { storeCandidates = null; });
+    if (state.storeMine || storeCandidates) await loadCandidates().catch(() => { forgetCandidates(); });
     renderTeam();
   });
 }
@@ -3423,26 +3679,82 @@ $('store-publish').addEventListener('click', () => openPublish());
 /* 卡片、列表行、安装队列和空状态里的按钮都在团队页里，统一在这里分派。 */
 $('page-team').addEventListener('click', event => {
   const goto = event.target.closest('[data-store-goto]');
+  const gotoTags = event.target.closest('[data-store-goto-tag]');
   const retry = event.target.closest('[data-store-queue-retry]');
   const clear = event.target.closest('[data-store-queue-clear]');
   const open = event.target.closest('[data-store-open]');
   const more = event.target.closest('[data-store-more]');
   const publish = event.target.closest('[data-store-publish]');
+  const missing = event.target.closest('[data-store-publish-missing]');
   const republish = event.target.closest('[data-store-republish]');
   const unlist = event.target.closest('[data-store-unlist]');
+  const packDialog = event.target.closest('[data-store-pack-dialog]');
+  const packEdit = event.target.closest('[data-store-pack-edit]');
+  const packToggle = event.target.closest('[data-store-pack-toggle]');
+  const queuePack = event.target.closest('[data-store-queue-pack]');
   if (goto) gotoStoreSkill(goto);
+  else if (gotoTags) gotoStoreTag(gotoTags.dataset.storeGotoTag);
   else if (retry) retryStoreQueue(retry.dataset.storeQueueRetry, retry);
   else if (clear) clearStoreQueue(clear);
   else if (open) openStoreDetail(open.dataset.storeOpen, open);
-  else if (more) {
+  else if (packToggle) {
+    const key = packToggle.dataset.storePackToggle;
+    if (storePackOpen.has(key)) storePackOpen.delete(key); else storePackOpen.add(key);
+    renderTeam();
+    $('store-list').querySelector(`[data-store-pack-toggle="${CSS.escape(key)}"]`)?.focus();
+  } else if (queuePack) {
+    const key = queuePack.dataset.storeQueuePack;
+    if (queueExpanded.has(key)) queueExpanded.delete(key); else queueExpanded.add(key);
+    renderStoreQueue();
+    $('store-queue').querySelector(`[data-store-queue-pack="${CSS.escape(key)}"]`)?.focus();
+  } else if (more?.dataset.storeMore === 'packs') {
+    const target = $('store-list').querySelector('[data-store-pack-group]') || $('store-all-title');
+    target.scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start'});
+    if (target.matches('[data-store-pack-group]')) target.querySelector('[data-store-open]')?.focus({preventScroll: true});
+    else target.focus();
+  } else if (more) {
     state.storeSort = more.dataset.storeMore;
     renderTeam();
     $('store-all').scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start'});
     $('store-all-title').focus({preventScroll: true});
   } else if (publish) openPublish();
+  else if (missing) openPublish((storeCandidateData?.skills || [])
+    .filter(item => item.listed && item.missing_requires?.length).map(item => item.name));
   else if (republish) openPublish([republish.dataset.storeRepublish]);
   else if (unlist) unlistStore(unlist.dataset.storeUnlist, unlist);
+  else if (packDialog) openPackDialog();
+  else if (packEdit) openPackDialog(packEdit.dataset.storePackEdit);
 });
+
+/* 「去启用这 N 个」：到技能页只看这个技能包的标签，清掉搜索和分组免得筛空。 */
+async function gotoStoreTag(tag) {
+  closeDetail();
+  showPage('skills');
+  $('skills-search').value = '';
+  state.chip = '';
+  let hasTag = state.table?.skills.some(skill => (skill.tags || []).includes(tag));
+  if (!hasTag) {
+    try {
+      await refreshTable();
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+      return;
+    }
+  }
+  state.tag = tag;
+  hasTag = state.table?.skills.some(skill => (skill.tags || []).includes(tag));
+  if (!hasTag) {
+    toast({text: '技能清单尚未刷新，请稍后重试。', tone: 'error'});
+    renderSkillTable();
+    return;
+  }
+  const agent = currentAgent();
+  // 新装的技能默认没启用：当前标签下「已启用」看不到任何一个时，换到「可添加」。
+  if (agent && !state.table.skills.some(skill => assignedNow(skill.name, agent.id) && (skill.tags || []).includes(tag))) {
+    state.tab = 'off';
+  }
+  renderSkillTable();
+}
 
 /* 队列里刚装好的技能可能还没进当前技能表：先补读一次，再打开它的详情。 */
 async function gotoStoreSkill(button) {
@@ -3485,7 +3797,7 @@ async function unlistStore(name, button) {
     try {
       await api('/api/team/listings/remove', {names});
       if (state.storeDetail === card?.key) closeDetail();
-      storeCandidates = null;
+      forgetCandidates();
       await loadStore();
       if (state.storeMine) await loadCandidates().catch(() => {});
       renderTeam();
@@ -3511,18 +3823,23 @@ const storeCard = key => state.store?.cards.find(card => card.key === key) || nu
 const storeMyListing = card => card.listings.find(item => item.member.id === state.store?.member?.id) || card.listings[0];
 
 function openStoreDetail(key, opener = null) {
-  if (state.storeDetail !== key || !storeGet) storeGet = {key, error: ''};
+  if (state.storeDetail !== key || !storeGet) {
+    storeGet = {key, error: '', packSelected: new Set()};
+    if (key.startsWith('pack:')) initPackSelection(storePack(key));
+  }
   storeOpener = opener;
   storeOpenerArea = opener?.closest('#store-shelves, #store-list')?.id || null;
   state.storeDetail = key;
   renderStoreDetail(true);
   showDetailPanel(() => state.storeDetail === key);
-  if (storeCard(key)?.local?.status === 'mine' && !storeCandidates) {
+  if ((storeCard(key)?.local?.status === 'mine' || storePack(key)?.mine) && !storeCandidates) {
     loadCandidates().then(() => { if (state.storeDetail === key) renderStoreDetail(); }).catch(() => {});
   }
 }
 
 function renderStoreDetail(fresh = false) {
+  const pack = storePack(state.storeDetail);
+  if (pack) return renderStorePackDetail(pack, fresh);
   const card = storeCard(state.storeDetail);
   if (!card) {
     // 同事下架了，或者分享站换了人：详情跟着关掉。
@@ -3536,7 +3853,9 @@ function renderStoreDetail(fresh = false) {
     ${card.title ? `<p class="detail-id">${escape(card.name)}</p>` : ''}
     ${storeSummary(card) ? `<p class="detail-summary">${escape(storeSummary(card))}</p>` : ''}
     ${storeFactsHtml(card)}
+    ${storeRequiredByHtml(card)}
     ${storeGetHtml(card)}
+    ${storePackHintHtml(card)}
     <h3 class="sub-title">推荐人</h3>
     <ul class="store-recs">${card.listings.map(item => `<li>
       <p class="store-rec-head"><strong>${escape(item.member.name)}</strong><span>${escape(friendlyDate(item.updated_at))}上架</span></p>
@@ -3544,12 +3863,29 @@ function renderStoreDetail(fresh = false) {
     </li>`).join('')}</ul>
     ${storeReviewsHtml(card)}
     ${card.description ? `<h3 class="sub-title">说明</h3><p class="detail-desc">${escape(card.description)}</p>` : ''}
-    ${card.requires?.length ? `<h3 class="sub-title">前置依赖${hint('安装此技能时将一并安装前置依赖；本机已有同名技能时沿用现有内容。')}</h3>
-      <p class="store-requires">${card.requires.map(name => escape(storeRequireTitle(card, name))).join('、')}</p>` : ''}
     <h3 class="sub-title">来源</h3>
     <p class="store-source">${escape(storeSourceText(card))}</p>`;
   body.scrollTop = scroll;
 }
+
+/* 被同一作者的哪些技能需要：最多列三个，多的写“等”。 */
+function storeRequiredByHtml(card) {
+  const names = card.required_by || [];
+  if (!names.length) return '';
+  const titles = names.map(name => storeRequireTitle(card, name));
+  const shown = titles.slice(0, 3).join('、') + (titles.length > 3 ? ' 等' : '');
+  return `<p class="store-required-by">被 ${number(names.length)} 个技能需要：${escape(shown)}</p>`;
+}
+
+/* 属于技能包时的浅色提示：包还没全装时给一个回到包详情的入口。 */
+function storePackHintHtml(card) {
+  const pack = storePackOf(card);
+  if (!pack || (pack.local?.installed || 0) >= (pack.local?.total || 0)) return '';
+  return `<p class="store-pack-hint">${icon('stack')}<span>属于「${escape(pack.title)}」（共 ${number(pack.local?.total || 0)} 个），一起装更好用</span>
+    <button class="link-btn" type="button" data-store-open="${escape(pack.key)}">查看技能包</button></p>`;
+}
+
+/* ---------- 技能包详情：清单、锁定、按包安装 ---------- */
 
 /* 所需技能优先用同一作者上架的那张卡片的中文名，没有就写原名。 */
 function storeRequireTitle(card, name) {
@@ -3604,13 +3940,31 @@ function storeGetHtml(card) {
   return storeInstallHtml(card);
 }
 
+/* 安装按钮正上方：安装时会一起装上的前置依赖。 */
+function storeNeedsBlockHtml(card) {
+  const needs = card.needs || [];
+  if (!needs.length) return '';
+  return `<div class="store-needs-box">
+    <p class="store-needs-title">安装时一起装上</p>
+    <ul>${needs.map(item => {
+      const [tone, text] = item.status === 'have' ? ['tag-ok', '已有']
+        : item.status === 'with' ? ['tag', '一起装']
+          : ['tag-warn', `装不了：${item.reason || '原因未知'}`];
+      return `<li>${icon('link')}<span>${escape(item.title || item.name)}</span><span class="tag ${tone}"${item.reason ? ` title="${escape(item.reason)}"` : ''}>${escape(text)}</span></li>`;
+    }).join('')}</ul>
+    <p class="row-note">安装这个技能时，前置依赖会自动一起装上；本机已有同名技能时沿用现有内容。</p>
+  </div>`;
+}
+
 function storeInstallHtml(card) {
   const get = storeGet;
   const readOnly = teamReadOnly() || jobsBlocked();
   const queued = storeQueueItem(card.key);
+  const withCount = (card.needs || []).filter(item => item.status === 'with').length;
+  const label = withCount ? `安装（含 ${withCount} 个前置依赖）` : '安装技能';
   const cost = `启用后，每个 Agent 的单次对话预占增加约 <b>${tokenText(card.tokens)} Token</b>${hint(TOKEN_HINT)}`;
   let status = '';
-  let action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>安装技能</button>`;
+  let action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>${label}</button>`;
   if (queued?.status === 'waiting') {
     status = '<p class="store-queue-state" role="status">已加入安装队列</p>';
     action = '';
@@ -3629,10 +3983,464 @@ function storeInstallHtml(card) {
     <p class="store-cost">${cost}</p>
     ${status}
     ${!queued && get?.error ? `<p class="store-get-error" role="alert">${escape(get.error)}</p>` : ''}
+    ${!queued ? storeNeedsBlockHtml(card) : ''}
     ${action ? `<div class="store-get-actions">${action}</div>` : ''}
     ${readOnly && action ? '<p class="row-note">只读预览，无法安装技能。</p>' : ''}
   </section>`;
 }
+
+/* ---------- 技能包清单：默认全勾，被别的勾选技能需要时锁住 ---------- */
+
+function storePackCards(pack) {
+  return (pack?.cards || []).map(storeCard).filter(Boolean);
+}
+
+function initPackSelection(pack) {
+  if (!storeGet) return;
+  storeGet.packSelected = new Set(storePackCards(pack)
+    .filter(card => card.local?.status === 'installable' && !storeQueueItem(card.key))
+    .map(card => card.key));
+}
+
+/* 勾选的技能直接或间接需要哪些技能。 */
+function storePackNeeds(cards, selected) {
+  const byName = new Map(cards.map(card => [card.name, card]));
+  const counts = new Map();
+  for (const card of cards) {
+    if (!selected.has(card.key)) continue;
+    const seen = new Set(), stack = [...(card.requires || [])];
+    while (stack.length) {
+      const name = stack.pop();
+      if (name === card.name || seen.has(name)) continue;
+      seen.add(name);
+      const dependency = byName.get(name);
+      if (dependency) stack.push(...(dependency.requires || []));
+    }
+    for (const name of seen) counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  return counts;
+}
+
+/* 当前勾选（锁住的会自动算进去），以及每个技能被几个勾选技能需要。 */
+function storePackSelection(pack) {
+  const cards = storePackCards(pack);
+  const available = new Set(cards
+    .filter(card => card.local?.status === 'installable' && !storeQueueItem(card.key))
+    .map(card => card.key));
+  const selected = new Set([...(storeGet?.packSelected || [])].filter(key => available.has(key)));
+  const locked = storePackNeeds(cards, selected);
+  for (const card of cards) {
+    if (locked.get(card.name) && available.has(card.key)) {
+      selected.add(card.key);
+      storeGet?.packSelected.add(card.key);
+    }
+  }
+  return {cards, selected, locked};
+}
+
+function packSkillStateHtml(card, item, lockedCount = 0) {
+  const local = card.local || {};
+  if (item?.status === 'waiting') return '<span class="tag tag-quiet">排队中</span>';
+  if (item?.status === 'running') return '<span class="tag">正在安装</span>';
+  if (item?.status === 'failed') {
+    return `<span class="tag tag-danger">安装失败：${escape(item.message || '原因未知')}</span>
+      <button class="link-btn" type="button" data-store-queue-retry="${escape(item.key)}">重试</button>`;
+  }
+  if (local.status === 'installed' || local.status === 'update') return '<span class="tag tag-ok">已有</span>';
+  if (item?.status === 'done') return '<span class="tag tag-ok">安装完成</span>';
+  if (local.status !== 'installable') {
+    return `<span class="tag tag-warn"${local.reason ? ` data-hint="${escape(local.reason)}"` : ''}>${escape(local.label || '暂不可装')}</span>`;
+  }
+  if (lockedCount) {
+    return `<span class="pack-lock" data-hint="还有 ${lockedCount} 个技能需要它，取消那些技能后才能取消。">${icon('lock')}${lockedCount} 个技能都要用它</span>`;
+  }
+  return '<span class="tag tag-quiet">可安装</span>';
+}
+
+function packSkillRowHtml(card, item, lockedCount, selected) {
+  const status = card.local?.status;
+  const selectable = !item && status === 'installable';
+  const showCheck = selectable || (!item && ['lark', 'conflict', 'blocked'].includes(status));
+  return `<li class="pack-skill-row" data-pack-skill="${escape(card.name)}">
+    <span class="pack-skill-check">${showCheck ? `<input type="checkbox" data-pack-check="${escape(card.key)}"
+      aria-label="${escape(`选择「${storeTitle(card)}」`)}"${selected ? ' checked' : ''}${selectable && !lockedCount ? '' : ' disabled'}>` : ''}</span>
+    <button class="link-btn pack-skill-name" type="button" data-store-open="${escape(card.key)}">${escape(storeTitle(card))}</button>
+    <span class="pack-skill-state" data-pack-state>${packSkillStateHtml(card, item, lockedCount)}</span>
+  </li>`;
+}
+
+function renderStorePackDetail(pack, fresh = false) {
+  const body = $('detail-body');
+  const scroll = fresh ? 0 : body.scrollTop;
+  const total = pack.local?.total || (pack.cards || []).length;
+  $('detail-title').textContent = pack.title;
+  body.innerHTML = `
+    <p class="detail-id">${escape(pack.member.name)} · ${escape(friendlyDate(pack.updated_at))}上架 · ${number(total)} 个技能</p>
+    ${pack.note ? `<p class="store-rec-note store-pack-note">“${escape(pack.note)}”</p>` : ''}
+    ${storePackGetHtml(pack)}
+    <h3 class="sub-title">推荐人</h3>
+    <ul class="store-recs"><li>
+      <p class="store-rec-head"><strong>${escape(pack.member.name)}</strong><span>${escape(friendlyDate(pack.updated_at))}上架</span></p>
+    </li></ul>`;
+  body.scrollTop = scroll;
+}
+
+function storePackGoHtml(pack, count = (pack.local?.total || 0)) {
+  return `<button class="btn btn-primary" type="button" data-store-goto-tag="${escape(pack.title)}">去启用这 ${number(count)} 个</button>`;
+}
+
+function storePackGetHtml(pack) {
+  const cards = storePackCards(pack);
+  const items = (state.queue?.items || []).filter(item => item.pack === pack.key);
+  const readOnly = teamReadOnly() || jobsBlocked();
+  const total = pack.local?.total || cards.length;
+  // 这一包装完后，把还没装的技能重新默认勾上，主按钮仍是「安装 N 个技能」。
+  if (storeGet?.packPending === pack.key && !items.some(queueActive)) {
+    storeGet.packSelected = new Set(cards.filter(card => card.local?.status === 'installable').map(card => card.key));
+    storeGet.packPending = '';
+  }
+  if (pack.mine) {
+    return `<section class="store-get store-get-quiet">
+      <p class="store-get-line">${icon('stack')}<span><strong>我的技能包</strong>，包里是已上架的技能。</span></p>
+      <div class="store-get-actions">
+        <button class="btn btn-small btn-quiet" type="button" data-store-pack-edit="${escape(pack.id)}"${teamCanWrite() && !jobsBlocked() ? '' : ' disabled'}>改技能包</button>
+        <button class="btn btn-small btn-quiet" type="button" data-store-pack-unpack="${escape(pack.key)}"${teamCanWrite() && !jobsBlocked() ? '' : ' disabled'}>拆开</button>
+      </div>
+    </section>`;
+  }
+  const {selected, locked} = storePackSelection(pack);
+  const done = items.filter(item => item.status === 'done').length;
+  const failed = items.filter(item => item.status === 'failed');
+  const active = items.some(queueActive);
+  const allInstalled = (pack.local?.installed || 0) >= total;
+  const installedCount = cards.filter(card => ['installed', 'update'].includes(card.local?.status)).length;
+  const enableInstalled = installedCount
+    ? `<button class="btn btn-quiet" type="button" data-store-goto-tag="${escape(pack.title)}">去启用已装的 ${number(installedCount)} 个</button>`
+    : '';
+  const rows = cards.map(card => packSkillRowHtml(card, storeQueueItem(card.key), locked.get(card.name) || 0, selected.has(card.key))).join('');
+  if (active) {
+    return `<section class="store-get store-get-install store-get-pack">
+      <p class="store-get-line">选好要一起装的技能，安装后保存至技能库，分配给 Agent 后生效。</p>
+      <ul class="pack-skill-list">${rows}</ul>
+      <p class="store-queue-state" role="status">正在安装 ${done}/${items.length}</p>
+      ${enableInstalled ? `<div class="store-get-actions">${enableInstalled}</div>` : ''}
+    </section>`;
+  }
+  if (failed.length) {
+    const rest = cards.filter(card => selected.has(card.key) && card.local?.status === 'installable');
+    const cost = rest.reduce((sum, card) => sum + (card.tokens || 0), 0);
+    const foot = rest.length ? `<div class="store-pack-foot">
+        <p class="store-cost" data-pack-cost>每个 Agent 约 +${tokenText(cost)} Token</p>
+        <div class="store-get-actions">${enableInstalled}<button class="btn btn-primary" type="button" data-pack-install${readOnly ? ' disabled' : ''}>安装 ${rest.length} 个技能</button></div>
+      </div>` : enableInstalled ? `<div class="store-get-actions">${enableInstalled}</div>` : '';
+    return `<section class="store-get store-get-install store-get-pack">
+      <p class="store-get-line">选好要一起装的技能，安装后保存至技能库，分配给 Agent 后生效。</p>
+      <ul class="pack-skill-list">${rows}</ul>
+      <p class="store-get-error" role="alert">${failed.length} 个没装上</p>
+      ${foot}
+    </section>`;
+  }
+  if (allInstalled) {
+    const whole = items.length === total && done === total;
+    return `<section class="store-get store-get-ok">
+      <p class="store-get-line">${icon('check-circle')}<span><strong>${whole ? `已安装 ${total}/${total}` : '已全部在技能库中'}</strong></span></p>
+      <div class="store-get-actions">${storePackGoHtml(pack, total)}</div>
+    </section>`;
+  }
+  // 队列里只剩已完成的历史条目时，照常显示还没装的技能，不挡住再次安装。
+  const cost = cards.filter(card => selected.has(card.key) && card.local?.status === 'installable')
+    .reduce((sum, card) => sum + (card.tokens || 0), 0);
+  const count = cards.filter(card => selected.has(card.key) && card.local?.status === 'installable').length;
+  const action = `<button class="btn btn-primary" type="button" data-pack-install${readOnly || !count ? ' disabled' : ''}>${
+    count ? `安装 ${count} 个技能` : '请至少选一个'}</button>`;
+  return `<section class="store-get store-get-install store-get-pack">
+    <p class="store-get-line">选好要一起装的技能，安装后保存至技能库，分配给 Agent 后生效。</p>
+    <ul class="pack-skill-list">${rows}</ul>
+    <div class="store-pack-foot">
+      <p class="store-cost" data-pack-cost>每个 Agent 约 +${tokenText(cost)} Token</p>
+      <div class="store-get-actions">${enableInstalled}${action}</div>
+    </div>
+    ${readOnly && count ? '<p class="row-note">只读预览，无法安装技能。</p>' : ''}
+  </section>`;
+}
+
+/* 勾选变化只更新这一块，不整块重画，键盘焦点留在原处。 */
+function syncPackSelection(pack) {
+  if (!storeGet || !state.storeDetail?.startsWith('pack:')) return;
+  const {cards, selected, locked} = storePackSelection(pack);
+  for (const card of cards) {
+    const row = $('detail-body').querySelector(`[data-pack-skill="${CSS.escape(card.name)}"]`);
+    if (!row) continue;
+    const input = row.querySelector('[data-pack-check]');
+    const lockedCount = locked.get(card.name) || 0;
+    if (input) {
+      input.checked = selected.has(card.key);
+      input.disabled = card.local?.status === 'installable' ? Boolean(lockedCount) : true;
+    }
+    const stateBox = row.querySelector('[data-pack-state]');
+    if (stateBox) stateBox.innerHTML = packSkillStateHtml(card, storeQueueItem(card.key), lockedCount);
+  }
+  const count = cards.filter(card => selected.has(card.key) && card.local?.status === 'installable').length;
+  const cost = cards.filter(card => selected.has(card.key) && card.local?.status === 'installable')
+    .reduce((sum, card) => sum + (card.tokens || 0), 0);
+  const costNode = $('detail-body').querySelector('[data-pack-cost]');
+  if (costNode) costNode.textContent = `每个 Agent 约 +${tokenText(cost)} Token`;
+  const button = $('detail-body').querySelector('[data-pack-install]');
+  if (button) {
+    button.textContent = count ? `安装 ${count} 个技能` : '请至少选一个';
+    button.disabled = teamReadOnly() || jobsBlocked() || !count;
+  }
+}
+
+async function queueStorePack(pack) {
+  if (!storeGet || jobsBlocked()) return;
+  const {cards, selected} = storePackSelection(pack);
+  const keys = cards.filter(card => selected.has(card.key) && card.local?.status === 'installable'
+    && !storeQueueItem(card.key)).map(card => card.key);
+  if (!keys.length) return;
+  storeGet.error = '';
+  const beforeIds = new Set((state.queue?.items || []).map(item => item.id));
+  try {
+    const result = await addToStoreQueue({pack: pack.key, keys});
+    trackPackBatch(pack, result, beforeIds);
+    storeGet.packPending = pack.key;
+    applyQueue(result, {force: true});
+    toast({text: '已加入安装队列。'});
+    if (state.storeDetail === pack.key) focusStorePanel('.store-get button, .store-get a');
+  } catch (error) {
+    storeGet.error = error.message;
+    if (state.storeDetail !== pack.key) return;
+    renderStoreDetail();
+    focusStorePanel('.store-get button');
+  }
+}
+
+async function unpackStorePack(pack, button) {
+  const ok = await confirmDialog({
+    title: `拆开「${pack.title}」`,
+    lines: ['只是不再打包，包里的技能照常上架。'],
+    okText: '拆开',
+  });
+  if (!ok) return;
+  await withBusy(button, '正在拆开…', async () => {
+    try {
+      await loadCandidates();
+      const packs = (storeCandidateData?.packs || []).filter(item => item.id !== pack.id)
+        .map(item => ({id: item.id, title: item.title, ...(item.note ? {note: item.note} : {}), skills: item.skills}));
+      await api('/api/team/packs', {packs});
+      toast({text: `已拆开「${pack.title}」。`});
+      forgetCandidates();
+      if (state.storeDetail === pack.key) closeDetail();
+      await loadStore();
+      if (state.storeMine) await loadCandidates().catch(() => {});
+      renderTeam();
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+/* ---------- 打包对话框：整理我已上架的技能包 ---------- */
+
+let packDraft = null;
+
+const packFieldBad = value => /[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060\ufeff]/.test(value);
+
+function packFieldError(pack) {
+  const title = String(pack.title || '').trim();
+  if (!title) return '请填写包名。';
+  if ([...title].length > 20) return '包名最多 20 个字。';
+  if (packFieldBad(title)) return '包名不能有换行或看不见的字符。';
+  const note = String(pack.note || '').trim();
+  if ([...note].length > 200) return '推荐语最多 200 个字。';
+  if (packFieldBad(note)) return '推荐语不能有换行或看不见的字符。';
+  return '';
+}
+
+const packSkillTitle = name => (storeCandidates?.find(item => item.name === name)?.title || name);
+
+function packDialogSkills() {
+  return (storeCandidates || []).filter(item => item.listed && item.kind !== 'lark' && !item.unavailable);
+}
+
+function packEditHtml(pack, index) {
+  const used = new Set((packDraft?.packs || []).filter(item => item.enabled && item !== pack).flatMap(item => item.skills));
+  const options = packDialogSkills().filter(item => !pack.skills.includes(item.name) && !used.has(item.name));
+  const existing = pack.existing ? '<span class="tag tag-quiet">现有技能包</span>' : '';
+  return `<section class="pack-edit${pack.id === packDraft?.targetId ? ' is-target' : ''}" data-pack-edit-row="${index}">
+    <div class="pack-edit-head">
+      <label class="pack-edit-toggle"><input type="checkbox" data-pack-enabled="${index}"${pack.enabled ? ' checked' : ''}> 这次保存这个技能包</label>
+      ${existing}
+    </div>
+    <div class="pack-edit-body"${pack.enabled ? '' : ' hidden'}>
+      <div class="pack-edit-field">
+        <label>包名<input class="input" type="text" maxlength="20" data-pack-title="${index}" value="${escape(pack.title)}" aria-label="技能包名字"></label>
+        ${pack.why ? `<span class="row-note">${escape(pack.why)}</span>` : ''}
+      </div>
+      <div class="pack-edit-field">
+        <label>推荐语（选填）<input class="input" type="text" maxlength="200" data-pack-note="${index}" value="${escape(pack.note || '')}" aria-label="技能包推荐语"></label>
+      </div>
+      <p class="pack-edit-error" data-pack-error="${index}" role="alert">${escape(pack.error || '')}</p>
+      <div class="pack-edit-chips">
+        ${pack.skills.map(name => `<span class="pack-chip">${escape(packSkillTitle(name))}<button type="button" class="tag-remove" data-pack-remove="${index}:${escape(name)}" aria-label="${escape(`把「${packSkillTitle(name)}」移出这个技能包`)}">${icon('close')}</button></span>`).join('')}
+      </div>
+      ${pack.skills.length < 2 ? '<p class="row-note">少于 2 个技能，这个包保存时会自动拆开。</p>' : ''}
+      <div class="pack-edit-add">
+        <select class="input" data-pack-add-select="${index}" aria-label="选择要加入的技能">
+          <option value="">选择要加入的技能</option>
+          ${options.map(item => `<option value="${escape(item.name)}">${escape(item.title || item.name)}${item.title ? `（${escape(item.name)}）` : ''}</option>`).join('')}
+        </select>
+        <button class="btn btn-small" type="button" data-pack-add="${index}"${options.length ? '' : ' disabled'}>添加</button>
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderPackDialog() {
+  if (!packDraft) return;
+  const list = $('store-pack-list');
+  list.innerHTML = packDraft.packs.map((pack, index) => packEditHtml(pack, index)).join('')
+    || `<div class="empty">${emptyInner('stack', '还没有可以整理的技能包')}<p class="row-note">上架两个技能后，名字开头相同或互相链接的技能会出现在建议里。</p></div>`;
+  $('store-pack-save').disabled = !packDraft.packs.length || !teamCanWrite() || jobsBlocked();
+  const target = packDraft.targetId && packDraft.packs.findIndex(pack => pack.id === packDraft.targetId);
+  const section = target !== false && target >= 0 ? list.querySelector(`[data-pack-edit-row="${target}"]`) : null;
+  section?.scrollIntoView({block: 'nearest'});
+  packDraft.targetId = '';
+  (section?.querySelector('[data-pack-title]') || list.querySelector('[data-pack-title]') || $('store-pack-close')).focus();
+}
+
+async function openPackDialog(targetId = '') {
+  const dialog = $('store-pack-dialog');
+  packDraft = null;
+  $('store-pack-message').textContent = '正在读取已上架的技能…';
+  $('store-pack-list').innerHTML = '<p class="muted">正在读取已上架的技能…</p>';
+  $('store-pack-save').disabled = true;
+  if (!dialog.open) dialog.showModal();
+  try {
+    await loadCandidates();
+  } catch (error) {
+    $('store-pack-list').replaceChildren();
+    $('store-pack-message').textContent = error.message;
+    return;
+  }
+  const data = storeCandidateData || {};
+  packDraft = {
+    targetId,
+    packs: [
+      ...(data.packs || []).map(item => ({id: item.id, title: item.title, note: item.note || '',
+        skills: [...item.skills], existing: true, enabled: true})),
+      ...(data.pack_suggestions || []).map(item => ({id: item.id, title: item.title, note: '', skills: [...item.skills],
+        why: item.why, existing: false, enabled: true})),
+    ],
+  };
+  renderPackDialog();
+  $('store-pack-message').textContent = data.packs_supported === false
+    ? '分享站版本较旧，暂不能整理技能包，请联系管理员更新分享站。'
+    : packDraft.packs.length ? '技能包里的技能会自动做成同名标签，装好后在技能页按这个标签就能找到。' : '还没有可以整理的技能包。';
+}
+
+function packEditRow(index) {
+  return $('store-pack-list').querySelector(`[data-pack-edit-row="${index}"]`);
+}
+
+$('store-pack-list').addEventListener('change', event => {
+  if (!packDraft) return;
+  const enabled = event.target.closest('[data-pack-enabled]');
+  if (enabled) {
+    const index = Number(enabled.dataset.packEnabled);
+    packDraft.packs[index].enabled = enabled.checked;
+    packDraft.packs[index].error = '';
+    renderPackDialog();
+    packEditRow(index)?.querySelector('[data-pack-enabled]')?.focus();
+    return;
+  }
+  const add = event.target.closest('[data-pack-add-select]');
+  if (!add) return;
+});
+
+$('store-pack-list').addEventListener('input', event => {
+  if (!packDraft) return;
+  const title = event.target.closest('[data-pack-title]');
+  if (title) {
+    packDraft.packs[Number(title.dataset.packTitle)].title = title.value;
+    const error = packEditRow(Number(title.dataset.packTitle))?.querySelector('[data-pack-error]');
+    if (error) error.textContent = '';
+    return;
+  }
+  const note = event.target.closest('[data-pack-note]');
+  if (note) packDraft.packs[Number(note.dataset.packNote)].note = note.value;
+});
+
+$('store-pack-list').addEventListener('click', event => {
+  if (!packDraft) return;
+  const remove = event.target.closest('[data-pack-remove]');
+  if (remove) {
+    const [index, name] = remove.dataset.packRemove.split(':');
+    packDraft.packs[Number(index)].skills = packDraft.packs[Number(index)].skills.filter(item => item !== name);
+    packDraft.packs[Number(index)].error = '';
+    renderPackDialog();
+    return;
+  }
+  const add = event.target.closest('[data-pack-add]');
+  if (!add) return;
+  const index = Number(add.dataset.packAdd);
+  const select = packEditRow(index)?.querySelector('[data-pack-add-select]');
+  const name = select?.value;
+  if (!name) return;
+  const pack = packDraft.packs[index];
+  if (!pack.skills.includes(name)) pack.skills.push(name);
+  renderPackDialog();
+  packEditRow(index)?.querySelector('[data-pack-add-select]')?.focus();
+});
+
+async function savePackDialog() {
+  if (!packDraft) return;
+  const payload = [];
+  const used = new Set();
+  let bad = null;
+  for (const pack of packDraft.packs) {
+    if (!pack.enabled || pack.skills.length < 2) continue;
+    const error = packFieldError(pack);
+    pack.error = error;
+    for (const name of pack.skills) {
+      if (used.has(name)) pack.error = '同一个技能最多放进一个技能包。';
+      used.add(name);
+    }
+    if (pack.error) {
+      if (!bad) bad = pack;
+      continue;
+    }
+    payload.push({id: pack.id, title: pack.title.trim(), ...(pack.note.trim() ? {note: pack.note.trim()} : {}), skills: pack.skills});
+  }
+  renderPackDialog();
+  if (bad) {
+    $('store-pack-message').textContent = '有技能包还没填好，请按提示修改。';
+    const index = packDraft.packs.indexOf(bad);
+    (packEditRow(index)?.querySelector('[data-pack-title]') || $('store-pack-close')).focus();
+    return;
+  }
+  await withBusy($('store-pack-save'), '正在保存…', async () => {
+    try {
+      await api('/api/team/packs', {packs: payload});
+      $('store-pack-dialog').close();
+      toast({text: '已更新技能包。'});
+      forgetCandidates();
+      await loadStore();
+      if (state.storeMine) await loadCandidates().catch(() => {});
+      renderTeam();
+    } catch (error) {
+      $('store-pack-message').textContent = error.message;
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
+$('store-pack-save').addEventListener('click', savePackDialog);
+$('store-pack-close').addEventListener('click', () => $('store-pack-dialog').close());
+$('store-pack-dialog').addEventListener('cancel', event => {
+  if ($('store-pack-save').getAttribute('aria-busy') === 'true') event.preventDefault();
+});
+$('store-pack-dialog').querySelector('form').addEventListener('submit', event => event.preventDefault());
 
 function storeReviewsHtml(card) {
   const me = state.store?.member?.id;
@@ -3670,11 +4478,22 @@ function storeRateHtml(card) {
 $('detail-body').addEventListener('click', event => {
   if (!state.storeDetail) return;
   const target = event.target;
-  if (target.closest('[data-store-install]')) {
+  if (target.closest('[data-pack-install]')) {
+    const pack = storePack(state.storeDetail);
+    if (pack) queueStorePack(pack);
+  } else if (target.closest('[data-store-install]')) {
     const card = storeCard(state.storeDetail);
     if (card) queueStoreInstall(card);
+  } else if (target.closest('[data-store-open]')) {
+    const button = target.closest('[data-store-open]');
+    const key = button.dataset.storeOpen;
+    if (key !== state.storeDetail) openStoreDetail(key);
+  } else if (target.closest('[data-store-goto-tag]')) {
+    gotoStoreTag(target.closest('[data-store-goto-tag]').dataset.storeGotoTag);
   } else if (target.closest('[data-store-goto]')) {
     gotoStoreSkill(target.closest('[data-store-goto]'));
+  } else if (target.closest('[data-store-queue-retry]')) {
+    retryStoreQueue(target.closest('[data-store-queue-retry]').dataset.storeQueueRetry, target.closest('[data-store-queue-retry]'));
   } else if (target.closest('[data-store-republish]')) {
     const name = target.closest('[data-store-republish]').dataset.storeRepublish;
     closeDetail();
@@ -3682,7 +4501,22 @@ $('detail-body').addEventListener('click', event => {
   } else if (target.closest('[data-store-unlist]')) {
     const button = target.closest('[data-store-unlist]');
     unlistStore(button.dataset.storeUnlist, button);
+  } else if (target.closest('[data-store-pack-edit]')) {
+    openPackDialog(target.closest('[data-store-pack-edit]').dataset.storePackEdit);
+  } else if (target.closest('[data-store-pack-unpack]')) {
+    const pack = storePack(target.closest('[data-store-pack-unpack]').dataset.storePackUnpack);
+    if (pack) unpackStorePack(pack, target.closest('[data-store-pack-unpack]'));
   } else if (target.closest('[data-store-rate-remove]')) rateStore(target.closest('form'), true);
+});
+
+$('detail-body').addEventListener('change', event => {
+  const box = event.target.closest('[data-pack-check]');
+  if (!box || !state.storeDetail?.startsWith('pack:') || !storeGet) return;
+  const pack = storePack(state.storeDetail);
+  if (!pack) return;
+  if (box.checked) storeGet.packSelected.add(box.dataset.packCheck);
+  else storeGet.packSelected.delete(box.dataset.packCheck);
+  syncPackSelection(pack);
 });
 
 $('detail-body').addEventListener('submit', event => {
@@ -3747,7 +4581,7 @@ let storePick = null;   // {selected: Map(技能名 → 推荐语), plan}
 let storePublishing = false;
 
 async function openPublish(preselect = []) {
-  storePick = {selected: new Map(), plan: null};
+  storePick = {selected: new Map(), plan: null, rejected: new Set(), packs: null, timer: null, previewing: false, pendingPreview: false};
   $('store-pick-search').value = '';
   showPublishStep('pick');
   $('store-pick-list').innerHTML = '<p class="muted store-pick-loading">正在读取已启用技能…</p>';
@@ -3827,6 +4661,57 @@ $('store-pick-list').addEventListener('input', event => {
   if (note) storePick.selected.set(note.dataset.storeNote, note.value);
 });
 
+const reviewPairKey = (skill, requires) => skill + '|' + requires;
+
+const reviewTitle = name => storeCandidates?.find(item => item.name === name)?.title || name;
+
+/* 识别到的前置依赖：默认勾上，取消的记下来重新预览。 */
+function storeDetectedHtml(plan) {
+  const rows = plan.detected || [];
+  if (!rows.length) return '';
+  return `<section class="store-review-block">
+    <h3 class="sub-title">识别到的前置依赖</h3>
+    <ul class="store-detected">${rows.map(item => {
+      const checked = item.adopted !== false && !storePick.rejected.has(reviewPairKey(item.skill, item.requires));
+      return `<li>
+        <label class="store-detected-main">
+          <input type="checkbox" data-review-detected="${escape(item.skill)}|${escape(item.requires)}"${checked ? ' checked' : ''}>
+          <span>${escape(reviewTitle(item.skill))} 需要 ${escape(reviewTitle(item.requires))}</span>
+        </label>
+        <p class="store-detected-evidence">“${escape(item.evidence)}”</p>
+      </li>`;
+    }).join('')}</ul>
+    <p class="row-note">没识别出来的，可以在技能页的技能详情里添加依赖项后再上架。</p>
+  </section>`;
+}
+
+/* 上架核对里的技能包小卡：和打包对话框共用样式。 */
+function storeReviewPacksHtml(plan) {
+  if (plan.packs_supported === false || !storePick.packs?.length) return '';
+  return `<section class="store-review-block">
+    <h3 class="sub-title">技能包</h3>
+    <p class="row-note">默认一起打包；取消这个包只是这次不打，包里的技能照常上架。</p>
+    <div class="store-review-packs">${storePick.packs.map((pack, index) => `<section class="pack-edit store-review-pack${pack.enabled ? '' : ' is-off'}" data-review-pack="${index}">
+      <div class="pack-edit-head">
+        <label class="pack-edit-toggle"><input type="checkbox" data-review-pack-enabled="${index}"${pack.enabled ? ' checked' : ''}> 这次一起打包</label>
+        ${pack.existing ? '<span class="tag tag-quiet">现有技能包</span>' : ''}
+      </div>
+      <div class="pack-edit-body"${pack.enabled ? '' : ' hidden'}>
+        <div class="pack-edit-field">
+          <label>包名<input class="input" type="text" maxlength="20" data-review-pack-title="${index}" value="${escape(pack.title)}" aria-label="技能包名字"></label>
+          ${pack.why ? `<span class="row-note">${escape(pack.why)}</span>` : ''}
+        </div>
+        <div class="pack-edit-field">
+          <label>推荐语（选填）<input class="input" type="text" maxlength="200" data-review-pack-note="${index}" value="${escape(pack.note || '')}" aria-label="技能包推荐语"></label>
+        </div>
+        <p class="pack-edit-error" data-review-pack-error="${index}" role="alert">${escape(pack.error || '')}</p>
+        <div class="pack-edit-chips">${pack.skills.map(name => `<span class="pack-chip">${escape(reviewTitle(name))}<button type="button" class="tag-remove" data-review-pack-remove="${index}:${escape(name)}" aria-label="${escape(`把「${reviewTitle(name)}」移出这个技能包`)}">${icon('close')}</button></span>`).join('')}</div>
+        ${pack.skills.length < 2 ? '<p class="row-note">少于 2 个技能，这个包这次不会打包。</p>' : ''}
+      </div>
+    </section>`).join('')}</div>
+  </section>`;
+}
+
 function storeReviewHtml(plan) {
   const errors = plan.errors?.length ? `<div class="banner banner-warn">
       <p>${icon('warning')} 以下技能暂不可上架，将跳过上传：</p>
@@ -3858,42 +4743,185 @@ function storeReviewHtml(plan) {
       </details>` : ''}
     </li>`;
   }).join('');
-  return errors + (rows ? `<ul class="store-review-list">${rows}</ul>` : '');
+  return errors + (rows ? `<ul class="store-review-list">${rows}</ul>` : '') + storeDetectedHtml(plan) + storeReviewPacksHtml(plan);
 }
 
-$('store-publish-next').addEventListener('click', async () => {
-  const skills = [...storePick.selected].map(([name, note]) => ({name, ...(note.trim() ? {note: note.trim()} : {})}));
-  showPublishStep('review');
-  storePick.plan = null;
-  $('store-review').replaceChildren();
-  $('store-publish-message').textContent = '正在核对上传文件…';
+function storePackPayload({onlyValid = true} = {}) {
+  return (storePick?.packs || []).filter(pack => pack.enabled && pack.skills.length >= 2
+    && (!onlyValid || !packFieldError(pack))).map(pack => ({
+      id: pack.id, title: pack.title.trim(), ...(pack.note?.trim() ? {note: pack.note.trim()} : {}), skills: pack.skills,
+    }));
+}
+
+function updateReviewActions() {
+  const plan = storePick?.plan;
+  const count = plan?.listings?.length || 0;
+  const invalid = (storePick?.packs || []).some(pack => pack.enabled && pack.skills.length >= 2 && packFieldError(pack));
+  if (storePick) {
+    $('store-publish-apply').disabled = !count || !teamCanWrite() || jobsBlocked() || invalid || storePick.previewing;
+  }
+  $('store-publish-apply').textContent = count ? `上架 ${count} 个` : '上架';
+}
+
+/* 重新核对：只更新手上的计划和提交令牌，不重画核对区，免得输入框里的光标跑掉。 */
+async function previewStore({initial = false} = {}) {
+  if (!storePick) return null;
+  const pick = storePick;
+  if (pick.previewing) {
+    pick.pendingPreview = true;
+    return null;
+  }
+  const invalid = (pick.packs || []).some(pack => pack.enabled && pack.skills.length >= 2 && packFieldError(pack));
+  if (!initial && invalid) {
+    $('store-publish-message').textContent = '技能包还没填好，请按提示修改后再继续。';
+    updateReviewActions();
+    return null;
+  }
+  const skills = [...pick.selected].map(([name, note]) => ({name, ...(note.trim() ? {note: note.trim()} : {})}));
+  const body = {skills};
+  if (!initial && pick.rejected.size) body.rejected = [...pick.rejected].map(key => key.split('|'));
+  if (!initial) body.packs = storePackPayload();
+  pick.previewing = true;
   $('store-publish-apply').disabled = true;
-  $('store-publish-apply').textContent = '上架';
+  $('store-publish-message').textContent = initial ? '正在核对上传文件…' : '正在重新核对…';
   try {
-    const plan = await api('/api/team/listings/preview', {skills});
-    if ($('store-review').hidden) return;
-    storePick.plan = plan;
-    $('store-review').innerHTML = storeReviewHtml(plan);
-    const count = plan.listings?.length || 0;
+    const plan = await api('/api/team/listings/preview', body);
+    if (storePick !== pick) return null;
+    pick.plan = plan;
+    if (initial && $('store-review').hidden) return plan;
+    if (initial) {
+      pick.packs = (plan.packs || []).map(pack => ({id: pack.id, title: pack.title, note: pack.note || '',
+        skills: [...pack.skills], why: pack.why, existing: Boolean(pack.existing), enabled: true, error: ''}));
+      $('store-review').innerHTML = storeReviewHtml(plan);
+    }
     $('store-publish-message').textContent = plan.message || '';
-    $('store-publish-apply').disabled = !count || !teamCanWrite();
-    $('store-publish-apply').textContent = count ? `上架 ${count} 个` : '上架';
-    $('store-publish-apply').focus();
+    updateReviewActions();
+    return plan;
   } catch (error) {
-    $('store-publish-message').textContent = error.message;
+    if (storePick === pick) {
+      pick.plan = null;
+      $('store-publish-message').textContent = error.message;
+      updateReviewActions();
+    }
+    return null;
+  } finally {
+    if (storePick === pick) {
+      pick.previewing = false;
+      updateReviewActions();
+      if (pick.pendingPreview) {
+        pick.pendingPreview = false;
+        previewStore();
+      }
+    }
+  }
+}
+
+function schedulePackPreview() {
+  if (!storePick) return;
+  clearTimeout(storePick.timer);
+  storePick.timer = setTimeout(() => {
+    if (!storePick) return;
+    storePick.timer = null;
+    previewStore();
+  }, 500);
+}
+
+function flushPackPreview() {
+  if (!storePick?.timer) return;
+  clearTimeout(storePick.timer);
+  storePick.timer = null;
+  previewStore();
+}
+
+$('store-review').addEventListener('change', event => {
+  if (!storePick) return;
+  const detected = event.target.closest('[data-review-detected]');
+  if (detected) {
+    const key = detected.dataset.reviewDetected;
+    if (detected.checked) storePick.rejected.delete(key); else storePick.rejected.add(key);
+    previewStore();
+    return;
+  }
+  const enabled = event.target.closest('[data-review-pack-enabled]');
+  if (enabled) {
+    const index = Number(enabled.dataset.reviewPackEnabled);
+    storePick.packs[index].enabled = enabled.checked;
+    const row = $('store-review').querySelector(`[data-review-pack="${index}"]`);
+    row?.querySelector('.pack-edit-body')?.toggleAttribute('hidden', !enabled.checked);
+    row?.classList.toggle('is-off', !enabled.checked);
+    updateReviewActions();
+    previewStore();
   }
 });
 
-$('store-publish-back').addEventListener('click', () => {
+$('store-review').addEventListener('input', event => {
+  if (!storePick) return;
+  const title = event.target.closest('[data-review-pack-title]');
+  const note = event.target.closest('[data-review-pack-note]');
+  const field = title || note;
+  if (!field) return;
+  const index = Number(title ? title.dataset.reviewPackTitle : note.dataset.reviewPackNote);
+  const pack = storePick.packs[index];
+  if (title) pack.title = title.value; else pack.note = note.value;
+  pack.error = packFieldError(pack);
+  const error = $('store-review').querySelector(`[data-review-pack-error="${index}"]`);
+  if (error) error.textContent = pack.error;
+  updateReviewActions();
+  schedulePackPreview();
+});
+
+$('store-review').addEventListener('focusout', event => {
+  if (event.target.closest('[data-review-pack-title], [data-review-pack-note]')) flushPackPreview();
+});
+
+$('store-review').addEventListener('click', event => {
+  if (!storePick) return;
+  const remove = event.target.closest('[data-review-pack-remove]');
+  if (!remove) return;
+  const [index, name] = remove.dataset.reviewPackRemove.split(':');
+  const pack = storePick.packs[Number(index)];
+  pack.skills = pack.skills.filter(item => item !== name);
+  pack.error = packFieldError(pack);
+  $('store-review').innerHTML = storeReviewHtml(storePick.plan);
+  updateReviewActions();
+  previewStore();
+});
+
+$('store-publish-next').addEventListener('click', async () => {
+  showPublishStep('review');
   storePick.plan = null;
+  storePick.packs = null;
+  storePick.rejected.clear();
+  $('store-review').replaceChildren();
+  $('store-publish-apply').disabled = true;
+  $('store-publish-apply').textContent = '上架';
+  await previewStore({initial: true});
+  if (storePick?.plan && !$('store-review').hidden) $('store-publish-apply').focus();
+});
+
+$('store-publish-back').addEventListener('click', () => {
+  if (!storePick) return;
+  if (storePick.timer) {
+    clearTimeout(storePick.timer);
+    storePick.timer = null;
+  }
+  storePick.plan = null;
+  storePick.packs = null;
+  storePick.rejected.clear();
   showPublishStep('pick');
   renderPick();
   $('store-pick-search').focus();
 });
 
 $('store-publish-apply').addEventListener('click', async event => {
+  if (!storePick || storePublishing) return;
+  if (storePick.timer) {
+    clearTimeout(storePick.timer);
+    storePick.timer = null;
+    await previewStore();
+  }
   const plan = storePick?.plan;
-  if (!plan || storePublishing) return;
+  if (!plan || $('store-publish-apply').disabled) return;
   storePublishing = true;
   $('store-publish-back').disabled = $('store-publish-close').disabled = true;
   await withBusy(event.currentTarget, '正在上架…', async () => {
@@ -3902,7 +4930,7 @@ $('store-publish-apply').addEventListener('click', async event => {
       storePublishing = false;
       $('store-publish-dialog').close();
       toast({text: `已上架 ${plan.listings.length} 个技能，同事现在能看到了。`});
-      storeCandidates = null;
+      forgetCandidates();
       await loadStore();
       if (state.storeMine) await loadCandidates().catch(() => {});
       renderTeam();

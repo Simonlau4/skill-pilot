@@ -1799,7 +1799,7 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 }
 .store-row:last-child { border-bottom: 0; }
 .store-row:hover { background: var(--panel-soft); }
-.store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 150px 196px; }
+.store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 150px 240px; }
 .store-row-main {
   display: grid;
   gap: 1px;
@@ -1900,17 +1900,121 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .store-publish-message { margin: var(--sp-3) 0 0; color: var(--ink-2); font-size: var(--fs-small); }
 .store-publish-message:empty { display: none; }
 
+/* 依赖标记：卡片底行和列表名字旁，只数本机还没有的。 */
+.store-needs { flex: none; }
+.store-row-name .store-needs { align-self: center; }
+
+/* 技能包卡片：后面两层错开的边，看起来是一摞；只用边框和底色。 */
+.store-pack { position: relative; min-width: 0; padding-top: 12px; }
+.store-pack-layer { position: absolute; left: 14px; right: 14px; top: 6px; bottom: 0; background: var(--panel-deep); border: 1px solid var(--line); border-radius: var(--radius-lg); pointer-events: none; }
+.store-pack-layer.is-far { left: 28px; right: 28px; top: 0; bottom: 6px; background: var(--panel); }
+.store-pack-card { position: relative; z-index: 1; width: 100%; height: 100%; }
+.store-pack-icon { width: 16px; height: 16px; margin-right: 5px; vertical-align: -3px; color: var(--ink-2); }
+
+/* 全部技能里的包组：组头一行，展开后缩进列出成员。 */
+.store-pack-group { border-bottom: 1px solid var(--line); }
+.store-pack-group:last-child { border-bottom: 0; }
+.store-pack-row { display: grid; grid-template-columns: 32px minmax(0, 1fr) 150px 116px; align-items: center; gap: var(--sp-3); padding: 0 var(--sp-5) 0 var(--sp-2); }
+.store-pack-toggle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; color: var(--muted); background: none; border: 0; border-radius: 50%; cursor: pointer; }
+.store-pack-toggle:hover { background: var(--panel-deep); color: var(--ink); }
+.store-pack-toggle .ico { width: 15px; height: 15px; transform: rotate(180deg); transition: transform var(--speed) var(--ease); }
+.store-pack-toggle.is-open .ico { transform: rotate(270deg); }
+.store-pack-main { display: flex; align-items: center; gap: var(--sp-3); min-width: 0; min-height: 52px; padding: 0; font: inherit; color: var(--ink); text-align: left; background: none; border: 0; cursor: pointer; }
+.store-pack-main:hover .t { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line-strong); }
+.store-pack-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; }
+.store-pack-name .ico { width: 16px; height: 16px; flex: none; color: var(--ink-2); }
+.store-pack-name .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.store-pack-count { flex: none; color: var(--ink-2); font-size: var(--fs-small); }
+.store-pack-by { overflow: hidden; color: var(--muted); font-size: var(--fs-small); text-overflow: ellipsis; white-space: nowrap; }
+.store-pack-end { display: flex; justify-content: flex-end; }
+.store-pack-members { background: var(--panel-soft); border-top: 1px solid var(--line); }
+.store-row.is-pack-child .store-row-main { padding-left: calc(var(--sp-5) + 28px); }
+.store-row-pack { margin-left: var(--sp-2); padding-left: var(--sp-2); border-left: 1px solid var(--line-strong); color: var(--muted); }
+
+/* 安装队列里带包的条目。 */
+.store-pack-queue { border-top: 1px solid var(--line); }
+.store-pack-queue:first-child { border-top: 0; }
+.store-pack-queue-head { display: flex; align-items: center; gap: var(--sp-2); min-height: 52px; padding: 0 var(--sp-2); flex-wrap: wrap; }
+.store-pack-queue-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; }
+.store-pack-queue-name .ico { width: 16px; height: 16px; flex: none; color: var(--ink-2); }
+.store-pack-queue-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.store-pack-queue-state { display: inline-flex; align-items: center; gap: 6px; }
+.store-pack-queue-action { margin-left: auto; }
+.store-pack-queue-items { padding-left: calc(var(--sp-5) + 8px); background: var(--panel-soft); border-top: 1px solid var(--line); }
+
+/* 详情：前置依赖、属于技能包、包清单。 */
+.store-required-by { margin: var(--sp-2) 0 0; color: var(--muted); font-size: var(--fs-small); }
+.store-pack-hint { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin: var(--sp-3) 0 0; padding: var(--sp-2) var(--sp-3); color: var(--ink-2); font-size: var(--fs-small); background: var(--panel-soft); border-radius: var(--radius-sm); }
+.store-pack-hint .ico { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.store-pack-hint .link-btn { margin-left: auto; }
+.store-pack-note { padding-bottom: var(--sp-2); }
+.store-needs-box { margin-top: var(--sp-3); padding-top: var(--sp-3); border-top: 1px solid var(--line); }
+.store-needs-title { margin: 0 0 var(--sp-2); font-size: var(--fs-small); font-weight: 600; }
+.store-needs-box ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.store-needs-box li { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-small); }
+.store-needs-box li .ico { width: 14px; height: 14px; flex: none; color: var(--muted); }
+.store-needs-box .row-note { margin: var(--sp-2) 0 0; }
+
+.pack-skill-list { display: grid; gap: 0; margin: var(--sp-3) 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.pack-skill-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: var(--sp-2); padding: 8px 0; border-bottom: 1px solid var(--line); }
+.pack-skill-row:last-child { border-bottom: 0; }
+.pack-skill-check { display: flex; align-items: center; justify-content: center; }
+.pack-skill-check input { margin: 0; }
+.pack-skill-name { justify-self: start; font-weight: 600; }
+.store-pack-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; margin-top: var(--sp-3); }
+.store-pack-foot .store-cost { margin: 0; }
+.store-pack-foot .store-get-actions { margin: 0 0 0 auto; }
+.pack-skill-state { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; color: var(--muted); font-size: var(--fs-small); }
+.pack-lock { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2); }
+.pack-lock .ico { width: 14px; height: 14px; }
+
+/* 上架核对和打包对话框共用的小卡。 */
+.store-review-block { margin-top: var(--sp-5); }
+.store-review-block .sub-title { margin-bottom: var(--sp-2); }
+.store-detected { margin: 0; padding: 0; list-style: none; }
+.store-detected li { padding: var(--sp-1) 0; }
+.store-detected-main { display: flex; align-items: center; gap: var(--sp-2); min-height: 30px; }
+.store-detected-evidence { margin: 2px 0 0 28px; color: var(--muted); font-size: var(--fs-small); overflow-wrap: anywhere; }
+.store-review-packs, .store-pack-list { display: grid; gap: var(--sp-3); }
+.store-hint { margin: 0 0 var(--sp-3); }
+.pack-edit { padding: var(--sp-3); background: var(--panel-soft); border-radius: var(--radius-lg); box-shadow: inset 0 0 0 1px var(--line); }
+.pack-edit.is-target { box-shadow: inset 0 0 0 2px var(--ink-2); }
+.pack-edit.is-off { opacity: 0.65; }
+.pack-edit-head { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.pack-edit-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-small); }
+.pack-edit-body { display: grid; gap: var(--sp-2); margin-top: var(--sp-2); }
+.pack-edit-body[hidden] { display: none; }
+.pack-edit-field { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.pack-edit-field label { display: flex; align-items: center; gap: var(--sp-2); color: var(--ink-2); font-size: var(--fs-small); }
+.pack-edit-field .input { width: min(300px, 60vw); }
+.pack-edit-field .row-note { margin: 0; }
+.pack-edit-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pack-chip { display: inline-flex; align-items: center; gap: 2px; min-height: 28px; padding: 0 2px 0 10px; background: var(--panel); border-radius: 999px; box-shadow: inset 0 0 0 1px var(--line); font-size: var(--fs-small); }
+.pack-edit-add { display: flex; align-items: center; gap: var(--sp-2); }
+.pack-edit-add .input { max-width: 320px; }
+.pack-edit-error { margin: 0; color: var(--danger-ink); font-size: var(--fs-small); }
+.pack-edit-error:empty { display: none; }
+#store-pack-dialog .dialog-form { display: flex; flex-direction: column; max-height: calc(100vh - 48px); }
+#store-pack-dialog .dialog-form > * { flex-shrink: 0; }
+#store-pack-list { min-height: 0; overflow-y: auto; padding: var(--sp-3); border: 1px solid var(--line); border-radius: var(--radius-sm); flex-shrink: 1; }
+
 @media (max-width: 1199px) {
   .shelf-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .shelf-cards > :nth-child(4) { display: none; }
 }
 @media (max-width: 1023px) {
   .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 116px; }
-  .store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 196px; }
+  .store-pack-row { grid-template-columns: 32px minmax(0, 1fr) 116px; }
+  .store-pack-by { display: none; }
+  .store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 240px; }
   .store-row-by { display: none; }
 }
 @media (max-width: 720px) {
   .shelf-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .store-pack-row { grid-template-columns: 28px minmax(0, 1fr) auto; }
+  .pack-skill-row { grid-template-columns: 24px minmax(0, 1fr); }
+  .pack-skill-state { grid-column: 2; justify-content: flex-start; }
+  .pack-edit-field .input { width: 100%; }
   .shelf-cards > :nth-child(3) { display: none; }
   .store-all-head .segmented { margin-left: 0; }
 }

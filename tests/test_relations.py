@@ -212,6 +212,24 @@ class RelationsTests(unittest.TestCase):
         self.assertEqual(pack['id'], 'acme-design-taste-frontend')
         self.assertEqual(pack['title'], 'Acme 技能包')
 
+    def test_default_pack_title_uses_only_real_labels(self):
+        for name in ('acme-design-one', 'acme-design-two'):
+            self.skill(name)
+        path = self.home / '.skill-pilot/labels.json'
+        for entries, expected in (
+                ({}, 'Acme 技能包'),
+                ({'acme-design-one': ['GSAP 动效一', '示例'],
+                  'acme-design-two': ['GSAP 动效二', '示例']}, 'GSAP 技能包'),
+                ({'acme-design-one': ['GSAP 动效一', '示例']}, 'Acme 技能包')):
+            with self.subTest(labels=entries):
+                if entries:
+                    path.write_text(json.dumps({'groups': [{'name': '示例', 'skills': entries}]}))
+                else:
+                    path.unlink(missing_ok=True)
+                pack = relations.suggest_packs(self.home, self.registry, self.registry['skills'])[0]
+                self.assertEqual(pack['id'], 'acme-design')
+                self.assertEqual(pack['title'], expected)
+
     def test_large_families_respect_pack_size(self):
         for index in range(51):
             self.skill('acme-' + str(index))

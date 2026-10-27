@@ -38,6 +38,9 @@
       <circle cx="9" cy="8" r="3.5"/>
       <path d="M2.5 20a6.5 6.5 0 0 1 13 0 M15.5 4.6a3.5 3.5 0 0 1 0 6.8 M18 14a6.5 6.5 0 0 1 3.5 6"/>
     </symbol>
+    <symbol id="sp-stack" viewBox="0 0 24 24">
+      <path d="M8 4h11a1 1 0 0 1 1 1v11 M5 7h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1Z"/>
+    </symbol>
     <symbol id="sp-star" viewBox="0 0 24 24">
       <path d="M12 3.6l2.55 5.2 5.75.84-4.16 4.05.98 5.72L12 16.7l-5.12 2.71.98-5.72L3.7 9.64l5.75-.84z"/>
     </symbol>
@@ -705,6 +708,7 @@
           </div>
         </div>
         <div id="store-groups" class="store-groups" role="group" aria-label="按分组筛选"></div>
+        <div id="store-hints"></div>
         <div id="store-list" class="store-list"></div>
       </section>
     </div>
@@ -822,6 +826,20 @@
       <button id="store-publish-close" type="button" class="btn">取消</button>
       <button id="store-publish-next" type="button" class="btn btn-primary" disabled>下一步：核对</button>
       <button id="store-publish-apply" type="button" class="btn btn-primary" hidden disabled>上架</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="store-pack-dialog" class="dialog dialog-wide" aria-labelledby="store-pack-title">
+  <form class="dialog-form">
+    <h2 id="store-pack-title">整理技能包</h2>
+    <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-stack"/></svg>
+      <span>技能包建议一起装，包里的技能各自也能用。改动会整体替换你现在的技能包。</span></p>
+    <div id="store-pack-list" class="dialog-body store-pack-list"></div>
+    <p id="store-pack-message" class="store-publish-message" role="status"></p>
+    <div class="dialog-actions">
+      <button id="store-pack-close" type="button" class="btn">取消</button>
+      <button id="store-pack-save" type="button" class="btn btn-primary">保存</button>
     </div>
   </form>
 </dialog>

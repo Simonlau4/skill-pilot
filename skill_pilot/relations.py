@@ -154,13 +154,12 @@ def suggest_packs(home, registry, names, existing=None):
             while identity in identities:
                 ending = '-' + str(suffix)
                 identity, suffix = base[:64 - len(ending)] + ending, suffix + 1
-            words = [re.match(r'([A-Za-z][A-Za-z0-9]*)(?=\b)', titles.get(n, n)) for n in members]
+            words = [re.match(r'([A-Za-z][A-Za-z0-9]*)(?=\b)', titles.get(n, '')) for n in members]
             if all(words) and len({w[1] for w in words}) == 1:
                 word = words[0][1]
             else:
-                word = identity[0].upper() + identity[1:]
-                if len(word) + 4 > 20:
-                    word = word.split('-', 1)[0]
+                word = identity.split('-', 1)[0]
+                word = word[0].upper() + word[1:]
             title = word + ' 技能包' if len(word) + 4 <= 20 else word[:20]
             pack = team_hub.clean_pack({'id': identity, 'title': title, 'skills': members})
             repositories = {origins[n]['repository'].lower() for n in members if origins[n]['kind'] == 'github'}
