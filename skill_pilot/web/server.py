@@ -1048,7 +1048,7 @@ class Handler(BaseHTTPRequestHandler):
                     incoming = Path(next(s['path'] for s in review['skills'] if s['name'] == body['name']))
                 else:
                     home, registry, agents = operations.load(self.server.home)
-                    incoming = Path(next(s['path'] for s in operations.new_skills(home, agents)
+                    incoming = Path(next(s['path'] for s in operations.external_skills(home, agents, registry)
                                          if s['relative'] == body['relative'] and s['name'] == body['name']))
                 github.safe_skill(incoming)
                 self.reply(200, {'comparison': compare_files(existing, incoming)})

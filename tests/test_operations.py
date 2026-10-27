@@ -226,6 +226,46 @@ class OperationsTests(unittest.TestCase):
         self.assertFalse(source.is_symlink())
         self.assertEqual(self.fingerprint(), before)
 
+    def test_existing_external_copies_are_separate_from_new_skills(self):
+        original = self.home / '.codex/skills/other'
+        text = (original / 'SKILL.md').read_text()
+        original.unlink()
+        original.mkdir()
+        (original / 'SKILL.md').write_text(text)
+        self.skill('.claude/skills/other', 'other', '由外部工具改写')
+        self.skill('.codex/skills/new', 'new')
+        self.skill('.claude/skills/new', 'new')
+        before = self.fingerprint()
+
+        table = operations.table(self.home)
+        self.assertEqual([s['name'] for s in table['new_skills']], ['new', 'new'])
+        self.assertEqual({s['relative']: s['same_content'] for s in table['changed_skills']},
+                         {'.codex/skills/other': True, '.claude/skills/other': False})
+        self.assertTrue(all(s['registered'] for s in table['changed_skills']))
+        self.assertEqual({s['name'] for s in operations.new_skills(self.home, operations.load(self.home)[2])}, {'new'})
+        review = operations.preview_assign([{'skill': 'other', 'agent': 'codex', 'enabled': False}], home=self.home, recheck=True)
+        self.assertTrue(review['conflicts'])
+        self.assertTrue(operations.absorb(all_skills=True, home=self.home)['conflicts'])
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_identical_existing_copy_can_be_absorbed_and_undone(self):
+        source = self.home / '.codex/skills/other'
+        text = (source / 'SKILL.md').read_text()
+        source.unlink()
+        source.mkdir()
+        (source / 'SKILL.md').write_text(text)
+        before = self.fingerprint()
+        self.assertEqual(operations.new_skills(self.home, operations.load(self.home)[2]), [])
+        self.assertEqual(len(operations.table(self.home)['changed_skills']), 1)
+
+        result = operations.absorb(all_skills=True, home=self.home)
+        self.assertTrue(source.is_symlink())
+        self.assertEqual(operations.table(self.home)['changed_skills'], [])
+        operations.undo(result['id'], home=self.home)
+        self.assertFalse(source.is_symlink())
+        self.assertEqual(len(operations.table(self.home)['changed_skills']), 1)
+        self.assertEqual(self.fingerprint(), before)
+
     def test_absorb_verified_self_made_and_conflict(self):
         self.skill('.codex/skills/new', 'new')
         with patch.object(github, 'verify_source', return_value={'source':'https://github.com/test/upstream','commit':'abc','tree_sha':'def'}):

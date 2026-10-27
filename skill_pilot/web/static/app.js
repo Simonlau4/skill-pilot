@@ -376,6 +376,7 @@ function lockControls(selectors) {
 
 /* 正在写入时把各区重画一遍，让新画出来的控件也是禁用的。 */
 function renderBusyAreas() {
+  renderNewSkills();
   renderProgram();
   renderJobs();
   renderConfigExport();
@@ -2424,13 +2425,20 @@ $('skills-refresh').addEventListener('click', event => withBusy(event.currentTar
   await refreshTable(true);
 }));
 
-/* 新技能横幅：发现没收进仓库的，先在这里提醒。 */
+/* 独立副本提醒：按技能计数，区分新技能和已有技能的变化。 */
 function renderNewSkills() {
-  const list = state.table?.new_skills || [];
+  const added = state.table?.new_skills || [];
+  const changed = state.table?.changed_skills || [];
+  const list = [...added, ...changed];
   $('new-banner').hidden = !list.length;
   if (!list.length) return;
-  $('new-text').innerHTML = `发现 ${list.length} 个新安装的技能${hint('这些技能尚未纳入统一管理。收编后可分配给不同 Agent、检查更新。')}`;
-  $('new-list').innerHTML = list.map(s => `<p>${escape(s.name)} <span class="mono muted">${pathLabel(s.relative)}</span></p>`).join('');
+  const summary = [];
+  if (added.length) summary.push(`发现 ${new Set(added.map(s => s.name)).size} 个未纳入管理的新技能`);
+  if (changed.length) summary.push(`${new Set(changed.map(s => s.name)).size} 个已有技能出现外部副本`);
+  $('new-text').innerHTML = summary.join('；') + hint('同一技能的多份副本只算一个技能。已有技能的副本会先核对内容，内容不同不会直接覆盖。');
+  $('new-absorb').disabled = Boolean(writeBusy) || !state.table?.write_allowed;
+  if (!writeBusy) $('new-absorb').textContent = changed.length ? '统一管理' : '一键收编';
+  $('new-list').innerHTML = list.map(s => `<p>${escape(s.name)} <span class="muted">${s.registered ? (s.same_content ? '已有技能 · 内容相同' : '已有技能 · 内容有变化') : '新技能'}</span> <span class="mono muted">${pathLabel(s.relative)}</span></p>`).join('');
 }
 
 
@@ -2442,14 +2450,15 @@ $('new-toggle').addEventListener('click', event => {
 
 $('new-absorb').addEventListener('click', async event => {
   const button = event.currentTarget;
-  const list = state.table.new_skills;
-  const names = list.map(s => s.name);
+  const changed = state.table.changed_skills || [];
+  const list = [...state.table.new_skills, ...changed];
+  const names = [...new Set(list.map(s => s.name))];
   const ok = await confirmDialog({
-    title: '收编新技能',
-    lines: ['会把这些新装的技能收进统一仓库，保持原来的可见范围。'],
+    title: changed.length ? '统一管理技能副本' : '收编新技能',
+    lines: [changed.length ? '会把独立副本纳入统一管理，保持原来的可见范围。内容不同的会先提示核对。' : '会把这些技能收进统一仓库，保持原来的可见范围。'],
     groups: [{label: `收进仓库 ${names.length} 个`, items: names.map(name => ({name}))}],
     note: '可以在操作记录里撤销。',
-    okText: '收编',
+    okText: changed.length ? '统一管理' : '收编',
   });
   if (!ok) return;
   const result = await runWrite({
@@ -2461,7 +2470,7 @@ $('new-absorb').addEventListener('click', async event => {
       return written;
     },
     success: written => (written.conflicts?.length ? null : {
-      text: '新技能已经收进仓库',
+      text: '技能副本已经纳入统一管理',
       undo: undoButton => undoOperation(written.id, {skills: names, message: written.message, button: undoButton}),
     }),
   });
@@ -5013,7 +5022,8 @@ async function showIncomingConflicts(result, reviewId) {
   const conflicts = result.conflicts || [];
   let shown = 0;
   for (const conflict of conflicts) {
-    const incoming = state.table?.new_skills?.find(s => s.name === conflict.name);
+    const incoming = [...(state.table?.new_skills || []), ...(state.table?.changed_skills || [])]
+      .find(s => s.name === conflict.name && (!conflict.incoming || s.path === conflict.incoming));
     try {
       const comparison = await api('/api/incoming/compare', {name: conflict.name, review_id: reviewId, relative: incoming?.relative});
       const item = document.createElement('details');

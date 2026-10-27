@@ -80,7 +80,8 @@ def revision(home, agents):
     return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
 
 
-def new_skills(home, agents):
+def external_skills(home, agents, registry=None):
+    registry = load(home)[1] if registry is None else registry
     result = []
     catalog = profiles.managed(home, agents)
     roots = sorted({r for p in catalog for r in p['skill_roots']})
@@ -100,9 +101,17 @@ def new_skills(home, agents):
             check_links(path, home)
             relative = path.relative_to(home).as_posix()
             readers = [p['id'] for p in catalog if profiles.reads(p, relative) and skill['name'] in visible[p['id']]['available']]
+            registered = skill['name'] in registry['skills']
+            same = (normalization.tree(path) == normalization.tree(home / '.skill-pilot/store' / skill['name'])
+                    if registered else None)
             result.append({**skill, 'relative': relative, 'assigned_agents': readers,
+                           'registered': registered, 'same_content': same,
                            'manual_only_for': [p['id'] for p in catalog if profiles.reads(p, relative) and profiles.manual_only(skill, p)]})
     return result
+
+
+def new_skills(home, agents):
+    return [s for s in external_skills(home, agents) if not s['registered']]
 
 
 def listing_tokens(name, info):
@@ -143,6 +152,7 @@ def table(home=None):
                      'local_modified': normalization.tree(path) != normalization.tree(home / '.skill-pilot/bases' / name),
                      'cell_notes': cells[name]})
     actual = visibility(home, profiles.managed(home, agents))
+    external = external_skills(home, agents, registry)
     return {'home': str(home), 'revision': revision(home, agents), 'write_allowed': write_allowed(home), 'skills': rows,
             'actual_assignments': {n: [a for a in agents if n in actual[a]['available']] for n in registry['skills']},
             'agents': [{'id': a, 'name': catalog[a]['name'],
@@ -150,7 +160,9 @@ def table(home=None):
                         'activation_text': profiles.activation_text(catalog[a]),
                         'count': sum(a in s['assigned_agents'] for s in rows),
                         'description_tokens': sum(s['description_tokens'] for s in rows if a in s['assigned_agents'])}
-                       for a in agents], 'notes': notes(home, agents), 'new_skills': new_skills(home, agents),
+                       for a in agents], 'notes': notes(home, agents),
+            'new_skills': [s for s in external if not s['registered']],
+            'changed_skills': [s for s in external if s['registered']],
             'groups': [{'name': group['name'], 'skills': [n for n in group['skills'] if n in registry['skills']]}
                        for group in groups if any(n in registry['skills'] for n in group['skills'])],
             'labels_pending': sum(labels.needs_work(display.get(row['name'])) for row in rows),
@@ -345,7 +357,7 @@ def _recheck_assignment(changes, home, registry, agents):
             conflict(change, str(error))
         plan = assignment_plan(live, agents, [], home)
     # Any external replacement of a selected entry needs a source decision.
-    foreign = {s['name'] for s in new_skills(home, agents)}
+    foreign = {s['name'] for s in external_skills(home, agents, live)}
     for name in plan['changed']:
         target = home / '.skill-pilot/store' / name
         info = metadata((target / 'SKILL.md').read_text()) if (target / 'SKILL.md').is_file() else {}
@@ -360,7 +372,7 @@ def _recheck_assignment(changes, home, registry, agents):
             (not p.is_symlink() or p.resolve() != target.resolve()) for p in (home / e for e in entries))
         if replaced:
             for change in affected:
-                conflict(change, '「' + name + '」的位置被其他文件替换，请先在新装技能里核对来源，或不改这处。')
+                conflict(change, '「' + name + '」的位置被其他文件替换，请先在技能页的外部副本提醒里核对，或不改这处。')
     # Dry-run the same lossless config editor used by the write, before any backup or mutation.
     try:
         desired = disabled_lists(plan['registry'], home)
@@ -719,14 +731,16 @@ def absorb(all_skills=False, selected=None, expected=None, home=None):
     home, registry, agents = load(home)
     guard(home / '.skill-pilot', home)
     start = expected or revision(home, agents)
-    candidates = new_skills(home, agents)
+    candidates = external_skills(home, agents, registry)
     if not all_skills:
         if selected:
             candidates = [s for s in candidates if s['relative'] in selected]
         elif len(candidates) != 1:
-            return {'new_skills': candidates, 'message': '请指定要收编的技能，或使用 --all 收编全部。'}
+            return {'new_skills': [s for s in candidates if not s['registered']],
+                    'changed_skills': [s for s in candidates if s['registered']],
+                    'message': '请指定要统一管理的技能，或使用 --all 收编全部。'}
     if not candidates:
-        return {'message': '没有需要收编的新技能。'}
+        return {'message': '没有需要收编的技能或外部副本。'}
     collisions = [c for c in conflicts(candidates, registry, home) if not c['same_content']]
     grouped = {}
     for item in candidates:
@@ -767,7 +781,7 @@ def absorb(all_skills=False, selected=None, expected=None, home=None):
                 source.symlink_to(str(home / '.skill-pilot/store' / name), target_is_directory=True)
             reconcile_assignments(current, home, checked, [name])
         return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names}}
-    return _run(home, registry, agents, start, f'收编了 {len(grouped)} 个新装技能', mutate)
+    return _run(home, registry, agents, start, f'收编了 {len(grouped)} 个技能的独立副本', mutate)
 
 
 def set_source(name, repository, folder, confirmed=False, home=None):

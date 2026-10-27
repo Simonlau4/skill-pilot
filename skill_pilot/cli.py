@@ -347,7 +347,9 @@ def main():
             elif args.command == 'status':
                 for agent in data['agents']:
                     print(f'{agent["name"]}：{agent["count"]} 个技能，约 {agent["description_tokens"]:,} Token；{agent["activation"]}')
-                print(f'发现 {len(data["new_skills"])} 个新装的技能。')
+                print(f'发现 {len({s["name"] for s in data["new_skills"]})} 个未纳入管理的新技能。')
+                if data['changed_skills']:
+                    print(f'{len({s["name"] for s in data["changed_skills"]})} 个已有技能出现外部副本，请核对。')
             elif args.command == 'list':
                 for skill in data['skills']:
                     print(skill['name'] + '：' + skill['description'])
