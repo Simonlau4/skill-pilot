@@ -4057,16 +4057,48 @@ function packSkillStateHtml(card, item, lockedCount = 0) {
   return '<span class="tag tag-quiet">可安装</span>';
 }
 
-function packSkillRowHtml(card, item, lockedCount, selected) {
+function packSkillRowHtml(card, item, lockedCount, selected, options) {
+  const {readOnly = false, packNames = null, hideState = false} = options || {};
   const status = card.local?.status;
   const selectable = !item && status === 'installable';
   const showCheck = selectable || (!item && ['lark', 'conflict', 'blocked'].includes(status));
+  const names = packNames ? new Set(packNames) : null;
+  // 只读清单里写清这个技能被包里几个同伴需要；不写锁图标，也不影响状态。
+  const requiredInPack = readOnly
+    ? (card.required_by || []).filter(name => name !== card.name && (!names || names.has(name))).length
+    : 0;
+  const summary = storeSummary(card);
+  const check = readOnly ? '' : `<span class="pack-skill-check">${showCheck ? `<input type="checkbox" data-pack-check="${escape(card.key)}"
+      aria-label="${escape(`选择「${storeTitle(card)}」`)}"${selected ? ' checked' : ''}${selectable && !lockedCount ? '' : ' disabled'}>` : ''}</span>`;
+  const state = hideState ? '' : packSkillStateHtml(card, readOnly ? null : item, readOnly ? 0 : lockedCount);
+  const uses = requiredInPack ? `<span class="pack-skill-uses">包里 ${number(requiredInPack)} 个技能要用它</span>` : '';
+  const stateCell = state || uses ? `<span class="pack-skill-state" data-pack-state>${state}${uses}</span>` : '';
   return `<li class="pack-skill-row" data-pack-skill="${escape(card.name)}">
-    <span class="pack-skill-check">${showCheck ? `<input type="checkbox" data-pack-check="${escape(card.key)}"
-      aria-label="${escape(`选择「${storeTitle(card)}」`)}"${selected ? ' checked' : ''}${selectable && !lockedCount ? '' : ' disabled'}>` : ''}</span>
-    <button class="link-btn pack-skill-name" type="button" data-store-open="${escape(card.key)}">${escape(storeTitle(card))}</button>
-    <span class="pack-skill-state" data-pack-state>${packSkillStateHtml(card, item, lockedCount)}</span>
+    ${check}
+    <span class="pack-skill-main">
+      <button class="link-btn pack-skill-name" type="button" data-store-open="${escape(card.key)}">${escape(storeTitle(card))}</button>
+      ${summary ? `<span class="pack-skill-sum">${escape(summary)}</span>` : ''}
+    </span>
+    ${stateCell}
   </li>`;
+}
+
+/* 标题下的一句话：有推荐语照旧，没有就写固定说明；自己的包在状态块里提示补写。 */
+function storePackIntroHtml(pack) {
+  if (pack.note) return `<p class="store-rec-note store-pack-note">“${escape(pack.note)}”</p>`;
+  if (pack.mine) return '';
+  return `<p class="detail-summary store-pack-intro">这几个技能配合着用，建议一起装。${
+    packCanSelect(pack) ? '不需要的可以取消勾选。' : ''}</p>`;
+}
+
+/* 现在能勾选：不是全装好、包里还有可装的、队列里这个包没有进行中的条目。 */
+function packCanSelect(pack) {
+  const cards = storePackCards(pack);
+  const total = pack.local?.total || cards.length;
+  const items = (state.queue?.items || []).filter(item => item.pack === pack.key);
+  return (pack.local?.installed || 0) < total
+    && cards.some(card => card.local?.status === 'installable')
+    && !items.some(queueActive);
 }
 
 function renderStorePackDetail(pack, fresh = false) {
@@ -4076,12 +4108,8 @@ function renderStorePackDetail(pack, fresh = false) {
   $('detail-title').textContent = pack.title;
   body.innerHTML = `
     <p class="detail-id">${escape(pack.member.name)} · ${escape(friendlyDate(pack.updated_at))}上架 · ${number(total)} 个技能</p>
-    ${pack.note ? `<p class="store-rec-note store-pack-note">“${escape(pack.note)}”</p>` : ''}
-    ${storePackGetHtml(pack)}
-    <h3 class="sub-title">推荐人</h3>
-    <ul class="store-recs"><li>
-      <p class="store-rec-head"><strong>${escape(pack.member.name)}</strong><span>${escape(friendlyDate(pack.updated_at))}上架</span></p>
-    </li></ul>`;
+    ${storePackIntroHtml(pack)}
+    ${storePackGetHtml(pack)}`;
   body.scrollTop = scroll;
 }
 
@@ -4099,14 +4127,23 @@ function storePackGetHtml(pack) {
     storeGet.packSelected = new Set(cards.filter(card => card.local?.status === 'installable').map(card => card.key));
     storeGet.packPending = '';
   }
+  // 只看不装的状态（自己的包、已经全装好）也列出包里的技能和用途。
+  const packNames = cards.map(card => card.name);
+  const readonlyList = `<h3 class="sub-title">包里的 ${number(cards.length)} 个技能</h3>
+    <ul class="pack-skill-list is-readonly">${cards.map(card =>
+      packSkillRowHtml(card, null, 0, false, {readOnly: true, packNames, hideState: pack.mine})).join('')}</ul>`;
   if (pack.mine) {
+    const mineLine = pack.note
+      ? '<strong>我的技能包</strong>，包里是已上架的技能。'
+      : '还没写推荐语。写一句这套技能能做什么，同事更容易看懂。';
     return `<section class="store-get store-get-quiet">
-      <p class="store-get-line">${icon('stack')}<span><strong>我的技能包</strong>，包里是已上架的技能。</span></p>
+      <p class="store-get-line">${icon('stack')}<span>${mineLine}</span></p>
       <div class="store-get-actions">
         <button class="btn btn-small btn-quiet" type="button" data-store-pack-edit="${escape(pack.id)}"${teamCanWrite() && !jobsBlocked() ? '' : ' disabled'}>改技能包</button>
         <button class="btn btn-small btn-quiet" type="button" data-store-pack-unpack="${escape(pack.key)}"${teamCanWrite() && !jobsBlocked() ? '' : ' disabled'}>拆开</button>
       </div>
-    </section>`;
+    </section>
+    ${readonlyList}`;
   }
   const {selected, locked} = storePackSelection(pack);
   const done = items.filter(item => item.status === 'done').length;
@@ -4145,7 +4182,8 @@ function storePackGetHtml(pack) {
     return `<section class="store-get store-get-ok">
       <p class="store-get-line">${icon('check-circle')}<span><strong>${whole ? `已安装 ${total}/${total}` : '已全部在技能库中'}</strong></span></p>
       <div class="store-get-actions">${storePackGoHtml(pack, total)}</div>
-    </section>`;
+    </section>
+    ${readonlyList}`;
   }
   // 队列里只剩已完成的历史条目时，照常显示还没装的技能，不挡住再次安装。
   const cost = cards.filter(card => selected.has(card.key) && card.local?.status === 'installable')
@@ -4278,7 +4316,7 @@ function packEditHtml(pack, index) {
         ${pack.why ? `<span class="row-note">${escape(pack.why)}</span>` : ''}
       </div>
       <div class="pack-edit-field">
-        <label>推荐语（选填）<input class="input" type="text" maxlength="200" data-pack-note="${index}" value="${escape(pack.note || '')}" aria-label="技能包推荐语"></label>
+        <label>推荐语（选填）<input class="input" type="text" maxlength="200" data-pack-note="${index}" value="${escape(pack.note || '')}" placeholder="写一句这套技能能做什么，同事更容易看懂" aria-label="技能包推荐语"></label>
       </div>
       <p class="pack-edit-error" data-pack-error="${index}" role="alert">${escape(pack.error || '')}</p>
       <div class="pack-edit-chips">
@@ -4702,7 +4740,7 @@ function storeReviewPacksHtml(plan) {
           ${pack.why ? `<span class="row-note">${escape(pack.why)}</span>` : ''}
         </div>
         <div class="pack-edit-field">
-          <label>推荐语（选填）<input class="input" type="text" maxlength="200" data-review-pack-note="${index}" value="${escape(pack.note || '')}" aria-label="技能包推荐语"></label>
+          <label>推荐语（选填）<input class="input" type="text" maxlength="200" data-review-pack-note="${index}" value="${escape(pack.note || '')}" placeholder="写一句这套技能能做什么，同事更容易看懂" aria-label="技能包推荐语"></label>
         </div>
         <p class="pack-edit-error" data-review-pack-error="${index}" role="alert">${escape(pack.error || '')}</p>
         <div class="pack-edit-chips">${pack.skills.map(name => `<span class="pack-chip">${escape(reviewTitle(name))}<button type="button" class="tag-remove" data-review-pack-remove="${index}:${escape(name)}" aria-label="${escape(`把「${reviewTitle(name)}」移出这个技能包`)}">${icon('close')}</button></span>`).join('')}</div>

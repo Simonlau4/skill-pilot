@@ -587,6 +587,7 @@ setTimeout(() => {
             extract_function(source, 'function storePackCards('),
             extract_function(source, 'function storePackNeeds('),
             extract_function(source, 'function storePackSelection('),
+            extract_function(source, 'function storeSummary('),
             extract_function(source, 'function packSkillStateHtml('),
             extract_function(source, 'function packSkillRowHtml('),
             extract_function(source, 'function storePackGoHtml('),
@@ -619,6 +620,117 @@ if (full.includes('安装 4 个技能')) fail('全部已装时不该再出现安
 """
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_store_pack_detail_lists_skills_and_uses(self):
+        source = (STATIC / 'app.js').read_text()
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const icon = (name'),
+            line(source, 'const number = value => '),
+            extract_function(source, 'const tokenText = '),
+            line(source, 'const storeTitle = '),
+            line(source, 'const queueActive = '),
+            line(source, 'const storeQueueItem = '),
+            line(source, 'const storeCard = '),
+            extract_function(source, 'function storePackCards('),
+            extract_function(source, 'function storePackNeeds('),
+            extract_function(source, 'function storePackSelection('),
+            extract_function(source, 'function storeSummary('),
+            extract_function(source, 'function packSkillStateHtml('),
+            extract_function(source, 'function packSkillRowHtml('),
+            extract_function(source, 'function packCanSelect('),
+            extract_function(source, 'function storePackIntroHtml('),
+            extract_function(source, 'function storePackGoHtml('),
+            extract_function(source, 'function storePackGetHtml('),
+        ]
+        script = '\n'.join(parts) + r"""
+function fail(message) { console.error(message); process.exit(1); }
+const teamReadOnly = () => false;
+const teamCanWrite = () => true;
+const jobsBlocked = () => false;
+const author = {id: 'acme-owner', name: 'Acme 甲'};
+function card(key, name, status, extra = {}) {
+  return {key, name, title: name, summary: `用途-${name}`, requires: [], local: {status},
+    listings: [{member: author}], packs: ['pack:p:1'], tokens: 8, ...extra};
+}
+const state = {queue: {items: []}, store: {cards: [], member: author}};
+let storeGet = {packSelected: new Set()};
+const pack = {key: 'pack:p:1', id: 'p', title: '写作包', note: '', mine: false, member: author,
+  cards: ['a', 'b', 'c'], local: {total: 3, installed: 0, installable: 3, blocked: 0},
+  updated_at: '2026-10-01T00:00:00Z'};
+
+// 自己的包、没写推荐语：状态提示补写，只读列出 3 个技能和用途，不出勾选框。
+const mineCards = [
+  card('a', 'acme-a', 'mine', {title: '甲技能', summary: '整理周报'}),
+  card('b', 'acme-b', 'mine', {title: '乙技能', summary: '', description: '把会议记录整理成要点。再发出去',
+    required_by: ['acme-a']}),
+  card('c', 'acme-c', 'mine', {title: '丙技能', summary: '<img src=x onerror=alert(1)> 写摘要'}),
+];
+state.store.cards = mineCards;
+const minePack = {...pack, mine: true, local: {total: 3, installed: 3, installable: 0, blocked: 0}};
+const mine = storePackGetHtml(minePack);
+if (!mine.includes('还没写推荐语')) fail('自己的包没写推荐语时应提示补写：' + mine);
+if (!mine.includes('包里的 3 个技能')) fail('自己的包也要写包里有几个技能：' + mine);
+if (!mine.includes('整理周报') || !mine.includes('把会议记录整理成要点') || !mine.includes('写摘要')) {
+  fail('只读清单要列出每个技能的用途：' + mine);
+}
+if (mine.includes('data-pack-check')) fail('只读清单不该出现勾选框：' + mine);
+if (!mine.includes('is-readonly')) fail('自己的包清单要用只读样式：' + mine);
+if (mine.includes('<img') || !mine.includes('&lt;img')) fail('用途里的标签要转成纯文字：' + mine);
+if (mine.includes('我上架的') || mine.includes('tag-warn')) fail('自己的包只读行不显示状态标签：' + mine);
+if ((mine.match(/包里 1 个技能要用它/g) || []).length !== 1) {
+  fail('自己的包被需要时仍要写包里几个技能要用它：' + mine);
+}
+const mineWithNote = storePackGetHtml({...minePack, note: '一起用'});
+if (!mineWithNote.includes('我的技能包') || mineWithNote.includes('还没写推荐语')) {
+  fail('写了推荐语时应保持原来的状态说明：' + mineWithNote);
+}
+
+// 同事的包、全部装好：状态照旧，只读列出技能；被包里两个技能需要时写清楚。
+const doneCards = [
+  card('a', 'acme-a', 'installed', {title: '甲技能', summary: '整理周报', required_by: ['acme-b', 'acme-c', 'acme-x']}),
+  card('b', 'acme-b', 'installed', {title: '乙技能', summary: '写会议纪要', required_by: ['acme-a']}),
+  card('c', 'acme-c', 'installed', {title: '丙技能', summary: '发周报'}),
+];
+state.store.cards = doneCards;
+const done = storePackGetHtml({...pack, local: {total: 3, installed: 3, installable: 0, blocked: 0}});
+if (!done.includes('已全部在技能库中')) fail('全部装好时状态照旧：' + done);
+if (!done.includes('包里的 3 个技能') || !done.includes('整理周报') || !done.includes('写会议纪要') || !done.includes('发周报')) {
+  fail('全部装好时也要列出技能和用途：' + done);
+}
+if (done.includes('data-pack-check')) fail('全部装好时只读清单不该出现勾选框：' + done);
+if (!done.includes('已有')) fail('同事的包全部装好时只读行保持「已有」：' + done);
+if ((done.match(/包里 2 个技能要用它/g) || []).length !== 1) fail('只数属于本包的需要者，并写包里 N 个技能要用它：' + done);
+
+// 同事的包、可以安装：保持勾选清单，每行多一句用途。
+const freshCards = [
+  card('a', 'acme-a', 'installable', {title: '甲技能', summary: '整理周报'}),
+  card('b', 'acme-b', 'installable', {title: '乙技能', summary: '写会议纪要'}),
+  card('c', 'acme-c', 'installable', {title: '丙技能', summary: '发周报'}),
+];
+state.store.cards = freshCards;
+storeGet = {packSelected: new Set(['a', 'b', 'c'])};
+const fresh = storePackGetHtml(pack);
+if ((fresh.match(/data-pack-check/g) || []).length !== 3) fail('可以安装时每行都要有勾选框：' + fresh);
+if ((fresh.match(/pack-skill-sum/g) || []).length !== 3) fail('可以安装时每行都要有一句用途：' + fresh);
+
+// 标题下的一句介绍。
+const quoted = storePackIntroHtml({...pack, note: '一起用'});
+if (!quoted.includes('“一起用”')) fail('有推荐语时照旧显示引号推荐语：' + quoted);
+const intro = storePackIntroHtml(pack);
+if (!intro.includes('这几个技能配合着用，建议一起装。')) fail('没有推荐语时应写固定说明：' + intro);
+if (!intro.includes('不需要的可以取消勾选。')) fail('现在能勾选时应提示可以取消：' + intro);
+const allDoneIntro = storePackIntroHtml({...pack, local: {total: 3, installed: 3, installable: 0, blocked: 0}});
+if (allDoneIntro.includes('不需要的可以取消勾选。')) fail('全部装好后不该再说可以取消勾选：' + allDoneIntro);
+state.queue = {items: [{key: 'x', pack: 'pack:p:1', status: 'waiting'}]};
+if (storePackIntroHtml(pack).includes('不需要的可以取消勾选。')) fail('这个包有进行中的安装时不该催着取消：' + storePackIntroHtml(pack));
+state.queue = {items: []};
+if (storePackIntroHtml({...pack, mine: true}) !== '') fail('自己的包没写推荐语时标题下不显示这句');
+"""
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(source.count('placeholder="写一句这套技能能做什么，同事更容易看懂"'), 2,
+                         '打包窗口和上架核对的推荐语输入框都要加新的提示文字')
 
     def test_store_pack_frontend_markers(self):
         source = (STATIC / 'app.js').read_text()
