@@ -194,12 +194,12 @@ class UpdateCheckTests(unittest.TestCase):
         registry['skills']['zbad']['source'] = {'source': 'example/repo', 'source_path': '../x'}
         path.write_text(json.dumps(registry))
         review = self.review()
-        # 自制的和没人用的都不出现；来源写坏的仍然列出并报“没查清楚”
+        # 自制和未启用的只列入跳过清单；来源位置有误的仍报告检查失败。
         self.assertEqual({r['name']: r['status'] for r in review['skills']}, {'sample': '有更新', 'zbad': '没查清楚'})
         self.assertEqual((review['total'], review['repositories']), (2, 1))
-        self.assertEqual(review['unchecked'], [
-            {'reason': '没有上游来源', 'count': 1},
-            {'reason': '没有 agent 在用', 'count': 1},
+        self.assertEqual([(r['code'], r['count'], r['names']) for r in review['unchecked']], [
+            ('self_made', 1, ['zmine']),
+            ('unused', 1, ['zunused']),
         ])
         self.assertNotIn('withdrawn', updates.public(review))
         self.server()  # 接口忽略旧的 withdrawn 字段
@@ -237,9 +237,9 @@ class UpdateCheckTests(unittest.TestCase):
             review = opened(partial)
             self.assertEqual(review['total'], 1)
             self.assertEqual(review['repositories'], 1)
-            self.assertEqual(review['unchecked'], [
-                {'reason': '没有上游来源', 'count': 1},
-                {'reason': '没有 agent 在用', 'count': 1},
+            self.assertEqual([(r['code'], r['count'], r['names']) for r in review['unchecked']], [
+                ('self_made', 1, ['zmade']),
+                ('unused', 1, ['zidle']),
             ])
 
         with self.subTest('none'):
@@ -249,15 +249,54 @@ class UpdateCheckTests(unittest.TestCase):
             review = opened(nothing)
             self.assertEqual(review['total'], 0)
             self.assertEqual(review['repositories'], 0)
-            self.assertEqual(review['unchecked'], [
-                {'reason': '没有上游来源', 'count': 1},
-                {'reason': '没有 agent 在用', 'count': 1},
+            self.assertEqual([(r['code'], r['count'], r['names']) for r in review['unchecked']], [
+                ('self_made', 1, ['sample']),
+                ('unused', 1, ['zidle']),
             ])
             self.assertEqual(review['skills'], [])
 
         with self.subTest('empty'):
             review = opened(lambda registry: registry.update(skills={}))
             self.assertEqual((review['total'], review['unchecked']), (0, []))
+
+    def test_skipped_lists_distinguish_sources_without_changing_check_scope(self):
+        path = self.home / '.skill-pilot/registry.json'
+        registry = json.loads(path.read_text())
+        for name, source, agents in [
+            ('mine', {'source': '自制'}, ['codex']),
+            ('local-code', {'source': '本机源码'}, ['codex']),
+            ('local-doc', {'source': '本机文档生成'}, ['codex']),
+            ('unknown', {'source': '来源不明'}, ['codex']),
+            ('missing', {}, ['codex']),
+            ('unsupported', {'source': 'https://example.test/skills'}, ['codex']),
+            ('unused-mine', {'source': '自制'}, []),
+            ('bad', {'source': 'https://github.com/example/repo', 'source_path': '../bad'}, ['codex']),
+        ]:
+            registry['skills'][name] = {'source': source, 'assigned_agents': agents, 'requires': [], 'entries': []}
+        path.write_text(json.dumps(registry))
+        before = store.physical_state(self.home)
+        review = updates.create(self.home)
+        self.addCleanup(shutil.rmtree, review['temporary'], True)
+        result = updates.public(review)
+        self.assertEqual(result['total'], 2)  # 正常技能和来源写错的技能仍在检查范围中。
+        self.assertEqual([(r['code'], r['reason'], r['count'], r['names']) for r in result['unchecked']], [
+            ('self_made', '自制技能', 1, ['mine']),
+            ('local', '本机维护', 2, ['local-code', 'local-doc']),
+            ('unknown', '来源未记录', 2, ['missing', 'unknown']),
+            ('unsupported', '暂不支持检查', 1, ['unsupported']),
+            ('unused', '未启用', 1, ['unused-mine']),
+        ])
+        names = [name for group in result['unchecked'] for name in group['names']]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(all(group['description'] for group in result['unchecked']))
+        self.assertEqual(before, store.physical_state(self.home))
+
+        # 旧的检查结果可从现存记录补齐名单；已经删除的技能不留在清单中。
+        review['unchecked'] = [{'reason': '没有上游来源', 'count': 6}]
+        del registry['skills']['local-code']
+        path.write_text(json.dumps(registry))
+        local = next(group for group in updates.public(review)['unchecked'] if group['code'] == 'local')
+        self.assertEqual((local['count'], local['names']), (1, ['local-doc']))
 
     def pin_baseline(self):
         path = self.home / '.skill-pilot/registry.json'

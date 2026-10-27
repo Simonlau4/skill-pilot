@@ -19,14 +19,18 @@ def normalize(source):
             raise ValueError('团队商店的来源记录不完整，请重新装上这个技能。')
         return {'kind': 'team', 'label': '团队商店 · ' + team['member_name'],
                 **{k: team[k] for k in ('member', 'member_name', 'name', 'version', 'key')}}
-    if text in {'自制', '本机源码', '本机文档生成', '来源不明'}:
-        return {'kind': 'skip', 'label': '自制，不检查更新'}
+    if text == '自制':
+        return {'kind': 'skip', 'label': '自制，不检查更新', 'skip_reason': 'self_made'}
+    if text in {'本机源码', '本机文档生成'}:
+        return {'kind': 'skip', 'label': '本机维护，不检查外部更新', 'skip_reason': 'local'}
+    if text == '来源不明':
+        return {'kind': 'skip', 'label': '来源未记录', 'skip_reason': 'unknown'}
     if record.get('sourceType') == 'well-known':
         url = record.get('sourceUrl', '')
         if url.startswith('https://open.feishu.cn/lark-cli/skills/'):
             return {'kind': 'lark', 'label': '飞书官方', 'url': url,
                     'base_url': record.get('sourceBaseUrl', url.split('/.well-known/')[0])}
-        return {'kind': 'skip', 'label': '自制，不检查更新'}
+        return {'kind': 'skip', 'label': '暂不支持检查此来源', 'skip_reason': 'unsupported'}
     repository = source.get('repository') or record.get('source', '')
     match = re.search(r'https://github.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)',
                       text + ' ' + str(record.get('sourceUrl', '')))
@@ -34,7 +38,9 @@ def normalize(source):
         repository = match[1].removesuffix('.git')
     local = str(repository).startswith('file:///')
     if not local and not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', str(repository)):
-        return {'kind': 'skip', 'label': '自制，不检查更新'}
+        if not (text or repository or record.get('sourceUrl')):
+            return {'kind': 'skip', 'label': '来源未记录', 'skip_reason': 'unknown'}
+        return {'kind': 'skip', 'label': '暂不支持检查此来源', 'skip_reason': 'unsupported'}
     folder = str(source.get('source_path', record.get('skillPath', '.')) or '.')
     path = PurePosixPath(folder)
     if path.is_absolute() or '..' in path.parts:

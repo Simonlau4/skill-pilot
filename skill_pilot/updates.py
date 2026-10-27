@@ -65,19 +65,32 @@ def skill_state(home, name, skill):
     return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
 
 
+UNCHECKED_REASONS = {
+    'self_made': ('自制技能', '来源已标为“自制”，由你自行维护，不检查外部更新。如有外部原版，需先核对来源。'),
+    'local': ('本机维护', '来源是本机源码或本机文档，需从本机原稿维护，不检查外部更新。'),
+    'unknown': ('来源未记录', '没有记录可用于检查更新的来源；需先找到原作者的来源并补记。'),
+    'unsupported': ('暂不支持检查', '已记录来源，但当前不支持从该来源检查更新；需到原来源核对版本。'),
+    'unused': ('未启用', '目前没有任何 Agent 启用，本次跳过。需要使用时，可在详情中启用后重新检查。'),
+}
+
+
 def _unchecked(registry):
-    no_source = unused = 0
-    for skill in registry.values():
+    groups = {}
+    for name, skill in sorted(registry.items()):
         if not skill['assigned_agents']:
-            unused += 1
+            reason = 'unused'
         else:
             try:
-                no_source += normalize(skill['source'])['kind'] == 'skip'
+                source = normalize(skill['source'])
             except ValueError:
-                pass
-    return [item for item in (
-        {'reason': '没有上游来源', 'count': no_source}, {'reason': '没有 agent 在用', 'count': unused},
-    ) if item['count']]
+                continue  # 来源写错的仍要尝试检查，并单独报告失败。
+            if source['kind'] != 'skip':
+                continue
+            reason = source['skip_reason']
+        groups.setdefault(reason, []).append(name)
+    return [{'code': code, 'reason': reason, 'description': description,
+             'count': len(groups[code]), 'names': groups[code]}
+            for code, (reason, description) in UNCHECKED_REASONS.items() if code in groups]
 
 
 def create(home=None):
@@ -87,14 +100,14 @@ def create(home=None):
               'checked_at': datetime.now(timezone.utc).isoformat(), 'write_allowed': operations.write_allowed(home),
               'skills': [], 'errors': [], 'lark': None, 'running': True, 'done': 0, 'current': [],
               'update_count': 0, 'latest_count': 0, 'api_calls': 0, '_groups': {}}
-    # 没查的只记已经跳过的原因，不扩大检查范围。
+    # 记录跳过的原因和名单，不扩大检查范围。
     for name, skill in sorted(registry['skills'].items()):
         if not skill['assigned_agents']:
             continue  # 没有 agent 在用的不查
         try:
             source = normalize(skill['source'])
             if source['kind'] == 'skip':
-                continue  # 自制的没有上游，不列出也不计数
+                continue  # 没有可检查来源的只列入跳过清单。
         except ValueError as error:
             source = {'kind': 'skip', 'label': '没查清楚', 'error': str(error)}
         group = source.get('repository', source['kind'])

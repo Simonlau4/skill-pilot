@@ -77,7 +77,7 @@ const all = updateResultSentence({
   unchecked: [],
   skills: [{has_update: false}, {has_update: false}, {has_update: false}],
 });
-for (const text of ['已检查 3 个技能', '均为最新版本', when + ' 检查']) {
+for (const text of ['全库检查', '已检查 3 个技能', '均为最新版本', when + ' 检查']) {
   if (!all.includes(text)) fail('全部已查缺少：' + text + ' / ' + all);
 }
 if (all.includes('没查') || all.includes('没有要查')) fail('全部已查不该说没查：' + all);
@@ -88,7 +88,7 @@ const partial = updateResultSentence({
   unchecked: [{reason: '没有上游来源', count: 3}],
   skills: [{has_update: false}, {has_update: false}],
 });
-for (const text of ['已检查 2 个技能', '其余 3 个未检查', '没有上游来源', when + ' 检查']) {
+for (const text of ['已检查 2 个技能', '3 个跳过检查', '没有上游来源', when + ' 检查']) {
   if (!partial.includes(text)) fail('部分未查缺少：' + text + ' / ' + partial);
 }
 if (partial.includes('最新')) fail('没查的被说成最新：' + partial);
@@ -97,12 +97,13 @@ const mixed = updateResultSentence({
   total: 1,
   checked_at: stamp,
   unchecked: [
-    {reason: '没有上游来源', count: 2},
-    {reason: '没有 agent 在用', count: 4},
+    {reason: '自制技能', count: 2, names: ['one', 'two']},
+    {reason: '本机维护', count: 1, names: ['local']},
+    {reason: '未启用', count: 3, names: ['idle-one', 'idle-two', 'idle-three']},
   ],
   skills: [{has_update: true}],
 });
-for (const text of ['1 个有可用更新', '其余 6 个未检查', '2 个没有上游来源', '4 个没有 agent 在用']) {
+for (const text of ['1 个有可用更新', '6 个跳过检查', '2 个自制技能', '1 个本机维护', '3 个未启用']) {
   if (!mixed.includes(text)) fail('多种原因缺少：' + text + ' / ' + mixed);
 }
 if (mixed.includes('最新')) fail('有没查的还说最新：' + mixed);

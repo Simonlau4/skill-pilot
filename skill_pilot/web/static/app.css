@@ -598,6 +598,15 @@ input[type="checkbox"]:disabled { cursor: default; }
 #skills-search { min-width: 150px; }
 .failed-list { margin: calc(var(--sp-2) * -1) 0 var(--sp-3); padding: var(--sp-2) var(--sp-4); max-height: 240px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: var(--fs-small); color: var(--ink-2); }
 .failed-list p { margin: var(--sp-1) 0; overflow-wrap: anywhere; }
+.updates-unchecked { margin: calc(var(--sp-2) * -1) 0 var(--sp-3); }
+#updates-unchecked-list { max-height: 360px; overflow-y: auto; padding: 0 var(--sp-3) var(--sp-3); }
+.unchecked-group + .unchecked-group { border-top: 1px solid var(--line); margin-top: var(--sp-3); padding-top: var(--sp-3); }
+.unchecked-group h3 { margin: 0; font-size: var(--fs-small); }
+.unchecked-group p { margin: var(--sp-1) 0 var(--sp-2); color: var(--ink-2); font-size: var(--fs-small); }
+.unchecked-group ul { list-style: none; padding: 0; margin: 0; }
+.unchecked-group li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-1) var(--sp-3); padding: var(--sp-1) 0; overflow-wrap: anywhere; }
+.unchecked-group .link-btn { text-align: left; min-width: 0; overflow-wrap: anywhere; }
+.unchecked-group .item-note { margin: 0; }
 
 /* 分组和标签常驻列表左侧，各自滚动；收起后把空间留给技能。 */
 .skills-main, .skills-results { min-width: 0; }
