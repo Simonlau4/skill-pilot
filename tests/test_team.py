@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import cleanup, operations, sharing, store, team, team_hub, updates, research, self_update
+from skill_pilot import cleanup, operations, sharing, store, tags, team, team_hub, updates, research, self_update
 from skill_pilot.sources import github, normalize
 from tests.test_team_hub import listing, file as package_file
 from skill_pilot.web import runtime
@@ -152,6 +152,259 @@ class TeamTests(unittest.TestCase):
 
     def raw_put(self, rows, member=None):
         return team._request({'url': self.url, 'key': (member or self.first)['token']}, '/api/listings/me', 'PUT', {'listings': rows})
+
+    def test_preview_detects_reverse_dependencies_auto_publishes_and_does_not_change_registry(self):
+        self.configure()
+        path = self.home / '.skill-pilot/store/acme-base/SKILL.md'
+        path.write_text(path.read_text() + '\n任何 acme-* 技能都要先读这个\n')
+        registry = (self.home / '.skill-pilot/registry.json').read_bytes()
+        preview = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-extra'}]})
+        self.assertEqual(preview['detected'], [{'skill': 'acme-extra', 'requires': 'acme-base',
+            'evidence': '任何 acme-* 技能都要先读这个', 'adopted': True}])
+        rows = {r['name']: r for r in preview['listings']}
+        self.assertEqual(rows['acme-extra']['requires'], ['acme-base'])
+        self.assertEqual(rows['acme-base']['auto'], ['acme-extra'])
+        self.assertTrue(preview['packs_supported'])
+        self.assertEqual(preview['packs'][0]['skills'], ['acme-base', 'acme-extra'])
+        self.ok(self.a, '/api/team/listings/apply', {'review': preview['review']})
+        self.assertEqual((self.home / '.skill-pilot/registry.json').read_bytes(), registry)
+        shared = team._owned(team._catalog(team.settings(self.home))['cards'], self.first['id'])
+        self.assertEqual(shared['acme-extra']['requires'], ['acme-base'])
+
+    def test_preview_only_detects_selected_and_transitive_auto_dependencies(self):
+        self.configure()
+        for name, dependency in (('acme-base', 'acme-extra'), ('acme-extra', 'acme-local')):
+            path = self.home / '.skill-pilot/store' / name / 'SKILL.md'
+            path.write_text(path.read_text() + '\n必须先读 ' + dependency)
+        with patch.object(team.relations, 'detect_requires', wraps=team.relations.detect_requires) as detect:
+            preview = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-main'}]})
+        batches = [set(c.args[2]) for c in detect.call_args_list]
+        self.assertEqual(batches, [{'acme-main'}, {'acme-base'}, {'acme-extra'}, {'acme-local'}])
+        self.assertEqual({r['name'] for r in preview['listings']}, {'acme-main', 'acme-base', 'acme-extra', 'acme-local'})
+        with patch.object(team.relations, 'detect_requires', wraps=team.relations.detect_requires) as detect:
+            preview = self.ok(self.a, '/api/team/listings/preview', {
+                'skills': [{'name': 'acme-main'}], 'rejected': [['acme-base', 'acme-extra']]})
+        self.assertEqual([set(c.args[2]) for c in detect.call_args_list], [{'acme-main'}, {'acme-base'}])
+        self.assertEqual({r['name'] for r in preview['listings']}, {'acme-main', 'acme-base'})
+        self.assertFalse(preview['detected'][0]['adopted'])
+        self.ok(self.a, '/api/team/listings/apply', {'review': preview['review']})
+        with patch.object(team.relations, 'detect_requires', wraps=team.relations.detect_requires) as detect:
+            self.ok(self.a, '/api/team/listings/candidates')
+        self.assertEqual([set(c.args[2]) for c in detect.call_args_list], [{'acme-main', 'acme-base'}])
+
+    def test_custom_preview_packs_omit_unpublishable_skills_and_small_packs(self):
+        self.configure()
+        (self.home / '.skill-pilot/store/acme-local/SKILL.md').unlink()
+        for members, expected in ((['acme-local', 'acme-extra', 'acme-other'], ['acme-extra', 'acme-other']),
+                                  (['acme-local', 'acme-extra'], [])):
+            with self.subTest(members=members):
+                preview = self.ok(self.a, '/api/team/listings/preview', {
+                    'skills': [{'name': n} for n in ('acme-local', 'acme-extra', 'acme-other')],
+                    'packs': [{'id': 'acme', 'title': 'Acme 技能包', 'skills': members}]})
+                self.assertEqual([r['name'] for r in preview['errors']], ['acme-local'])
+                self.assertEqual(preview['packs'][0]['skills'] if expected else preview['packs'], expected)
+                self.ok(self.a, '/api/team/listings/apply', {'review': preview['review']})
+                catalog = self.ok(self.b, '/api/team/catalog')
+                self.assertEqual(len(catalog['packs']), bool(expected))
+
+    def test_preview_rejected_detection_remains_visible_and_packs_can_be_customized(self):
+        self.configure()
+        path = self.home / '.skill-pilot/store/acme-extra/SKILL.md'
+        path.write_text(path.read_text() + '\n必须先读 acme-base。')
+        preview = self.ok(self.a, '/api/team/listings/preview', {
+            'skills': [{'name': 'acme-extra'}], 'rejected': [['acme-extra', 'acme-base']], 'packs': []})
+        self.assertEqual(preview['detected'][0]['adopted'], False)
+        self.assertEqual([r['name'] for r in preview['listings']], ['acme-extra'])
+        self.assertEqual(preview['packs'], [])
+        self.publish(('acme-main',))  # Keep this existing pack when publishing a different pair.
+        custom = {'id': 'acme-custom', 'title': '#自选技能包', 'skills': ['acme-local', 'acme-other']}
+        preview = self.ok(self.a, '/api/team/listings/preview', {
+            'skills': [{'name': 'acme-local'}, {'name': 'acme-other'}], 'packs': [custom]})
+        self.assertEqual({p['id'] for p in preview['packs']}, {'acme', 'acme-custom'})
+        self.assertTrue(next(p for p in preview['packs'] if p['id'] == 'acme')['existing'])
+        self.assertEqual(preview['packs'][0]['title'], '自选技能包')
+        self.ok(self.a, '/api/team/listings/apply', {'review': preview['review']})
+        self.assertEqual(len(self.ok(self.a, '/api/team/listings/candidates')['packs']), 2)
+        preview = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-local'}], 'packs': []})
+        self.assertEqual([p['id'] for p in preview['packs']], ['acme'])
+        for rejected in ('bad', [['acme-extra']], [[1, 'acme-base']]):
+            self.assertEqual(self.request(self.a, '/api/team/listings/preview', {
+                'skills': [{'name': 'acme-extra'}], 'rejected': rejected})[0], 409)
+
+    def test_candidates_missing_requires_and_suggestions_only_use_own_listings(self):
+        self.configure()
+        self.publish(('acme-extra',))
+        self.publish(('acme-local',))
+        # Dismantle the default pack so that two listed skills can be suggested again.
+        self.ok(self.a, '/api/team/packs', {'packs': []})
+        path = self.home / '.skill-pilot/store/acme-extra/SKILL.md'
+        path.write_text(path.read_text() + '\nREQUIRED acme-base\n')
+        result = self.ok(self.a, '/api/team/listings/candidates')
+        rows = {r['name']: r for r in result['skills']}
+        self.assertEqual(rows['acme-extra']['missing_requires'], ['acme-base'])
+        self.assertEqual(rows['acme-main']['missing_requires'], [])
+        self.assertEqual(result['pack_suggestions'][0]['skills'], ['acme-extra', 'acme-local'])
+        self.registry(self.home, lambda s: s['acme-extra'].update(dependency_decisions={'acme-base': 'rejected'}))
+        self.assertEqual(next(r for r in self.ok(self.a, '/api/team/listings/candidates')['skills']
+                              if r['name'] == 'acme-extra')['missing_requires'], [])
+
+    def test_catalog_needs_required_by_packs_counts_and_tokens(self):
+        self.configure()
+        self.publish(('acme-main', 'acme-local', 'acme-other'))
+        self.raw_put([listing('acme-official', 'lark'), listing('acme-blocked', requires=['acme-official'])])
+        # Put a blocked non-official card into the same pack.
+        names = ['acme-main', 'acme-base', 'acme-local', 'acme-other', 'acme-blocked']
+        self.ok(self.a, '/api/team/packs', {'packs': [{'id': 'acme', 'title': 'Acme 技能包', 'skills': names}]})
+        result = self.ok(self.b, '/api/team/catalog')
+        cards = {r['name']: r for r in result['cards']}
+        self.assertEqual(cards['acme-main']['needs'], [{'name': 'acme-base', 'title': 'acme-base', 'status': 'with'}])
+        self.assertEqual(cards['acme-base']['required_by'], ['acme-main'])
+        self.assertEqual(cards['acme-blocked']['needs'][0]['status'], 'missing')
+        self.assertIn('飞书', cards['acme-blocked']['needs'][0]['reason'])
+        pack = result['packs'][0]
+        self.assertEqual(pack['local'], {'total': 5, 'installed': 1, 'installable': 3, 'blocked': 1})
+        self.assertEqual(pack['tokens'], sum(cards[n]['tokens'] for n in names if n != 'acme-other'))
+        self.assertEqual(cards['acme-local']['packs'], [pack['key']])
+        self.assertFalse(pack['mine'])
+        self.assertTrue(self.ok(self.a, '/api/team/catalog')['packs'][0]['mine'])
+        self.assertTrue(all(not c['needs'] for c in self.ok(self.a, '/api/team/catalog')['cards']))
+        self.install('acme-base')
+        self.assertEqual(self.cards()['acme-main']['needs'][0]['status'], 'have')
+        self.install('acme-main')
+        self.assertEqual(self.cards()['acme-main']['needs'], [])
+
+    def test_catalog_skips_missing_pack_cards_and_current_validator_accepts_new_hub(self):
+        self.configure()
+        self.publish(('acme-main', 'acme-local'))
+        config = team.settings(self.other)
+        data = team._request(config, '/api/catalog')
+        with patch.object(team, '_request', return_value=data):
+            self.assertEqual(team._catalog(config)['packs'][0]['cards'], data['packs'][0]['cards'])
+        data['packs'][0]['cards'].append('team:missing:acme-gone')
+        request = team._request
+        def inconsistent(config, path, method='GET', data_body=None):
+            return copy.deepcopy(data) if path == '/api/catalog' else request(config, path, method, data_body)
+        with patch.object(team, '_request', side_effect=inconsistent):
+            result = self.ok(self.b, '/api/team/catalog')
+        self.assertEqual(len(result['packs'][0]['cards']), 3)
+        data['packs'][0]['cards'] = [data['packs'][0]['cards'][0], 'team:missing:acme-gone']
+        with patch.object(team, '_request', side_effect=inconsistent):
+            self.assertEqual(self.ok(self.b, '/api/team/catalog')['packs'], [])
+
+    def test_old_hub_has_no_packs_and_preview_upload_does_not_send_them(self):
+        self.configure()
+        request, uploads = team._request, []
+        def old(config, path, method='GET', data=None):
+            if path == '/api/listings/me':
+                uploads.append(copy.deepcopy(data))
+            result = request(config, path, method, data)
+            if path == '/api/catalog': result.pop('packs')
+            return result
+        with patch.object(team, '_request', side_effect=old):
+            preview = self.publish(('acme-main',))
+            self.assertFalse(preview['packs_supported'])
+            self.assertEqual(preview['packs'], [])
+            self.assertNotIn('packs', uploads[0])
+            result = self.ok(self.b, '/api/team/catalog')
+            self.assertFalse(result['packs_supported'])
+            self.assertEqual(result['packs'], [])
+            candidates = self.ok(self.a, '/api/team/listings/candidates')
+            self.assertEqual(candidates['packs'], [])
+            status, result = self.request(self.a, '/api/team/packs', {'packs': []})
+            self.assertEqual(status, 409)
+            self.assertEqual(result['error'], team.PACKS_UNSUPPORTED)
+
+    def test_packs_endpoint_checks_ownership_readonly_and_preserves_listing_times(self):
+        self.configure()
+        self.publish(('acme-main', 'acme-local'))
+        before = self.hub.store._listings(self.first['id'])
+        pack = {'id': 'acme-new', 'title': '自选技能包', 'skills': ['acme-main', 'acme-local']}
+        self.ok(self.a, '/api/team/packs', {'packs': [pack]})
+        self.assertEqual(self.hub.store._listings(self.first['id']), before)
+        self.assertEqual(self.request(self.b, '/api/team/packs', {'packs': [pack]})[0], 409)
+        for packs in (None, [dict(pack, title='字' * 21)], [dict(pack, skills=['acme-main', 'acme-missing'])]):
+            self.assertEqual(self.request(self.a, '/api/team/packs', {'packs': packs})[0], 409)
+        with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
+            self.assertEqual(self.request(self.a, '/api/team/packs', {'packs': []})[0], 403)
+        self.a.jobs_blocked = '请先恢复'
+        self.assertEqual(self.request(self.a, '/api/team/packs', {'packs': []})[0], 409)
+
+    def test_pack_queue_orders_skips_installed_keeps_cancelled_out_and_tags_existing_skills(self):
+        self.configure()
+        self.publish(('acme-main', 'acme-local', 'acme-extra', 'acme-other'))
+        catalog = self.ok(self.b, '/api/team/catalog')
+        pack = catalog['packs'][0]
+        cards = {r['name']: r for r in catalog['cards']}
+        keys = [k for k in reversed(pack['cards']) if k != cards['acme-extra']['key']]
+        queued = self.ok(self.b, '/api/team/queue', {'pack': pack['key'], 'keys': keys})
+        self.assertEqual([r['name'] for r in queued['items']], ['acme-base', 'acme-local', 'acme-main'])
+        items = self.wait_queue()
+        self.assertTrue(all(r['status'] == 'done' and r['pack'] == pack['key'] and r['pack_title'] == pack['title'] for r in items))
+        self.assertNotIn('acme-extra', operations.load(self.other)[1]['skills'])
+        current = tags.read(self.other)
+        for name in ('acme-main', 'acme-base', 'acme-local', 'acme-other'):
+            self.assertEqual(current[name], [pack['title']])
+        operations.undo(items[-1]['operation'], home=self.other)
+        self.assertIn('acme-main', tags.read(self.other))  # Orphan tag names remain harmless.
+        self.ok(self.b, '/api/table')
+        self.ok(self.b, '/api/tags', {'skills': ['acme-other'], 'add': '示例标签'})
+
+    def test_pack_queue_validation_readonly_and_blocked(self):
+        self.configure()
+        self.publish(('acme-main', 'acme-local'))
+        pack = self.ok(self.b, '/api/team/catalog')['packs'][0]
+        for body in ({'pack': pack['key'], 'keys': []}, {'pack': pack['key'], 'keys': ['outside']},
+                     {'pack': pack['key'], 'keys': [None]}, {'pack': 'missing', 'keys': pack['cards']},
+                     {'pack': pack['key'], 'keys': pack['cards'] * 2}):
+            self.assertEqual(self.request(self.b, '/api/team/queue', body)[0], 409)
+            self.assertEqual(self.b.jobs, [])
+        body = {'pack': pack['key'], 'keys': pack['cards']}
+        with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
+            self.assertEqual(self.request(self.b, '/api/team/queue', body)[0], 403)
+        self.b.jobs_blocked = '请先恢复'
+        self.assertEqual(self.request(self.b, '/api/team/queue', body)[0], 409)
+        self.assertEqual(self.b.jobs, [])
+
+    def test_pack_tasks_can_retry_individually_and_keep_metadata(self):
+        self.configure()
+        self.publish(('acme-local', 'acme-extra'))
+        pack = self.ok(self.b, '/api/team/catalog')['packs'][0]
+        install = team.install
+        def fail_first(home, key):
+            if key == pack['cards'][0]:
+                raise ValueError('模拟失败')
+            return install(home, key)
+        with patch.object(team, 'install', side_effect=fail_first):
+            self.ok(self.b, '/api/team/queue', {'pack': pack['key'], 'keys': pack['cards']})
+            items = self.wait_queue()
+        self.assertEqual([r['status'] for r in items], ['failed', 'done'])
+        retried = self.ok(self.b, '/api/jobs/retry', {'id': items[0]['id']})['job']
+        self.assertEqual(retried['pack'], pack['key'])
+        self.assertEqual(self.wait_queue()[-1]['status'], 'done')
+        self.assertEqual(tags.read(self.other)['acme-extra'], [pack['title']])
+
+    def test_pack_tag_limit_and_unreadable_file_do_not_fail_installation(self):
+        self.configure()
+        self.publish(('acme-local', 'acme-other', 'acme-extra'))
+        pack = self.ok(self.b, '/api/team/catalog')['packs'][0]
+        for index in range(10):
+            tags.update(self.other, {'skills': ['acme-other'], 'add': '示例' + str(index)})
+        local = self.cards()['acme-local']['key']
+        self.ok(self.b, '/api/team/queue', {'pack': pack['key'], 'keys': [local]})
+        item = self.wait_queue()[0]
+        self.assertEqual(item['status'], 'done')
+        self.assertIn('没能加上标签', item['message'])
+        self.assertIn('10 个标签', item['message'])
+        self.assertEqual(tags.read(self.other)['acme-local'], [pack['title']])
+        path = self.other / '.skill-pilot/tags.json'
+        path.write_text('unreadable tags')
+        extra = self.cards()['acme-extra']['key']
+        self.ok(self.b, '/api/team/queue', {'pack': pack['key'], 'keys': [extra]})
+        item = self.wait_queue()[-1]
+        self.assertEqual(item['status'], 'done')
+        self.assertIn('没能加上标签', item['message'])
+        self.assertIn('读不懂', item['message'])
+        self.assertEqual(path.read_text(), 'unreadable tags')
 
     @contextlib.contextmanager
     def local_github(self):

@@ -15,7 +15,7 @@ import urllib.request
 from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 
-from . import labels, operations, sharing, store, team_hub
+from . import labels, operations, relations, sharing, store, tags, team_hub
 from .scan import SKIP_CONTENT, metadata
 from .sources import github, normalize
 from .store import git_tree, guard
@@ -23,6 +23,7 @@ from .store import git_tree, guard
 MAX_BODY = team_hub.MAX_BODY
 TIMEOUT = 10
 FORMAT_ERROR = '分享站的技能格式不对，请联系管理员检查。'
+PACKS_UNSUPPORTED = '分享站版本较旧，暂不能整理技能包，请联系管理员更新分享站。'
 LOCAL_LABELS = {'mine': '我上架的', 'installed': '已装', 'update': '有新版', 'installable': '可以装',
                 'lark': '要用飞书官方方式装', 'conflict': '本机有同名技能', 'blocked': '暂时装不了'}
 SECRET_NAMES = ('.env', '.env.*', '*.pem', '*.key', '*.p12', 'id_rsa*', 'id_ed25519*',
@@ -90,8 +91,11 @@ def _request(config, path, method='GET', data=None):
     limit = (team_hub.MAX_JOIN_BODY if path == '/api/join' else
              team_hub.MAX_RATING_BODY if path == '/api/ratings' else
              team_hub.MAX_INSTALL_BODY if path == '/api/installs/me' else MAX_BODY)
+    if path == '/api/packs/me':
+        limit = team_hub.MAX_PACK_BODY
     if body is not None and len(body) > limit:
-        raise ValueError('上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
+        raise ValueError('技能包内容超过 64 KB，请缩短后重试。' if path == '/api/packs/me' else
+                         '上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
                          '上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
                          '评价内容超过 64 KB。' if limit == team_hub.MAX_RATING_BODY else
                          '加入信息超过 4096 字节，请缩短后重试。')
@@ -260,14 +264,35 @@ def _catalog(config):
         catalog = {'cards': sorted(result, key=lambda c: c['listings'][0]['updated_at'], reverse=True)}
         if has_installs:
             catalog['my_installs'] = data['my_installs']
+        if 'packs' in data:
+            if not isinstance(data['packs'], list):
+                raise ValueError
+            packs, seen_packs = [], set()
+            for row in data['packs']:
+                pack = team_hub.clean_pack(row)
+                member = _member(row.get('member'))
+                key = 'pack:' + member['id'] + ':' + pack['id']
+                if (row.get('key') != key or key in seen_packs or not isinstance(row.get('updated_at'), str) or
+                        not isinstance(row.get('cards'), list) or
+                        any(not isinstance(k, str) for k in row['cards'])):
+                    raise ValueError
+                owned = _owned(result, member['id'])
+                owned_keys = {team_hub.listing_key(member['id'], owned[n]) for n in pack['skills'] if n in owned}
+                for card_key in row['cards']:
+                    if card_key in seen and card_key not in owned_keys:
+                        raise ValueError
+                packs.append({**pack, 'key': key, 'member': member, 'cards': row['cards'], 'updated_at': row['updated_at']})
+                seen_packs.add(key)
+            catalog['packs'] = sorted(packs, key=lambda p: p['updated_at'], reverse=True)
         return catalog
     except (ValueError, TypeError, KeyError, AttributeError):
         raise ValueError(FORMAT_ERROR) from None
 
 
-def _fetch(home):
+def _fetch(home, with_packs=False):
     config = _connection(home)
-    return config, _me(config), _catalog(config)['cards']
+    member, data = _me(config), _catalog(config)
+    return config, member, data if with_packs else data['cards']
 
 
 def _owned(cards, member):
@@ -368,8 +393,23 @@ def catalog(home):
         my_rating = next(({k: r[k] for k in ('stars', 'text') if k in r} for r in card['ratings']
                           if r['member']['id'] == member['id']), None)
         reviews = card['ratings']
+        needs = []
+        if state not in {'mine', 'installed', 'update'}:
+            install_rows, _, skipped = _plan(card, cards, registry)
+            errors = {r['name']: r['reason'] for r in skipped}
+            owned = _owned(cards, row['member']['id'])
+            for name in row['requires']:
+                dependency = owned.get(name)
+                have = name in registry['skills'] or (dependency is not None and
+                        _local(dependency, registry)[0] in {'installed', 'update'})
+                status = 'have' if have else 'with' if name in install_rows else 'missing'
+                needs.append({'name': name, 'title': dependency.get('title', name) if dependency else name,
+                              'status': status, **({'reason': errors.get(name, errors.get(row['name'], '这个所需技能暂时装不了。'))}
+                                                  if status == 'missing' else {})})
         result.append({'key': card['key'], 'kind': row['source']['kind'], 'name': row['name'], **details,
             'requires': row['requires'], 'updated_at': row['updated_at'],
+            'needs': needs, 'required_by': sorted(n for n, r in _owned(cards, row['member']['id']).items()
+                                                 if row['name'] in r['requires']), 'packs': [],
             'listings': [{**{k: r[k] for k in ('member', 'note', 'updated_at') if k in r},
                           **{k: r['source'][k] for k in ('version', 'file_count', 'size') if k in r['source']}}
                          for r in card['listings']],
@@ -391,7 +431,40 @@ def catalog(home):
                     key = card['key']
                     counted_before = key in previous and card['local']['status'] != 'mine'
                     card['installs'] = max(0, card['installs'] - counted_before + (key in current))
-    return {'member': member, 'cards': result}
+    indexed = {c['key']: c for c in result}
+    packs = []
+    for pack in data.get('packs', []):
+        keys = list(dict.fromkeys(k for k in pack['cards'] if k in indexed))
+        if len(keys) < 2:
+            continue
+        for key in keys:
+            indexed[key]['packs'].append(pack['key'])
+        states = [indexed[k]['local']['status'] for k in keys]
+        packs.append({**{k: v for k, v in pack.items() if k != 'skills'}, 'cards': keys,
+                      'mine': pack['member']['id'] == member['id'],
+                      'local': {'total': len(keys), 'installed': sum(s in {'installed', 'update'} for s in states),
+                                'installable': states.count('installable'),
+                                'blocked': sum(s in {'lark', 'conflict', 'blocked'} for s in states)},
+                      'tokens': sum(indexed[k]['tokens'] for k in keys if indexed[k]['local']['status'] not in {'installed', 'update'})})
+    return {'member': member, 'cards': result, 'packs': packs, 'packs_supported': 'packs' in data}
+
+
+def tag_pack(home, names, title):
+    warnings = []
+    try:
+        skills = operations.load(home)[1]['skills']
+        for name in names:
+            if name not in skills:
+                continue
+            try:
+                tags.update(home, {'skills': [name], 'add': title})
+            except (ValueError, OSError) as error:
+                message = str(error) if isinstance(error, ValueError) else '标签文件没能保存。'
+                if message not in warnings:
+                    warnings.append(message)
+    except (ValueError, OSError):
+        warnings.append('本机技能名单没能读取。')
+    return '没能加上标签：' + '；'.join(warnings) if warnings else ''
 
 
 def package(config, member, name, version, destination):
@@ -586,17 +659,27 @@ def _candidates(home, registry, member, cards):
 
 
 def listing_candidates(home):
-    _, member, cards = _fetch(home)
+    _, member, data = _fetch(home, with_packs=True)
+    cards = data['cards']
     _, registry, _ = operations.load(home)
     rows = _candidates(home, registry, member, cards)
+    shared = _owned(cards, member['id'])
+    detected = relations.detect_requires(home, registry, shared)
+    for name, row in rows.items():
+        row['missing_requires'] = sorted(r['requires'] for r in detected.get(name, [])
+                                         if r['requires'] not in shared.get(name, {}).get('requires', []))
+    packs = [p for p in data.get('packs', []) if p['member']['id'] == member['id']]
     return {'skills': [{k: v for k, v in row.items() if not k.startswith('_')} for name, row in rows.items()
-                       if registry['skills'][name]['assigned_agents']]}
+                       if registry['skills'][name]['assigned_agents']], 'packs': packs,
+            'pack_suggestions': relations.suggest_packs(home, registry, shared, packs) if 'packs' in data else [],
+            'packs_supported': 'packs' in data}
 
 
-def listings_preview(home, skills):
+def listings_preview(home, skills, rejected=None, packs=None):
     home, registry, agents = operations.load(home)
     revision = operations.revision(home, agents)
-    config, member, cards = _fetch(home)
+    config, member, data = _fetch(home, with_packs=True)
+    cards = data['cards']
     candidates = _candidates(home, registry, member, cards)
     if (not isinstance(skills, list) or not skills or
             any(not isinstance(s, dict) or not isinstance(s.get('name'), str) or s['name'] not in candidates or
@@ -604,18 +687,32 @@ def listings_preview(home, skills):
             len({s['name'] for s in skills}) != len(skills)):
         raise ValueError('请从本机在用的技能里选择要上架的技能。')
     notes = {s['name']: team_hub.short_text(s.get('note', ''), '推荐语') for s in skills}
+    rejected = [] if rejected is None else rejected
+    if (not isinstance(rejected, list) or any(not isinstance(pair, list) or len(pair) != 2 or
+            any(not isinstance(n, str) for n in pair) for pair in rejected)):
+        raise ValueError('取消的前置依赖须逐对填写技能名称。')
+    rejected = {tuple(pair) for pair in rejected}
+    detected, requires = {}, {}
+    detection_registry = {'skills': dict(registry['skills'])}
     shared, auto = _owned(cards, member['id']), {}
     selected = set(notes)
     pending = list(sorted(selected))
     while pending:
-        parent = pending.pop()
-        for dependency in registry['skills'].get(parent, {}).get('requires', []):
-            if dependency in shared and dependency not in selected:
-                continue
-            auto.setdefault(dependency, set()).add(parent)
-            if dependency not in selected:
-                selected.add(dependency)
-                pending.append(dependency)
+        detected.update(relations.detect_requires(home, detection_registry, pending))
+        batch, pending = pending, []
+        for parent in batch:
+            skill = registry['skills'].get(parent, {})
+            requires[parent] = sorted(set(skill.get('requires', [])) | {r['requires'] for r in detected.get(parent, [])
+                                                                      if (parent, r['requires']) not in rejected})
+            if parent in registry['skills']:
+                detection_registry['skills'][parent] = {**skill, 'requires': requires[parent]}
+            for dependency in requires[parent]:
+                if dependency in shared and dependency not in selected:
+                    continue
+                auto.setdefault(dependency, set()).add(parent)
+                if dependency not in selected:
+                    selected.add(dependency)
+                    pending.append(dependency)
     payload, public, errors = {}, {}, {}
     for name in sorted(selected):
         row = candidates.get(name)
@@ -626,6 +723,7 @@ def listings_preview(home, skills):
             errors[name] = row['unavailable']
             continue
         listing = {k: row[k] for k in ('name', 'title', 'summary', 'group', 'description', 'requires') if k in row}
+        listing['requires'] = requires[name]
         listing['note'] = notes.get(name, '')
         files_info = {'count': 0, 'size': 0, 'blocked': []}
         version = None
@@ -658,7 +756,7 @@ def listings_preview(home, skills):
     while True:
         before = len(errors)
         for name in selected - errors.keys():
-            missing = set(registry['skills'].get(name, {}).get('requires', [])) & errors.keys()
+            missing = set(requires.get(name, [])) & errors.keys()
             if missing:
                 errors[name] = '所需技能不能上架：' + '、'.join(sorted(missing))
         if len(errors) == before:
@@ -666,7 +764,26 @@ def listings_preview(home, skills):
     valid = sorted(selected - errors.keys())
     saved = {'listings': [payload[n] for n in valid], 'revision': revision, 'connection': _connection_version(config)}
     result = {'listings': [public[n] for n in valid], 'errors': [{'name': n, 'reason': r} for n, r in sorted(errors.items())],
+              'detected': [{'skill': n, **r, 'adopted': (n, r['requires']) not in rejected}
+                           for n in sorted(selected) for r in detected.get(n, [])],
+              'packs': [], 'packs_supported': 'packs' in data,
               'message': f'可上架 {len(valid)} 个，不能上架 {len(errors)} 个。'}
+    if 'packs' in data:
+        existing = [p for p in data['packs'] if p['member']['id'] == member['id']]
+        if packs is None:
+            proposed = [*existing, *relations.suggest_packs(home, registry, set(valid) | shared.keys(), existing)]
+        else:
+            proposed = team_hub.clean_packs(packs)
+            involved = selected | {n for p in proposed for n in p['skills']}
+            identities = {p['id'] for p in proposed}
+            proposed = [{**p, 'skills': [n for n in p['skills'] if n not in errors]} for p in proposed]
+            proposed = [p for p in proposed if len(p['skills']) >= 2]
+            proposed += [p for p in existing if p['id'] not in identities and not involved.intersection(p['skills'])]
+        checked = team_hub.clean_packs(proposed, {**shared, **{n: payload[n] for n in valid}})
+        saved['packs'] = checked
+        result['packs'] = [{**p, **({'why': original['why']} if 'why' in original else {}),
+                            'existing': any(old['id'] == p['id'] for old in existing)}
+                           for p, original in zip(checked, proposed)]
     return saved, result
 
 
@@ -681,8 +798,18 @@ def listings_apply(home, review):
     if not review['listings']:
         raise ValueError('没有可以上架的技能，请先处理预览里的原因。')
     _me(config)
-    result = _request(config, '/api/listings/me', 'PUT', {'listings': review['listings']})
+    result = _request(config, '/api/listings/me', 'PUT', {k: review[k] for k in ('listings', 'packs') if k in review})
     return {**result, 'message': '技能已上架。'}
+
+
+def packs_apply(home, packs):
+    guard(Path(home) / '.skill-pilot', home)
+    config, member, data = _fetch(home, with_packs=True)
+    if 'packs' not in data:
+        raise ValueError(PACKS_UNSUPPORTED)
+    checked = team_hub.clean_packs(packs, _owned(data['cards'], member['id']))
+    result = _request(config, '/api/packs/me', 'PUT', {'packs': checked})
+    return {**result, 'message': '技能包已保存。'}
 
 
 def listings_remove(home, names):

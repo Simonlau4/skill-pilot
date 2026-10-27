@@ -228,7 +228,7 @@ class Dashboard(ThreadingHTTPServer):
              '_intent': json.dumps({'kind': 'team_install', 'key': item['key']}, sort_keys=True)} for item in items]
 
     def team_queue_status(self):
-        fields = {'id', 'key', 'name', 'title', 'status', 'message', 'installed', 'reuse', 'operation'}
+        fields = {'id', 'key', 'name', 'title', 'status', 'message', 'installed', 'reuse', 'operation', 'pack', 'pack_title'}
         with self.jobs_lock:
             return {'items': [copy.deepcopy({k: v for k, v in item.items() if k in fields})
                               for item in self.team_queue]}
@@ -264,6 +264,8 @@ class Dashboard(ThreadingHTTPServer):
                 info = team_info or {}
                 item.update(key=parameters['key'], name=info.get('name', ''), installed=[], reuse=[], message='等待安装。')
                 if info.get('title') is not None: item['title'] = info['title']
+                for field in ('pack', 'pack_title', '_pack_skills'):
+                    if field in info: item[field] = copy.deepcopy(info[field])
                 if info.get('name'):
                     item.update(skills=[info['name']], summary='安装「' + (info.get('title') or titles.get(info['name'], info['name'])) + '」')
             if previous:
@@ -312,13 +314,14 @@ class Dashboard(ThreadingHTTPServer):
                 self.jobs_version += 1
             return self.team_queue_status() if team_only else self.jobs_status()
 
-    def queue_team(self, key):
+    def queue_team(self, key, pack_info=None):
         if not isinstance(key, str) or not key.strip():
             raise ValueError('请选择要装上的技能。')
         with self.jobs_lock:
             self._accept_jobs()
             previous = next((item for item in self.team_queue if item['key'] == key), None)
             if previous and previous['status'] in {'waiting', 'running'}:
+                if pack_info: previous.update(copy.deepcopy(pack_info))
                 return self.team_queue_status()
         if previous:
             name, title = previous['name'], previous.get('title')
@@ -332,9 +335,34 @@ class Dashboard(ThreadingHTTPServer):
         with self.jobs_lock:
             previous = next((item for item in self.team_queue if item['key'] == key), None)
             if previous and previous['status'] in ACTIVE_JOBS:
+                if pack_info: previous.update(copy.deepcopy(pack_info))
                 return self.team_queue_status()
-            self._add_job({'kind': 'team_install', 'key': key}, previous, {'name': name, 'title': title})
+            info = {k: previous[k] for k in ('pack', 'pack_title', '_pack_skills') if previous and k in previous}
+            self._add_job({'kind': 'team_install', 'key': key}, previous,
+                          {**info, 'name': name, 'title': title, **(pack_info or {})})
             return self.team_queue_status()
+
+    def queue_team_pack(self, key, keys):
+        if (not isinstance(key, str) or not isinstance(keys, list) or not keys or
+                any(not isinstance(k, str) for k in keys) or len(set(keys)) != len(keys)):
+            raise ValueError('请从技能包里选择至少一个要安装的技能。')
+        with self.jobs_lock:
+            self._accept_jobs()
+        _, _, data = team._fetch(self.home, with_packs=True)
+        pack = next((p for p in data.get('packs', []) if p['key'] == key), None)
+        if pack is None:
+            raise ValueError('这个技能包已经拆开或不再上架，请刷新商店。')
+        cards = {c['key']: c for c in data['cards']}
+        if not set(keys) <= set(pack['cards']) & cards.keys():
+            raise ValueError('选中的技能不全在这个技能包里，请重新选择。')
+        registry = operations.load(self.home)[1]
+        names = [team._local(row, registry)[1] for card_key in pack['cards'] if card_key in cards
+                 for row in cards[card_key]['listings'] if row['member']['id'] == pack['member']['id']]
+        info = {'pack': key, 'pack_title': pack['title'], '_pack_skills': list(dict.fromkeys(names))}
+        for card_key in dict.fromkeys(pack['cards']):
+            if card_key in keys and team._local(cards[card_key]['listings'][0], registry)[0] not in {'installed', 'update'}:
+                self.queue_team(card_key, info)
+        return self.team_queue_status()
 
     def clear_team_queue(self):
         return self.clear_jobs(team_only=True)
@@ -553,6 +581,9 @@ class Dashboard(ThreadingHTTPServer):
             result = cleanup.restore(names, self.home)
         else:
             result = team.install(self.home, parameters['key'])
+            if item.get('pack'):
+                warning = team.tag_pack(self.home, item['_pack_skills'], item['pack_title'])
+                if warning: result['message'] += ' ' + warning
             return {'message': result['message'], 'installed': result['installed'], 'reuse': result['reuse'],
                     **({'skills': sorted(set(result['installed'] + result['reuse']))} if result['installed'] else {}),
                     **({'operation': result['id']} if 'id' in result else {}),
@@ -901,7 +932,7 @@ class Handler(BaseHTTPRequestHandler):
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/queue', '/api/team/queue/clear',
-                        '/api/team/ratings', '/api/team/ratings/remove'}
+                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
@@ -1141,16 +1172,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/team/settings':
             return team.save_settings(home, body, self.server.local_write())
         if path == '/api/team/listings/preview':
-            saved, result = team.listings_preview(home, body.get('skills'))
+            saved, result = team.listings_preview(home, body.get('skills'), body.get('rejected'), body.get('packs'))
             review = secrets.token_urlsafe(16)
             self.server.team_upload_reviews[review] = saved
             return {**result, 'review': review}
         if path == '/api/team/queue':
+            if 'pack' in body:
+                return self.server.queue_team_pack(body.get('pack'), body.get('keys'))
             return self.server.queue_team(body.get('key'))
         if path == '/api/team/queue/clear':
             return self.server.clear_team_queue()
         if path == '/api/team/listings/remove':
             return team.listings_remove(home, body.get('names'))
+        if path == '/api/team/packs':
+            with self.server.local_write():
+                return team.packs_apply(home, body.get('packs'))
         if path in {'/api/team/ratings', '/api/team/ratings/remove'}:
             return team.rate(home, body, path.endswith('/remove'))
         reviews = self.server.team_upload_reviews

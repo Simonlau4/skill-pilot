@@ -17,11 +17,12 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import sharing
+from . import sharing, tags
 
 MAX_BODY = 20 * 1024 * 1024
 MAX_RATING_BODY = 64 * 1024
 MAX_INSTALL_BODY = 64 * 1024
+MAX_PACK_BODY = 64 * 1024
 MAX_JOIN_BODY = 4096
 MAX_FILES = 300
 MAX_SIZE = 5 * 1024 * 1024
@@ -152,6 +153,43 @@ def listing_key(member, row):
     return 'lark:' + row['name'] if source['kind'] == 'lark' else 'team:' + member + ':' + row['name']
 
 
+def clean_pack(row, listings=None):
+    if not isinstance(row, dict):
+        raise ValueError('技能包格式不正确。')
+    identity, skills = row.get('id'), row.get('skills')
+    if not isinstance(identity, str) or len(identity) > 64 or not re.fullmatch(NAME, identity):
+        raise ValueError('技能包编号须以字母或数字开头，最多 64 个字符，只能用字母、数字、点、横线或下划线。')
+    if (not isinstance(skills, list) or not 2 <= len(skills) <= 50 or
+            any(not isinstance(n, str) or not re.fullmatch(NAME, n) for n in skills) or
+            len(set(skills)) != len(skills)):
+        raise ValueError('每个技能包须有 2–50 个不重复的技能。')
+    if listings is not None:
+        if any(n not in listings for n in skills):
+            raise ValueError('技能包只能包含本人已经上架的技能。')
+        if any(listings[n]['source']['kind'] == 'lark' for n in skills):
+            raise ValueError('飞书官方技能不能放进技能包。')
+    result = {'id': identity, 'title': tags.clean_tag(row.get('title')), 'skills': list(skills)}
+    if 'note' in row:
+        result['note'] = short_text(row['note'], '推荐语')
+    return result
+
+
+def clean_packs(rows, listings=None):
+    if not isinstance(rows, list) or len(rows) > 50:
+        raise ValueError('每位成员最多整理 50 个技能包，请把技能包放在列表里。')
+    result, identities, skills = [], set(), set()
+    for row in rows:
+        pack = clean_pack(row, listings)
+        if pack['id'] in identities:
+            raise ValueError('技能包编号不能重复。')
+        if skills.intersection(pack['skills']):
+            raise ValueError('同一个技能最多放进一个技能包。')
+        identities.add(pack['id'])
+        skills.update(pack['skills'])
+        result.append(pack)
+    return result
+
+
 class HubError(ValueError):
     def __init__(self, status, message):
         super().__init__(message)
@@ -206,6 +244,7 @@ class HubStore:
             installs.pop(member_id, None)
             changes = {p: None for p in (self.data / 'packages' / member_id).glob('*.json')}
             changes.update({self._listing_path(member_id): None,
+                            self._pack_path(member_id): None,
                             self.data / 'ratings.json': {'ratings': ratings},
                             self.data / 'installs.json': {'installs': installs},
                             self.data / 'members.json': {'members': [m for m in members if m['id'] != member_id]}})
@@ -230,6 +269,36 @@ class HubStore:
 
     def _listings(self, member_id):
         return self._read(self._listing_path(member_id), 'listings')
+
+    def _pack_path(self, member_id):
+        return self.data / 'packs' / (member_id + '.json')
+
+    def _packs(self, member_id):
+        return self._read(self._pack_path(member_id), 'packs')
+
+    def _pack_changes(self, member_id, rows, listings):
+        try:
+            checked = clean_packs(rows, listings)
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
+        previous, updated_at = self._packs(member_id), now()
+        return {p['id']: {**{k: v for k, v in p.items() if k != 'id'},
+                         'updated_at': previous[p['id']]['updated_at']
+                         if p['id'] in previous and clean_pack({'id': p['id'], **previous[p['id']]}) == p
+                         else updated_at} for p in checked}
+
+    def _public_packs(self, member):
+        listings = self._listings(member['id'])
+        return [{'key': 'pack:' + member['id'] + ':' + identity, 'id': identity, 'member': member,
+                 **pack, 'cards': [listing_key(member['id'], listings[n]) for n in pack['skills'] if n in listings]}
+                for identity, pack in self._packs(member['id']).items()]
+
+    def _put_packs(self, member, data):
+        if not isinstance(data, dict) or 'packs' not in data:
+            raise HubError(400, '请提供技能包列表。')
+        packs = self._pack_changes(member['id'], data['packs'], self._listings(member['id']))
+        self._save({self._pack_path(member['id']): {'packs': packs}})
+        return {'packs': sorted(self._public_packs(member), key=lambda p: p['updated_at'], reverse=True)}
 
     def _ratings(self):
         return self._read(self.data / 'ratings.json', 'ratings')
@@ -275,6 +344,8 @@ class HubStore:
             card['installs'] = sum(card['key'] in keys for member, keys in installs.items()
                                    if member in members and member not in authors)
         return {'cards': sorted(cards.values(), key=lambda c: c['listings'][0]['updated_at'], reverse=True),
+                'packs': sorted([p for m in members.values() for p in self._public_packs(m)],
+                                key=lambda p: p['updated_at'], reverse=True),
                 'my_installs': sorted(set(installs.get(member_id, [])) & cards.keys())}
 
     def _put_installs(self, member_id, data):
@@ -325,6 +396,8 @@ class HubStore:
             current[name] = {**row, 'updated_at': updated_at}
             receipts.append(receipt)
         changes[self._listing_path(member_id)] = {'listings': current}
+        if 'packs' in data:
+            changes[self._pack_path(member_id)] = {'packs': self._pack_changes(member_id, data['packs'], current)}
         self._save(changes)
         return {'listings': receipts}
 
@@ -336,7 +409,16 @@ class HubStore:
         if parents:
             raise HubError(409, '这些上架的技能仍需要它：' + '、'.join(sorted(parents)))
         del current[name]
+        packs = self._packs(member_id)
+        for identity, pack in list(packs.items()):
+            if name in pack['skills']:
+                pack['skills'].remove(name)
+                if len(pack['skills']) < 2:
+                    del packs[identity]
+                else:
+                    pack['updated_at'] = now()
         self._save({self.data / 'packages' / member_id / (name + '.json'): None,
+                    self._pack_path(member_id): {'packs': packs},
                     self._listing_path(member_id): {'listings': current}})
         return {}
 
@@ -462,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             allowed = ({'POST'} if path == '/api/join' else
                        {'GET'} if path in {'/api/me', '/api/catalog'} or package else
-                       {'PUT'} if path in {'/api/listings/me', '/api/installs/me'} else {'DELETE'} if listing else
+                       {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} else {'DELETE'} if listing else
                        {'PUT', 'DELETE'} if path == '/api/ratings' else set())
             if not allowed:
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
@@ -484,6 +566,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             data = (self._read_body(MAX_INSTALL_BODY, '上报内容超过 64 KB，请缩短后重试。')
                     if path == '/api/installs/me' else
+                    self._read_body(MAX_PACK_BODY, '技能包内容超过 64 KB，请缩短后重试。')
+                    if path == '/api/packs/me' else
                     self._read_body(MAX_BODY if path == '/api/listings/me' else MAX_RATING_BODY)
                     if self.command == 'PUT' or path == '/api/ratings' else None)
             store = self.server.store
@@ -498,6 +582,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = store._put_listings(member['id'], data)
                 elif path == '/api/installs/me':
                     result = store._put_installs(member['id'], data)
+                elif path == '/api/packs/me':
+                    result = store._put_packs(member, data)
                 elif listing:
                     result = store._remove_listing(member['id'], listing[1])
                 elif package:
@@ -551,4 +637,4 @@ def run(args):
             print('\t'.join(member[key] for key in ('id', 'name', 'created_at')))
     else:
         store.remove_member(args.member_id)
-        print('已删除这位成员和他的上架、文件及评价。')
+        print('已删除这位成员和他的上架、技能包、文件及评价。')

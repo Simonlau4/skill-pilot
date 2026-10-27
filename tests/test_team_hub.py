@@ -82,6 +82,125 @@ class TeamHubTests(unittest.TestCase):
     def state(self):
         return {str(p.relative_to(self.data)): p.read_bytes() for p in self.data.rglob('*.json')}
 
+    def pack(self, **extra):
+        return {'id': 'acme', 'title': 'Acme 技能包', 'skills': ['acme-one', 'acme-two'], **extra}
+
+    def put_packs(self, packs):
+        return self.request('/api/packs/me', 'PUT', {'packs': packs})
+
+    def test_clean_pack_rules_and_whitelist(self):
+        owned = {n: listing(n) for n in ('acme-one', 'acme-two')}
+        self.assertEqual(team_hub.clean_pack(self.pack(title=' #Acme 技能包 ', unknown='drop'), owned), self.pack())
+        self.assertEqual(team_hub.clean_pack(self.pack(note=''), owned)['note'], '')
+        invalid = [None, [], self.pack(id=''), self.pack(id='a' * 65), self.pack(id='../acme'),
+                   self.pack(id='acme/one'), self.pack(title=''), self.pack(title='字' * 21),
+                   self.pack(title='acme\nline'), self.pack(title='acme\u200b'), self.pack(note='a' * 201),
+                   self.pack(note='acme\nline'), self.pack(skills=[]), self.pack(skills=['acme-one']),
+                   self.pack(skills=['acme-one', 'acme-one']), self.pack(skills=['acme-one', '../bad']),
+                   self.pack(skills=['acme-one', 1]), self.pack(skills=['acme-' + str(i) for i in range(51)])]
+        for row in invalid:
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                team_hub.clean_pack(row, owned)
+        self.assertEqual(team_hub.clean_pack(self.pack(id='a' * 64, title='字' * 20), owned)['id'], 'a' * 64)
+        fifty = self.pack(skills=['acme-' + str(i) for i in range(50)])
+        self.assertEqual(len(team_hub.clean_pack(fifty)['skills']), 50)
+
+    def test_pack_replace_preserves_times_and_does_not_republish_cards(self):
+        self.put([listing(n) for n in ('acme-one', 'acme-two', 'acme-three')])
+        before = self.cards()
+        with patch.object(team_hub, 'now', return_value='first'):
+            status, result = self.put_packs([self.pack(skills=['acme-two', 'acme-one'])])
+        self.assertEqual(status, 200, result)
+        pack = result['packs'][0]
+        self.assertEqual(pack['updated_at'], 'first')
+        self.assertEqual(pack['cards'], ['github:acme/skills:skills/acme-two', 'github:acme/skills:skills/acme-one'])
+        self.assertEqual(pack['key'], 'pack:' + self.first['id'] + ':acme')
+        with patch.object(team_hub, 'now', return_value='second'):
+            self.assertEqual(self.put_packs([self.pack(skills=['acme-two', 'acme-one'])])[1]['packs'][0]['updated_at'], 'first')
+            self.assertEqual(self.put_packs([self.pack(title='新包')])[1]['packs'][0]['updated_at'], 'second')
+        self.assertEqual(self.cards(), before)
+        self.assertEqual(self.request('/api/catalog')[1]['packs'][0]['title'], '新包')
+        self.assertEqual(self.put_packs([]), (200, {'packs': []}))
+
+    def test_pack_validation_ownership_official_overlap_counts_and_exact_routes(self):
+        self.put([listing('acme-one'), listing('acme-two', 'lark')])
+        self.put([listing('acme-other')], self.second['token'])
+        for packs in ([self.pack()], [self.pack(skills=['acme-one', 'acme-other'])],
+                      [self.pack(), self.pack(id='acme-second')], [self.pack()] * 51, None):
+            with self.subTest(packs=packs):
+                before = self.state()
+                self.assertEqual(self.put_packs(packs)[0], 400)
+                self.assertEqual(self.state(), before)
+        self.put([listing('acme-two')])
+        self.assertEqual(self.put_packs([self.pack(), self.pack(id='acme-second')])[0], 400)
+        self.assertEqual(self.put_packs([self.pack(), self.pack()])[0], 400)
+        for method in ('GET', 'POST', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'):
+            self.assertEqual(self.request('/api/packs/me', method)[0], 405)
+        for path in ('/api/packs', '/api/packs/me/', '/api/packs/me?x=1'):
+            self.assertEqual(self.request(path, 'PUT', {'packs': []})[0], 404)
+        self.assertEqual(self.request('/api/packs/me', 'PUT', {'packs': []}, token=None)[0], 401)
+        self.assertEqual(self.request('/api/packs/me', 'PUT', {'packs': [], 'padding': 'x' * 65536})[0], 413)
+        self.assertEqual(self.request('/api/packs/me', 'PUT', {})[0], 400)
+        rows = [listing('acme-' + str(i)) for i in range(100)]
+        self.put(rows)
+        packs = [self.pack(id='acme-' + str(i), skills=['acme-' + str(2 * i), 'acme-' + str(2 * i + 1)]) for i in range(50)]
+        self.assertEqual(self.put_packs(packs)[0], 200)
+
+    def test_listings_and_packs_validate_and_save_together_with_rollback(self):
+        self.assertEqual(self.request('/api/listings/me', 'PUT', {
+            'listings': [listing('acme-one', 'files'), listing('acme-two')], 'packs': [self.pack()]})[0], 200)
+        before = self.state()
+        write = team_hub.atomic_write
+        def fail_pack(path, data):
+            if path == self.store._pack_path(self.first['id']):
+                raise OSError('simulated pack write failure')
+            return write(path, data)
+        with patch.object(team_hub, 'atomic_write', side_effect=fail_pack):
+            status, _ = self.request('/api/listings/me', 'PUT', {
+                'listings': [listing('acme-one', 'files', note='新版')], 'packs': [self.pack(title='新版包')]})
+        self.assertEqual(status, 500)
+        self.assertEqual(self.state(), before)
+        for packs in ([self.pack(skills=['acme-one', 'acme-missing'])], [self.pack(title='')]):
+            self.assertEqual(self.request('/api/listings/me', 'PUT', {
+                'listings': [listing('acme-one', 'files', note='新版')], 'packs': packs})[0], 400)
+            self.assertEqual(self.state(), before)
+        self.put([listing('acme-one', 'files', note='新版')])
+        self.assertEqual(json.loads(self.store._pack_path(self.first['id']).read_text()),
+                         json.loads(before['packs/' + self.first['id'] + '.json']))
+
+    def test_unlist_trims_packs_and_removal_is_transactional(self):
+        self.put([listing(n, 'files') for n in ('acme-one', 'acme-two', 'acme-three')])
+        self.put_packs([self.pack(skills=['acme-one', 'acme-two', 'acme-three'])])
+        before = self.state()
+        write = team_hub.atomic_write
+        def fail_listing(path, data):
+            if path == self.store._listing_path(self.first['id']):
+                raise OSError('simulated failure')
+            return write(path, data)
+        with patch.object(team_hub, 'atomic_write', side_effect=fail_listing):
+            self.assertEqual(self.request('/api/listings/me/acme-one', 'DELETE')[0], 500)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.request('/api/listings/me/acme-one', 'DELETE')[0], 200)
+        self.assertEqual(self.request('/api/catalog')[1]['packs'][0]['skills'], ['acme-two', 'acme-three'])
+        self.assertEqual(self.request('/api/listings/me/acme-two', 'DELETE')[0], 200)
+        self.assertEqual(self.request('/api/catalog')[1]['packs'], [])
+
+    def test_remove_member_deletes_packs_and_restores_them_on_failure(self):
+        self.put([listing('acme-one'), listing('acme-two')])
+        self.put_packs([self.pack()])
+        before = self.state()
+        write = team_hub.atomic_write
+        def fail_members(path, data):
+            if path == self.data / 'members.json':
+                raise OSError('simulated failure')
+            return write(path, data)
+        with patch.object(team_hub, 'atomic_write', side_effect=fail_members), self.assertRaises(OSError):
+            self.store.remove_member(self.first['id'])
+        self.assertEqual(self.state(), before)
+        self.store.remove_member(self.first['id'])
+        self.assertFalse(self.store._pack_path(self.first['id']).exists())
+        self.assertEqual(self.request('/api/catalog', token=self.second['token'])[1]['packs'], [])
+
     def test_members_private_and_api_two(self):
         self.assertNotEqual(self.first['token'], self.second['token'])
         saved = (self.data / 'members.json').read_text()
@@ -422,7 +541,7 @@ class TeamHubTests(unittest.TestCase):
                          (200, {'keys': [key]}))
         self.assertEqual(self.request('/api/listings/me/example', 'DELETE')[0], 200)
         self.assertEqual(self.request('/api/catalog', token=self.second['token'])[1],
-                         {'cards': [], 'my_installs': []})
+                         {'cards': [], 'my_installs': [], 'packs': []})
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
                          (200, {'keys': []}))
         self.put()
