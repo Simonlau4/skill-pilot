@@ -1761,6 +1761,27 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .store-card.is-skeleton { min-height: 176px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); cursor: default; animation: skeleton 1.4s var(--ease) infinite alternate; }
 @keyframes skeleton { from { opacity: 0.55; } to { opacity: 1; } }
 
+/* GitHub 最近热门：卡片不是详情入口，动作放在卡片里；展开后按网格铺满。 */
+.shelf-github .shelf-head { align-items: center; }
+.shelf-note { margin: calc(-1 * var(--sp-1)) var(--sp-1) var(--sp-3); color: var(--muted); font-size: var(--fs-small); }
+.github-card { cursor: default; }
+.github-card:hover { box-shadow: var(--shadow-1), inset 0 0 0 1px var(--line); transform: none; }
+.github-card:active { transform: none; }
+.github-owner { color: var(--muted); font-weight: 500; }
+.github-card .store-card-title {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.github-card-sum { min-height: 39px; }
+.github-card-sum.is-empty { color: var(--muted); }
+.github-card-actions { display: flex; align-items: center; gap: var(--sp-3); margin-top: auto; padding-top: var(--sp-2); border-top: 1px solid var(--line); }
+.github-card-actions .link-btn { margin-left: auto; }
+.shelf-cards.github-cards.is-expanded > * { display: flex; }
+
 .store-empty { padding: var(--sp-8) var(--sp-4); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
 .store-empty .btn { margin-top: var(--sp-4); }
 

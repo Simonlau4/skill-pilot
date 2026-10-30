@@ -35,6 +35,134 @@ class TeamStaticTests(unittest.TestCase):
         self.assertIn('aria-live="polite"', queue_items.group(0))
         self.assertRegex((STATIC / 'app.js').read_text(), r"const SETTINGS_BLOCKS = \[[^\]]*'team'")
 
+    def test_store_github_trending_shelf(self):
+        source = (STATIC / 'app.js').read_text()
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const number = value => '),
+            line(source, 'const SHELF_SIZE = '),
+            extract_function(source, 'const STORE_STATUS = {') + ';',
+            extract_function(source, 'function githubCreatedText('),
+            extract_function(source, 'function githubStatusTag('),
+            extract_function(source, 'function githubCardHtml('),
+            extract_function(source, 'function storeGithubShelfHtml('),
+        ]
+        script = '\n'.join(parts) + r'''
+function fail(message) { console.error(message); process.exit(1); }
+let readOnly = false;
+const teamReadOnly = () => readOnly;
+const now = Date.now();
+const repo = (extra = {}) => ({
+  repository: 'acme/example-skills', url: 'https://github.com/acme/example-skills',
+  description: 'Example <b>agent</b> skills', stars: 1234,
+  created_at: new Date(now - 3 * 86400000).toISOString(), pushed_at: new Date(now).toISOString(),
+  skill_count: 3, local: {status: 'installable'}, ...extra,
+});
+const card = githubCardHtml(repo());
+if (!card.startsWith('<div class="store-card github-card">')) fail('热门卡片外层不能用按钮：' + card);
+if (card.includes('<button class="store-card')) fail('热门卡片不该是详情按钮');
+if (!card.includes('acme/') || !card.includes('example-skills')) fail('顶行要写 owner/name');
+if (!card.includes('title="acme/example-skills"')) fail('完整 owner/name 要放进 title 属性，悬停能看到：' + card);
+if (!card.includes('<span class="tag tag-quiet">可安装</span>')) fail('可安装的状态标签要沿用团队卡片写法：' + card);
+if (!card.includes('1,234 星')) fail('底行要写星数：' + card);
+if (!card.includes('3 天前新建')) fail('底行要写几天前新建：' + card);
+if (!card.includes('含 3 个技能')) fail('有技能个数时要写含几个技能：' + card);
+if (card.includes('sp-star')) fail('星数不能用团队评分的星形图标');
+if (!card.includes('&lt;b&gt;agent&lt;/b&gt;')) fail('仓库说明要按纯文字转义：' + card);
+if (!card.includes('data-github-install="acme/example-skills"')) fail('可安装的卡片要有安装入口：' + card);
+if (!card.includes('前往安装')) fail('安装入口应写成跳转动作，不能写成已经安装：' + card);
+if (!card.includes('target="_blank"') || !card.includes('rel="noopener noreferrer"')) fail('GitHub 链接要在新窗口打开');
+if (!card.includes('href="https://github.com/acme/example-skills"')) fail('链接地址要用后台给的 url');
+if (!card.includes('打开 GitHub')) fail('卡片要有打开 GitHub 页面的链接');
+
+const installed = githubCardHtml(repo({local: {status: 'installed'}}));
+if (!installed.includes('<span class="tag tag-ok">已安装</span>')) fail('已安装的状态标签不对：' + installed);
+if (installed.includes('data-github-install')) fail('已安装的卡片不该再显示安装按钮：' + installed);
+const bare = githubCardHtml(repo({description: '', skill_count: null}));
+if (!bare.includes('仓库没有写说明')) fail('没有说明时要写“仓库没有写说明”');
+if (bare.includes('含 ')) fail('技能个数未知时不该写含几个技能：' + bare);
+
+readOnly = true;
+const locked = githubCardHtml(repo());
+if (!locked.includes('disabled') || !locked.includes('只读预览，无法安装技能。')) fail('只读预览时安装按钮要禁用并写原因：' + locked);
+readOnly = false;
+
+const repos = Array.from({length: 6}, (_, index) => repo({repository: `acme/skills-${index}`, stars: 6 - index}));
+const state = {store: {github: {repos}}, storeGithubExpanded: false};
+let shelf = storeGithubShelfHtml();
+if (!shelf.includes('<h2 id="shelf-github">GitHub 最近热门</h2>')) fail('缺少“GitHub 最近热门”标题');
+if ((shelf.match(/class="store-card github-card"/g) || []).length !== 4) fail('默认只显示 4 张：' + shelf);
+if (!shelf.includes('展开全部 6 个') || !shelf.includes('aria-expanded="false"')) fail('默认要有展开全部按钮：' + shelf);
+if (shelf.includes('>收起<')) fail('默认不该显示收起');
+state.storeGithubExpanded = true;
+shelf = storeGithubShelfHtml();
+if ((shelf.match(/class="store-card github-card"/g) || []).length !== 6) fail('展开后要显示全部 6 张：' + shelf);
+if (!shelf.includes('收起') || !shelf.includes('aria-expanded="true"') || !shelf.includes('is-expanded')) fail('展开后要有收起状态：' + shelf);
+state.store = null;
+if (storeGithubShelfHtml() !== '') fail('没有 github 字段时不该显示这一排');
+state.store = {github: {repos: []}};
+if (storeGithubShelfHtml() !== '') fail('名单为空时不该显示这一排');
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        # 空状态、技能少、正常三处都要接在后面；搜索、选分组、看「我的上架」和读取中不显示。
+        shelves = extract_function(source, 'function renderStoreShelves(')
+        self.assertIn("+ (storeBrowsing() ? storeGithubShelfHtml() : '')", shelves)
+        self.assertIn('box.innerHTML = packShelf + githubShelf;', shelves)
+        self.assertIn("}).join('') + githubShelf;", shelves)
+        self.assertLess(shelves.index('if (!storeBrowsing())'), shelves.index('const githubShelf'),
+                        '要先判断是不是浏览状态，再准备这一排')
+        loading = shelves[:shelves.index('if (!cards.length)')]
+        self.assertNotIn('storeGithubShelfHtml', loading, '读取目录时不该显示这一排')
+
+        # 标题只占一行，超出省略；完整 owner/name 靠 title 属性。
+        css = (STATIC / 'app.css').read_text()
+        title_rule = re.search(r'\.github-card \.store-card-title\s*\{([^}]*)\}', css)
+        self.assertIsNotNone(title_rule, '热门卡片的标题样式不见了')
+        for declaration in ('display: block', 'white-space: nowrap', 'overflow: hidden',
+                            'text-overflow: ellipsis', 'overflow-wrap: normal'):
+            self.assertIn(declaration, title_rule.group(1), f'标题没写 {declaration}，会在单词中间断行')
+        self.assertNotIn('-webkit-line-clamp', title_rule.group(1), '标题不该再保留两行截断')
+
+    def test_store_github_install_opens_left_rail(self):
+        source = (STATIC / 'app.js').read_text()
+        function = extract_function(source, 'function openGithubInstall(')
+        script = function + r'''
+function fail(message) { console.error(message); process.exit(1); }
+const calls = [];
+const elements = {
+  'install-url': {value: '', focus: options => calls.push(['focus', options])},
+  'install-rail': {scrollIntoView: options => calls.push(['scroll', options])},
+};
+const $ = id => elements[id];
+const showPage = page => calls.push(['page', page]);
+const inspectInstall = force => calls.push(['inspect', force]);
+let installInspectTimer = 1;
+const clearTimeout = timer => calls.push(['clear', timer]);
+const prefersReducedMotion = () => false;
+const state = {store: {github: {repos: [{repository: 'acme/example-skills', url: 'https://github.com/acme/example-skills'}]}}};
+
+openGithubInstall('acme/example-skills');
+if (elements['install-url'].value !== 'https://github.com/acme/example-skills') fail('没有把仓库地址填进安装框');
+if (JSON.stringify(calls[0]) !== '["page","skills"]') fail('应先到技能页：' + JSON.stringify(calls));
+if (!calls.some(call => call[0] === 'inspect' && call[1] === true)) fail('应以强制读取模式调用现有安装检查');
+if (!calls.some(call => call[0] === 'clear')) fail('要清掉输入停顿的定时器，免得重复读取');
+if (!calls.some(call => call[0] === 'scroll')) fail('安装区要滚到眼前');
+if (!calls.some(call => call[0] === 'focus')) fail('焦点要落在安装框');
+
+const before = calls.length;
+openGithubInstall('acme/missing');
+if (calls.length !== before) fail('找不到仓库时不该跳转或报错');
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        handler = source[source.index("$('page-team').addEventListener('click'"):]
+        self.assertIn("target.closest('[data-github-install]')", handler[:1200], '团队页点击要接上热门卡片的安装按钮')
+        self.assertIn("target.closest('[data-github-more]')", handler[:1200], '团队页点击要接上展开按钮')
+        self.assertIn('state.storeGithubExpanded = !state.storeGithubExpanded', handler[:2000])
+
     def test_team_settings_support_open_join(self):
         html = (STATIC / 'index.html').read_text()
         name_input = re.search(r'<input[^>]*id="team-name"[^>]*>', html)

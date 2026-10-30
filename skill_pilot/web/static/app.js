@@ -1184,6 +1184,7 @@ const state = {
   storeGroup: '',      // 选中的分组；'-' 是没分组
   storeMine: false,    // 只看我上架的
   storeDetail: null,   // 详情面板里正在看的卡片编号或技能包编号（pack: 开头）
+  storeGithubExpanded: false,   // 「GitHub 最近热门」是否展开全部
   queue: null,         // /api/team/queue：安装队列；null 是还没读
 };
 
@@ -3483,6 +3484,73 @@ const SHELF_MIN = 8;   // 技能少于这个数时不分几排，直接看全部
 const storeQuery = () => $('store-search').value.trim();
 const storeBrowsing = () => !storeQuery() && !state.storeGroup && !state.storeMine;
 
+/* ---------- GitHub 最近热门：后台按星数排好，最多 20 个 ---------- */
+
+/* 后台给的是 UTC 时间：只写差几天；读不出的时间不写。 */
+function githubCreatedText(value) {
+  const time = Date.parse(value);
+  if (Number.isNaN(time)) return '';
+  const days = Math.max(0, Math.floor((Date.now() - time) / 86400000));
+  return days ? `${number(days)} 天前新建` : '今天新建';
+}
+
+/* 状态沿用团队卡片那套标签：已安装写「已安装」，还没装写「可安装」。 */
+function githubStatusTag(repo) {
+  const [tone, label] = STORE_STATUS[repo.local?.status] || [];
+  return label ? `<span class="tag ${tone}">${escape(label)}</span>` : '';
+}
+
+/* 热门仓库卡片不是详情入口，外层用 div；安装和打开 GitHub 都放在卡片里面。 */
+function githubCardHtml(repo) {
+  const [owner, ...rest] = String(repo.repository || '').split('/');
+  const name = rest.join('/');
+  const description = String(repo.description || '').trim();
+  const created = githubCreatedText(repo.created_at);
+  const skillCount = Number.isInteger(repo.skill_count) ? `<span>含 ${number(repo.skill_count)} 个技能</span>` : '';
+  const readOnly = teamReadOnly();
+  const install = repo.local?.status === 'installable'
+    ? `<button class="btn btn-small btn-primary" type="button" data-github-install="${escape(repo.repository)}"
+      aria-label="${escape(`前往安装 ${repo.repository}`)}"${readOnly ? ' disabled title="只读预览，无法安装技能。"' : ''}>前往安装</button>`
+    : '';
+  return `<div class="store-card github-card">
+    <div class="store-card-top">
+      <span class="store-card-title" title="${escape(repo.repository)}"><span class="github-owner">${escape(owner)}/</span>${escape(name)}</span>
+      ${githubStatusTag(repo)}
+    </div>
+    <span class="store-card-sum github-card-sum${description ? '' : ' is-empty'}">${escape(description || '仓库没有写说明')}</span>
+    <span class="store-card-foot">
+      <span>${number(repo.stars)} 星</span>
+      ${created ? `<span>${created}</span>` : ''}
+      ${skillCount}
+    </span>
+    <div class="github-card-actions">
+      ${install}
+      <a class="link-btn" href="${escape(repo.url)}" target="_blank" rel="noopener noreferrer"
+        aria-label="${escape(`在新窗口打开 ${repo.repository} 的 GitHub 页面`)}">打开 GitHub</a>
+    </div>
+  </div>`;
+}
+
+/* 默认和别的排一样显示四张；展开后全部铺开，最多 20 张。没有这一排数据时返回空字符串。 */
+function storeGithubShelfHtml() {
+  const repos = state.store?.github?.repos;
+  if (!Array.isArray(repos) || !repos.length) return '';
+  const expanded = state.storeGithubExpanded;
+  const shown = repos.slice(0, expanded ? 20 : SHELF_SIZE);
+  const more = repos.length > SHELF_SIZE
+    ? `<button class="link-btn" type="button" data-github-more aria-expanded="${expanded}" aria-controls="shelf-github-cards">${
+      expanded ? '收起' : `展开全部 ${number(repos.length)} 个`}</button>`
+    : '';
+  return `<section class="shelf shelf-github" aria-labelledby="shelf-github">
+    <div class="shelf-head">
+      <h2 id="shelf-github">GitHub 最近热门</h2>
+      ${more}
+    </div>
+    <p class="shelf-note">最近 30 天新建、星数最多的 GitHub 技能仓库，团队里还没人上架。</p>
+    <div id="shelf-github-cards" class="shelf-cards github-cards${expanded ? ' is-expanded' : ''}">${shown.map(githubCardHtml).join('')}</div>
+  </section>`;
+}
+
 function renderTeam() {
   if (state.page !== 'team') return;
   const team = state.team;
@@ -3517,13 +3585,14 @@ function renderStoreShelves(cards) {
   }
   if (!cards.length) {
     box.innerHTML = `<div class="empty store-empty">${emptyInner('team', '暂无团队技能')}
-      <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>`;
+      <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>` + (storeBrowsing() ? storeGithubShelfHtml() : '');
     return;
   }
   if (!storeBrowsing()) {
     box.innerHTML = '';
     return;
   }
+  const githubShelf = storeGithubShelfHtml();
   const shown = new Set();
   const packs = [...(state.store?.packs || [])].sort((a, b) => storePackTime(b) - storePackTime(a));
   const packShelf = packs.length ? `<section class="shelf" aria-labelledby="shelf-packs">
@@ -3535,7 +3604,7 @@ function renderStoreShelves(cards) {
     </section>` : '';
   // 三排推荐仍按原来的门槛；技能包少的时候也能单独出现在前面。
   if (cards.length < SHELF_MIN) {
-    box.innerHTML = packShelf;
+    box.innerHTML = packShelf + githubShelf;
     return;
   }
   box.innerHTML = packShelf + STORE_SHELVES.map(shelf => {
@@ -3550,7 +3619,7 @@ function renderStoreShelves(cards) {
       </div>
       <div class="shelf-cards">${picked.map(storeCardHtml).join('')}</div>
     </section>` : '';
-  }).join('');
+  }).join('') + githubShelf;
 }
 
 let storePackOpen = new Set();
@@ -3692,7 +3761,14 @@ $('page-team').addEventListener('click', event => {
   const packEdit = event.target.closest('[data-store-pack-edit]');
   const packToggle = event.target.closest('[data-store-pack-toggle]');
   const queuePack = event.target.closest('[data-store-queue-pack]');
-  if (goto) gotoStoreSkill(goto);
+  const githubInstall = event.target.closest('[data-github-install]');
+  const githubMore = event.target.closest('[data-github-more]');
+  if (githubInstall) openGithubInstall(githubInstall.dataset.githubInstall);
+  else if (githubMore) {
+    state.storeGithubExpanded = !state.storeGithubExpanded;
+    renderTeam();
+    $('store-shelves').querySelector('[data-github-more]')?.focus({preventScroll: true});
+  } else if (goto) gotoStoreSkill(goto);
   else if (gotoTags) gotoStoreTag(gotoTags.dataset.storeGotoTag);
   else if (retry) retryStoreQueue(retry.dataset.storeQueueRetry, retry);
   else if (clear) clearStoreQueue(clear);
@@ -5997,6 +6073,19 @@ async function inspectInstall(force = false) {
     installReadError = error.message;
     renderInstallRail();
   }
+}
+
+/* 「前往安装」不另写安装：到技能页左栏填上仓库地址，和用户自己粘贴链接一样读取，
+   仓库里有多个技能时照旧挑。 */
+function openGithubInstall(repository) {
+  const repo = (state.store?.github?.repos || []).find(item => item.repository === repository);
+  if (!repo) return;
+  showPage('skills');
+  $('install-url').value = repo.url;
+  clearTimeout(installInspectTimer);
+  inspectInstall(true);
+  $('install-rail').scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'center'});
+  $('install-url').focus({preventScroll: true});
 }
 
 /* 「全部装给 X」：只装能直接装的，点了直接装，不弹确认框，完成提示带撤销。 */
