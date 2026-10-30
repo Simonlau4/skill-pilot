@@ -9,11 +9,16 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import tempfile
+import threading
 import unicodedata
+import urllib.error
 import urllib.parse
+import urllib.request
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,6 +33,8 @@ MAX_FILES = 300
 MAX_SIZE = 5 * 1024 * 1024
 TEXT_FIELDS = ('title', 'summary', 'group', 'description', 'note')
 NAME = r'[A-Za-z0-9][A-Za-z0-9_.-]*'
+GITHUB_SEARCH_LIMIT = 2 * 1024 * 1024
+GITHUB_TREE_LIMIT = 8 * 1024 * 1024
 
 
 def now():
@@ -55,6 +62,137 @@ def atomic_write(path, data):
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _github_time(value):
+    if (isinstance(value, str) and re.fullmatch(
+            r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})', value)):
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is not None:
+                return parsed
+        except ValueError:
+            pass
+    raise ValueError('GitHub 最近热门的时间格式不正确。')
+
+
+def _github_repo(row):
+    if not isinstance(row, dict):
+        raise ValueError('GitHub 最近热门的仓库格式不正确。')
+    repository = row.get('repository')
+    match = (re.fullmatch(r'([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)/([A-Za-z0-9._-]{1,100})', repository)
+             if isinstance(repository, str) else None)
+    description = row.get('description')
+    stars, count = row.get('stars'), row.get('skill_count')
+    if (not match or len(match[1]) > 39 or match[2] in {'.', '..'} or
+            description is not None and not isinstance(description, str) or
+            type(stars) is not int or stars < 0 or
+            'skill_count' not in row or count is not None and (type(count) is not int or count <= 0)):
+        raise ValueError('GitHub 最近热门的仓库格式不正确。')
+    for field in ('created_at', 'pushed_at'):
+        _github_time(row.get(field))
+    return {'repository': repository,
+            'description': ''.join(c for c in description or '' if unicodedata.category(c) not in
+                                   {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'})[:500],
+            'stars': stars, 'created_at': row['created_at'], 'pushed_at': row['pushed_at'],
+            'skill_count': count}
+
+
+def clean_github(data):
+    if not isinstance(data, dict) or not isinstance(data.get('repos'), list) or len(data['repos']) > 20:
+        raise ValueError('GitHub 最近热门的名单格式不正确。')
+    _github_time(data.get('fetched_at'))
+    return {'fetched_at': data['fetched_at'], 'repos': [_github_repo(row) for row in data['repos']]}
+
+
+class _GitHubRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        address = urllib.parse.urlsplit(newurl)
+        if address.scheme != 'https' or address.netloc != 'api.github.com':
+            raise ValueError('GitHub 跳转到了其他地址，已停止访问。')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class _GitHubResponseTooLarge(ValueError):
+    pass
+
+
+def _github_json(path, limit):
+    request = urllib.request.Request('https://api.github.com' + path, headers={
+        'User-Agent': 'skill-pilot-team-hub', 'Accept': 'application/vnd.github+json'})
+    try:
+        with urllib.request.build_opener(_GitHubRedirect()).open(request, timeout=15) as response:
+            content = response.read(limit + 1)
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise ValueError(f'GitHub 公开接口返回 {error.code}，请稍后再试。') from None
+    except (OSError, HTTPException):
+        raise ValueError('暂时连不上 GitHub 公开接口。') from None
+    if len(content) > limit:
+        raise _GitHubResponseTooLarge('GitHub 返回的内容太大，暂时不能读取。')
+    try:
+        return json.loads(content)
+    except (ValueError, RecursionError):
+        raise ValueError('GitHub 返回的内容格式不正确。') from None
+
+
+def fetch_github_trending():
+    fetched_at = now()
+    cutoff = (_github_time(fetched_at) - timedelta(days=30)).date().isoformat()
+    query = urllib.parse.urlencode({'q': f'topic:agent-skills created:>{cutoff} fork:false archived:false',
+                                    'sort': 'stars', 'order': 'desc', 'per_page': 50})
+    data = _github_json('/search/repositories?' + query, GITHUB_SEARCH_LIMIT)
+    if not isinstance(data, dict) or not isinstance(data.get('items'), list):
+        raise ValueError('GitHub 返回的仓库名单格式不正确。')
+    candidates = []
+    for item in data['items'][:50]:
+        if not isinstance(item, dict):
+            continue
+        name, topics, branch = item.get('name'), item.get('topics', []), item.get('default_branch')
+        if (not isinstance(name, str) or not isinstance(topics, list) or
+                any(not isinstance(topic, str) for topic in topics) or
+                any('awesome' in text.lower() for text in [name, *topics]) or
+                item.get('fork') or item.get('archived') or not isinstance(branch, str) or not branch):
+            continue
+        try:
+            row = _github_repo({'repository': item.get('full_name'), 'description': item.get('description'),
+                                'stars': item.get('stargazers_count'), 'created_at': item.get('created_at'),
+                                'pushed_at': item.get('pushed_at'), 'skill_count': None})
+        except ValueError:
+            continue
+        if row['repository'].split('/')[1] == name:
+            candidates.append((row, branch))
+    repos, completed = [], 0
+    for row, branch in sorted(candidates, key=lambda candidate: candidate[0]['stars'], reverse=True)[:40]:
+        try:
+            tree = _github_json('/repos/' + row['repository'] + '/git/trees/' +
+                                urllib.parse.quote(branch, safe='') + '?recursive=1', GITHUB_TREE_LIMIT)
+            if (not isinstance(tree, dict) or type(tree.get('truncated')) is not bool or
+                    not isinstance(tree.get('tree'), list) or
+                    any(not isinstance(entry, dict) or not isinstance(entry.get('path'), str) or
+                        not isinstance(entry.get('type'), str) for entry in tree['tree'])):
+                raise ValueError('GitHub 返回的文件清单格式不正确。')
+            count = None if tree['truncated'] else sum(entry['type'] == 'blob' and
+                    entry['path'].rsplit('/', 1)[-1] == 'SKILL.md' for entry in tree['tree'])
+        except _GitHubResponseTooLarge:
+            count = None
+        except ValueError:
+            continue
+        completed += 1
+        if count == 0:
+            continue
+        repos.append({**row, 'skill_count': count})
+        if len(repos) == 20:
+            break
+    if candidates and not completed:
+        raise ValueError('暂时没能读取 GitHub 仓库的文件清单。')
+    return {'fetched_at': fetched_at, 'repos': repos}
+
+
+def github_worker(store, stopped):
+    while not stopped.is_set():
+        store.refresh_github()
+        stopped.wait(3600)
 
 
 def short_text(value, label):
@@ -209,6 +347,26 @@ class HubStore:
             fcntl.flock(stream, fcntl.LOCK_EX)
             yield
 
+    def _github(self):
+        try:
+            return clean_github(json.loads((self.data / 'github-trending.json').read_text(encoding='utf-8')))
+        except (OSError, ValueError, RecursionError):
+            return None
+
+    def refresh_github(self):
+        try:
+            with self.locked():
+                previous = self._github()
+            if previous and _github_time(now()) - _github_time(previous['fetched_at']) < timedelta(hours=24):
+                return
+            data = clean_github(fetch_github_trending())
+            with self.locked():
+                atomic_write(self.data / 'github-trending.json', data)
+        except ValueError as error:
+            print('GitHub 最近热门更新失败：' + str(error), file=sys.stderr, flush=True)
+        except OSError:
+            print('GitHub 最近热门更新失败：没能读写热门名单，请检查分享站数据文件夹。', file=sys.stderr, flush=True)
+
     def _members(self):
         path = self.data / 'members.json'
         try:
@@ -343,10 +501,14 @@ class HubStore:
             authors = {row['member']['id'] for row in card['listings']}
             card['installs'] = sum(card['key'] in keys for member, keys in installs.items()
                                    if member in members and member not in authors)
-        return {'cards': sorted(cards.values(), key=lambda c: c['listings'][0]['updated_at'], reverse=True),
+        result = {'cards': sorted(cards.values(), key=lambda c: c['listings'][0]['updated_at'], reverse=True),
                 'packs': sorted([p for m in members.values() for p in self._public_packs(m)],
                                 key=lambda p: p['updated_at'], reverse=True),
                 'my_installs': sorted(set(installs.get(member_id, [])) & cards.keys())}
+        github = self._github()
+        if github is not None:
+            result['github'] = github
+        return result
 
     def _put_installs(self, member_id, data):
         if (not isinstance(data, dict) or not isinstance(data.get('keys'), list) or
@@ -618,10 +780,14 @@ def run(args):
             access = ('开放加入，知道地址的同事填名字就能加入。' if args.open else
                       '只有管理员发了口令的成员能用。')
             print(f'分享站已启动，监听 {args.host}:{server.server_port}；{access}按 Ctrl+C 停止。', flush=True)
+            stopped = threading.Event()
+            threading.Thread(target=github_worker, args=(server.store, stopped), daemon=True).start()
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
                 print('分享站已停止。')
+            finally:
+                stopped.set()
         return
     store = HubStore(args.data)
     if args.hub_command == 'add-member':

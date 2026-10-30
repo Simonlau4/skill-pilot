@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 from skill_pilot import cli, team_hub
 from tests import set_up_home
+from tests.test_github_trending import github_catalog
 
 
 def listing(name='example', kind='github', **extra):
@@ -75,6 +76,22 @@ class TeamHubTests(unittest.TestCase):
         status, body = self.request('/api/catalog')
         self.assertEqual(status, 200, body)
         return body['cards']
+
+    def test_catalog_github_is_optional_validated_and_keeps_other_fields(self):
+        self.put()
+        previous = self.request('/api/catalog')[1]
+        self.assertNotIn('github', previous)
+        snapshot = github_catalog('acme/example-skills')
+        with self.store.locked():
+            team_hub.atomic_write(self.data / 'github-trending.json', snapshot)
+        status, data = self.request('/api/catalog')
+        self.assertEqual(status, 200)
+        self.assertEqual(data, previous | {'github': snapshot})
+        for content in ('{', '[]', '{"fetched_at":"invalid","repos":[]}',
+                        json.dumps(github_catalog('acme/..'))):
+            with self.subTest(content=content):
+                (self.data / 'github-trending.json').write_text(content)
+                self.assertEqual(self.request('/api/catalog'), (200, previous))
 
     def package(self, name='example', suffix=''):
         return self.request('/api/packages/' + self.first['id'] + '/' + name + suffix)
@@ -743,13 +760,20 @@ class TeamHubCliTests(unittest.TestCase):
                                        (['--open'], True, '开放加入，知道地址的同事填名字就能加入')):
             argv = ['skill-pilot', 'hub', 'serve', '--data', str(self.data), *flags]
             with self.subTest(open=opened), patch.object(sys, 'argv', argv), \
-                    patch.object(team_hub, 'HubServer') as server_class, redirect_stdout(io.StringIO()) as output:
+                    patch.object(team_hub, 'HubServer') as server_class, \
+                    patch.object(team_hub.threading, 'Thread') as thread, redirect_stdout(io.StringIO()) as output:
                 server = server_class.return_value.__enter__.return_value
                 server.server_port = 8765
                 server.serve_forever.side_effect = KeyboardInterrupt
                 cli.main()
                 server_class.assert_called_once_with(str(self.data), '0.0.0.0', 8765, open=opened)
                 self.assertIn(message, output.getvalue())
+                thread.assert_called_once()
+                self.assertTrue(thread.call_args.kwargs['daemon'])
+                self.assertIs(thread.call_args.kwargs['target'], team_hub.github_worker)
+                self.assertIs(thread.call_args.kwargs['args'][0], server.store)
+                self.assertTrue(thread.call_args.kwargs['args'][1].is_set())
+                thread.return_value.start.assert_called_once_with()
         self.assertIn('开放加入：知道地址的同事填名字就能加入，不用口令', self.command('serve', '--help').stdout)
         self.assertEqual(list(self.home.iterdir()), [])
 
