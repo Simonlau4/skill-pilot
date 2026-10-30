@@ -53,6 +53,7 @@ def main():
     source_command.add_argument('skill')
     source_command.add_argument('--repo', required=True)
     source_command.add_argument('--path', required=True)
+    source_command.add_argument('--branch', help='跟着这个分支检查更新，默认跟仓库的默认分支')
     source_command.add_argument('--yes', action='store_true')
     source_command.add_argument('--json', action='store_true')
     exporting = commands.add_parser('export-config', help='导出可分享的技能清单和分配')
@@ -86,6 +87,25 @@ def main():
     extras.add_argument('folder', nargs='?')
     extras.add_argument('--remove', action='store_true', help='不再额外查看这个文件夹')
     extras.add_argument('--json', action='store_true')
+    sharing_team = commands.add_parser('team', help='团队商店：查看、上架、下架、按名称安装')
+    team_commands = sharing_team.add_subparsers(dest='team_command', required=True)
+    team_list = team_commands.add_parser('list', help='查看团队商店里的技能')
+    team_publish = team_commands.add_parser('publish', help='把本机在用的技能上架到分享站')
+    team_publish.add_argument('skills', nargs='+', metavar='SKILL')
+    team_publish.add_argument('--note', action='append', default=[], metavar='技能=推荐语', help='给同事看的推荐语')
+    team_publish.add_argument('--no-require', action='append', default=[], metavar='技能=依赖',
+                              help='预览认错的依赖，不算作这个技能需要的')
+    team_publish.add_argument('--skip-pack', action='append', default=[], metavar='编号', help='不要预览里的这个技能包')
+    team_unpublish = team_commands.add_parser('unpublish', help='从分享站下架自己上架的技能')
+    team_unpublish.add_argument('skills', nargs='+', metavar='SKILL')
+    team_install = team_commands.add_parser('install', help='按名称从团队商店安装')
+    team_install.add_argument('name', help='技能名称或中文名')
+    team_install.add_argument('--author', help='有重名时指定上架人')
+    team_install.add_argument('--agent', action='append', default=[], help='装好后分配给这个 agent，可以重复指定')
+    for command in (team_publish, team_unpublish, team_install):
+        command.add_argument('--yes', action='store_true')
+    for command in (team_list, team_publish, team_unpublish, team_install):
+        command.add_argument('--json', action='store_true')
     checking = commands.add_parser('check-updates', help='只读检查技能更新')
     checking.add_argument('--json', action='store_true')
     updating = commands.add_parser('update', help='核对并更新选中的技能')
@@ -108,7 +128,7 @@ def main():
             command.add_argument('--all', action='store_true')
             command.add_argument('--yes', action='store_true')
         if name == 'install':
-            command.add_argument('github_url')
+            command.add_argument('source', metavar='SOURCE', help='GitHub 链接，或本机的技能文件夹')
             command.add_argument('--skill', action='append')
             command.add_argument('--agent', action='append', default=[])
             command.add_argument('--yes', action='store_true')
@@ -204,7 +224,7 @@ def main():
             elif args.command == 'restore-withdrawn':
                 result = cleanup.restore(args.skills)
             else:
-                result = operations.set_source(args.skill,args.repo,args.path,args.yes)
+                result = operations.set_source(args.skill,args.repo,args.path,args.yes,branch=args.branch)
             if args.json:
                 print(json.dumps(result,ensure_ascii=False,indent=2))
             elif args.command == 'cleanup' and args.list:
@@ -243,6 +263,73 @@ def main():
                 raise ValueError('请先确认，再加 --yes 保存这个提醒方式。')
             return updates.set_watch(args.skill, args.mode, confirmed=True)
         attempt(work)
+        return
+    if args.command == 'team':
+        from . import team
+        home = target_home()
+        def pairs(values, label):
+            result = [value.partition('=') for value in values]
+            if any(not name or not text for name, _, text in result):
+                parser.error(label + ' 请写成 技能=内容。')
+            return [(name, text) for name, _, text in result]
+        def named(title, name):
+            return f'{title}（{name}）' if title and title != name else name
+        try:
+            if args.team_command == 'list':
+                result = team.catalog(home)
+            elif args.team_command == 'publish':
+                result = team.publish(home, args.skills, dict(pairs(args.note, '--note')),
+                                      [list(p) for p in pairs(args.no_require, '--no-require')],
+                                      args.skip_pack, args.yes)
+            elif args.team_command == 'unpublish':
+                result = team.unpublish(home, args.skills, args.yes)
+            else:
+                result = team.install_named(home, args.name, args.author, args.agent, args.yes)
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            elif args.team_command == 'list':
+                for card in result['cards']:
+                    authors = '、'.join(dict.fromkeys(row['member']['name'] for row in card['listings']))
+                    local = card['local']
+                    print(f'{named(card.get("title"), card["name"])}：{authors} 上架；{local["label"]}' +
+                          (f'，{local["reason"]}' if local['status'] == 'blocked' else ''))
+                if not result['cards']:
+                    print('团队商店里还没有技能。')
+            elif args.team_command == 'publish':
+                print(result['message'])
+                for row in result['listings']:
+                    files = row['files']
+                    line = named(row['title'], row['name']) + '：'
+                    line += ('飞书官方技能，同事按官方方式装' if row['kind'] == 'lark' else
+                             row['download_note'] if 'download_note' in row else
+                             f'上传 {files["count"]} 个文件，共 {files["size"] / 1024:.1f} KB')
+                    if row['auto']:
+                        line += '；因为 ' + '、'.join(row['auto']) + ' 需要它，一起上架'
+                    if row['requires']:
+                        line += '；需要 ' + '、'.join(row['requires'])
+                    print(line)
+                    for item in files['blocked']:
+                        print(f'  不上传 {item["path"]}：{item["reason"]}')
+                for row in result['detected']:
+                    print(f'看说明 {row["skill"]} 可能需要 {row["requires"]}' +
+                          (f'，已算作依赖；不对的话加 --no-require {row["skill"]}={row["requires"]}' if row['adopted'] else '，已取消'))
+                for row in result['errors']:
+                    print(f'不能上架 {row["name"]}：{row["reason"]}')
+                for pack in result['packs']:
+                    print(f'技能包「{pack["title"]}」：' + '、'.join(pack['skills']) + ('（已有）' if pack['existing'] else '（新建）') +
+                          (f'；不要的话加 --skip-pack {pack["id"]}' if not args.yes else ''))
+            else:
+                print(result['message'])
+                if result.get('operations'):
+                    print('可以撤销：' + '；'.join('skill-pilot undo ' + i for i in reversed(result['operations'])))
+            if result.get('needs_confirmation'):
+                if not args.json:
+                    print('请核对后加 --yes 执行。')
+                raise SystemExit(2)
+            if args.team_command == 'publish' and not result['listings']:
+                raise SystemExit(1)
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            fail(error)
         return
     if args.command in {'check-updates', 'update'}:
         from . import updates
@@ -325,19 +412,23 @@ def main():
                     raise ValueError('收编会移动新装技能，请核对后加 --yes 执行。')
                 data = operations.absorb(all_skills=args.all)
             elif args.command == 'install':
-                if not args.yes:
-                    raise ValueError('安装会把所选技能收进仓库，请核对后加 --yes 执行。')
-                from .sources.github import inspect
-                review = inspect(args.github_url)
+                if '://' in args.source:
+                    from .sources.github import inspect
+                    review = inspect(args.source)
+                else:
+                    review = operations.inspect_local(args.source)
                 try:
+                    if not review['skills']:
+                        raise ValueError('这个位置没有找到技能。')
                     names = args.skill or [s['name'] for s in review['skills']]
-                    data = operations.install(review, names, args.agent)
+                    data = operations.install(review, names, args.agent, confirmed=args.yes)
                     if data.get('conflicts'):
                         from .web.server import compare_files
                         for conflict in data['conflicts']:
                             conflict['comparison'] = compare_files(Path(conflict['existing']), Path(conflict['incoming']))
                 finally:
-                    rmtree(review['temporary'])
+                    if 'temporary' in review:
+                        rmtree(review['temporary'])
             elif args.command == 'log':
                 data = operations.history()
             else:
@@ -358,6 +449,9 @@ def main():
                     print(f'{record["time"]} {record["message"]}（{"、".join(record["agents"])}） 编号 {record["id"]}' + (' 已撤销' if record['undone'] else ''))
             else:
                 print(data['message'])
+                if args.command == 'install' and not args.yes:
+                    for skill in data.get('skills', []):
+                        print(skill['name'] + '：' + skill['description'])
                 for line in data.get('reasons', []) + data.get('dependency_warnings', []):
                     print(line)
                 for warning in data.get('path_warnings', []):

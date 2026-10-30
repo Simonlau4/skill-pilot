@@ -47,5 +47,16 @@ def normalize(source):
         raise ValueError('来源记录中的技能位置不正确。')
     if path.name == 'SKILL.md':
         path = path.parent
-    return {'kind': 'github', 'repository': repository, 'path': str(path),
-            'label': str(repository), 'url': repository if local else 'https://github.com/' + repository}
+    result = {'kind': 'github', 'repository': repository, 'path': str(path),
+              'label': str(repository), 'url': repository if local else 'https://github.com/' + repository}
+    if 'branch' in source:
+        if not valid_branch(source['branch']):
+            raise ValueError('来源记录中的分支名称不正确。')
+        result.update(branch=source['branch'], label=f'{repository}（{source["branch"]} 分支）')
+    return result
+
+
+def valid_branch(name):
+    return (isinstance(name, str) and bool(re.fullmatch(r'[A-Za-z0-9._/-]{1,200}', name)) and
+            not name.startswith(('-', '/', '.')) and not name.endswith(('/', '.', '.lock')) and
+            '..' not in name and '//' not in name and '/.' not in name)
