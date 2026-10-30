@@ -866,6 +866,11 @@ input[type="checkbox"]:disabled { cursor: default; }
 .install-summary-name { margin: 0; color: var(--ink); font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
 .install-summary-detail { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .install-summary-purpose { min-width: 0; line-height: 1.45; }
+.install-targets { display: grid; gap: 2px; min-width: 0; margin: 4px 0 0; padding: 0; border: 0; }
+.install-targets legend { display: flex; align-items: center; gap: 2px; padding: 0; }
+.install-target-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 6px; }
+.install-target { gap: 4px; min-width: 0; min-height: 28px; font-size: var(--fs-small); }
+.install-target > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .install-actions { display: grid; gap: 6px; }
 .install-actions .btn-primary { width: 100%; height: auto; min-height: 34px; padding: 5px 10px; white-space: normal; line-height: 1.35; }
 .install-actions-row { display: flex; align-items: center; gap: var(--sp-1); }
