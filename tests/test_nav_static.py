@@ -138,6 +138,7 @@ if ($('program-message').textContent !== '从 Skill Pilot 官方项目获取新�
         script = function + r'''
 let checks = 0;
 async function autoCheckProgram() { checks++; }
+function stopGithubDigestPolling() {}
 function fail(message) { console.error(message); process.exit(1); }
 const state = {page: 'skills', agent: 'Acme'};
 let homeVisible = true;

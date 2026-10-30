@@ -131,9 +131,38 @@ def fetch_materials(row):
     row = team_hub._github_repo(row)
     materials, total, seen = {'readme': '', 'skills': []}, 0, set()
     paths = ([row['readme_path']] if row['readme_path'] else []) + row['skill_paths']
-    for path in paths:
-        content = download(row, path, min(FILE_LIMIT, REPOSITORY_LIMIT - total))
-        total += len(content)
+    contents, errors = [None] * len(paths), []
+    pending, lock = iter(enumerate(paths)), threading.Lock()
+    def fetch():
+        nonlocal total
+        while True:
+            with lock:
+                if errors:
+                    return
+                item = next(pending, None)
+            if item is None:
+                return
+            index, path = item
+            try:
+                content = download(row, path, FILE_LIMIT)
+                with lock:
+                    total += len(content)
+                    if total > REPOSITORY_LIMIT:
+                        raise DownloadError('GitHub 原文超过读取上限，这次没有整理。')
+                    contents[index] = content
+            except Exception as error:
+                with lock:
+                    errors.append(error)
+                return
+    # Daemon workers must not keep the dashboard alive during exit or refresh.
+    threads = [threading.Thread(target=fetch, daemon=True) for _ in range(min(6, len(paths)))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    for path, content in zip(paths, contents):
         original = content.decode('utf-8-sig', errors='replace')
         if path == row['readme_path']:
             materials['readme'] = original[:12000]
@@ -254,6 +283,10 @@ class Digests:
 
     def _materials(self, row):
         # A detail request and the worker share downloads without blocking polling.
+        with self.lock:
+            previous = copy.deepcopy(self.cache.get(row['repository'], {}))
+        if previous and previous['pushed_at'] == row['pushed_at']:
+            return previous
         with self.download_lock:
             with self.lock:
                 previous = copy.deepcopy(self.cache.get(row['repository'], {}))

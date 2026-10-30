@@ -41,9 +41,11 @@ class TeamStaticTests(unittest.TestCase):
             line(source, 'const escape = value => '),
             line(source, 'const number = value => '),
             line(source, 'const SHELF_SIZE = '),
+            line(source, 'const githubRepos = '),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             extract_function(source, 'function githubCreatedText('),
             extract_function(source, 'function githubStatusTag('),
+            extract_function(source, 'function githubInstallHtml('),
             extract_function(source, 'function githubCardHtml('),
             extract_function(source, 'function storeGithubShelfHtml('),
         ]
@@ -59,9 +61,9 @@ const repo = (extra = {}) => ({
   skill_count: 3, local: {status: 'installable'}, ...extra,
 });
 const card = githubCardHtml(repo());
-if (!card.startsWith('<div class="store-card github-card">')) fail('热门卡片外层不能用按钮：' + card);
-if (card.includes('<button class="store-card')) fail('热门卡片不该是详情按钮');
-if (!card.includes('acme/') || !card.includes('example-skills')) fail('顶行要写 owner/name');
+if (!card.startsWith('<div class="store-card github-card" data-github-card="acme/example-skills">')) fail('热门卡片外层不能用按钮：' + card);
+if (card.startsWith('<button')) fail('热门卡片外层不该是按钮：' + card);
+if (!card.includes('data-github-open="acme/example-skills"')) fail('标题要做成打开详情的按钮：' + card);
 if (!card.includes('title="acme/example-skills"')) fail('完整 owner/name 要放进 title 属性，悬停能看到：' + card);
 if (!card.includes('<span class="tag tag-quiet">可安装</span>')) fail('可安装的状态标签要沿用团队卡片写法：' + card);
 if (!card.includes('1,234 星')) fail('底行要写星数：' + card);
@@ -124,6 +126,16 @@ if (storeGithubShelfHtml() !== '') fail('名单为空时不该显示这一排');
                             'text-overflow: ellipsis', 'overflow-wrap: normal'):
             self.assertIn(declaration, title_rule.group(1), f'标题没写 {declaration}，会在单词中间断行')
         self.assertNotIn('-webkit-line-clamp', title_rule.group(1), '标题不该再保留两行截断')
+        # 中英文两种卡片都留出同样两行标题位，换成中文时不改变卡片高度。
+        card_rule = re.search(r'\.github-card\s*\{([^}]*)\}', css)
+        self.assertIn('min-height: 192px', card_rule.group(1), '热门卡片要定住高度，换成中文时不能变高')
+        heading_rule = re.search(r'\.github-card-heading\s*\{([^}]*)\}', css)
+        self.assertIsNotNone(heading_rule, '卡片标题区样式不见了')
+        self.assertIn('min-height: 42px', heading_rule.group(1), '标题区要给英文和中文都留出两行位置')
+        repo_rule = re.search(r'\.github-card-repo\s*\{([^}]*)\}', css)
+        self.assertIsNotNone(repo_rule, '中文卡片标题下的仓库名样式不见了')
+        for declaration in ('white-space: nowrap', 'overflow: hidden', 'text-overflow: ellipsis'):
+            self.assertIn(declaration, repo_rule.group(1), f'仓库名没写 {declaration}，不会单行省略')
 
     def test_store_github_install_opens_left_rail(self):
         source = (STATIC / 'app.js').read_text()
@@ -159,9 +171,203 @@ if (calls.length !== before) fail('找不到仓库时不该跳转或报错');
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         handler = source[source.index("$('page-team').addEventListener('click'"):]
-        self.assertIn("target.closest('[data-github-install]')", handler[:1200], '团队页点击要接上热门卡片的安装按钮')
-        self.assertIn("target.closest('[data-github-more]')", handler[:1200], '团队页点击要接上展开按钮')
+        self.assertIn("target.closest('[data-github-install]')", handler[:1600], '团队页点击要接上热门卡片的安装按钮')
+        self.assertIn("target.closest('[data-github-open]')", handler[:1600], '标题按钮要打开详情')
+        self.assertIn("target.closest('[data-github-card]')", handler[:1600], '卡片空白处也要能打开详情')
+        self.assertIn("target.closest('[data-github-more]')", handler[:1600], '团队页点击要接上展开按钮')
         self.assertIn('state.storeGithubExpanded = !state.storeGithubExpanded', handler[:2000])
+        self.assertLess(handler.index('if (githubInstall)'), handler.index('else if (githubCard'),
+                        '安装按钮要先响应，不能顺带打开详情')
+
+    def test_store_github_digest_cards_and_detail(self):
+        source = (STATIC / 'app.js').read_text()
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const icon = (name'),
+            line(source, 'const number = value => '),
+            extract_function(source, 'const STORE_STATUS = {') + ';',
+            extract_function(source, 'function githubCreatedText('),
+            extract_function(source, 'function githubStatusTag('),
+            extract_function(source, 'function githubInstallHtml('),
+            extract_function(source, 'function githubCardHtml('),
+            extract_function(source, 'function githubListHtml('),
+            extract_function(source, 'function githubSkillsHtml('),
+            extract_function(source, 'function githubDigestStatusHtml('),
+            extract_function(source, 'function githubDetailHtml('),
+        ]
+        script = '\n'.join(parts) + r'''
+function fail(message) { console.error(message); process.exit(1); }
+let readOnly = false;
+const state = {table: {llm_configured: true}};
+const teamReadOnly = () => readOnly;
+const now = Date.now();
+const repo = (extra = {}) => ({
+  repository: 'acme/example', url: 'https://github.com/acme/example',
+  description: 'Example <b>skills</b>', stars: 1234,
+  created_at: new Date(now - 3 * 86400000).toISOString(), pushed_at: new Date(now).toISOString(),
+  skill_count: 2, local: {status: 'installable'}, digest_status: 'pending', ...extra,
+});
+const materials = {
+  readme: '第一行\n<b>第二行</b>',
+  skills: [{name: 'acme-example', description: '原始说明'},
+           {name: 'acme-other', description: '<i>另一份说明</i>'}],
+};
+const digest = {
+  title: '<b>示例工具</b>', summary: '整理 <i>公开</i> 资料。',
+  uses: ['阅读资料', '归纳用途'],
+  skills: [{name: 'acme-example', title: '示例整理', purpose: '汇总资料。'}],
+  notes: ['需要联网'],
+};
+
+const readyCard = githubCardHtml(repo({digest_status: 'ready', digest}));
+if (!readyCard.includes('&lt;b&gt;示例工具&lt;/b&gt;')) fail('中文名没有按纯文字转义：' + readyCard);
+if (!readyCard.includes('<span class="github-card-repo" title="acme/example">acme/example</span>')) {
+  fail('中文卡片要在标题下面用小字写 owner/name：' + readyCard);
+}
+if (readyCard.includes('Example &lt;b&gt;skills')) fail('有中文介绍时不该再显示英文说明：' + readyCard);
+if (!readyCard.includes('&lt;i&gt;公开&lt;/i&gt;')) fail('中文一句话没有转义：' + readyCard);
+const titleButton = readyCard.match(/<button[^>]*data-github-open[^>]*>[\s\S]*?<\/button>/);
+if (!titleButton || titleButton[0].includes('data-github-install')) fail('标题按钮不能套安装按钮：' + readyCard);
+
+const pendingCard = githubCardHtml(repo());
+if (!pendingCard.includes('Example &lt;b&gt;skills')) fail('还没整理时保持原来的英文说明：' + pendingCard);
+if (pendingCard.includes('github-card-repo')) fail('还没整理时不在标题下加仓库名：' + pendingCard);
+if (pendingCard.includes('aria-busy') || pendingCard.includes('正在用 AI')) fail('等待整理时卡片不加转圈或提示：' + pendingCard);
+for (const status of ['failed', 'off']) {
+  const card = githubCardHtml(repo({digest_status: status, digest_error: '<img src=x> 下载失败'}));
+  if (card.includes('<img') || card.includes('下载失败')) fail(`卡片上不写 ${status} 的原因：` + card);
+}
+
+const ready = githubDetailHtml({...repo({digest_status: 'ready'}), materials, digest});
+for (const text of ['acme/example', '1,234 星', '3 天前新建', '含 2 个技能', '能做什么', '阅读资料',
+                    '归纳用途', '仓库里的技能', '示例整理', '汇总资料。', 'acme-other', '另一份说明',
+                    '用之前要知道', '需要联网', 'AI 整理，仅供参考。', '原文说明', '前往安装', '打开 GitHub']) {
+  if (!ready.includes(text)) fail('整理结果详情缺了：' + text);
+}
+if (ready.includes('原始说明')) fail('有中文技能说明时不该再显示原始说明：' + ready);
+if (!ready.includes('第一行\n&lt;b&gt;第二行')) fail('原文说明要保留换行并转义：' + ready);
+if (ready.includes('<b>第二行') || ready.includes('<i>另一份')) fail('原文和 AI 文字都要按纯文字显示：' + ready);
+if (!ready.includes('data-github-install="acme/example"')) fail('详情底部要有前往安装：' + ready);
+
+const pending = githubDetailHtml({...repo({digest_status: 'pending'}), materials, digest: null});
+if (!pending.includes('正在用 AI 整理中文介绍…')) fail('等待整理时要写正在整理：' + pending);
+if (!pending.includes('acme-example') || !pending.includes('原始说明')) fail('没有整理结果时列原名和原始说明：' + pending);
+if (pending.includes('data-github-digest-retry')) fail('等待整理时不该显示重试：' + pending);
+
+const failed = githubDetailHtml({...repo({digest_status: 'failed', digest_error: '<img src=x> 下载失败'}), materials, digest: null});
+if (!failed.includes('&lt;img src=x&gt; 下载失败')) fail('失败原因没有转义：' + failed);
+if (!failed.includes('data-github-digest-retry="acme/example"')) fail('整理失败要有重试：' + failed);
+readOnly = true;
+const failedLocked = githubDetailHtml({...repo({digest_status: 'failed', digest_error: '下载失败'}), materials, digest: null});
+if (failedLocked.includes('data-github-digest-retry')) fail('只读预览不显示整理重试：' + failedLocked);
+readOnly = false;
+
+state.table.llm_configured = false;
+const off = githubDetailHtml({...repo({digest_status: 'off'}), materials, digest: null});
+if (!off.includes('在设置里填好 AI 服务，就能看到中文介绍。')) fail('没填 AI 服务时要提示去设置：' + off);
+if (!off.includes('data-goto="settings/ai"')) fail('没填 AI 服务时要能跳到设置：' + off);
+state.table.llm_configured = true;
+const legacy = githubDetailHtml({...repo({digest_status: 'off'}), materials, digest: null});
+if (legacy.includes('在设置里填好 AI 服务')) fail('旧分享站等 off 情况不写提示：' + legacy);
+state.table.llm_configured = false;
+readOnly = true;
+const offReadOnly = githubDetailHtml({...repo({digest_status: 'off'}), materials, digest: null});
+if (offReadOnly.includes('在设置里填好 AI 服务')) fail('只读预览的 off 不写提示：' + offReadOnly);
+readOnly = false;
+
+const noSkills = githubDetailHtml({...repo({digest_status: 'off'}), materials: {readme: '', skills: []}, digest: null});
+if (!noSkills.includes('没有读到仓库里的技能。')) fail('没有技能文件时说明当前情况：' + noSkills);
+if (noSkills.includes('原文说明')) fail('原文为空时整块不显示：' + noSkills);
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        # 读详情的占位、失败原因和重试都要接上；所有文字按纯文字显示。
+        detail = extract_function(source, 'function renderGithubDetail(')
+        self.assertIn('正在读取仓库详情…', detail)
+        self.assertIn('data-github-detail-retry', detail)
+        self.assertIn('escape(detail.error)', detail)
+        self.assertIn('button.dataset.githubDetailRetry', source)
+        self.assertIn('button.dataset.githubDigestRetry', source)
+        self.assertIn('/api/team/github/detail?repository=${encodeURIComponent(repository)}', source)
+        self.assertIn("api('/api/team/github/retry', {repository})", source)
+        html = (STATIC / 'index.html').read_text()
+        self.assertIn('也会在团队页把 GitHub 最近热门整理成中文介绍，会产生少量费用', html,
+                      '设置页 AI 整理的说明要补上团队页用途和费用')
+
+    def test_store_github_digest_polling_only_updates_changed_cards(self):
+        source = (STATIC / 'app.js').read_text()
+        parts = [
+            line(source, 'const GITHUB_DIGEST_POLL_MS = '),
+            line(source, 'const githubRepos = '),
+            line(source, 'const githubRepo = '),
+            line(source, 'const githubHasPending = '),
+            extract_function(source, 'function githubApplyEntry('),
+            extract_function(source, 'function applyGithubDigests('),
+            extract_function(source, 'function scheduleGithubDigestPoll('),
+            extract_function(source, 'function stopGithubDigestPolling('),
+        ]
+        script = '\n'.join(parts) + r'''
+function fail(message) { console.error(message); process.exit(1); }
+let githubDigestTimer = null;
+let githubDigestSequence = 0;
+let githubDetail = null;
+const timers = [];
+const cleared = [];
+const setTimeout = (fn, ms) => { timers.push([fn, ms]); return timers.length; };
+const clearTimeout = id => cleared.push(id);
+const readGithubDigests = () => {};
+const updated = [];
+const updateGithubCard = repository => updated.push(repository);
+const loadGithubDetail = repository => updated.push('detail:' + repository);
+const state = {page: 'team', store: {github: {repos: [
+  {repository: 'acme/a', digest_status: 'pending'},
+  {repository: 'acme/b', digest_status: 'ready', digest: {title: '乙', summary: '旧'}},
+]}}};
+
+if (GITHUB_DIGEST_POLL_MS !== 3000) fail('轮询间隔要是 3 秒：' + GITHUB_DIGEST_POLL_MS);
+scheduleGithubDigestPoll();
+if (timers.length !== 1 || timers[0][1] !== 3000) fail('有等待中的仓库时要排一次 3 秒后的轮询：' + JSON.stringify(timers));
+scheduleGithubDigestPoll();
+if (timers.length !== 1) fail('已经排了轮询就不要重复排');
+stopGithubDigestPolling();
+if (!cleared.length || githubDigestTimer !== null) fail('离开团队页要停掉轮询');
+timers.length = 0;
+
+state.store.github.repos[0].digest_status = 'ready';
+scheduleGithubDigestPoll();
+if (timers.length !== 0) fail('没有等待中的仓库时不该继续轮询');
+
+state.store.github.repos[0].digest_status = 'pending';
+if (!githubHasPending()) fail('应该能看出还有等待中的仓库');
+applyGithubDigests({repos: {'acme/a': {digest_status: 'ready', digest: {title: '甲', summary: '新'}}}});
+if (state.store.github.repos[0].digest_status !== 'ready') fail('轻量状态没有合并进目录：' + JSON.stringify(state.store));
+if (!updated.includes('acme/a')) fail('变了的卡片要单独更新：' + JSON.stringify(updated));
+applyGithubDigests({repos: {'acme/b': {digest_status: 'failed', digest_error: '下载失败'}}});
+if (!updated.includes('acme/b')) fail('第二张变了的卡片也要更新：' + JSON.stringify(updated));
+if (state.store.github.repos[1].digest_status !== 'failed' || state.store.github.repos[1].digest_error !== '下载失败') {
+  fail('失败状态没有合并：' + JSON.stringify(state.store.github.repos[1]));
+}
+if ('digest' in state.store.github.repos[1]) fail('失败后要清掉旧的中文内容');
+
+githubDetail = {repository: 'acme/b', data: null};
+applyGithubDigests({repos: {'acme/b': {digest_status: 'ready', digest: {title: '乙', summary: '新'}}}});
+if (!updated.includes('detail:acme/b')) fail('打开着的详情要跟着重新读：' + JSON.stringify(updated));
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        # 轮询只读轻量接口，不重读目录；没有等待中的条目或离开团队页就停。
+        read = extract_function(source, 'async function readGithubDigests(')
+        self.assertIn("api('/api/team/github/digests')", read)
+        self.assertIn('state.page !== \'team\'', read)
+        self.assertIn('!githubHasPending()', read)
+        self.assertNotIn('/api/team/catalog', read)
+        self.assertIn('if (page !== \'team\') stopGithubDigestPolling()', source[
+            source.index('function showPage('):source.index('function gotoPlace(')])
+        load_store = source[source.index('async function loadStore('):source.index('/* 自己能上架的技能')]
+        self.assertIn('scheduleGithubDigestPoll()', load_store)
+        self.assertIn('stopGithubDigestPolling()', load_store)
 
     def test_team_settings_support_open_join(self):
         html = (STATIC / 'index.html').read_text()

@@ -123,7 +123,8 @@ class DigestTests(unittest.TestCase):
                   b'---\nname: acme-example\ndescription: duplicate\n---',
                   b'---\nname: ../bad\ndescription: invalid\n---', b'no manifest',
                   b'---\nname: acme-second\ndescription: second\n---\nExecute nothing.']
-        with patch.object(digest, 'download', side_effect=bodies) as download:
+        files = dict(zip([row['readme_path'], *row['skill_paths']], bodies))
+        with patch.object(digest, 'download', side_effect=lambda row, path, limit: files[path]) as download:
             result = digest.fetch_materials(row)
         self.assertEqual(len(result['readme']), 12000)
         self.assertEqual(result['skills'], [{'name': 'acme-example', 'description': 'x' * 500},
@@ -147,8 +148,92 @@ class DigestTests(unittest.TestCase):
             build.return_value.open.side_effect = opener
             with self.assertRaisesRegex(digest.DownloadError, '上限'):
                 digest.fetch_materials(row)
-        self.assertEqual(sum(c - 1 for c in calls), digest.REPOSITORY_LIMIT)
-        self.assertEqual(calls[-1], 1)
+        self.assertGreater(len(calls) * digest.FILE_LIMIT, digest.REPOSITORY_LIMIT)
+        self.assertTrue(all(c == digest.FILE_LIMIT + 1 for c in calls))
+
+    def test_parallel_downloads_use_six_daemon_workers_and_preserve_file_order(self):
+        row = catalog()['github']['repos'][0]
+        row['skill_paths'] = [f'skills/{i}/SKILL.md' for i in range(8)]
+        paths = [row['readme_path'], *row['skill_paths']]
+        release = [threading.Event() for _ in paths]
+        completed = [threading.Event() for _ in paths]
+        six_started, finished = threading.Event(), threading.Event()
+        lock = threading.Lock()
+        active, maximum = 0, 0
+        daemons, order, results, errors = [], [], [], []
+        def download(row, path, limit):
+            nonlocal active, maximum
+            index = paths.index(path)
+            self.assertEqual(limit, digest.FILE_LIMIT)
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+                daemons.append(threading.current_thread().daemon)
+                if active == 6:
+                    six_started.set()
+            try:
+                if index < 6:
+                    self.assertTrue(release[index].wait(timeout=4))
+                with lock:
+                    order.append(index)
+                completed[index].set()
+                return (b'Example README' if index == 0 else
+                        f'---\nname: acme-{index}\ndescription: Purpose {index}\n---'.encode())
+            finally:
+                with lock:
+                    active -= 1
+        def run():
+            try:
+                results.append(digest.fetch_materials(row))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+        with patch.object(digest, 'download', side_effect=download):
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(six_started.wait(timeout=2))
+                self.assertEqual(maximum, 6)
+                release[5].set()
+                self.assertTrue(completed[5].wait(timeout=2))
+            finally:
+                for event in release:
+                    event.set()
+                thread.join(timeout=3)
+        self.assertTrue(finished.is_set())
+        self.assertEqual(errors, [])
+        self.assertEqual(maximum, 6)
+        self.assertTrue(all(daemons))
+        self.assertEqual(order[0], 5)
+        self.assertEqual(results[0], {'readme': 'Example README', 'skills': [
+            {'name': f'acme-{i}', 'description': f'Purpose {i}'} for i in range(1, 9)]})
+
+    def test_parallel_downloads_allow_exactly_two_megabytes(self):
+        row = catalog()['github']['repos'][0]
+        row['skill_paths'] = [f'{i}/SKILL.md' for i in range(7)]
+        with patch.object(digest.urllib.request, 'build_opener') as build:
+            build.return_value.open.side_effect = lambda *args, **kwargs: io.BytesIO(b'x' * digest.FILE_LIMIT)
+            result = digest.fetch_materials(row)
+        self.assertEqual(result, {'readme': 'x' * 12000, 'skills': []})
+        self.assertEqual(build.return_value.open.call_count, 8)
+
+    def test_any_parallel_file_failure_fails_the_repository(self):
+        row = catalog()['github']['repos'][0]
+        row['skill_paths'] = [f'skills/{i}/SKILL.md' for i in range(8)]
+        for oversized in (False, True):
+            def open_file(request, timeout):
+                if request.full_url.endswith('/skills/1/SKILL.md'):
+                    if oversized:
+                        return io.BytesIO(b'x' * (digest.FILE_LIMIT + 1))
+                    raise urllib.error.URLError('private response')
+                return io.BytesIO(b'---\nname: acme-example\ndescription: Example\n---')
+            with self.subTest(oversized=oversized), patch.object(digest.urllib.request, 'build_opener') as build:
+                build.return_value.open.side_effect = open_file
+                with self.assertRaises(digest.DownloadError) as error:
+                    digest.fetch_materials(row)
+            self.assertNotIn('private response', str(error.exception))
+            self.assertIn('上限' if oversized else '下载', str(error.exception))
 
     def test_digest_validation_cleans_limits_and_drops_unknown_or_repeated_skills(self):
         value = copy.deepcopy(DIGEST)
@@ -357,6 +442,49 @@ class DigestTests(unittest.TestCase):
         fetch.assert_called_once()
         ai.assert_called_once()
 
+    def test_concurrent_details_download_the_repository_once(self):
+        self.digests.catalog(catalog())
+        entered, release, all_waiting = threading.Event(), threading.Event(), threading.Event()
+        actual_lock, count_lock = threading.Lock(), threading.Lock()
+        waiters, results, errors = [], [], []
+        class ObservedLock:
+            def __enter__(self):
+                with count_lock:
+                    waiters.append(True)
+                    if len(waiters) == 3:
+                        all_waiting.set()
+                actual_lock.acquire()
+            def __exit__(self, *args):
+                actual_lock.release()
+        self.digests.download_lock = ObservedLock()
+        def fetch(row):
+            entered.set()
+            self.assertTrue(release.wait(timeout=4))
+            return MATERIALS
+        def read_detail():
+            try:
+                results.append(self.digests.detail('acme/example'))
+            except Exception as error:
+                errors.append(error)
+        with patch.object(digest, 'fetch_materials', side_effect=fetch) as download, patch.object(labels, 'completion') as ai:
+            threads = [threading.Thread(target=read_detail, daemon=True) for _ in range(3)]
+            for thread in threads:
+                thread.start()
+            try:
+                self.assertTrue(entered.wait(timeout=2))
+                self.assertTrue(all_waiting.wait(timeout=2))
+                download.assert_called_once()
+            finally:
+                release.set()
+                for thread in threads:
+                    thread.join(timeout=3)
+                    self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(r['materials'] == MATERIALS for r in results))
+        download.assert_called_once()
+        ai.assert_not_called()
+
     def test_detail_uses_result_completed_while_materials_were_being_read(self):
         self.digests.catalog(catalog())
         row = catalog()['github']['repos'][0]
@@ -518,6 +646,46 @@ class DigestRouteTests(unittest.TestCase):
                 self.assertEqual(self.request('/api/team/github/detail?repository=acme/example')[0], 200)
                 self.assertEqual(self.request('/api/team/github/digests')[0], 200)
         ai.assert_not_called()
+
+    def test_cached_detail_does_not_wait_for_another_repository_download(self):
+        labels.save_settings(self.home, {'provider': 'example', 'base_url': 'http://127.0.0.1:1',
+                                        'model': 'example', 'api_key': 'synthetic-key'})
+        manager = self.server.github_digests
+        manager.catalog(catalog('acme/slow', 'acme/cached'))
+        with patch.object(digest, 'fetch_materials', return_value=MATERIALS):
+            self.assertIsNone(manager.detail('acme/cached')['digest'])
+        entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+        responses, errors = [], []
+        def fetch(row):
+            self.assertEqual(row['repository'], 'acme/slow')
+            entered.set()
+            self.assertTrue(release.wait(timeout=4))
+            return MATERIALS
+        def read_cached():
+            try:
+                responses.append(self.request('/api/team/github/detail?repository=acme/cached'))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                returned.set()
+        with patch.object(digest, 'fetch_materials', side_effect=fetch) as download, patch.object(
+                labels, 'completion', return_value=DIGEST):
+            manager.start()
+            reader = threading.Thread(target=read_cached, daemon=True)
+            try:
+                self.assertTrue(entered.wait(timeout=2))
+                reader.start()
+                self.assertTrue(returned.wait(timeout=1))
+                self.assertTrue(manager.thread.is_alive())
+            finally:
+                release.set()
+                if reader.ident is not None:
+                    reader.join(timeout=3)
+                manager.thread.join(timeout=3)
+        self.assertEqual(errors, [])
+        self.assertEqual(responses[0][0], 200)
+        self.assertEqual(responses[0][1]['materials'], MATERIALS)
+        download.assert_called_once()
 
     def test_auto_start_returns_pending_then_ready_and_detail_has_full_result(self):
         labels.save_settings(self.home, {'provider': 'example', 'base_url': 'http://127.0.0.1:1',

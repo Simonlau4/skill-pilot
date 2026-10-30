@@ -1276,6 +1276,7 @@ function rememberPlace() {
 
 function showPage(page) {
   state.page = page;
+  if (page !== 'team') stopGithubDigestPolling();
   homeVisible = page === 'home';
   rememberPlace();
   for (const section of document.querySelectorAll('.page-section')) {
@@ -3180,6 +3181,8 @@ async function loadStore({syncQueue = true} = {}) {
   }
   renderTeam();
   if (state.storeDetail) renderStoreDetail();
+  if (githubHasPending()) scheduleGithubDigestPoll();
+  else stopGithubDigestPolling();
 }
 
 /* 自己能上架的技能（含已上架的是否改过）：打开上架窗口或看“我上架的”时才读。 */
@@ -3500,31 +3503,51 @@ function githubStatusTag(repo) {
   return label ? `<span class="tag ${tone}">${escape(label)}</span>` : '';
 }
 
-/* 热门仓库卡片不是详情入口，外层用 div；安装和打开 GitHub 都放在卡片里面。 */
+const githubRepos = () => state.store?.github?.repos || [];
+const githubRepo = repository => githubRepos().find(repo => repo.repository === repository) || null;
+const githubDetailKey = repository => `github-repo:${repository}`;
+const githubErrorText = error => error instanceof TypeError
+  ? '没能连接到看板，请稍后重试。'
+  : String(error?.message || '操作没能完成，请稍后再试。');
+
+/* 卡片上的安装入口：卡片和详情底部共用，只读预览时禁用并写原因。 */
+function githubInstallHtml(repo) {
+  if (repo.local?.status !== 'installable') return '';
+  const readOnly = teamReadOnly();
+  return `<button class="btn btn-small btn-primary" type="button" data-github-install="${escape(repo.repository)}"
+    aria-label="${escape(`前往安装 ${repo.repository}`)}"${readOnly ? ' disabled title="只读预览，无法安装技能。"' : ''}>前往安装</button>`;
+}
+
+/* 热门仓库卡片不是详情入口，外层用 div；标题是打开详情的按钮，安装和打开 GitHub 也放在卡片里面。 */
 function githubCardHtml(repo) {
-  const [owner, ...rest] = String(repo.repository || '').split('/');
+  const repository = String(repo.repository || '');
+  const [owner, ...rest] = repository.split('/');
   const name = rest.join('/');
-  const description = String(repo.description || '').trim();
+  const digest = repo.digest_status === 'ready' && repo.digest && String(repo.digest.title || '').trim()
+    ? repo.digest : null;
+  const summary = String((digest ? digest.summary : repo.description) || '').trim();
   const created = githubCreatedText(repo.created_at);
   const skillCount = Number.isInteger(repo.skill_count) ? `<span>含 ${number(repo.skill_count)} 个技能</span>` : '';
-  const readOnly = teamReadOnly();
-  const install = repo.local?.status === 'installable'
-    ? `<button class="btn btn-small btn-primary" type="button" data-github-install="${escape(repo.repository)}"
-      aria-label="${escape(`前往安装 ${repo.repository}`)}"${readOnly ? ' disabled title="只读预览，无法安装技能。"' : ''}>前往安装</button>`
-    : '';
-  return `<div class="store-card github-card">
+  const title = digest ? String(digest.title).trim() : repository;
+  const heading = digest
+    ? `<button class="store-card-title github-card-title" type="button" data-github-open="${escape(repository)}"
+        title="${escape(title)}" aria-label="${escape(`查看「${title}」的详情`)}">${escape(title)}</button>
+      <span class="github-card-repo" title="${escape(repository)}">${escape(repository)}</span>`
+    : `<button class="store-card-title github-card-title" type="button" data-github-open="${escape(repository)}"
+        title="${escape(repository)}" aria-label="${escape(`查看 ${repository} 的详情`)}"><span class="github-owner">${escape(owner)}/</span>${escape(name)}</button>`;
+  return `<div class="store-card github-card" data-github-card="${escape(repository)}">
     <div class="store-card-top">
-      <span class="store-card-title" title="${escape(repo.repository)}"><span class="github-owner">${escape(owner)}/</span>${escape(name)}</span>
+      <div class="github-card-heading">${heading}</div>
       ${githubStatusTag(repo)}
     </div>
-    <span class="store-card-sum github-card-sum${description ? '' : ' is-empty'}">${escape(description || '仓库没有写说明')}</span>
+    <span class="store-card-sum github-card-sum${summary ? '' : ' is-empty'}">${escape(summary || '仓库没有写说明')}</span>
     <span class="store-card-foot">
       <span>${number(repo.stars)} 星</span>
       ${created ? `<span>${created}</span>` : ''}
       ${skillCount}
     </span>
     <div class="github-card-actions">
-      ${install}
+      ${githubInstallHtml(repo)}
       <a class="link-btn" href="${escape(repo.url)}" target="_blank" rel="noopener noreferrer"
         aria-label="${escape(`在新窗口打开 ${repo.repository} 的 GitHub 页面`)}">打开 GitHub</a>
     </div>
@@ -3533,8 +3556,8 @@ function githubCardHtml(repo) {
 
 /* 默认和别的排一样显示四张；展开后全部铺开，最多 20 张。没有这一排数据时返回空字符串。 */
 function storeGithubShelfHtml() {
-  const repos = state.store?.github?.repos;
-  if (!Array.isArray(repos) || !repos.length) return '';
+  const repos = githubRepos();
+  if (!repos.length) return '';
   const expanded = state.storeGithubExpanded;
   const shown = repos.slice(0, expanded ? 20 : SHELF_SIZE);
   const more = repos.length > SHELF_SIZE
@@ -3549,6 +3572,244 @@ function storeGithubShelfHtml() {
     <p class="shelf-note">最近 30 天新建、星数最多的 GitHub 技能仓库，团队里还没人上架。</p>
     <div id="shelf-github-cards" class="shelf-cards github-cards${expanded ? ' is-expanded' : ''}">${shown.map(githubCardHtml).join('')}</div>
   </section>`;
+}
+
+/* ---------- 中文介绍：轮询只读轻量状态，不重读目录 ---------- */
+
+const GITHUB_DIGEST_POLL_MS = 3000;
+let githubDigestTimer = null;
+let githubDigestSequence = 0;
+let githubDetail = null;        // 详情面板正在看的仓库：{repository, data, error, loading}
+let githubDetailSequence = 0;
+
+const githubHasPending = () => githubRepos().some(repo => repo.digest_status === 'pending');
+
+/* 只把轻量状态合并进目录里的对应条目；返回这一项是否真的变了。 */
+function githubApplyEntry(repository, entry) {
+  const repo = githubRepo(repository);
+  if (!repo || !entry || typeof entry !== 'object') return false;
+  const before = JSON.stringify([repo.digest_status, repo.digest, repo.digest_error]);
+  if (entry.digest_status) repo.digest_status = entry.digest_status;
+  if (entry.digest) repo.digest = entry.digest;
+  else delete repo.digest;
+  if (entry.digest_error) repo.digest_error = entry.digest_error;
+  else delete repo.digest_error;
+  return before !== JSON.stringify([repo.digest_status, repo.digest, repo.digest_error]);
+}
+
+/* 轮询结果只换变了的卡片；卡片里的按钮正在被键盘操作时，焦点留在原来的位置。 */
+function updateGithubCard(repository) {
+  if (state.page !== 'team' || !storeBrowsing()) return;
+  const card = $('store-shelves').querySelector(`[data-github-card="${CSS.escape(repository)}"]`);
+  const repo = githubRepo(repository);
+  if (!card || !repo) return;
+  const active = document.activeElement;
+  const focusKey = card.contains(active)
+    ? active.dataset.githubOpen ? 'open' : active.dataset.githubInstall ? 'install' : ''
+    : '';
+  const template = document.createElement('template');
+  template.innerHTML = githubCardHtml(repo);
+  const next = template.content.firstElementChild;
+  card.replaceWith(next);
+  if (focusKey === 'open') next.querySelector('[data-github-open]')?.focus({preventScroll: true});
+  else if (focusKey === 'install') next.querySelector('[data-github-install]')?.focus({preventScroll: true});
+}
+
+function applyGithubDigests(result) {
+  const entries = result?.repos && typeof result.repos === 'object' ? result.repos : {};
+  const changed = [];
+  for (const [repository, entry] of Object.entries(entries)) {
+    if (githubApplyEntry(repository, entry)) changed.push(repository);
+  }
+  for (const repository of changed) updateGithubCard(repository);
+  if (githubDetail && changed.includes(githubDetail.repository)) loadGithubDetail(githubDetail.repository);
+}
+
+function scheduleGithubDigestPoll() {
+  if (githubDigestTimer || state.page !== 'team' || !githubHasPending()) return;
+  githubDigestTimer = setTimeout(readGithubDigests, GITHUB_DIGEST_POLL_MS);
+}
+
+function stopGithubDigestPolling() {
+  clearTimeout(githubDigestTimer);
+  githubDigestTimer = null;
+  githubDigestSequence += 1;   // 已经在路上的轮询结果也作废
+}
+
+async function readGithubDigests() {
+  githubDigestTimer = null;
+  if (state.page !== 'team' || !githubHasPending()) return;
+  const sequence = ++githubDigestSequence;
+  try {
+    const result = await api('/api/team/github/digests');
+    if (sequence !== githubDigestSequence || state.page !== 'team') return;
+    applyGithubDigests(result);
+  } catch {
+    // 读不到轻量状态不打断页面；还有等待中的卡片就过 3 秒再试。
+  }
+  if (state.page === 'team' && githubHasPending()) scheduleGithubDigestPoll();
+}
+
+/* ---------- 详情：中文介绍、原文说明和失败重试 ---------- */
+
+function githubListHtml(items) {
+  const clean = (Array.isArray(items) ? items : []).map(item => String(item || '').trim()).filter(Boolean);
+  return clean.length ? `<ul class="github-list">${clean.map(item => `<li>${escape(item)}</li>`).join('')}</ul>` : '';
+}
+
+/* 原文技能名单为准；有对应的中文整理就写中文名和用途，没有就写原名和原始说明。 */
+function githubSkillsHtml(skills, digestSkills) {
+  const translated = new Map((Array.isArray(digestSkills) ? digestSkills : [])
+    .map(item => [String(item?.name || ''), item]));
+  const rows = (Array.isArray(skills) ? skills : []).map(skill => {
+    const name = String(skill?.name || '').trim();
+    const match = translated.get(name);
+    const title = String(match?.title || '').trim() || name;
+    const purpose = String(match?.purpose || '').trim() || String(skill?.description || '').trim();
+    if (!title && !purpose) return '';
+    // 有中文名时带上原名：安装时列出的是原名，两边要对得上。
+    const original = name && title !== name ? `<span class="github-skill-id">${escape(name)}</span>` : '';
+    return `<li class="github-skill">
+      <p class="github-skill-name">${escape(title || '未命名技能')}${original}</p>
+      ${purpose ? `<p class="github-skill-purpose">${escape(purpose)}</p>` : ''}
+    </li>`;
+  }).filter(Boolean);
+  return rows.length
+    ? `<ul class="github-skill-list">${rows.join('')}</ul>`
+    : '<p class="row-note">没有读到仓库里的技能。</p>';
+}
+
+function githubDigestStatusHtml(repo) {
+  if (repo.digest_status === 'pending') {
+    return '<p class="row-note github-digest-note" role="status">正在用 AI 整理中文介绍…</p>';
+  }
+  if (repo.digest_status === 'failed') {
+    const retry = teamReadOnly() ? '' : `<button class="btn btn-small" type="button"
+      data-github-digest-retry="${escape(repo.repository)}">重试</button>`;
+    return `<div class="store-get store-get-warn github-digest-note" role="alert">
+      ${icon('warning')}<span>${escape(repo.digest_error || '这次没能整理中文介绍，请稍后重试。')}</span>
+      ${retry ? `<span class="store-get-actions">${retry}</span>` : ''}
+    </div>`;
+  }
+  // 只读预览和旧分享站没有文件位置的 off 都不提示，只有“没填 AI 服务”才给设置入口。
+  if (repo.digest_status === 'off' && !teamReadOnly() && state.table && !state.table.llm_configured) {
+    return `<p class="row-note github-digest-note">在设置里填好 AI 服务，就能看到中文介绍。
+      <button class="link-btn" type="button" data-goto="settings/ai">前往设置</button></p>`;
+  }
+  return '';
+}
+
+function githubDetailHtml(data) {
+  const repo = data && typeof data === 'object' ? data : {};
+  const digest = repo.digest && typeof repo.digest === 'object' ? repo.digest : null;
+  const materials = repo.materials && typeof repo.materials === 'object' ? repo.materials : {};
+  const facts = [];
+  if (repo.stars !== undefined && repo.stars !== null && Number.isFinite(Number(repo.stars))) {
+    facts.push(`${number(repo.stars)} 星`);
+  }
+  const created = githubCreatedText(repo.created_at);
+  if (created) facts.push(created);
+  if (Number.isInteger(repo.skill_count)) facts.push(`含 ${number(repo.skill_count)} 个技能`);
+  const status = githubStatusTag(repo);
+  const readme = String(materials.readme || '').trim();
+  const url = String(repo.url || '');
+  const translatedSkills = digest?.skills;
+  const uses = githubListHtml(digest?.uses);
+  const notes = githubListHtml(digest?.notes);
+  // 没有中文名时面板标题已经是仓库名，这里不再重复。
+  return `
+    ${digest?.title ? `<p class="detail-id">${escape(repo.repository)}</p>` : ''}
+    ${status || facts.length ? `<div class="github-detail-meta">${status}${facts.map(text => `<span>${escape(text)}</span>`).join('')}</div>` : ''}
+    ${digest ? `<p class="detail-summary">${escape(digest.summary || '')}</p>
+      ${uses ? `<h3 class="sub-title">能做什么</h3>${uses}` : ''}
+      <h3 class="sub-title">仓库里的技能</h3>
+      ${githubSkillsHtml(materials.skills, translatedSkills)}
+      ${notes ? `<h3 class="sub-title">用之前要知道</h3>${notes}` : ''}
+      <p class="github-ai-note">AI 整理，仅供参考。</p>`
+    : `${githubDigestStatusHtml(repo)}
+      <h3 class="sub-title">仓库里的技能</h3>
+      ${githubSkillsHtml(materials.skills, [])}`}
+    ${readme ? `<details class="fold fold-inner github-readme"><summary>原文说明</summary><pre class="github-readme-text">${escape(readme)}</pre></details>` : ''}
+    <div class="github-detail-actions">
+      ${githubInstallHtml(repo)}
+      ${url ? `<a class="link-btn" href="${escape(url)}" target="_blank" rel="noopener noreferrer"
+        aria-label="${escape(`在新窗口打开 ${repo.repository} 的 GitHub 页面`)}">打开 GitHub</a>` : ''}
+    </div>`;
+}
+
+function renderGithubDetail() {
+  const detail = githubDetail;
+  if (!detail) return;
+  const repo = detail.data || githubRepo(detail.repository) || {repository: detail.repository};
+  const title = detail.data?.digest?.title || repo.repository || detail.repository;
+  $('detail-title').textContent = title;
+  const body = $('detail-body');
+  const scroll = body.scrollTop;
+  if (detail.loading && !detail.data) {
+    body.innerHTML = '<p class="github-detail-loading" role="status">正在读取仓库详情…</p>';
+  } else if (detail.error && !detail.data) {
+    body.innerHTML = `<div class="store-get store-get-warn">
+      <p class="store-get-line">${icon('warning')}<span>${escape(detail.error)}</span></p>
+      <p class="row-note">没能读到这个仓库的详情，请重试。</p>
+      <div class="store-get-actions"><button class="btn btn-small" type="button"
+        data-github-detail-retry="${escape(detail.repository)}">重试</button></div>
+    </div>`;
+  } else {
+    const notice = detail.error
+      ? `<p class="row-note is-error">没读到最新内容：${escape(detail.error)}
+        <button class="link-btn" type="button" data-github-detail-retry="${escape(detail.repository)}">重试</button></p>`
+      : '';
+    body.innerHTML = notice + githubDetailHtml(detail.data);
+  }
+  body.scrollTop = scroll;
+}
+
+async function loadGithubDetail(repository) {
+  if (!githubDetail || githubDetail.repository !== repository) {
+    githubDetail = {repository, data: null, error: '', loading: true};
+  }
+  const sequence = ++githubDetailSequence;
+  githubDetail.loading = true;
+  githubDetail.error = '';
+  renderGithubDetail();
+  try {
+    const data = await api(`/api/team/github/detail?repository=${encodeURIComponent(repository)}`);
+    if (sequence !== githubDetailSequence || state.storeDetail !== githubDetailKey(repository)) return;
+    githubDetail = {repository, data, error: '', loading: false};
+  } catch (error) {
+    if (sequence !== githubDetailSequence || state.storeDetail !== githubDetailKey(repository)) return;
+    githubDetail = {repository, data: githubDetail?.data || null, error: githubErrorText(error), loading: false};
+  }
+  renderGithubDetail();
+}
+
+function openGithubDetail(repository, opener = null) {
+  const key = githubDetailKey(repository);
+  if (state.storeDetail !== key || !githubDetail || githubDetail.repository !== repository) {
+    githubDetail = {repository, data: null, error: '', loading: true};
+  }
+  storeOpener = opener;
+  storeOpenerArea = opener?.closest('#store-shelves, #store-list')?.id || null;
+  state.storeDetail = key;
+  renderGithubDetail();
+  showDetailPanel(() => state.storeDetail === key);
+  loadGithubDetail(repository);
+}
+
+async function retryGithubDigest(repository, button) {
+  await withBusy(button, '正在重试…', async () => {
+    try {
+      const result = await api('/api/team/github/retry', {repository});
+      if (githubRepo(repository)) {
+        githubApplyEntry(repository, result);
+        updateGithubCard(repository);
+      }
+      if (githubDetail?.repository === repository) await loadGithubDetail(repository);
+      if (githubHasPending()) scheduleGithubDigestPoll();
+    } catch (error) {
+      toast({text: githubErrorText(error), tone: 'error', sticky: true});
+    }
+  });
 }
 
 function renderTeam() {
@@ -3762,9 +4023,15 @@ $('page-team').addEventListener('click', event => {
   const packToggle = event.target.closest('[data-store-pack-toggle]');
   const queuePack = event.target.closest('[data-store-queue-pack]');
   const githubInstall = event.target.closest('[data-github-install]');
+  const githubOpen = event.target.closest('[data-github-open]');
+  const githubCard = event.target.closest('[data-github-card]');
   const githubMore = event.target.closest('[data-github-more]');
   if (githubInstall) openGithubInstall(githubInstall.dataset.githubInstall);
-  else if (githubMore) {
+  else if (githubOpen) openGithubDetail(githubOpen.dataset.githubOpen, githubOpen);
+  else if (githubCard && !event.target.closest('a, button')) {
+    // 卡片空白处也能打开详情；安装和 GitHub 链接照旧单独响应。
+    openGithubDetail(githubCard.dataset.githubCard, githubCard.querySelector('[data-github-open]'));
+  } else if (githubMore) {
     state.storeGithubExpanded = !state.storeGithubExpanded;
     renderTeam();
     $('store-shelves').querySelector('[data-github-more]')?.focus({preventScroll: true});
@@ -3914,6 +4181,7 @@ function openStoreDetail(key, opener = null) {
 }
 
 function renderStoreDetail(fresh = false) {
+  if (String(state.storeDetail || '').startsWith('github-repo:')) return renderGithubDetail();
   const pack = storePack(state.storeDetail);
   if (pack) return renderStorePackDetail(pack, fresh);
   const card = storeCard(state.storeDetail);
@@ -5767,6 +6035,8 @@ function closeDetail() {
   state.detail = null;
   state.storeDetail = null;
   storeGet = null;
+  githubDetail = null;
+  githubDetailSequence += 1;   // 关掉后回来的详情结果直接丢掉
   setTimeout(() => {
     if (state.detail || state.storeDetail) return;
     panel.classList.remove('is-open');
@@ -5775,8 +6045,11 @@ function closeDetail() {
   }, 200);
   holdDetailBackground(false);
   if (storeKey) {
-    // 商店的卡片或列表行可能已经重画过：按卡片编号找回来，把焦点还给它。
-    const selector = `[data-store-open="${CSS.escape(storeKey)}"]`;
+    // 商店的卡片、列表行或热门仓库可能已经重画过：按编号找回来，把焦点还给它。
+    const github = storeKey.startsWith('github-repo:');
+    const selector = github
+      ? `[data-github-open="${CSS.escape(storeKey.slice('github-repo:'.length))}"]`
+      : `[data-store-open="${CSS.escape(storeKey)}"]`;
     const opener = storeOpener?.isConnected ? storeOpener
       : (storeOpenerArea && $(storeOpenerArea)?.querySelector(selector)) || $('page-team').querySelector(selector);
     opener?.focus();
@@ -5826,6 +6099,14 @@ $('detail-body').addEventListener('submit', event => {
 $('detail-body').addEventListener('click', async event => {
   const button = event.target.closest('button');
   if (!button) return;
+  if (button.dataset.githubInstall !== undefined) {
+    closeDetail();
+    openGithubInstall(button.dataset.githubInstall);
+    return;
+  }
+  if (button.dataset.githubDetailRetry) { loadGithubDetail(button.dataset.githubDetailRetry); return; }
+  if (button.dataset.githubDigestRetry) { retryGithubDigest(button.dataset.githubDigestRetry, button); return; }
+  if (button.dataset.goto) { closeDetail(); gotoPlace(button.dataset.goto); return; }
   if (button.dataset.skill && button.dataset.agent) { toggleAssignment(button.dataset.skill, button.dataset.agent); return; }
   if (button.dataset.open) { openDetail(button.dataset.open); return; }
   if (button.dataset.tagRemove) { await writeDetailTag('remove', button.dataset.tagRemove); return; }
