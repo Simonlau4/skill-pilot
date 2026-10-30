@@ -46,17 +46,18 @@ def extract_function(source, signature):
 
 
 class InstallSummaryStaticTests(unittest.TestCase):
-    def test_summary_card_shows_name_purpose_and_agent(self):
+    def test_summary_card_shows_name_purpose_and_targets(self):
         source = (STATIC / 'app.js').read_text()
         escape = next(line for line in source.splitlines() if line.startswith('const escape = '))
         names = [
             'function installReadyNames(',
             'function installPurpose(',
             'function installSummary(',
+            'function installTargetsHtml(',
             'function installSummaryCard(',
         ]
         functions = '\n'.join(extract_function(source, name) for name in names)
-        install_all = extract_function(source, 'async function installAllForCurrent(')
+        install_all = extract_function(source, 'async function installAllReady(')
         picker = extract_function(source, 'function renderInstallSkills(')
         self.assertNotIn('confirmDialog', install_all)
         self.assertNotIn('查看全部', picker)
@@ -64,6 +65,9 @@ class InstallSummaryStaticTests(unittest.TestCase):
 
         script = escape + '\n' + r'''
 const icon = name => '';
+const hint = text => '';
+const state = {agents: [{id: 'codex', name: 'Codex'}, {id: 'acme', name: 'Acme "x"'}]};
+let installTargets = new Set();
 function installDismissButton() { return '<button data-install-dismiss>关闭</button>'; }
 ''' + functions + r'''
 const purpose = 'Prioritize a backlog of feature ideas based on impact, effort, risk, and strategic alignment with top 5 recommendations. Use when prioritizing a feature backlog, making scope decisions, or ranking product ideas.';
@@ -77,19 +81,25 @@ if (summary.items[0].name !== 'prioritize-features') fail('摘要没有技能名
 if (summary.items[0].purpose !== purpose.split('. ')[0] + '.') fail('摘要没有停在第一句：' + summary.items[0].purpose);
 if (summary.items[0].purpose.includes('Use when')) fail('一句话用途带上了后面的句子');
 
-const card = installSummaryCard(single, 'Codex', false, true);
-for (const text of ['prioritize-features', summary.items[0].purpose, '添加至 Codex', '全部添加给 Codex', '挑选安装', '1 个可直接安装']) {
+const card = installSummaryCard(single, false, true);
+for (const text of ['prioritize-features', summary.items[0].purpose, '同时启用到', 'data-install-target="codex"', 'data-install-target="acme"', '>全部安装<', '挑选安装', '1 个可直接安装']) {
   if (!card.includes(text)) fail('卡片缺少：' + text);
 }
+if (card.includes('checked')) fail('默认不应勾选任何 Agent');
+if (card.includes('添加给') || card.includes('添加至')) fail('卡片不应再按当前 Agent 写装给谁');
+installTargets = new Set(['acme']);
+const picked = installSummaryCard(single, false, true);
+if (!/data-install-target="acme" checked/.test(picked) || /data-install-target="codex" checked/.test(picked)) fail('只应勾上记下的 Agent');
+installTargets = new Set();
 if (card.includes('查看全部') || card.includes('收起')) fail('一个技能不应出现查看全部');
 if (card.includes('confirm') || card.includes('确认安装')) fail('摘要卡片多了确认步骤');
 
 const escaped = installSummaryCard({
   skills: [{name: 'a<b', description: '用途&说明。后面不用出现。'}],
   conflicts: [],
-}, 'Codex "x"', false, true);
-if (escaped.includes('a<b') || escaped.includes('用途&说明') || escaped.includes('Codex "x"')) fail('卡片没有转义技能名、用途或 agent');
-if (!escaped.includes('a&lt;b') || !escaped.includes('用途&amp;说明') || !escaped.includes('Codex &quot;x&quot;')) fail('转义结果不对');
+}, false, true);
+if (escaped.includes('a<b') || escaped.includes('用途&说明') || escaped.includes('Acme "x"')) fail('卡片没有转义技能名、用途或 agent');
+if (!escaped.includes('a&lt;b') || !escaped.includes('用途&amp;说明') || !escaped.includes('Acme &quot;x&quot;')) fail('转义结果不对');
 if (escaped.includes('后面不用出现')) fail('转义后的卡片仍带上了第二句');
 
 const versioned = installPurpose('Use version 1.2 before the cutoff. Then stop.');
@@ -103,30 +113,32 @@ const many = {
   skills: ['alpha', 'beta', 'gamma', 'delta'].map(name => ({name, description: name + ' 的用途。'})),
   conflicts: [{name: 'delta', same_content: false}],
 };
-const folded = installSummaryCard(many, 'Codex', false, true);
+const folded = installSummaryCard(many, false, true);
 for (const name of ['alpha', 'beta', 'gamma']) {
   if (!folded.includes(name)) fail('前几项缺少 ' + name);
 }
 if (folded.includes('delta')) fail('未展开时不应出现第四个技能');
 if (!folded.includes('查看全部') || folded.includes('收起')) fail('多于三个时应有查看全部');
-if (!folded.includes('添加至 Codex') || !folded.includes('需核对')) fail('多个技能时应能看到装给谁和需核对');
+if (!folded.includes('同时启用到') || !folded.includes('需核对')) fail('多个技能时应能选启用到哪些 Agent，并看到需核对');
+if (!folded.includes('>安装 3 个<')) fail('有需核对的技能时，一键安装应写明只装能直接装的几个');
 
-const opened = installSummaryCard(many, 'Codex', true, true);
+const opened = installSummaryCard(many, true, true);
 if (!opened.includes('delta') || !opened.includes('delta 的用途')) fail('查看全部后应能核对第四个技能');
 if (!opened.includes('收起') || opened.includes('>查看全部<')) fail('展开后应收起，而不是继续只给查看全部');
 
 const installed = installSummaryCard({
   skills: [{name: 'prioritize-features', description: '已经有了。'}],
   conflicts: [{name: 'prioritize-features', same_content: true}],
-}, 'Codex', false, true);
+}, false, true);
 if (!installed.includes('已安装')) fail('已安装的技能卡片上应标明');
-if (installed.includes('data-install-all') || installed.includes('添加至 Codex') || installed.includes('挑选安装')) fail('都装过了不应再提示装给谁');
+if (installed.includes('data-install-all') || installed.includes('同时启用到') || installed.includes('挑选安装')) fail('都装过了不应再提示启用到哪些 Agent');
 
-const locked = installSummaryCard(single, 'Codex', false, false);
+const locked = installSummaryCard(single, false, false);
 if (!locked.includes('data-install-all disabled')) fail('不能修改时，一键安装应不可点');
+if (!locked.includes('data-install-target="codex" disabled')) fail('不能修改时，Agent 勾选框应不可点');
 if (locked.includes('data-install-pick disabled')) fail('挑选安装不该被这次改动禁用');
 
-const empty = installSummaryCard({skills: [], conflicts: []}, 'Codex', false, true);
+const empty = installSummaryCard({skills: [], conflicts: []}, false, true);
 if (!empty.includes('未在此链接中找到技能')) fail('没找到技能时卡片没有说明');
 if (empty.includes('install-summary-name') || empty.includes('查看全部')) fail('没找到技能时不应列出技能');
 

@@ -1521,7 +1521,6 @@ function pickAgent(id) {
   rememberPlace();
   renderAgentSummary();
   renderSkillTable();
-  renderInstallRail();   // 「装给谁」和「全部装给」跟着当前 agent 换
 }
 
 /* 左栏的 SP 新版提醒：和「设置 → 版本」共用同一份 programUpdate，
@@ -6235,6 +6234,7 @@ let installInspectSequence = 0;   // 读取的先后顺序：后发的记更大�
 let installInspectedUrl = '';     // 已经读过（或正在读）的链接，同一个链接不重复读
 let installReadingUrl = '';       // 正在读的链接，避免同一个链接同时读两次
 let installInspectTimer = null;   // 输入停下来之后再读
+let installTargets = new Set();   // 卡片上勾的「同时启用到」；默认不勾，只装进技能库，每读一个新链接清空
 const INSTALL_URL_PATTERN = /^https:\/\/github\.com\/\S+\/\S+/;
 
 /* 能直接装的：不在同名名单里的。已经装过和要先对比的都不算。 */
@@ -6273,8 +6273,20 @@ function installSummary(review) {
   return {title: `已获取 ${skills.length} 个技能`, notes, items};
 }
 
-/* 左栏卡片：不另开窗口就能看到装什么、有什么用、给谁。多于三个先显示前三个。 */
-function installSummaryCard(review, agentName, expanded, writable) {
+/* 「同时启用到」：列出全部 Agent，默认都不勾；不勾就只装进技能库。 */
+function installTargetsHtml(writable) {
+  if (!state.agents.length) return '';
+  const boxes = state.agents.map(agent => `<label class="check install-target" title="${escape(agent.name)}">
+    <input type="checkbox" data-install-target="${escape(agent.id)}"${installTargets.has(agent.id) ? ' checked' : ''}${writable ? '' : ' disabled'}>
+    <span>${escape(agent.name)}</span></label>`).join('');
+  return `<fieldset class="install-targets">
+    <legend class="item-note">同时启用到${hint('不勾选时只装进技能库，之后可在技能页启用。')}</legend>
+    <div class="install-target-list">${boxes}</div>
+  </fieldset>`;
+}
+
+/* 左栏卡片：不另开窗口就能看到装什么、有什么用，并可勾选同时启用到哪些 Agent。多于三个先显示前三个。 */
+function installSummaryCard(review, expanded, writable) {
   const summary = installSummary(review);
   const ready = installReadyNames(review);
   const conflicts = review.conflicts || [];
@@ -6282,7 +6294,6 @@ function installSummaryCard(review, agentName, expanded, writable) {
   const preview = 3;
   const shown = expanded ? summary.items : summary.items.slice(0, preview);
   const hidden = summary.items.length - shown.length;
-  const showTarget = Boolean(agentName) && (ready.length > 0 || conflicts.some(item => !item.same_content));
   const items = shown.map(item => {
     const tag = item.status
       ? `<span class="tag ${item.status === '需核对' ? 'tag-warn' : 'tag-quiet'}">${escape(item.status)}</span>`
@@ -6294,15 +6305,14 @@ function installSummaryCard(review, agentName, expanded, writable) {
   const more = hidden
     ? '<button type="button" class="link-btn" data-install-more>查看全部</button>'
     : (expanded && summary.items.length > preview ? '<button type="button" class="link-btn" data-install-more="open">收起</button>' : '');
-  const facts = [];
-  if (showTarget) facts.push(`添加至 ${agentName}`);
-  if (summary.notes.length) facts.push(summary.notes.join('，'));
+  const allReady = ready.length === summary.items.length;
   return `<p class="rail-note-title">${icon('plus')}<strong>${escape(summary.title)}</strong></p>
     ${items ? `<ul class="install-summary">${items}</ul>` : ''}
     ${more}
-    ${facts.length ? `<p class="item-note">${escape(facts.join(' · '))}。</p>` : ''}
+    ${summary.notes.length ? `<p class="item-note">${escape(summary.notes.join('，'))}。</p>` : ''}
+    ${pickable ? installTargetsHtml(writable) : ''}
     <div class="install-actions">
-      ${ready.length && agentName ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>全部添加给 ${escape(agentName)}</button>` : ''}
+      ${ready.length ? `<button class="btn btn-small btn-primary" data-install-all${writable ? '' : ' disabled'}>${allReady ? '全部安装' : `安装 ${ready.length} 个`}</button>` : ''}
       <div class="install-actions-row">
         ${pickable ? '<button class="btn btn-small" data-install-pick>挑选安装</button>' : ''}
         ${installDismissButton()}
@@ -6339,9 +6349,11 @@ function renderInstallRail() {
     card.innerHTML = '';
     return;
   }
-  const agent = currentAgent();
+  // 卡片会因写入状态变化重画：正在勾的那个 Agent 保住焦点。
+  const focused = card.contains(document.activeElement) ? document.activeElement.dataset.installTarget : '';
   card.hidden = false;
-  card.innerHTML = installSummaryCard(railReview, agent ? agent.name : '', installSummaryExpanded, writable);
+  card.innerHTML = installSummaryCard(railReview, installSummaryExpanded, writable);
+  if (focused) card.querySelector(`[data-install-target="${CSS.escape(focused)}"]`)?.focus();
 }
 
 /* 收起卡片。装好了连粘贴框一起清空；用户点关闭只收卡片，链接留着还能再按回车重读。 */
@@ -6350,6 +6362,7 @@ function clearInstallRail(clearUrl = false) {
   installReadError = '';
   installInspectedUrl = '';
   installSummaryExpanded = false;
+  installTargets = new Set();
   if (clearUrl) $('install-url').value = '';
   renderInstallRail();
 }
@@ -6362,10 +6375,9 @@ function openInstall(review = null) {
   $('incoming-conflicts').hidden = true;
   $('incoming-comparisons').innerHTML = '';
   $('install-apply').disabled = true;
-  // 默认勾上技能页正在看的那个 agent，用户可以多勾或取消。
-  const agent = currentAgent();
+  // 带上卡片里勾的 Agent；默认都不勾，只装进技能库。
   $('install-agents').innerHTML = state.agents
-    .map(a => `<label class="check"><input type="checkbox" data-install-agent="${escape(a.id)}"${a.id === agent?.id ? ' checked' : ''}> ${swatch(a.id)}${escape(a.name)}</label>`).join('');
+    .map(a => `<label class="check"><input type="checkbox" data-install-agent="${escape(a.id)}"${review && installTargets.has(a.id) ? ' checked' : ''}> ${swatch(a.id)}${escape(a.name)}</label>`).join('');
   $('install-dialog').showModal();
   if (review) renderInstallSkills(review);
 }
@@ -6382,6 +6394,7 @@ async function inspectInstall(force = false) {
   railReview = null;
   installReadError = '';
   installSummaryExpanded = false;
+  installTargets = new Set();
   renderInstallRail();
   try {
     const review = await api('/api/install/inspect', {url});
@@ -6399,17 +6412,17 @@ async function inspectInstall(force = false) {
   }
 }
 
-/* 「全部装给 X」：只装能直接装的，点了直接装，不弹确认框，完成提示带撤销。 */
-async function installAllForCurrent(button) {
+/* 「全部安装」：只装能直接装的，装进技能库，并启用到卡片上勾的 Agent；不弹确认框，完成提示带撤销。 */
+async function installAllReady(button) {
   const review = railReview;
-  const agent = currentAgent();
-  const skills = review && agent ? installReadyNames(review) : [];
+  const skills = review ? installReadyNames(review) : [];
   if (!skills.length || jobsBlocked()) return;
+  const agents = state.agents.map(agent => agent.id).filter(id => installTargets.has(id));
   const result = await submitJob({
     kind: 'install',
     review_id: review.id,
     skills,
-    agents: [agent.id],
+    agents,
   }, {button, busyText: '正在提交…'});
   if (!result) return;
   // 只清掉这次提交的那份读取结果；用户如果已经读了另一个链接，那份留着。
@@ -6431,12 +6444,19 @@ $('install-url').addEventListener('keydown', event => {
   inspectInstall(true);
 });
 
-/* 卡片上的按钮：重试、全部装给、查看全部、挑一挑、关闭。 */
+/* 卡片上的勾选：只记下来，不重画卡片。 */
+$('install-rail').addEventListener('change', event => {
+  const id = event.target.dataset?.installTarget;
+  if (!id) return;
+  if (event.target.checked) installTargets.add(id); else installTargets.delete(id);
+});
+
+/* 卡片上的按钮：重试、全部安装、查看全部、挑一挑、关闭。 */
 $('install-rail').addEventListener('click', event => {
   const button = event.target.closest('button');
   if (!button) return;
   if (button.dataset.installRetry !== undefined) { clearTimeout(installInspectTimer); inspectInstall(true); }
-  else if (button.dataset.installAll !== undefined) installAllForCurrent(button);
+  else if (button.dataset.installAll !== undefined) installAllReady(button);
   else if (button.dataset.installMore !== undefined) {
     installSummaryExpanded = button.dataset.installMore !== 'open';
     renderInstallRail();
