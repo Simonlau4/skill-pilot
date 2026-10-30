@@ -39,8 +39,15 @@ class Reader:
         if source['repository'].startswith('file:///'):
             _, commit = self.repository(source)
             return commit, self.tree(source, commit)
-        item = self.api('repos/' + source['repository'] + '/commits?per_page=1')[0]
+        item = self.api(self.head(source))[0]
         return item['sha'], self.tree(source, item['sha'], item['commit']['tree']['sha'])
+
+    @staticmethod
+    def head(source):
+        # Without a recorded branch, follow the repository's default branch as before.
+        branch = source.get('branch')
+        return ('repos/' + source['repository'] + '/commits?per_page=1' +
+                ('&sha=' + urllib.parse.quote(branch, safe='') if branch else ''))
 
     def api(self, endpoint):
         self.remaining()
@@ -56,31 +63,32 @@ class Reader:
         return result
 
     def repository(self, source):
-        repo = source['repository']
-        if repo in self.repo_errors:
-            raise ValueError(self.repo_errors[repo])
+        key = source['repository'] + '\n' + source.get('branch', '')
+        if key in self.repo_errors:
+            raise ValueError(self.repo_errors[key])
         try:
-            return self._repository(source)
+            return self._repository(source, key)
         except ValueError as error:
-            self.repo_errors[repo] = str(error)
+            self.repo_errors[key] = str(error)
             raise
 
-    def _repository(self, source):
+    def _repository(self, source, key):
         repo = source['repository']
-        if repo in self.repos:
-            return self.repos[repo]
-        checkout = self.root / ('repo-' + hashlib.sha256(repo.encode()).hexdigest()[:16])
+        if key in self.repos:
+            return self.repos[key]
+        checkout = self.root / ('repo-' + hashlib.sha256(key.encode()).hexdigest()[:16])
         local = repo.startswith('file:///')
         if local:
-            self.git(self.root, 'clone', '--depth', '1', '--no-checkout', '--', repo, str(checkout))
+            branch = ['--branch', source['branch']] if source.get('branch') else []
+            self.git(self.root, 'clone', '--depth', '1', '--no-checkout', *branch, '--', repo, str(checkout))
             commit = self.git(checkout, 'rev-parse', 'HEAD')
         else:
-            commit = self.api('repos/' + repo + '/commits?per_page=1')[0]['sha']
+            commit = self.api(self.head(source))[0]['sha']
             checkout.mkdir()
             self.git(checkout, 'init', '-q')
             self.git(checkout, 'remote', 'add', 'origin', 'https://github.com/' + repo + '.git')
             self.git(checkout, 'fetch', '--depth', '1', 'origin', commit)
-        self.repos[repo] = checkout, commit
+        self.repos[key] = checkout, commit
         return checkout, commit
 
     def tree(self, source, commit, root=None):

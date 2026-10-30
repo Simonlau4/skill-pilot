@@ -6,6 +6,7 @@ from .platform_support import fcntl, user_home, user_id, check_directory_links
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 from datetime import datetime, timezone
@@ -653,9 +654,10 @@ def conflicts(items, registry, home):
     return result
 
 
-def install(review, names, assigned=None, expected=None, home=None):
+def install(review, names, assigned=None, expected=None, home=None, confirmed=True):
     home, registry, agents = load(home)
-    guard(home / '.skill-pilot', home)
+    if confirmed:
+        guard(home / '.skill-pilot', home)
     assigned = assigned or []
     if not set(assigned) <= set(agents) or not names:
         raise ValueError('请选择技能和已接入的 agent。')
@@ -668,6 +670,12 @@ def install(review, names, assigned=None, expected=None, home=None):
     collisions = conflicts(items, registry, home)
     if collisions:
         return {'conflicts': collisions, 'message': '有同名技能需要先对比，文件没有改动。'}
+    if not confirmed:
+        return {'skills': [{k: s[k] for k in ('name', 'description', 'repository_path')} |
+                           ({'branch': s['source']['branch']} if 'branch' in s['source'] else {}) for s in items],
+                'agents': assigned, 'needs_confirmation': True,
+                'message': f'将安装 {len(items)} 个技能：' + '、'.join(s['name'] for s in items) +
+                           ('，并分配给 ' + '、'.join(assigned) if assigned else '，只装进技能库，暂不分配给 agent') + '。'}
     def mutate(current, checked):
         for item in items:
             _put(home, current, item, [], [], checked)
@@ -682,6 +690,43 @@ def install(review, names, assigned=None, expected=None, home=None):
         return changed, sorted(names), {'reasons': plan['reasons'],
                                       'normalization': {n: current['skills'][n]['normalization'] for n in names}}
     return _run(home, registry, agents, expected or revision(home, agents), f'安装了 {len(items)} 个技能', mutate)
+
+def inspect_local(folder, home=None):
+    """Read skills from a local folder as self-made skills; never runs their files."""
+    home = target_home() if home is None else Path(home).resolve()
+    raw = Path(os.path.abspath(Path(folder).expanduser()))
+    root = raw.resolve()
+    if not root.is_dir():
+        raise ValueError('找不到这个文件夹，请核对位置。')
+    if any(path.is_relative_to((home / '.skill-pilot').resolve()) for path in (raw, root)):
+        raise ValueError('这个文件夹已经在统一仓库里，不用再安装。')
+    roots = {r for p in profiles.all_profiles(home) for r in p['skill_roots']} | profiles.readonly_roots(home)
+    for relative in roots:
+        directory = home / relative
+        if any(path.is_relative_to(directory) or path.is_relative_to(directory.resolve()) for path in (raw, root)):
+            raise ValueError('这个文件夹在 agent 自己的技能目录里，不能从这里安装；新放进去的技能请用收编统一管理。')
+    skills = scan_root(root, user_root=False)
+    if skills['errors']:
+        raise ValueError('文件夹里的技能没有读完整，已停止安装。')
+    found = []
+    for skill in skills['skills']:
+        if not skill['valid']:
+            continue
+        name = skill['name']
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
+            raise ValueError('技能名称不能安全用作文件夹名称，请先核对。')
+        path = Path(skill['path'])
+        github.safe_skill(path)
+        found.append({'name': name, 'path': str(path), 'repository_path': path.relative_to(root).as_posix(),
+                      'digest': content_digest(path), 'description': skill['description'],
+                      'source': {'source': '自制', 'source_path': '本机维护', 'confidence': '高',
+                                 'evidence': '从本机文件夹安装，未执行其中的程序'}})
+    if not found:
+        raise ValueError('这个文件夹里没有找到带名称和说明的 SKILL.md。')
+    if len({s['name'] for s in found}) != len(found):
+        raise ValueError('文件夹里有多个同名技能，请指定具体的技能文件夹。')
+    return {'url': str(root), 'skills': found}
+
 
 def bootstrap(home):  # 首次安装；撤销或撤下后不再自动安装。
     if not write_allowed(home) or not (home / '.skill-pilot/registry.json').is_file():
@@ -793,7 +838,7 @@ def absorb(all_skills=False, selected=None, expected=None, home=None):
     return _run(home, registry, agents, start, f'收编了 {len(grouped)} 个技能的独立副本', mutate)
 
 
-def set_source(name, repository, folder, confirmed=False, home=None):
+def set_source(name, repository, folder, confirmed=False, home=None, branch=None):
     if not confirmed:
         raise ValueError('来源补登记需要确认，请核对后加 --yes 执行。')
     home, registry, agents = load(home)
@@ -801,6 +846,8 @@ def set_source(name, repository, folder, confirmed=False, home=None):
     if name not in registry['skills'] or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('请选择已有技能，并填写 owner/repo 形式的来源。')
     source = {'source':'https://github.com/'+repository,'repository':repository,'source_path':folder}
+    if branch is not None:
+        source['branch'] = branch
     normalized = normalize(source)
     expected = revision(home,agents)
     import tempfile
