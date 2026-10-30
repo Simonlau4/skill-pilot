@@ -35,6 +35,7 @@ TEXT_FIELDS = ('title', 'summary', 'group', 'description', 'note')
 NAME = r'[A-Za-z0-9][A-Za-z0-9_.-]*'
 GITHUB_SEARCH_LIMIT = 2 * 1024 * 1024
 GITHUB_TREE_LIMIT = 8 * 1024 * 1024
+GITHUB_READMES = ('readme.md', 'readme.markdown', 'readme.rst', 'readme.txt', 'readme')
 
 
 def now():
@@ -76,6 +77,21 @@ def _github_time(value):
     raise ValueError('GitHub 最近热门的时间格式不正确。')
 
 
+def github_branch(value):
+    if (not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9._/-]{1,100}', value) or
+            '..' in value or value.startswith('/') or value.endswith('/')):
+        raise ValueError('GitHub 仓库的分支名不正确。')
+    return value
+
+
+def github_path(value):
+    if (not isinstance(value, str) or not 1 <= len(value) <= 300 or '\\' in value or
+            any(part in {'', '.', '..'} for part in value.split('/')) or
+            any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'} for c in value)):
+        raise ValueError('GitHub 仓库的文件位置不正确。')
+    return value
+
+
 def _github_repo(row):
     if not isinstance(row, dict):
         raise ValueError('GitHub 最近热门的仓库格式不正确。')
@@ -91,11 +107,27 @@ def _github_repo(row):
         raise ValueError('GitHub 最近热门的仓库格式不正确。')
     for field in ('created_at', 'pushed_at'):
         _github_time(row.get(field))
-    return {'repository': repository,
+    result = {'repository': repository,
             'description': ''.join(c for c in description or '' if unicodedata.category(c) not in
                                    {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'})[:500],
             'stars': stars, 'created_at': row['created_at'], 'pushed_at': row['pushed_at'],
             'skill_count': count}
+    fields = {'branch', 'readme_path', 'skill_paths'}
+    if fields & row.keys():
+        if not fields <= row.keys():
+            raise ValueError('GitHub 仓库的文件位置不完整。')
+        branch = github_branch(row['branch'])
+        readme, skills = row['readme_path'], row['skill_paths']
+        if readme is not None:
+            github_path(readme)
+            if readme.lower() not in GITHUB_READMES:
+                raise ValueError('GitHub 仓库的说明文件位置不正确。')
+        if (not isinstance(skills, list) or len(skills) > 30 or
+                any(github_path(path).rsplit('/', 1)[-1] != 'SKILL.md' for path in skills) or
+                len(set(skills)) != len(skills)):
+            raise ValueError('GitHub 仓库的技能文件位置不正确。')
+        result.update(branch=branch, readme_path=readme, skill_paths=sorted(skills))
+    return result
 
 
 def clean_github(data):
@@ -155,6 +187,7 @@ def fetch_github_trending():
                 item.get('fork') or item.get('archived') or not isinstance(branch, str) or not branch):
             continue
         try:
+            github_branch(branch)
             row = _github_repo({'repository': item.get('full_name'), 'description': item.get('description'),
                                 'stars': item.get('stargazers_count'), 'created_at': item.get('created_at'),
                                 'pushed_at': item.get('pushed_at'), 'skill_count': None})
@@ -164,6 +197,7 @@ def fetch_github_trending():
             candidates.append((row, branch))
     repos, completed = [], 0
     for row, branch in sorted(candidates, key=lambda candidate: candidate[0]['stars'], reverse=True)[:40]:
+        readme, skills = None, []
         try:
             tree = _github_json('/repos/' + row['repository'] + '/git/trees/' +
                                 urllib.parse.quote(branch, safe='') + '?recursive=1', GITHUB_TREE_LIMIT)
@@ -174,6 +208,10 @@ def fetch_github_trending():
                 raise ValueError('GitHub 返回的文件清单格式不正确。')
             count = None if tree['truncated'] else sum(entry['type'] == 'blob' and
                     entry['path'].rsplit('/', 1)[-1] == 'SKILL.md' for entry in tree['tree'])
+            if not tree['truncated']:
+                paths = sorted(entry['path'] for entry in tree['tree'] if entry['type'] == 'blob')
+                readme = next((path for name in GITHUB_READMES for path in paths if path.lower() == name), None)
+                skills = [path for path in paths if path.rsplit('/', 1)[-1] == 'SKILL.md'][:30]
         except _GitHubResponseTooLarge:
             count = None
         except ValueError:
@@ -181,7 +219,11 @@ def fetch_github_trending():
         completed += 1
         if count == 0:
             continue
-        repos.append({**row, 'skill_count': count})
+        try:
+            repos.append(_github_repo({**row, 'skill_count': count, 'branch': branch,
+                                       'readme_path': readme, 'skill_paths': skills}))
+        except ValueError:
+            continue
         if len(repos) == 20:
             break
     if candidates and not completed:

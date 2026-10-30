@@ -119,6 +119,46 @@ class GitHubTrendingTests(unittest.TestCase):
         self.assertEqual(request.call_count, 5)
         self.assertTrue(any('/git/trees/feature%2Fskills?recursive=1' in c.args[0] for c in request.call_args_list))
 
+    def test_locations_choose_root_readme_by_priority_and_limit_sorted_skills(self):
+        paths = ['docs/README.md', 'README.txt', 'ReadMe.MARKDOWN', 'readme.MD', 'README', 'README.rst']
+        paths += [f'skills/skill-{i:02d}/SKILL.md' for i in reversed(range(35))]
+        with patch.object(team_hub, '_github_json', side_effect=self.search(
+                [repository('example', default_branch='release/v1')], {'example': tree(*paths)})):
+            row = team_hub.fetch_github_trending()['repos'][0]
+        self.assertEqual(row['branch'], 'release/v1')
+        self.assertEqual(row['readme_path'], 'readme.MD')
+        self.assertEqual(row['skill_paths'], sorted(p for p in paths if p.endswith('/SKILL.md'))[:30])
+        self.assertEqual(row['skill_count'], 35)
+        self.assertEqual(team_hub.clean_github({'fetched_at': STAMP, 'repos': [row]})['repos'], [row])
+
+    def test_locations_validate_new_fields_and_keep_legacy_rows(self):
+        old = github_catalog('acme/example')['repos'][0]
+        self.assertEqual(team_hub._github_repo(old), old)
+        new = {**old, 'branch': 'main', 'readme_path': 'README.md', 'skill_paths': ['skills/example/SKILL.md']}
+        self.assertEqual(team_hub._github_repo(new), new)
+        for field, values in {
+            'branch': (None, '', '/main', 'main/', 'a..b', 'x?y', 'x#y', 'x%2Fy', 'a' * 101, 'x\ny'),
+            'readme_path': ('/README.md', '../README.md', './README.md', 'docs/README.md', 'README.md\x00'),
+            'skill_paths': (None, 'SKILL.md', ['../SKILL.md'], ['/SKILL.md'], ['./SKILL.md'],
+                            ['skills//SKILL.md'], ['skills/../SKILL.md'], ['skills\\SKILL.md'],
+                            ['skills/\x00/SKILL.md'], ['a' * 300 + '/SKILL.md'], ['skill.md'],
+                            ['SKILL.md'] * 2, [f'{i}/SKILL.md' for i in range(31)])
+        }.items():
+            for value in values:
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    team_hub._github_repo({**new, field: value})
+        for field in ('branch', 'readme_path', 'skill_paths'):
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                team_hub._github_repo({k: v for k, v in new.items() if k != field})
+        # Quoted URL segments can safely represent spaces and Unicode filenames.
+        self.assertEqual(team_hub.github_path('技能 folder/SKILL.md'), '技能 folder/SKILL.md')
+
+    def test_search_discards_malicious_branch_and_tree_paths(self):
+        items = [repository('bad-branch', default_branch='../main'), repository('bad-path'), repository('good')]
+        with patch.object(team_hub, '_github_json', side_effect=self.search(
+                items, {'bad-path': tree('../SKILL.md')})):
+            self.assertEqual([r['repository'] for r in team_hub.fetch_github_trending()['repos']], ['acme/good'])
+
     def test_stops_at_twenty_repositories(self):
         items = [repository('skills-' + str(i), 100 - i) for i in range(50)]
         with patch.object(team_hub, '_github_json', side_effect=self.search(items, {})) as request:
@@ -136,13 +176,14 @@ class GitHubTrendingTests(unittest.TestCase):
 
     def test_truncated_or_oversized_trees_keep_unknown_counts(self):
         items = [repository('truncated', 3), repository('large', 2), repository('malformed', 1)]
-        trees = {'truncated': tree(truncated=True),
+        trees = {'truncated': tree('README.md', 'SKILL.md', truncated=True),
                  'large': team_hub._GitHubResponseTooLarge('内容太大。'),
                  'malformed': {'truncated': False, 'tree': [None]}}
         with patch.object(team_hub, '_github_json', side_effect=self.search(items, trees)):
             result = team_hub.fetch_github_trending()
         self.assertEqual([r['repository'] for r in result['repos']], ['acme/truncated', 'acme/large'])
         self.assertEqual([r['skill_count'] for r in result['repos']], [None, None])
+        self.assertTrue(all(r['readme_path'] is None and r['skill_paths'] == [] for r in result['repos']))
 
     def test_malformed_search_preserves_the_previous_file_and_logs_once(self):
         previous = github_catalog('acme/previous')
