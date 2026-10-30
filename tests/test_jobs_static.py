@@ -187,9 +187,10 @@ function fail(message) { console.error(message); process.exit(1); }
             self.assertIn(marker, assignment)
         self.assertNotIn('runWrite', assignment)
 
-        install = extract_function(app, 'async function installAllForCurrent(')
+        install = extract_function(app, 'async function installAllReady(')
         self.assertIn("kind: 'install'", install)
         self.assertIn('review_id: review.id', install)
+        self.assertIn('installTargets.has(id)', install)
         self.assertNotIn('runWrite', install)
 
         updates = extract_function(app, 'async function applyUpdates(')
