@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..scan import content_digest, scan_root
 from ..store import attribution, git_tree
+from . import valid_branch
 
 
 def git(directory, *args, timeout=120, input=None):
@@ -64,14 +65,21 @@ def inspect(url):
     temporary = Path(tempfile.mkdtemp(prefix='skill-pilot-install-')).resolve()
     checkout = temporary / 'repo'
     try:
-        ref, subpath = None, ''
+        ref, subpath, branch = None, '', None
         if suffix:
             refs = git(temporary, 'ls-remote', '--heads', '--tags', clone_url)
-            names = [line.split('\t')[1].removeprefix('refs/heads/').removeprefix('refs/tags/')
-                     for line in refs.splitlines() if '\t' in line and not line.endswith('^{}')]
+            full = [line.split('\t')[1] for line in refs.splitlines() if '\t' in line and not line.endswith('^{}')]
+            names = [r.removeprefix('refs/heads/').removeprefix('refs/tags/') for r in full]
             match = sorted((r for r in names if suffix == r or suffix.startswith(r + '/')), key=len, reverse=True)
             ref = match[0] if match else suffix.split('/')[0]
             subpath = suffix[len(ref):].lstrip('/')
+            if 'refs/heads/' + ref in full:
+                # Remember only a non-default branch, so later updates follow it.
+                head = git(temporary, 'ls-remote', '--symref', clone_url, 'HEAD').splitlines()
+                default = next((line.split('\t')[0].removeprefix('ref: refs/heads/') for line in head
+                                if line.startswith('ref: ')), None)
+                if ref != default and valid_branch(ref):
+                    branch = ref
         args = ['clone', '--depth', '1', '--no-local', '--filter=blob:none', '--no-checkout']
         if ref and not re.fullmatch(r'[0-9a-f]{7,40}', ref):
             args += ['--branch', ref]
@@ -111,7 +119,8 @@ def inspect(url):
                           'digest': content_digest(path), 'description': skill['description'],
                           'source': {'source': clone_url, 'repository': repository or clone_url,
                                      'source_path': relative, 'commit': git(checkout, 'rev-parse', 'HEAD'),
-                                     'tree_sha': tree, 'confidence': '高', 'evidence': '从仓库直接读取，未执行其中的程序'}})
+                                     'tree_sha': tree, 'confidence': '高', 'evidence': '从仓库直接读取，未执行其中的程序',
+                                     **({'branch': branch} if branch else {})}})
         if len({s['name'] for s in found}) != len(found):
             raise ValueError('仓库里有多个同名技能，请粘贴具体技能文件夹的链接。')
         return {'id': temporary.name, 'temporary': str(temporary), 'url': url, 'skills': found}

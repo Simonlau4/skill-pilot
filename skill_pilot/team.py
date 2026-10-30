@@ -834,8 +834,9 @@ def packs_apply(home, packs):
     return {**result, 'message': '技能包已保存。'}
 
 
-def listings_remove(home, names):
-    guard(Path(home) / '.skill-pilot', home)
+def listings_remove(home, names, confirmed=True):
+    if confirmed:
+        guard(Path(home) / '.skill-pilot', home)
     config, member, cards = _fetch(home)
     rows = _owned(cards, member['id'])
     if (not isinstance(names, list) or not names or
@@ -845,6 +846,10 @@ def listings_remove(home, names):
     parents = [n for n, row in rows.items() if n not in pending and set(row['requires']) & pending]
     if parents:
         raise ValueError('这些上架的技能仍需要它们：' + '、'.join(sorted(parents)))
+    if not confirmed:
+        return {'names': sorted(names), 'needs_confirmation': True,
+                'message': f'将从分享站下架 {len(names)} 个技能：' + '、'.join(sorted(names)) +
+                           '。同事已经装上的不受影响。'}
     while pending:
         ready = sorted(n for n in pending if not any(n in rows[p]['requires'] for p in pending - {n}))
         if not ready:
@@ -870,6 +875,100 @@ def listings_remove(home, names):
     for name in order:
         _request(config, '/api/listings/me/' + name, 'DELETE')
     return {'message': '技能已下架。'}
+
+
+def publish(home, names, notes=None, rejected=None, skip_packs=(), confirmed=False):
+    """Command-line publishing: the dashboard preview, then upload and read back."""
+    notes = notes or {}
+    if set(notes) - set(names):
+        raise ValueError('推荐语只能写给这次要上架的技能。')
+    skills = [{'name': n, **({'note': notes[n]} if notes.get(n) else {})} for n in names]
+    saved, result = listings_preview(home, skills, rejected)
+    if skip_packs:
+        unknown = set(skip_packs) - {p['id'] for p in result['packs']}
+        if unknown:
+            raise ValueError('预览里没有这些技能包：' + '、'.join(sorted(unknown)))
+        packs = [{k: p[k] for k in ('id', 'title', 'note', 'skills') if k in p}
+                 for p in result['packs'] if p['id'] not in skip_packs]
+        saved, result = listings_preview(home, skills, rejected, packs)
+    if not confirmed:
+        return {**result, 'needs_confirmation': bool(result['listings'])}
+    listings_apply(home, saved)
+    _, member, cards = _fetch(home)
+    shared = _owned(cards, member['id'])
+    missing = [row['name'] for row in result['listings'] if row['name'] not in shared or
+               (row['version'] and shared[row['name']]['source'].get('version') != row['version'])]
+    if missing:
+        raise ValueError('上架后分享站没有读到这些技能的新版本：' + '、'.join(missing) + '，请稍后重试。')
+    return {**result, 'published': [row['name'] for row in result['listings']],
+            'message': f'已上架 {len(result["listings"])} 个技能，分享站上已经能看到。'}
+
+
+def unpublish(home, names, confirmed=False):
+    result = listings_remove(home, names, confirmed)
+    if not confirmed:
+        return result
+    _, member, cards = _fetch(home)
+    left = sorted(set(names) & _owned(cards, member['id']).keys())
+    if left:
+        raise ValueError('分享站上还能看到这些技能：' + '、'.join(left) + '，请稍后重试。')
+    return {'names': sorted(names), 'message': f'已下架 {len(names)} 个技能，分享站上已经看不到了。'}
+
+
+def find(home, name, author=None):
+    """Resolve a store card by skill name or Chinese title for command-line installs."""
+    home, registry, _ = operations.load(home)
+    _, member, cards = _fetch(home)
+    matches = [c for c in cards if any(name in {r['name'], r.get('title')} for r in c['listings'])]
+    if author is not None:
+        matches = [c for c in matches if any(r['member']['name'] == author for r in c['listings'])]
+    if not matches:
+        raise ValueError(f'团队商店里没有找到「{name}」，可以先运行 skill-pilot team list 查看。')
+    if len(matches) > 1:
+        authors = '、'.join(sorted({c['listings'][0]['member']['name'] for c in matches}))
+        raise ValueError(f'团队商店里有多个「{name}」（上架人：{authors}），请用 --author 指定上架人。')
+    card = matches[0]
+    root = card['listings'][0]
+    title = next((r['title'] for r in card['listings'] if 'title' in r), root['name'])
+    state, local_name = _local(root, registry)
+    mine = any(r['member']['id'] == member['id'] for r in card['listings']) and root['name'] in registry['skills']
+    result = {'key': card['key'], 'name': local_name, 'title': title, 'author': root['member']['name']}
+    if mine or state in {'installed', 'update'}:
+        return {**result, 'installed': [], 'reuse': [local_name], 'message': f'本机已经有「{title}」了。'}
+    rows, reuse, skipped = _plan(card, cards, registry)
+    if skipped:
+        raise ValueError(next(r['reason'] for r in skipped if r['name'] == root['name']))
+    extra = sorted(set(rows) - {root['name']})
+    return {**result, 'installed': sorted(rows), 'reuse': sorted(reuse),
+            'message': f'将从团队商店装上「{title}」（{result["author"]} 上架）' +
+                       ('，一起装上它需要的 ' + '、'.join(extra) if extra else '') + '。'}
+
+
+def install_named(home, name, author=None, agents=(), confirmed=False):
+    agents = list(dict.fromkeys(agents))
+    if not set(agents) <= set(operations.load(home)[2]):
+        raise ValueError('请选择已接入的 agent，可以先运行 skill-pilot status 查看编号。')
+    plan = find(home, name, author)
+    plan['agents'] = agents
+    if agents:
+        plan['message'] += '然后分配给 ' + '、'.join(agents) + '，会一起带上它需要的技能。'
+    elif plan['installed']:
+        plan['message'] += '只装进技能库，暂不分配给 agent；要直接用，加 --agent <编号>。'
+    if not confirmed:
+        return {**plan, 'needs_confirmation': bool(plan['installed'] or agents)}
+    result = {**plan, 'operations': [], 'message': f'本机已经有「{plan["title"]}」了'}
+    if plan['installed']:
+        installed = install(home, plan['key'])
+        result.update(installed=installed['installed'], reuse=installed['reuse'], message=installed['message'])
+        if 'id' in installed:
+            result['operations'].append(installed['id'])
+    if agents:
+        assigned = operations.apply_assign([{'skill': plan['name'], 'agent': a, 'enabled': True} for a in agents],
+                                           confirmed=True, home=home)
+        result['message'] += '；' + assigned['message']
+        if 'id' in assigned:
+            result['operations'].append(assigned['id'])
+    return result
 
 
 def rate(home, body, remove=False):

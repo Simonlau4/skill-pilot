@@ -16,7 +16,7 @@ Token 是衡量文本长度的单位；看板按技能说明的长度估算，�
   - **Windows**：从开始菜单打开 **Skill Pilot**。
   - 关闭所有看板页面后，后台程序会自动退出。
 - **在对话里调用**：首次整理后，打开看板会给已接入的 Agent 安装 `skill-pilot` 技能，平时在对话里可直接说“看看 Claude 有哪些技能”“把 X 也给 Antigravity 启用”。
-- **命令行**：`skill-pilot status`、`skill-pilot list --agent claude`、`skill-pilot check-updates`、`skill-pilot cleanup --list`，加 `--json` 输出结构化结果。
+- **命令行**：`skill-pilot status`、`skill-pilot list --agent claude`、`skill-pilot check-updates`、`skill-pilot cleanup --list`，加 `--json` 输出结构化结果。安装和团队分享也能在命令行完成：`skill-pilot install <GitHub 链接或本机文件夹> --agent claude`、`skill-pilot team publish <技能>`、`skill-pilot team install <技能名> --agent claude`；会改动的命令不带 `--yes` 只预览，完整命令见 `skill-pilot --help`。
 
 看板里的主要模块：
 
@@ -87,6 +87,8 @@ python -X utf8 -B scripts/install.py
 
 - **文件分享给其他用户**：导出与导入方法见 [分享技能配置](docs/sharing-config.md)。导出文件包含技能中文名、一句话说明、分组、来源和分配关系，不包含技能正文和账号密钥；自制或已本地修改的技能会列为待补齐。
 - **团队技能商店**：管理员在局域网电脑或 NAS 上运行一份团队分享站（支持 `--open` 开放加入或凭口令加入），同事用自己电脑上的看板连接，在「团队」页浏览、上架和安装技能。点「安装技能」加入安装队列，前置依赖会一并安装，页面刷新后队列仍保留；失败可重试，安装完成后到「技能」页分配给 Agent，也可在操作记录撤销。安装过的技能可打星级、写评价，自己上架的不能评价。
+
+这些操作也可以在对话里交给 Agent：`skill-pilot team list` 查看商店，`team publish` 上架、`team unpublish` 下架，`team install <技能名> --agent <编号>` 装上并分配；不带 `--yes` 只预览。连接分享站仍在看板「设置 → 团队分享」完成。
 
 上架会尽量带上技能文件；疑似包含密钥、凭证的文件会被拦下，上架前可核对实际上传内容。安装优先从分享站下载，早期没有文件的上架记录仍从原来源下载；飞书官方技能仍走官方安装方式。分享站只接收主动上架的内容，不读取本机技能库或账号设置，也不安装或执行上传的技能程序。
 
