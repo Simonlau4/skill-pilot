@@ -129,7 +129,8 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(result['repos'][1]['url'], 'https://github.com/ACME/SKILLS')
         with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}), patch.object(
                 team, '_request', wraps=team._request) as network:
-            self.assertEqual(team.catalog(self.other)['github'], result)
+            self.assertEqual(team.catalog(self.other)['github'], {**result, 'repos': [
+                {k: v for k, v in row.items() if k != 'digest_status'} for row in result['repos']]})
         self.assertTrue(all(c.args[1] in {'/api/me', '/api/catalog'} for c in network.call_args_list))
         self.assertEqual(self.library(self.other), before)
 
@@ -145,6 +146,27 @@ class TeamTests(unittest.TestCase):
         with self.hub.store.locked():
             team_hub.atomic_write(self.hub.store.data / 'github-trending.json', github_catalog('ACME/SKILLS'))
         self.assertNotIn('github', self.ok(self.b, '/api/team/catalog'))
+
+    def test_github_new_locations_reach_dashboard_and_legacy_fields_stay_compatible(self):
+        self.configure()
+        snapshot = github_catalog('acme/new-skills')
+        old = copy.deepcopy(snapshot['repos'][0])
+        snapshot['repos'][0].update(branch='main', readme_path='README.md',
+                                    skill_paths=['skills/example/SKILL.md'])
+        with self.hub.store.locked():
+            team_hub.atomic_write(self.hub.store.data / 'github-trending.json', snapshot)
+        raw = team._catalog(team.settings(self.other))['github']
+        self.assertEqual(raw, snapshot)
+        # The #161 client keeps exactly these six fields and ignores extra keys.
+        legacy_fields = ('repository', 'description', 'stars', 'created_at', 'pushed_at', 'skill_count')
+        legacy = {k: raw['repos'][0][k] for k in legacy_fields}
+        self.assertEqual(legacy, old)
+        self.assertEqual(team._request(team.settings(self.other), '/api/me')['api'], 2)
+        current = self.ok(self.b, '/api/team/catalog')['github']['repos'][0]
+        self.assertEqual(current['branch'], 'main')
+        self.assertEqual(current['readme_path'], 'README.md')
+        self.assertEqual(current['skill_paths'], ['skills/example/SKILL.md'])
+        self.assertEqual(current['digest_status'], 'off')
 
     def test_missing_empty_or_invalid_github_does_not_break_the_store(self):
         self.configure()

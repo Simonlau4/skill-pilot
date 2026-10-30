@@ -23,7 +23,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import SKIP_CONTENT, apply, backups, guard, preview, restore, target_home
-from .. import operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources
+from .. import operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from . import runtime
@@ -156,6 +156,8 @@ class Dashboard(ThreadingHTTPServer):
         self.reload_error = ''
         self.reload_thread = None
         self.closing = False
+        self.github_digests = github_digest.Digests(self.home, lambda: self.closing or self.reload_pending or
+                                                  self.program_progress['phase'] in {'apply', 'ready'})
         self.agents_generation = 0
         self.agents_cache = None
         self.agents_lock = threading.Lock()
@@ -182,6 +184,7 @@ class Dashboard(ThreadingHTTPServer):
         if queue_thread: queue_thread.join()
         if self.update_thread: self.update_thread.join()
         if self.labels_thread: self.labels_thread.join()
+        self.github_digests.close()
         if self.agents_thread: self.agents_thread.join()
         if self._program_thread_blocks_exit():
             self.program_thread.join()
@@ -198,7 +201,8 @@ class Dashboard(ThreadingHTTPServer):
         return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread, self.agents_thread)) or
                 self.jobs_busy() or
                 self._program_thread_blocks_exit() or
-                self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())))
+                self.labels_progress['running'] or
+                any(r['running'] for r in list(self.update_reviews.values())))
 
     def jobs_busy(self):
         with self.jobs_lock:
@@ -629,7 +633,8 @@ class Dashboard(ThreadingHTTPServer):
                     with self.runtime_lock:
                         idle = not self.active_requests and not (
                             any(t and t.is_alive() for t in (self.update_thread, self.labels_thread)) or
-                            self.labels_progress['running'] or any(r['running'] for r in list(self.update_reviews.values())) or
+                            self.labels_progress['running'] or
+                            any(r['running'] for r in list(self.update_reviews.values())) or
                             self.jobs_busy())
                     if idle:
                         break
@@ -832,12 +837,26 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, self.server.team_queue_status())
         elif path == '/api/jobs':
             self.reply(200, self.server.jobs_status())
+        elif path == '/api/team/github/digests':
+            self.reply(200, self.server.github_digests.status())
+        elif path == '/api/team/github/detail':
+            try:
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                self.reply(200, self.server.github_digests.detail(query.get('repository', [''])[0]))
+            except github_digest.RepositoryMissing as error:
+                self.reply(404, {'error': str(error)})
+            except (ValueError, OSError) as error:
+                self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取仓库原文，请稍后重试。'})
         elif path in {'/api/team', '/api/team/catalog', '/api/team/listings/candidates'}:
             try:
                 result = (team.status(self.server.home, strict=False) if path == '/api/team' else
                           team.catalog(self.server.home) if path == '/api/team/catalog' else
                           team.listing_candidates(self.server.home))
+                if path == '/api/team/catalog':
+                    result = self.server.github_digests.catalog(result)
                 self.reply(200, result)
+                if path == '/api/team/catalog':
+                    self.server.github_digests.start()
             except (ValueError, OSError) as error:
                 self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取团队分享，请稍后重试。'})
         elif path == '/api/updates/progress':
@@ -932,7 +951,7 @@ class Handler(BaseHTTPRequestHandler):
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/queue', '/api/team/queue/clear',
-                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs'}
+                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
@@ -955,6 +974,8 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 if path in job_routes:
                     raise JobInputError('请求内容格式不正确，请逐项填写任务参数。') from None
+                if path == '/api/team/github/retry':
+                    raise ValueError('请求内容格式不正确，请重新选择仓库后重试。') from None
                 raise
             if path in job_routes:
                 if not preview_allowed(self.server.home):
@@ -1169,6 +1190,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def team_post(self, path, body):
         home = self.server.home
+        if path == '/api/team/github/retry':
+            return self.server.github_digests.retry(body.get('repository'))
         if path == '/api/team/settings':
             return team.save_settings(home, body, self.server.local_write())
         if path == '/api/team/listings/preview':
