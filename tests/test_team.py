@@ -22,6 +22,7 @@ from unittest.mock import patch
 from skill_pilot import cleanup, operations, sharing, store, tags, team, team_hub, updates, research, self_update
 from skill_pilot.sources import github, normalize
 from tests.test_team_hub import listing, file as package_file
+from tests.test_github_trending import github_catalog
 from skill_pilot.web import runtime
 from skill_pilot.web.server import Dashboard
 from skill_pilot.sources.update_github import Reader
@@ -111,6 +112,63 @@ class TeamTests(unittest.TestCase):
     def configure(self):
         for server, member in ((self.a, self.first), (self.b, self.second)):
             self.ok(server, '/api/team/settings', {'url': self.url, 'key': member['token']})
+
+    def test_github_catalog_marks_repository_installed_without_matching_the_skill_path(self):
+        self.configure()
+        snapshot = github_catalog('acme/new-skills', 'ACME/SKILLS', 'acme/another-skills')
+        with self.hub.store.locked():
+            team_hub.atomic_write(self.hub.store.data / 'github-trending.json', snapshot)
+        before = self.library(self.other)
+        result = self.ok(self.b, '/api/team/catalog')['github']
+        self.assertEqual(result['fetched_at'], snapshot['fetched_at'])
+        self.assertEqual([r['repository'] for r in result['repos']], [r['repository'] for r in snapshot['repos']])
+        self.assertEqual([r['local'] for r in result['repos']], [
+            {'status': 'installable', 'label': team.LOCAL_LABELS['installable']},
+            {'status': 'installed', 'label': team.LOCAL_LABELS['installed']},
+            {'status': 'installable', 'label': team.LOCAL_LABELS['installable']}])
+        self.assertEqual(result['repos'][1]['url'], 'https://github.com/ACME/SKILLS')
+        with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}), patch.object(
+                team, '_request', wraps=team._request) as network:
+            self.assertEqual(team.catalog(self.other)['github'], result)
+        self.assertTrue(all(c.args[1] in {'/api/me', '/api/catalog'} for c in network.call_args_list))
+        self.assertEqual(self.library(self.other), before)
+
+    def test_github_catalog_removes_any_team_listing_from_the_same_repository(self):
+        self.configure()
+        self.raw_put([listing('acme-main'), listing('acme-base')])
+        snapshot = github_catalog('acme/new-skills', 'ACME/SKILLS', 'acme/another-skills')
+        with self.hub.store.locked():
+            team_hub.atomic_write(self.hub.store.data / 'github-trending.json', snapshot)
+        result = self.ok(self.b, '/api/team/catalog')
+        self.assertEqual([r['repository'] for r in result['github']['repos']],
+                         ['acme/new-skills', 'acme/another-skills'])
+        with self.hub.store.locked():
+            team_hub.atomic_write(self.hub.store.data / 'github-trending.json', github_catalog('ACME/SKILLS'))
+        self.assertNotIn('github', self.ok(self.b, '/api/team/catalog'))
+
+    def test_missing_empty_or_invalid_github_does_not_break_the_store(self):
+        self.configure()
+        self.raw_put([listing('acme-other')])
+        baseline = self.ok(self.b, '/api/team/catalog')
+        self.assertNotIn('github', baseline)
+        request = team._request
+        cases = [None, [], {}, {'fetched_at': 'invalid', 'repos': []},
+                 github_catalog('acme/..'), github_catalog()]
+        for snapshot in cases:
+            def changed(config, path, method='GET', body=None):
+                data = request(config, path, method, body)
+                if path == '/api/catalog':
+                    data['github'] = snapshot
+                return data
+            with self.subTest(snapshot=snapshot), patch.object(team, '_request', side_effect=changed):
+                self.assertEqual(self.ok(self.b, '/api/team/catalog'), baseline)
+
+    def test_github_install_inspect_accepts_a_repository_url_and_lists_multiple_skills(self):
+        with self.local_github():
+            result = self.ok(self.b, '/api/install/inspect', {'url': 'https://github.com/acme/skills'})
+        self.assertEqual({r['name'] for r in result['skills']},
+                         {'acme-main', 'acme-base', 'acme-other', 'acme-extra', 'acme-local'})
+        self.assertTrue(all(r['source']['source_path'].startswith('skills/') for r in result['skills']))
 
     def test_team_install_preserves_existing_dsh_drift_and_can_be_undone(self):
         self.configure()

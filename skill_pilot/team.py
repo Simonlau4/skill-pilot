@@ -285,9 +285,14 @@ def _catalog(config):
                 packs.append({**pack, 'key': key, 'member': member, 'cards': row['cards'], 'updated_at': row['updated_at']})
                 seen_packs.add(key)
             catalog['packs'] = sorted(packs, key=lambda p: p['updated_at'], reverse=True)
-        return catalog
     except (ValueError, TypeError, KeyError, AttributeError):
         raise ValueError(FORMAT_ERROR) from None
+    if 'github' in data:
+        try:
+            catalog['github'] = team_hub.clean_github(data['github'])
+        except ValueError:
+            pass
+    return catalog
 
 
 def _fetch(home, with_packs=False):
@@ -447,7 +452,23 @@ def catalog(home):
                                 'installable': states.count('installable'),
                                 'blocked': sum(s in {'lark', 'conflict', 'blocked'} for s in states)},
                       'tokens': sum(indexed[k]['tokens'] for k in keys if indexed[k]['local']['status'] not in {'installed', 'update'})})
-    return {'member': member, 'cards': result, 'packs': packs, 'packs_supported': 'packs' in data}
+    catalog = {'member': member, 'cards': result, 'packs': packs, 'packs_supported': 'packs' in data}
+    if 'github' in data:
+        listed = {r['source']['repository'].lower() for c in cards for r in c['listings']
+                  if r['source']['kind'] == 'github'}
+        installed = {origin['repository'].lower() for skill in registry['skills'].values()
+                     if (origin := _origin(skill))['kind'] == 'github'}
+        repos = []
+        for row in data['github']['repos']:
+            repository = row['repository']
+            if repository.lower() in listed:
+                continue
+            state = 'installed' if repository.lower() in installed else 'installable'
+            repos.append({**row, 'url': 'https://github.com/' + repository,
+                          'local': {'status': state, 'label': LOCAL_LABELS[state]}})
+        if repos:
+            catalog['github'] = {'fetched_at': data['github']['fetched_at'], 'repos': repos}
+    return catalog
 
 
 def tag_pack(home, names, title):
