@@ -35,6 +35,7 @@ PROGRAM_AUTO_CHECK_INTERVAL = 600
 # dashboard alive until it says goodbye or has been silent this long.
 OPEN_PAGE_TIMEOUT = 24 * 3600
 ACTIVE_JOBS = {'waiting', 'running'}
+TEAM_JOBS = {'team_install', 'github_install'}
 
 
 class JobInputError(ValueError):
@@ -44,7 +45,7 @@ class JobInputError(ValueError):
 def job_parameters(body):
     kind = body.get('kind')
     if not isinstance(kind, str) or kind not in {
-            'assignment', 'install', 'update', 'cleanup_withdraw', 'cleanup_delete', 'restore', 'team_install'}:
+            'assignment', 'install', 'update', 'cleanup_withdraw', 'cleanup_delete', 'restore', 'team_install', 'github_install'}:
         raise JobInputError('请选择支持的任务类型。')
     result = {'kind': kind}
     def text(value):
@@ -58,6 +59,11 @@ def job_parameters(body):
         if not text(body.get('key')):
             raise JobInputError('请选择要装上的团队技能。')
         result['key'] = body['key']
+        return result
+    if kind == 'github_install':
+        if not text(body.get('repository')):
+            raise JobInputError('请选择要安装的 GitHub 最近热门仓库。')
+        result['repository'] = body['repository']
         return result
     if kind == 'assignment':
         value = body.get('changes')
@@ -220,7 +226,7 @@ class Dashboard(ThreadingHTTPServer):
 
     @property
     def team_queue(self):
-        return [item for item in self.jobs if item['kind'] == 'team_install']
+        return [item for item in self.jobs if item['kind'] in TEAM_JOBS]
 
     @team_queue.setter
     def team_queue(self, items):
@@ -232,7 +238,8 @@ class Dashboard(ThreadingHTTPServer):
              '_intent': json.dumps({'kind': 'team_install', 'key': item['key']}, sort_keys=True)} for item in items]
 
     def team_queue_status(self):
-        fields = {'id', 'key', 'name', 'title', 'status', 'message', 'installed', 'reuse', 'operation', 'pack', 'pack_title'}
+        fields = {'id', 'kind', 'key', 'name', 'title', 'repository', 'status', 'message', 'installed', 'reuse',
+                  'skipped', 'operation', 'tag', 'pack', 'pack_title'}
         with self.jobs_lock:
             return {'items': [copy.deepcopy({k: v for k, v in item.items() if k in fields})
                               for item in self.team_queue]}
@@ -258,7 +265,7 @@ class Dashboard(ThreadingHTTPServer):
             agents = parameters.get('agents', sorted({c['agent'] for c in parameters.get('changes', [])}))
             titles = self.skill_titles()
             action = {'assignment': '调整分配', 'install': '安装', 'update': '更新', 'cleanup_withdraw': '撤下',
-                      'cleanup_delete': '删除', 'restore': '恢复', 'team_install': '安装团队技能'}[kind]
+                      'cleanup_delete': '删除', 'restore': '恢复', 'team_install': '安装团队技能', 'github_install': '安装'}[kind]
             item = {'id': secrets.token_urlsafe(16), 'kind': kind, 'status': 'waiting',
                     'skills': skills, 'agents': agents, 'summary': action + ('「' + '、'.join(titles.get(n, n) for n in skills) + '」' if skills else ''),
                     'message': '等待处理。', 'operations': [], '_parameters': copy.deepcopy(parameters), '_intent': intent}
@@ -272,6 +279,12 @@ class Dashboard(ThreadingHTTPServer):
                     if field in info: item[field] = copy.deepcopy(info[field])
                 if info.get('name'):
                     item.update(skills=[info['name']], summary='安装「' + (info.get('title') or titles.get(info['name'], info['name'])) + '」')
+            if kind == 'github_install':
+                repository = parameters['repository']
+                title = (team_info or {}).get('title') or repository
+                item.update(key='github:' + repository, repository=repository, title=title,
+                            summary='安装「' + title + '」', installed=[], reuse=[], skipped=[], operation=None,
+                            message='等待安装。')
             if previous:
                 if kind == 'update':
                     item['_completed_operations'] = list(previous['operations'])
@@ -289,6 +302,8 @@ class Dashboard(ThreadingHTTPServer):
         if body.get('confirmed') is not True:
             raise JobInputError('请先核对，并确认这次操作。')
         parameters = job_parameters(body)
+        if parameters['kind'] == 'github_install':
+            return self.queue_github(parameters['repository'])
         # Enqueue and pruning use this order so a referenced review cannot be
         # removed in the gap between validation and adding the waiting item.
         with self.update_lock:
@@ -308,11 +323,13 @@ class Dashboard(ThreadingHTTPServer):
             for field in ('seen', 'review_id', 'choices', 'merge_ids', 'confirm_lark_cli'):
                 if field in body: parameters[field] = body[field]
             parameters = job_parameters(parameters)
-            return self._add_job(parameters, previous, previous)
+            if parameters['kind'] != 'github_install':
+                return self._add_job(parameters, previous, previous)
+        return self.queue_github(parameters['repository'])
 
     def clear_jobs(self, team_only=False):
         with self.jobs_lock:
-            remaining = [i for i in self.jobs if i['status'] in ACTIVE_JOBS or (team_only and i['kind'] != 'team_install')]
+            remaining = [i for i in self.jobs if i['status'] in ACTIVE_JOBS or (team_only and i['kind'] not in TEAM_JOBS)]
             if len(remaining) != len(self.jobs):
                 self.jobs = remaining
                 self.jobs_version += 1
@@ -345,6 +362,23 @@ class Dashboard(ThreadingHTTPServer):
             self._add_job({'kind': 'team_install', 'key': key}, previous,
                           {**info, 'name': name, 'title': title, **(pack_info or {})})
             return self.team_queue_status()
+
+    def queue_github(self, repository):
+        parameters = job_parameters({'kind': 'github_install', 'repository': repository})
+        with self.jobs_lock:
+            self._accept_jobs()
+        catalog = team.catalog(self.home)
+        row = next((r for r in catalog.get('github', {}).get('repos', [])
+                    if r['repository'].lower() == repository.lower()), None)
+        if row is None:
+            raise ValueError('这个仓库已不在 GitHub 最近热门里，请刷新团队页。')
+        repository = parameters['repository'] = row['repository']
+        with self.github_digests.lock:
+            title = (self.github_digests.cache.get(repository, {}).get('digest') or {}).get('title') or repository
+        with self.jobs_lock:
+            previous = next((i for i in self.team_queue if i['key'] == 'github:' + repository
+                             and i['status'] not in ACTIVE_JOBS), None)
+            return self._add_job(parameters, previous, {'title': title})
 
     def queue_team_pack(self, key, keys):
         if (not isinstance(key, str) or not isinstance(keys, list) or not keys or
@@ -470,7 +504,7 @@ class Dashboard(ThreadingHTTPServer):
                 except Exception as error:
                     result = {'status': 'failed', 'message': self.job_message(str(error))
                               if isinstance(error, ValueError) else '安装没能完成，请稍后重试。'
-                              if item['kind'] == 'team_install' else '任务没能完成，请重新核对后重试。'}
+                              if item['kind'] in TEAM_JOBS else '任务没能完成，请重新核对后重试。'}
                 finally:
                     self.invalidate_agents()
                     try:
@@ -583,6 +617,42 @@ class Dashboard(ThreadingHTTPServer):
                     '、'.join(missing) + '：已经删除，没有恢复。' if missing else '',
                     '、'.join(restored) + '：已经恢复或不在已撤下列表，无需重复恢复。' if restored else '']))))
             result = cleanup.restore(names, self.home)
+        elif kind == 'github_install':
+            review = github.inspect('https://github.com/' + parameters['repository'])
+            try:
+                if not review['skills']:
+                    raise ValueError('这个仓库里没有找到可安装的技能。')
+                registry = operations.load(self.home)[1]
+                collisions = {c['name']: c['same_content'] for c in operations.conflicts(review['skills'], registry, self.home)}
+                installed = [s['name'] for s in review['skills'] if s['name'] not in collisions]
+                reuse = [n for n, same in collisions.items() if same]
+                skipped = [n for n, same in collisions.items() if not same]
+                result = operations.install(review, installed, [], home=self.home) if installed else {}
+                if result.get('conflicts'):
+                    raise ValueError(result['message'])
+                message = (f'已安装 {len(installed)} 个技能。' if installed else '本机已经有了。' if reuse else
+                           '安装失败：同名技能内容不同，现有内容已保留。')
+                if reuse and (installed or skipped):
+                    message += f'沿用 {len(reuse)} 个技能：' + '、'.join(reuse) + '。'
+                if skipped:
+                    message += f'跳过 {len(skipped)} 个同名但内容不同的技能：' + '、'.join(skipped) + '。可到技能页粘贴仓库链接核对。'
+                tag = None
+                if len(installed) >= 2:
+                    name = item['title']
+                    if name == parameters['repository'] and len(name) > 20:
+                        name = name.rsplit('/', 1)[-1]
+                    name = name.strip()[:20].strip()
+                    warning = team.tag_pack(self.home, installed, name)
+                    if warning: message += ' ' + warning
+                    else:
+                        tag = next((t for t in tags.read(self.home).get(installed[0], [])
+                                    if t.casefold() == tags.clean_tag(name).casefold()), None)
+                return {'status': 'done' if installed or reuse else 'failed', 'message': self.job_message(message),
+                        'installed': installed, 'reuse': reuse, 'skipped': skipped, 'skills': installed + reuse,
+                        **({'tag': tag} if tag else {}),
+                        'operation': result.get('id'), 'operations': [result['id']] if 'id' in result else []}
+            finally:
+                rmtree(review['temporary'], ignore_errors=True)
         else:
             result = team.install(self.home, parameters['key'])
             if item.get('pack'):
@@ -1200,6 +1270,9 @@ class Handler(BaseHTTPRequestHandler):
             self.server.team_upload_reviews[review] = saved
             return {**result, 'review': review}
         if path == '/api/team/queue':
+            if 'github' in body:
+                self.server.queue_github(body.get('github'))
+                return self.server.team_queue_status()
             if 'pack' in body:
                 return self.server.queue_team_pack(body.get('pack'), body.get('keys'))
             return self.server.queue_team(body.get('key'))

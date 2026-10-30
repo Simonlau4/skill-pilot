@@ -42,6 +42,9 @@ class TeamStaticTests(unittest.TestCase):
             line(source, 'const number = value => '),
             line(source, 'const SHELF_SIZE = '),
             line(source, 'const githubRepos = '),
+            line(source, 'const queueActive = '),
+            line(source, 'const storeQueueItem = '),
+            line(source, 'const githubQueueKey = '),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             extract_function(source, 'function githubCreatedText('),
             extract_function(source, 'function githubStatusTag('),
@@ -51,6 +54,7 @@ class TeamStaticTests(unittest.TestCase):
         ]
         script = '\n'.join(parts) + r'''
 function fail(message) { console.error(message); process.exit(1); }
+const state = {queue: {items: []}};
 let readOnly = false;
 const teamReadOnly = () => readOnly;
 const now = Date.now();
@@ -72,7 +76,21 @@ if (!card.includes('含 3 个技能')) fail('有技能个数时要写含几个�
 if (card.includes('sp-star')) fail('星数不能用团队评分的星形图标');
 if (!card.includes('&lt;b&gt;agent&lt;/b&gt;')) fail('仓库说明要按纯文字转义：' + card);
 if (!card.includes('data-github-install="acme/example-skills"')) fail('可安装的卡片要有安装入口：' + card);
-if (!card.includes('前往安装')) fail('安装入口应写成跳转动作，不能写成已经安装：' + card);
+if (!card.includes('>安装</button>') || card.includes('前往安装')) fail('安装入口写“安装”，点了直接排队，不再跳到技能页：' + card);
+if (!card.includes('aria-label="安装 acme/example-skills"')) fail('安装按钮的读屏文字要带仓库名：' + card);
+
+state.queue.items = [{kind: 'github_install', key: 'github:acme/example-skills', repository: 'acme/example-skills', status: 'waiting'}];
+const waiting = githubCardHtml(repo());
+if (!waiting.includes('<span class="tag tag-quiet">排队中</span>') || waiting.includes('可安装')) fail('排队中时标签写排队中：' + waiting);
+if (waiting.includes('data-github-install')) fail('排队中时不再显示安装按钮：' + waiting);
+state.queue.items[0].status = 'running';
+const running = githubCardHtml(repo());
+if (!running.includes('正在安装') || running.includes('data-github-install')) fail('正在安装时写正在安装、不显示按钮：' + running);
+state.queue.items[0].status = 'failed';
+if (!githubCardHtml(repo()).includes('data-github-install')) fail('装失败后还能再点安装');
+state.queue.items = [{kind: 'team_install', key: 'github:acme/example-skills:skills/a', status: 'waiting'}];
+if (!githubCardHtml(repo()).includes('可安装')) fail('团队技能的队列编号不能算到热门仓库上');
+state.queue.items = [];
 if (!card.includes('target="_blank"') || !card.includes('rel="noopener noreferrer"')) fail('GitHub 链接要在新窗口打开');
 if (!card.includes('href="https://github.com/acme/example-skills"')) fail('链接地址要用后台给的 url');
 if (!card.includes('打开 GitHub')) fail('卡片要有打开 GitHub 页面的链接');
@@ -90,7 +108,7 @@ if (!locked.includes('disabled') || !locked.includes('只读预览，无法安�
 readOnly = false;
 
 const repos = Array.from({length: 6}, (_, index) => repo({repository: `acme/skills-${index}`, stars: 6 - index}));
-const state = {store: {github: {repos}}, storeGithubExpanded: false};
+Object.assign(state, {store: {github: {repos}}, storeGithubExpanded: false});
 let shelf = storeGithubShelfHtml();
 if (!shelf.includes('<h2 id="shelf-github">GitHub 最近热门</h2>')) fail('缺少“GitHub 最近热门”标题');
 if ((shelf.match(/class="store-card github-card"/g) || []).length !== 4) fail('默认只显示 4 张：' + shelf);
@@ -137,41 +155,68 @@ if (storeGithubShelfHtml() !== '') fail('名单为空时不该显示这一排');
         for declaration in ('white-space: nowrap', 'overflow: hidden', 'text-overflow: ellipsis'):
             self.assertIn(declaration, repo_rule.group(1), f'仓库名没写 {declaration}，不会单行省略')
 
-    def test_store_github_install_opens_left_rail(self):
+    def test_store_github_install_queues_on_team_page(self):
         source = (STATIC / 'app.js').read_text()
-        function = extract_function(source, 'function openGithubInstall(')
-        script = function + r'''
+        self.assertNotIn('openGithubInstall', source, '热门仓库不再跳到技能页安装')
+        parts = [
+            line(source, 'const storeQueueItem = '),
+            extract_function(source, 'async function addToStoreQueue('),
+            extract_function(source, 'async function retryStoreQueue('),
+            extract_function(source, 'async function queueGithubInstall('),
+        ]
+        script = '\n'.join(parts) + r'''
 function fail(message) { console.error(message); process.exit(1); }
-const calls = [];
-const elements = {
-  'install-url': {value: '', focus: options => calls.push(['focus', options])},
-  'install-rail': {scrollIntoView: options => calls.push(['scroll', options])},
+const sent = [], applied = [], toasts = [];
+let queueVersion = 0;
+let blocked = false;
+const jobsBlocked = () => blocked;
+const state = {queue: {items: [
+  {kind: 'github_install', key: 'github:acme/example', repository: 'acme/example', status: 'failed'},
+  {kind: 'team_install', key: 'github:acme/example:skills/one', status: 'failed'},
+]}};
+let refuse = '';
+const api = async (path, body) => {
+  if (refuse) throw new Error(refuse);
+  sent.push([path, body]);
+  return {items: []};
 };
-const $ = id => elements[id];
-const showPage = page => calls.push(['page', page]);
-const inspectInstall = force => calls.push(['inspect', force]);
-let installInspectTimer = 1;
-const clearTimeout = timer => calls.push(['clear', timer]);
-const prefersReducedMotion = () => false;
-const state = {store: {github: {repos: [{repository: 'acme/example-skills', url: 'https://github.com/acme/example-skills'}]}}};
+const applyQueue = (result, options) => applied.push(options);
+const toast = item => toasts.push(item);
+const withBusy = async (button, label, work) => work();
+const detailBody = {contains: () => false};
+const shelves = {querySelector: () => null};
+const $ = id => id === 'detail-body' ? detailBody : shelves;
+const CSS = {escape: value => value};
+const focusStorePanel = () => {};
+const button = {isConnected: true};
 
-openGithubInstall('acme/example-skills');
-if (elements['install-url'].value !== 'https://github.com/acme/example-skills') fail('没有把仓库地址填进安装框');
-if (JSON.stringify(calls[0]) !== '["page","skills"]') fail('应先到技能页：' + JSON.stringify(calls));
-if (!calls.some(call => call[0] === 'inspect' && call[1] === true)) fail('应以强制读取模式调用现有安装检查');
-if (!calls.some(call => call[0] === 'clear')) fail('要清掉输入停顿的定时器，免得重复读取');
-if (!calls.some(call => call[0] === 'scroll')) fail('安装区要滚到眼前');
-if (!calls.some(call => call[0] === 'focus')) fail('焦点要落在安装框');
-
-const before = calls.length;
-openGithubInstall('acme/missing');
-if (calls.length !== before) fail('找不到仓库时不该跳转或报错');
+(async () => {
+  await queueGithubInstall('acme/example', button);
+  if (JSON.stringify(sent[0]) !== '["/api/team/queue",{"github":"acme/example"}]') fail('安装要直接加入团队安装队列：' + JSON.stringify(sent));
+  if (!applied.length || !applied[0].force) fail('加入后要立即用返回的队列刷新页面');
+  await retryStoreQueue('github:acme/example', button);
+  if (JSON.stringify(sent[1][1]) !== '{"github":"acme/example"}') fail('热门仓库的重试要按仓库重新排队：' + JSON.stringify(sent[1]));
+  await retryStoreQueue('github:acme/example:skills/one', button);
+  if (JSON.stringify(sent[2][1]) !== '{"key":"github:acme/example:skills/one"}') fail('团队技能的重试照旧按编号：' + JSON.stringify(sent[2]));
+  blocked = true;
+  await queueGithubInstall('acme/example', button);
+  if (sent.length !== 3) fail('任务停止时不该再加入队列');
+  blocked = false;
+  refuse = '这个仓库已不在 GitHub 最近热门里，请刷新团队页。';
+  await queueGithubInstall('acme/example', button);
+  if (toasts.at(-1)?.text !== refuse || toasts.at(-1)?.tone !== 'error') fail('加入失败要把原因醒目提示出来：' + JSON.stringify(toasts));
+})().catch(error => { console.error(error); process.exit(1); });
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+        detail = source[source.index("$('detail-body').addEventListener('click', async event => {"):]
+        self.assertIn('queueGithubInstall(button.dataset.githubInstall, button)', detail[:600], '详情里的安装也直接排队')
+        self.assertNotIn('closeDetail();\n    openGithub', detail[:600])
+
         handler = source[source.index("$('page-team').addEventListener('click'"):]
         self.assertIn("target.closest('[data-github-install]')", handler[:1600], '团队页点击要接上热门卡片的安装按钮')
+        self.assertIn('queueGithubInstall(githubInstall.dataset.githubInstall, githubInstall)', handler[:1600])
         self.assertIn("target.closest('[data-github-open]')", handler[:1600], '标题按钮要打开详情')
         self.assertIn("target.closest('[data-github-card]')", handler[:1600], '卡片空白处也要能打开详情')
         self.assertIn("target.closest('[data-github-more]')", handler[:1600], '团队页点击要接上展开按钮')
@@ -185,6 +230,9 @@ if (calls.length !== before) fail('找不到仓库时不该跳转或报错');
             line(source, 'const escape = value => '),
             line(source, 'const icon = (name'),
             line(source, 'const number = value => '),
+            line(source, 'const queueActive = '),
+            line(source, 'const storeQueueItem = '),
+            line(source, 'const githubQueueKey = '),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             extract_function(source, 'function githubCreatedText('),
             extract_function(source, 'function githubStatusTag('),
@@ -198,7 +246,7 @@ if (calls.length !== before) fail('找不到仓库时不该跳转或报错');
         script = '\n'.join(parts) + r'''
 function fail(message) { console.error(message); process.exit(1); }
 let readOnly = false;
-const state = {table: {llm_configured: true}};
+const state = {table: {llm_configured: true}, queue: {items: []}};
 const teamReadOnly = () => readOnly;
 const now = Date.now();
 const repo = (extra = {}) => ({
@@ -241,13 +289,13 @@ for (const status of ['failed', 'off']) {
 const ready = githubDetailHtml({...repo({digest_status: 'ready'}), materials, digest});
 for (const text of ['acme/example', '1,234 星', '3 天前新建', '含 2 个技能', '能做什么', '阅读资料',
                     '归纳用途', '仓库里的技能', '示例整理', '汇总资料。', 'acme-other', '另一份说明',
-                    '用之前要知道', '需要联网', 'AI 整理，仅供参考。', '原文说明', '前往安装', '打开 GitHub']) {
+                    '用之前要知道', '需要联网', 'AI 整理，仅供参考。', '原文说明', '>安装</button>', '打开 GitHub']) {
   if (!ready.includes(text)) fail('整理结果详情缺了：' + text);
 }
 if (ready.includes('原始说明')) fail('有中文技能说明时不该再显示原始说明：' + ready);
 if (!ready.includes('第一行\n&lt;b&gt;第二行')) fail('原文说明要保留换行并转义：' + ready);
 if (ready.includes('<b>第二行') || ready.includes('<i>另一份')) fail('原文和 AI 文字都要按纯文字显示：' + ready);
-if (!ready.includes('data-github-install="acme/example"')) fail('详情底部要有前往安装：' + ready);
+if (!ready.includes('data-github-install="acme/example"')) fail('详情底部要有安装：' + ready);
 
 const pending = githubDetailHtml({...repo({digest_status: 'pending'}), materials, digest: null});
 if (!pending.includes('正在用 AI 整理中文介绍…')) fail('等待整理时要写正在整理：' + pending);
@@ -541,10 +589,28 @@ if (!storeCardHtml(card(1200)).includes('1,200 人已安装')) fail('人数要�
             line(source, 'const storeQueueItem = '),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             extract_function(source, 'function storeStatusTag('),
+            extract_function(source, 'function githubQueueNote('),
+            extract_function(source, 'function githubQueueAction('),
             extract_function(source, 'function storeQueueRowHtml('),
         ]
         script = '\n'.join(parts) + r'''
 function fail(message) { console.error(message); process.exit(1); }
+const github = extra => ({kind: 'github_install', key: 'github:acme/example', repository: 'acme/example',
+  title: '示例仓库', status: 'done', message: '已安装 2 个技能。', installed: [], reuse: [], skipped: [], ...extra});
+const many = storeQueueRowHtml(github({installed: ['acme-a', 'acme-b'], skipped: ['acme-c'], tag: '示例仓库',
+  message: '已安装 2 个技能。跳过 1 个同名但内容不同的技能：acme-c。可到技能页粘贴仓库链接核对。'}));
+if (!many.includes('安装完成') || !many.includes('装上 2 个，1 个同名没装')) fail('仓库装完要写装上和没装的个数：' + many);
+if (!many.includes('title="已安装 2 个技能。跳过 1 个')) fail('完整说明要放在悬停提示里：' + many);
+if (!many.includes('data-store-goto-tag="示例仓库"') || !many.includes('去启用这 2 个')) fail('装上多个时按标签去启用：' + many);
+if (many.includes('前置依赖')) fail('仓库安装不该写成前置依赖：' + many);
+const one = storeQueueRowHtml(github({installed: ['acme-a']}));
+if (!one.includes('data-store-goto="acme-a"') || !one.includes('前往分配')) fail('装上一个时直接打开它：' + one);
+const reused = storeQueueRowHtml(github({reuse: ['acme-a'], message: '本机已经有了。'}));
+if (!reused.includes('1 个本机已有') || !reused.includes('data-store-goto="acme-a"')) fail('本机已有的一个也能直接打开：' + reused);
+const untagged = storeQueueRowHtml(github({installed: ['acme-a', 'acme-b']}));
+if (untagged.includes('data-store-goto')) fail('没加上标签时不给筛不出来的入口：' + untagged);
+const broken = storeQueueRowHtml(github({status: 'failed', message: '下载失败'}));
+if (!broken.includes('安装失败：下载失败') || !broken.includes('data-store-queue-retry="github:acme/example"')) fail('仓库装失败要能重试：' + broken);
 const state = {queue: {items: [
   {key: 'a', name: 'acme-a', title: '<b>示例</b>', status: 'waiting'},
   {key: 'b', name: 'acme-b', status: 'failed', message: '<img src=x onerror=alert(1)> 连不上分享站'},
