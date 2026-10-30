@@ -1026,7 +1026,7 @@ function finishJobs(finished) {
   }
   for (const key of packKeys) announcePackBatch(key, state.jobs);
   const updatesFinished = finished.some(job => job.kind === 'update');
-  const installed = finished.some(job => job.kind === 'install' && job.status === 'done');
+  const installed = finished.some(job => ['install', 'github_install'].includes(job.kind) && job.status === 'done');
   (async () => {
     const results = await Promise.allSettled([refreshTable(), refreshLog(), loadCleanup()]);
     if (updatesFinished) await refreshUpdates();
@@ -3126,7 +3126,8 @@ function applyQueue(result, {force = false} = {}) {
 
 async function addToStoreQueue(item) {
   queueVersion += 1;   // 还在路上的队列读取作废，别把刚加入的盖掉
-  const result = await api('/api/team/queue', item.pack ? {pack: item.pack, keys: item.keys} : {key: item.key});
+  const body = item.github ? {github: item.github} : item.pack ? {pack: item.pack, keys: item.keys} : {key: item.key};
+  const result = await api('/api/team/queue', body);
   queueVersion += 1;   // 写入期间发出的读取也作废，以这次返回的队列为准
   return result;
 }
@@ -3157,9 +3158,10 @@ async function clearStoreQueue(button) {
 }
 
 async function retryStoreQueue(key, button) {
+  const item = storeQueueItem(key);
   await withBusy(button, '正在重试…', async () => {
     try {
-      applyQueue(await addToStoreQueue({key}), {force: true});
+      applyQueue(await addToStoreQueue(item?.kind === 'github_install' ? {github: item.repository} : {key}), {force: true});
     } catch (error) {
       toast({text: error.message, tone: 'error', sticky: true});
     }
@@ -3369,19 +3371,40 @@ function storeRowHtml(card, options) {
 
 /* ---------- 安装队列：排队中、正在装、装好了、没装上 ---------- */
 
+/* GitHub 仓库装完：写装上、本机已有、同名没装各几个；完整说明放在悬停提示里。 */
+function githubQueueNote(item) {
+  const parts = [
+    item.installed?.length ? `装上 ${item.installed.length} 个` : '',
+    item.reuse?.length ? `${item.reuse.length} 个本机已有` : '',
+    item.skipped?.length ? `${item.skipped.length} 个同名没装` : '',
+  ].filter(Boolean);
+  return parts.length ? `<small class="item-note" title="${escape(item.message || '')}">${parts.join('，')}</small>` : '';
+}
+
+/* 装上一个就打开它；装上多个时按这批的标签到技能页去启用。 */
+function githubQueueAction(item) {
+  const names = item.installed?.length ? item.installed : item.reuse || [];
+  if (names.length === 1) return `<button class="link-btn" type="button" data-store-goto="${escape(names[0])}">前往分配</button>`;
+  if (item.tag && item.installed?.length > 1) {
+    return `<button class="link-btn" type="button" data-store-goto-tag="${escape(item.tag)}">去启用这 ${item.installed.length} 个</button>`;
+  }
+  return '';
+}
+
 function storeQueueRowHtml(item, locked = false) {
-  const extra = item.status === 'done'
+  const github = item.kind === 'github_install';
+  const extra = item.status === 'done' && !github
     ? (item.installed || []).filter(name => name !== item.name).length
     : 0;
   const status = item.status === 'done'
-    ? `<span class="tag tag-ok">安装完成</span>${extra ? `<small class="item-note">含 ${extra} 个前置依赖</small>` : ''}`
+    ? `<span class="tag tag-ok">安装完成</span>${github ? githubQueueNote(item) : extra ? `<small class="item-note">含 ${extra} 个前置依赖</small>` : ''}`
     : item.status === 'failed'
       ? `<span class="tag tag-danger">安装失败：${escape(item.message || '原因未知')}</span>`
       : item.status === 'running'
         ? '<span class="tag">正在安装</span>'
         : '<span class="tag tag-quiet">排队中</span>';
   const action = item.status === 'done'
-    ? `<button class="link-btn" type="button" data-store-goto="${escape(item.name)}">前往分配</button>`
+    ? github ? githubQueueAction(item) : `<button class="link-btn" type="button" data-store-goto="${escape(item.name)}">前往分配</button>`
     : item.status === 'failed'
       ? `<button class="btn btn-small btn-quiet" type="button" data-store-queue-retry="${escape(item.key)}"${locked ? ' disabled' : ''}>重试</button>`
       : '';
@@ -3496,8 +3519,13 @@ function githubCreatedText(value) {
   return days ? `${number(days)} 天前新建` : '今天新建';
 }
 
-/* 状态沿用团队卡片那套标签：已安装写「已安装」，还没装写「可安装」。 */
+const githubQueueKey = repository => `github:${repository}`;
+
+/* 状态沿用团队卡片那套标签：在安装队列里写「排队中」「正在安装」，其余按本机写「已安装」「可安装」。 */
 function githubStatusTag(repo) {
+  const queued = storeQueueItem(githubQueueKey(repo.repository));
+  if (queued?.status === 'waiting') return '<span class="tag tag-quiet">排队中</span>';
+  if (queued?.status === 'running') return '<span class="tag">正在安装</span>';
   const [tone, label] = STORE_STATUS[repo.local?.status] || [];
   return label ? `<span class="tag ${tone}">${escape(label)}</span>` : '';
 }
@@ -3509,12 +3537,30 @@ const githubErrorText = error => error instanceof TypeError
   ? '没能连接到看板，请稍后重试。'
   : String(error?.message || '操作没能完成，请稍后再试。');
 
-/* 卡片上的安装入口：卡片和详情底部共用，只读预览时禁用并写原因。 */
+/* 安装入口：卡片和详情底部共用，点一下加入安装队列；排队中、正在安装时由状态标签说明，不再显示按钮。
+   只读预览时禁用并写原因。 */
 function githubInstallHtml(repo) {
-  if (repo.local?.status !== 'installable') return '';
+  const queued = storeQueueItem(githubQueueKey(repo.repository));
+  if (repo.local?.status !== 'installable' || (queued && queueActive(queued))) return '';
   const readOnly = teamReadOnly();
   return `<button class="btn btn-small btn-primary" type="button" data-github-install="${escape(repo.repository)}"
-    aria-label="${escape(`前往安装 ${repo.repository}`)}"${readOnly ? ' disabled title="只读预览，无法安装技能。"' : ''}>前往安装</button>`;
+    aria-label="${escape(`安装 ${repo.repository}`)}"${readOnly ? ' disabled title="只读预览，无法安装技能。"' : ''}>安装</button>`;
+}
+
+/* 点一下就加入安装队列：后台下载、装进技能库，不跳页、不锁页面。按钮随后消失，焦点留在这张卡片或详情里。 */
+async function queueGithubInstall(repository, button) {
+  if (jobsBlocked()) return;
+  const inDetail = $('detail-body').contains(button);
+  await withBusy(button, '正在加入…', async () => {
+    try {
+      applyQueue(await addToStoreQueue({github: repository}), {force: true});
+    } catch (error) {
+      toast({text: error.message, tone: 'error', sticky: true});
+    }
+  });
+  if (button.isConnected) return;
+  if (inDetail) focusStorePanel('.github-detail-actions button, .github-detail-actions a');
+  else $('store-shelves').querySelector(`[data-github-card="${CSS.escape(repository)}"] [data-github-open]`)?.focus({preventScroll: true});
 }
 
 /* 热门仓库卡片不是详情入口，外层用 div；标题是打开详情的按钮，安装和打开 GitHub 也放在卡片里面。 */
@@ -3758,7 +3804,8 @@ function renderGithubDetail() {
       ? `<p class="row-note is-error">没读到最新内容：${escape(detail.error)}
         <button class="link-btn" type="button" data-github-detail-retry="${escape(detail.repository)}">重试</button></p>`
       : '';
-    body.innerHTML = notice + githubDetailHtml(detail.data);
+    // 详情是打开时读的：本机状态以刚刷新的目录为准，装好后按钮和标签跟着变。
+    body.innerHTML = notice + githubDetailHtml({...detail.data, local: githubRepo(detail.repository)?.local || detail.data.local});
   }
   body.scrollTop = scroll;
 }
@@ -4025,7 +4072,7 @@ $('page-team').addEventListener('click', event => {
   const githubOpen = event.target.closest('[data-github-open]');
   const githubCard = event.target.closest('[data-github-card]');
   const githubMore = event.target.closest('[data-github-more]');
-  if (githubInstall) openGithubInstall(githubInstall.dataset.githubInstall);
+  if (githubInstall) queueGithubInstall(githubInstall.dataset.githubInstall, githubInstall);
   else if (githubOpen) openGithubDetail(githubOpen.dataset.githubOpen, githubOpen);
   else if (githubCard && !event.target.closest('a, button')) {
     // 卡片空白处也能打开详情；安装和 GitHub 链接照旧单独响应。
@@ -6098,11 +6145,7 @@ $('detail-body').addEventListener('submit', event => {
 $('detail-body').addEventListener('click', async event => {
   const button = event.target.closest('button');
   if (!button) return;
-  if (button.dataset.githubInstall !== undefined) {
-    closeDetail();
-    openGithubInstall(button.dataset.githubInstall);
-    return;
-  }
+  if (button.dataset.githubInstall !== undefined) { queueGithubInstall(button.dataset.githubInstall, button); return; }
   if (button.dataset.githubDetailRetry) { loadGithubDetail(button.dataset.githubDetailRetry); return; }
   if (button.dataset.githubDigestRetry) { retryGithubDigest(button.dataset.githubDigestRetry, button); return; }
   if (button.dataset.goto) { closeDetail(); gotoPlace(button.dataset.goto); return; }
@@ -6367,19 +6410,6 @@ async function inspectInstall(force = false) {
     installReadError = error.message;
     renderInstallRail();
   }
-}
-
-/* 「前往安装」不另写安装：到技能页左栏填上仓库地址，和用户自己粘贴链接一样读取，
-   仓库里有多个技能时照旧挑。 */
-function openGithubInstall(repository) {
-  const repo = (state.store?.github?.repos || []).find(item => item.repository === repository);
-  if (!repo) return;
-  showPage('skills');
-  $('install-url').value = repo.url;
-  clearTimeout(installInspectTimer);
-  inspectInstall(true);
-  $('install-rail').scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'center'});
-  $('install-url').focus({preventScroll: true});
 }
 
 /* 「全部安装」：只装能直接装的，装进技能库，并启用到卡片上勾的 Agent；不弹确认框，完成提示带撤销。 */
