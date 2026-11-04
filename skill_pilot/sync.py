@@ -170,8 +170,10 @@ def assignment_entries(name, agents, home=None, catalog=None):
 
 def disabled_lists(registry, home, agent_ids=None):
     catalog = profiles.managed(home, agent_ids)
+    external = external_disable_rules(registry, home)
     return {p['id']: sorted(name for name, skill in registry['skills'].items()
                            if p['id'] not in skill['assigned_agents'] and
+                           not externally_disabled(name, skill, p['id'], home, external) and
                            any(profiles.reads(p, entry) and
                                any(q['id'] in skill['assigned_agents'] and profiles.reads(q, entry) for q in catalog)
                                for entry in skill.get('entries', [])))
@@ -217,8 +219,23 @@ def notes(home, agent_ids=None):
 
 
 def reconcile_assignments(registry, home, checked, changed_names, entries_override=None):
+    from .scan import scan_root
     from .store import check_links
     external = external_disable_rules(registry, home)
+    catalog = profiles.managed(home)
+    entries = {name: set(registry['skills'][name].get('entries', [])) for name in changed_names}
+    cache = {}
+    # External installers can add aliases without updating the registry.
+    for root in sorted({r for p in catalog for r in p['skill_roots']}):
+        inventory = scan_root(home / root, profiles.root_nested(root, catalog), cache,
+                              excluded=profiles.exclusions(home / root, home))
+        if inventory['errors']:
+            raise ValueError('有技能目录没能完整读取，请解决后重新预览。')
+        for item in inventory['skills']:
+            name = item['name']
+            if (name in entries and item['valid'] and item['kind'] == 'link' and
+                    Path(item['resolved_path']) == (home / '.skill-pilot/store' / name).resolve()):
+                entries[name].add(Path(item['path']).relative_to(home).as_posix())
     for name in sorted(changed_names):
         skill = registry['skills'][name]
         target = home / '.skill-pilot/store' / name
@@ -226,22 +243,31 @@ def reconcile_assignments(registry, home, checked, changed_names, entries_overri
         desired = (entries_override[name] if entries_override and name in entries_override else
                    assignment_entries(name, skill['assigned_agents'], home))
         if not entries_override or name not in entries_override:
-            watched = {Path(path) for agent in skill['assigned_agents']
-                       for path in external.get(agent, {}).get('entry_paths', [])}
+            watched = {Path(path) for rules in external.values() for path in rules.get('entry_paths', [])}
             # Keep a user-disabled alias when adding another reader. Removing it
             # would make the old path rule stop applying to the shared copy.
-            protected = [entry for entry in skill.get('entries', [])
+            protected = [entry for entry in entries[name]
                          if home / entry in watched or home / entry / 'SKILL.md' in watched]
             desired = sorted(set(desired) | set(protected))
-        for relative in sorted(set(skill.get('entries', [])) | set(desired)):
+        # Validate the entire chain before rewriting or removing any entry.
+        for relative in sorted(entries[name] | set(desired)):
             path = checked(home / relative)
             if path.exists() or path.is_symlink():
                 if not path.is_symlink() or path.resolve() != target.resolve():
                     raise ValueError('技能入口出现了外部改动，请先收编或刷新后再应用。')
-                if relative not in desired:
-                    path.unlink()
-            elif relative in desired:
-                checked(path.parent).mkdir(parents=True, exist_ok=True)
-                path.symlink_to(str(target), target_is_directory=True)
+        # Kept aliases must point at the store before their intermediate links go.
+        for relative in desired:
+            path = checked(home / relative)
+            if path.is_symlink():
+                if readlink(path) == str(target):
+                    continue
+                path.unlink()
+            checked(path.parent).mkdir(parents=True, exist_ok=True)
+            path.symlink_to(str(target), target_is_directory=True)
+        kept = {(home / e).parent.resolve() / Path(e).name for e in desired}
+        for relative in sorted(entries[name] - set(desired)):
+            path = checked(home / relative)
+            if path.is_symlink() and path.parent.resolve() / path.name not in kept:
+                path.unlink()
         skill['entries'] = desired
     reconcile_disabled(registry, home, checked)
