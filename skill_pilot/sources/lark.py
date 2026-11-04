@@ -84,6 +84,34 @@ def prepare(sources, temporary, version, deadline=None):
     return result
 
 
+def _npm_command(env, root):
+    # Resolve shell/version-manager launchers while their original HOME works.
+    # Exit before npm's entry point runs: no config loading or package lifecycle.
+    probe = root / 'npm-runtime.cjs'
+    probe.write_text("if (process.argv[1] && process.argv.includes('--version')) {\n"
+                     "  require('fs').writeFileSync(1, 'SP_NPM_RUNTIME=' + JSON.stringify({\n"
+                     "    node: process.execPath, entry: process.argv[1]\n"
+                     "  }) + '\\n');\n  process.exit(0);\n}\n")
+    try:
+        result = subprocess.run([shutil.which('npm', path=env['PATH']), '--version'], cwd=root,
+                                env={**env, 'NODE_OPTIONS': '--require ' + json.dumps(str(probe), ensure_ascii=False)},
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError('飞书安装所需的工具启动入口没能运行，请检查 Node.js 和 npm。这组技能保持原样。') from error
+    if result.returncode:
+        raise ValueError(f'飞书安装所需的工具启动失败（退出状态 {result.returncode}），请检查 Node.js 和 npm。这组技能保持原样。') from subprocess.CalledProcessError(
+            result.returncode, result.args, result.stdout, result.stderr)
+    try:
+        line, = [line for line in result.stdout.decode().splitlines() if line.startswith('SP_NPM_RUNTIME=')]
+        paths = json.loads(line.removeprefix('SP_NPM_RUNTIME='))
+        node, entry = Path(paths['node']), Path(paths['entry'])
+        if not all(p.is_absolute() and p.is_file() for p in (node, entry)) or not os.access(node, os.X_OK):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError, UnicodeError) as error:
+        raise ValueError('无法确认飞书安装所需的工具位置，请检查 Node.js 和 npm 的启动入口。这组技能保持原样。') from error
+    return [str(node.resolve()), str(entry.resolve())]
+
+
 def install_cli(home, version, checked):
     guard(home / '.skill-pilot', home)
     if os.name == 'nt':
@@ -98,18 +126,24 @@ def install_cli(home, version, checked):
     with tempfile.TemporaryDirectory(prefix='skill-pilot-lark-install-') as temporary:
         root = Path(temporary)
         env = {k: v for k, v in env.items() if not k.lower().startswith(('npm_config_', 'pnpm_'))}
-        env.update(HOME=str(root), npm_config_prefix=str(root / 'prefix'), npm_config_cache=str(root / 'cache'),
+        env.update(npm_config_prefix=str(root / 'prefix'), npm_config_cache=str(root / 'cache'),
                    npm_config_userconfig=str(root / 'user.npmrc'), npm_config_globalconfig=str(root / 'global.npmrc'),
                    XDG_CONFIG_HOME=str(root / '.config'), XDG_STATE_HOME=str(root / '.state'))
-        result = subprocess.run(['npm', 'install', '-g', '@larksuite/cli@' + version],
-                                cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+        command = _npm_command(env, root)
+        env.update(HOME=str(root), PATH=str(Path(command[0]).parent) + os.pathsep + env['PATH'])
+        try:
+            result = subprocess.run([*command, 'install', '-g', '@larksuite/cli@' + version],
+                                    cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError('飞书工具安装未能启动或等待超时，请检查安装环境后重试。这组技能保持原样。') from error
         if result.returncode:
             error = result.stderr.decode(errors='replace')
             reason = ('安装设置互相冲突' if 'double-loading config' in error else
                       '下载没有成功，请检查网络后重试' if any(code in error for code in
                           ('ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED')) else
                       '安装程序报错，请稍后重试')
-            raise ValueError('飞书工具' + reason + '。这组技能保持原样。')
+            raise ValueError('飞书工具' + reason + f'（退出状态 {result.returncode}）。这组技能保持原样。') from subprocess.CalledProcessError(
+                result.returncode, result.args, result.stdout, result.stderr)
         package = root / 'prefix/lib/node_modules/@larksuite/cli'
         if json.loads((package / 'package.json').read_text())['version'] != version:
             raise ValueError('飞书工具版本没有核对通过，技能保持原样。')

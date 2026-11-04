@@ -302,7 +302,7 @@ class LarkInstallerTests(unittest.TestCase):
                 root = Path(kwargs['env']['HOME'])
                 self.assertNotEqual(root, self.home)
                 self.assertNotEqual(kwargs['env']['npm_config_userconfig'], kwargs['env']['npm_config_globalconfig'])
-                check = real_run(['npm', 'config', 'get', 'registry', '--logs-max=0', '--update-notifier=false'],
+                check = real_run([*command[:2], 'config', 'get', 'registry', '--logs-max=0', '--update-notifier=false'],
                                  cwd=root, env=kwargs['env'], capture_output=True, timeout=20)
                 self.assertEqual(check.returncode, 0, check.stderr.decode())
                 package = root / 'prefix/lib/node_modules/@larksuite/cli'
@@ -310,7 +310,9 @@ class LarkInstallerTests(unittest.TestCase):
                 (package / 'package.json').write_text('{"version":"1.0.98"}')
                 (package / 'scripts/run.js').write_text('fixture')
                 return subprocess.CompletedProcess(command, 0, b'', b'')
-            with patch.object(lark.subprocess, 'run', side_effect=fake_install):
+            def dispatch(command, **kwargs):
+                return fake_install(command, **kwargs) if 'install' in command else real_run(command, **kwargs)
+            with patch.object(lark.subprocess, 'run', side_effect=dispatch):
                 lark.install_cli(self.home, '1.0.98', lambda p: store.guard(p, self.home))
             self.assertEqual(json.loads((self.home / lark.CLI_PATHS[0] / 'package.json').read_text())['version'], '1.0.98')
 
