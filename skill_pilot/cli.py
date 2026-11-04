@@ -127,6 +127,9 @@ def main():
         if name == 'absorb':
             command.add_argument('--all', action='store_true')
             command.add_argument('--yes', action='store_true')
+            command.add_argument('--path', action='append', help='只收编此副本（相对于用户目录，可重复）')
+            command.add_argument('--choose', action='append', default=[], help='技能=store 或 技能=副本相对路径，可重复')
+            command.add_argument('--revision', help='副本预览返回的核对编号')
         if name == 'install':
             command.add_argument('source', metavar='SOURCE', help='GitHub 链接，或本机的技能文件夹')
             command.add_argument('--skill', action='append')
@@ -408,9 +411,17 @@ def main():
                 data = operations.apply_assign([{'skill': args.skill, 'agent': args.agent,
                                                   'enabled': args.command == 'assign'}], confirmed=args.yes)
             elif args.command == 'absorb':
+                from .web.server import preview_absorb
                 if not args.yes:
-                    raise ValueError('收编会移动新装技能，请核对后加 --yes 执行。')
-                data = operations.absorb(all_skills=args.all)
+                    data = preview_absorb(selected=args.path)
+                else:
+                    choices = {}
+                    for value in args.choose:
+                        name, separator, choice = value.partition('=')
+                        if not separator or not name or not choice or name in choices:
+                            raise ValueError('保留版本请写成 技能=store 或 技能=副本相对路径，每个技能只选一次。')
+                        choices[name] = choice
+                    data = operations.absorb(all_skills=args.all, selected=args.path, expected=args.revision, choices=choices)
             elif args.command == 'install':
                 if '://' in args.source:
                     from .sources.github import inspect
@@ -462,6 +473,12 @@ def main():
                     print(conflict['name'] + '：' + conflict['message'])
                     if conflict.get('comparison'):
                         print(conflict['comparison'])
+                    for option in conflict.get('options', []):
+                        print('保留版本：--choose ' + conflict['name'] + '=' + option['value'])
+                        if option.get('comparison'):
+                            print(option['comparison'])
+                if args.command == 'absorb' and data.get('revision'):
+                    print('核对编号：--revision ' + data['revision'])
             if isinstance(data, dict) and (data.get('needs_confirmation') or data.get('conflicts')):
                 raise SystemExit(2)
             return

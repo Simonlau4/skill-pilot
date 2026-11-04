@@ -55,3 +55,49 @@ for (const path of ['.codex/skills/new', '.codex/skills/existing', '.claude/skil
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('renderNewSkills();', extract_function(source, 'function renderBusyAreas('))
+
+    def test_resolution_requires_choices_and_submits_the_reviewed_revision(self):
+        source = (STATIC / 'app.js').read_text()
+        script = extract_function(source, 'function renderAbsorbApply(')
+        script += extract_function(source, 'async function applyAbsorb(')
+        script += r'''
+const elements = new Map();
+let closed = false;
+const $ = id => {
+  if (!elements.has(id)) elements.set(id, {close: () => {closed = true;}});
+  return elements.get(id);
+};
+const inputs = [{value: ''}, {value: 'store'}];
+const document = {querySelectorAll: () => inputs};
+let absorbReview = {revision: 'reviewed', skills: ['one', 'two']};
+let writeBusy = null;
+const state = {table: {write_allowed: true, revision: 'changed-after-review'}};
+const assert = (value, message) => {if (!value) throw Error(message);};
+renderAbsorbApply();
+assert($('absorb-apply').disabled, '没有选全版本不能提交');
+inputs[0].value = '.agents/skills/one';
+renderAbsorbApply();
+assert(!$('absorb-apply').disabled, '选完版本应可提交');
+writeBusy = 'writing';
+renderAbsorbApply();
+assert($('absorb-apply').disabled, '写入中不能重复提交');
+writeBusy = null;
+state.table.write_allowed = false;
+renderAbsorbApply();
+assert($('absorb-apply').disabled, '只读时不能提交');
+state.table.write_allowed = true;
+let submitted;
+const api = async (path, body) => {submitted = {path, body}; return {id: 'operation'};};
+const runWrite = async options => options.work();
+const refreshEverything = async () => {};
+(async () => {
+  const choices = {one: inputs[0].value, two: 'store'};
+  await applyAbsorb(absorbReview, choices, $('absorb-apply'));
+  assert(submitted.path === '/api/absorb', '必须使用收编接口');
+  assert(submitted.body.revision === 'reviewed', '不能用刷新后的编号冒充已核对版本');
+  assert(submitted.body.choices === choices && submitted.body.confirmed, '提交必须包含所选版本');
+  assert(closed && absorbReview === null, '成功后结束核对');
+})().catch(error => {console.error(error); process.exit(1);});
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -356,6 +356,7 @@ const WRITE_LOCK_SELECTORS = [
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
   '#log-list button', '#log-refresh', '#log-export', '#detail-body button:not(.hint)', '#detail-body select',
   '#new-absorb', '#new-toggle', '#install-dialog button:not(.hint)',
+  '#absorb-dialog select', '#absorb-dialog button',
   '#agents-scan', '#agent-add-submit', '#agents-managed button:not(.hint)', '#agents-suggested button:not(.hint)', '#agents-ignored button:not(.hint)', '#agents-join-dialog input', '#agents-join-dialog button:not(.hint)',
   '#migration-preview', '#migration-apply', '#migration-back', '#migration-agents input',
   '#migration-versions input', '#migration-backups', '#migration-restore', '#migration-backup-list button',
@@ -2493,37 +2494,83 @@ $('new-toggle').addEventListener('click', event => {
   event.currentTarget.setAttribute('aria-expanded', String(!list.hidden));
 });
 
-$('new-absorb').addEventListener('click', async event => {
-  const button = event.currentTarget;
-  const changed = state.table.changed_skills || [];
-  const list = [...state.table.new_skills, ...changed];
-  const names = [...new Set(list.map(s => s.name))];
-  const ok = await confirmDialog({
-    title: changed.length ? '统一管理技能副本' : '收编新技能',
-    lines: [changed.length ? '会把独立副本纳入统一管理，保持原来的可见范围。内容不同的会先提示核对。' : '会把这些技能收进统一仓库，保持原来的可见范围。'],
-    groups: [{label: `收进仓库 ${names.length} 个`, items: names.map(name => ({name}))}],
-    note: '可以在操作记录里撤销。',
-    okText: changed.length ? '统一管理' : '收编',
-  });
-  if (!ok) return;
+let absorbReview = null;
+
+function renderAbsorbApply() {
+  const complete = absorbReview && [...document.querySelectorAll('[data-absorb-choice]')].every(input => input.value);
+  $('absorb-apply').disabled = !complete || Boolean(writeBusy) || !state.table?.write_allowed;
+}
+
+async function applyAbsorb(review, choices, button) {
   const result = await runWrite({
     button,
-    busyText: '正在收编…',
+    busyText: '正在统一管理…',
     work: async () => {
-      const written = await api('/api/absorb', {all: true, revision: state.table.revision, confirmed: true});
+      const written = await api('/api/absorb', {all: true, revision: review.revision, choices, confirmed: true});
+      if (written.conflicts?.length) throw new Error('副本需要重新核对，请关闭后重新打开。');
+      $('absorb-dialog').close();
+      absorbReview = null;
       await refreshEverything();
       return written;
     },
-    success: written => (written.conflicts?.length ? null : {
+    onError: error => { $('absorb-message').textContent = error.message; },
+    success: written => ({
       text: '技能副本已经纳入统一管理',
-      undo: undoButton => undoOperation(written.id, {skills: names, message: written.message, button: undoButton}),
+      undo: undoButton => undoOperation(written.id, {skills: review.skills, message: written.message, button: undoButton}),
     }),
   });
-  if (result?.conflicts?.length) {
-    toast({text: '有同名技能需要先对比，请到安装技能里查看差异。', tone: 'error', sticky: true});
-    openInstall();
-    await showIncomingConflicts(result, null);
+  renderAbsorbApply();
+  return result;
+}
+
+$('new-absorb').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = '正在核对副本…';
+  try {
+    const review = await api('/api/absorb/preview', {});
+    if (!review.skills?.length) { await refreshEverything(); return; }
+    if (review.conflicts.length) {
+      absorbReview = review;
+      $('absorb-message').textContent = `本次统一管理 ${review.skills.length} 个技能，其中 ${review.conflicts.length} 个需要选择版本。`;
+      $('absorb-choices').innerHTML = review.conflicts.map(conflict => `
+        <section class="fold fold-inner">
+          <h3 class="sub-title">${escape(conflict.name)}</h3>
+          <label>统一使用
+            <select class="input" data-absorb-choice="${escape(conflict.name)}" aria-label="${escape(conflict.name)} 保留版本">
+              <option value="">请选择核对过的版本</option>
+              ${conflict.options.map(option => `<option value="${escape(option.value)}">${escape(option.label)}</option>`).join('')}
+            </select>
+          </label>
+          ${conflict.options.filter(option => option.comparison).map(option => `<details class="fold fold-inner">
+            <summary>${escape(option.label)} 与第一份的差异</summary><pre>${escape(option.comparison)}</pre>
+          </details>`).join('')}
+        </section>`).join('');
+      renderAbsorbApply();
+      $('absorb-dialog').showModal();
+      return;
+    }
+    const ok = await confirmDialog({
+      title: '统一管理技能副本',
+      lines: ['会把独立副本纳入统一管理，保持原来的可见范围。'],
+      groups: [{label: `收进仓库 ${review.skills.length} 个`, items: review.skills.map(name => ({name}))}],
+      note: '可以在操作记录里撤销。', okText: '统一管理',
+    });
+    if (ok) await applyAbsorb(review, {}, button);
+  } catch (error) {
+    toast({text: error.message, tone: 'error', sticky: true});
+  } finally {
+    renderNewSkills();
   }
+});
+
+$('absorb-choices').addEventListener('change', renderAbsorbApply);
+$('absorb-close').addEventListener('click', () => $('absorb-dialog').close());
+$('absorb-apply').addEventListener('click', async event => {
+  if (!absorbReview || event.currentTarget.disabled) return;
+  const choices = Object.fromEntries([...document.querySelectorAll('[data-absorb-choice]')]
+    .map(input => [input.dataset.absorbChoice, input.value]));
+  await applyAbsorb(absorbReview, choices, event.currentTarget);
 });
 
 /* 重新加载数据。 */

@@ -778,30 +778,52 @@ def update_local(name, folder, expected=None, home=None, confirmed=False):
     return _run(home, registry, agents, expected or revision(home, agents), f'用本地文件更新了「{name}」', mutate)
 
 
-def absorb(all_skills=False, selected=None, expected=None, home=None):
+def absorb(all_skills=False, selected=None, expected=None, home=None, choices=None, preview=False):
     home, registry, agents = load(home)
-    guard(home / '.skill-pilot', home)
+    if not preview:
+        guard(home / '.skill-pilot', home)
+    choices = {} if choices is None else choices
+    if not isinstance(choices, dict) or any(not isinstance(v, str) for v in choices.values()):
+        raise ValueError('请为每个冲突技能选择要保留的版本。')
+    if choices and not expected:
+        raise ValueError('请先预览副本差异，再带上核对编号执行。')
     start = expected or revision(home, agents)
     candidates = external_skills(home, agents, registry)
-    if not all_skills:
-        if selected:
-            candidates = [s for s in candidates if s['relative'] in selected]
-        elif len(candidates) != 1:
+    if selected is not None:
+        if not isinstance(selected, list) or not selected or not all(isinstance(p, str) for p in selected):
+            raise ValueError('请指定要收编的副本位置。')
+        if set(selected) - {s['relative'] for s in candidates}:
+            raise ValueError('所选副本已经变化，请刷新后重新核对。')
+        candidates = [s for s in candidates if s['relative'] in selected]
+    elif not all_skills:
+        if len(candidates) != 1:
             return {'new_skills': [s for s in candidates if not s['registered']],
                     'changed_skills': [s for s in candidates if s['registered']],
                     'message': '请指定要统一管理的技能，或使用 --all 收编全部。'}
     if not candidates:
+        if choices:
+            raise ValueError('所选副本已经变化，请刷新后重新核对。')
         return {'message': '没有需要收编的技能或外部副本。'}
-    collisions = [c for c in conflicts(candidates, registry, home) if not c['same_content']]
-    grouped = {}
+    grouped, copies_by_name, collisions = {}, {}, []
     for item in candidates:
-        name = item['name']
-        if name in grouped and normalization.tree(Path(grouped[name]['path'])) != normalization.tree(Path(item['path'])):
-            collisions.append({'name': name, 'existing': grouped[name]['path'], 'incoming': item['path'],
-                               'message': '新装的同名技能内容不同，请先对比。'})
-        grouped[name] = item
-    if collisions:
-        return {'conflicts': collisions, 'message': '有同名技能需要先对比，文件没有改动。'}
+        copies_by_name.setdefault(item['name'], []).append(item)
+    if set(choices) - set(copies_by_name):
+        raise ValueError('所选技能已不在这次收编范围内，请刷新后重新核对。')
+    for name, copies in copies_by_name.items():
+        options = ([{'value': 'store', 'path': str(home / '.skill-pilot/store' / name),
+                     'label': '技能库中的版本'}] if name in registry['skills'] else [])
+        options += [{'value': s['relative'], 'path': s['path'], 'label': s['relative']} for s in copies]
+        choice = choices.get(name)
+        if choice is not None and choice not in {o['value'] for o in options}:
+            raise ValueError('所选副本不属于这个技能，请刷新后重新核对。')
+        different = len({normalization.tree(Path(o['path'])) for o in options}) > 1
+        if different and (preview or choice is None):
+            collisions.append({'name': name, 'existing': options[0]['path'], 'incoming': options[1]['path'],
+                               'options': options, 'message': '请选择核对后要统一使用的版本。'})
+        grouped[name] = next((s for s in copies if s['relative'] == choice), copies[0])
+    if preview or collisions:
+        return {'revision': start, 'skills': sorted(grouped), 'conflicts': collisions,
+                'needs_confirmation': True, 'message': '请核对副本差异和保留版本，文件没有改动。'}
     lock_path = home / '.agents/.skill-lock.json'
     records = json.loads(lock_path.read_text()).get('skills', {}) if lock_path.exists() else {}
     for name, item in grouped.items():
@@ -829,6 +851,16 @@ def absorb(all_skills=False, selected=None, expected=None, home=None):
                 _put(home, current, grouped[name], assigned, [], checked)
             else:
                 current['skills'][name]['assigned_agents'] = assigned
+                if choices.get(name) not in (None, 'store'):
+                    incoming = Path(grouped[name]['path'])
+                    github.safe_skill(incoming)
+                    destination = checked(home / '.skill-pilot/store' / name)
+                    rmtree(destination)
+                    copytree(incoming, destination, symlinks=True, ignore=shutil.ignore_patterns(*SKIP_CONTENT))
+                    current['skills'][name]['normalization'] = normalization.apply(destination)
+                    # An external copy is a local choice, not a verified upstream release.
+                    # Keep the source and original base so update checks can still compare it.
+                    content.append(name)
             for item in copies:
                 source = checked(Path(item['path']))
                 # Move the full original aside in this operation's backup; never discard user files.
@@ -837,7 +869,7 @@ def absorb(all_skills=False, selected=None, expected=None, home=None):
                 current['skills'][name]['entries'].append(item['relative'])
                 source.symlink_to(str(home / '.skill-pilot/store' / name), target_is_directory=True)
         reconcile_assignments(current, home, checked, names)
-        return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names},
+        return names, content, {'choices': choices, 'normalization': {n: current['skills'][n].get('normalization', {}) for n in names},
                                 **({'_assignment_before': before} if had_drift else {})}
     return _run(home, registry, agents, start, f'收编了 {len(grouped)} 个技能的独立副本', mutate)
 

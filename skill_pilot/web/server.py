@@ -22,8 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from ..scan import scan
-from ..store import SKIP_CONTENT, apply, backups, guard, preview, restore, target_home
-from .. import operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest
+from ..store import apply, backups, guard, preview, restore, target_home
+from .. import operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from . import runtime
@@ -1013,7 +1013,7 @@ class Handler(BaseHTTPRequestHandler):
                 and self.server.program_progress['phase'] == 'apply'):
             self.reply(503, {'error': '正在升级 SP，请完成后刷新页面再操作。'})
             return
-        read_routes = {'/api/assignment/preview', '/api/cleanup/preview', '/api/cleanup/delete/preview', '/api/install/inspect', '/api/incoming/compare',
+        read_routes = {'/api/assignment/preview', '/api/absorb/preview', '/api/cleanup/preview', '/api/cleanup/delete/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
                        '/api/agents/scan', '/api/team/listings/preview', '/api/program/auto-check'}
@@ -1163,6 +1163,9 @@ class Handler(BaseHTTPRequestHandler):
                 registry = operations.load(self.server.home)[1]
                 self.reply(200, {**review, 'conflicts': operations.conflicts(review['skills'], registry, self.server.home)})
                 return
+            if path == '/api/absorb/preview':
+                self.reply(200, preview_absorb(self.server.home, body.get('selected')))
+                return
             if path == '/api/incoming/compare':
                 existing = self.server.home / '.skill-pilot/store' / body['name']
                 if body.get('review_id'):
@@ -1225,7 +1228,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = operations.install(self.server.install_reviews[body['review_id']], body['skills'],
                                                 body.get('agents'), body['revision'], self.server.home)
                 elif path == '/api/absorb':
-                    result = operations.absorb(body.get('all', True), body.get('selected'), body['revision'], self.server.home)
+                    result = operations.absorb(body.get('all', True), body.get('selected'), body['revision'], self.server.home,
+                                               body.get('choices'))
                 elif path == '/api/updates/watch':
                     result = updates.set_watch(body.get('name'), body.get('mode'), body.get('revision'), self.server.home, True)
                 elif path == '/api/updates/apply':
@@ -1305,18 +1309,28 @@ def preview_allowed(home):
         return False
 
 
+def preview_absorb(home=None, selected=None):
+    result = operations.absorb(all_skills=not selected, selected=selected, home=home, preview=True)
+    for conflict in result.get('conflicts', []):
+        left = Path(conflict['existing'])
+        for option in conflict['options']:
+            github.safe_skill(Path(option['path']))
+            option['comparison'] = compare_files(left, Path(option['path'])) if option['path'] != str(left) else ''
+    return result
+
+
 def compare_files(left, right):
-    def files(root):
-        return {p.relative_to(root).as_posix(): p for p in root.rglob("*") if p.is_file()
-                and not any(part in SKIP_CONTENT for part in p.relative_to(root).parts)}
-    one, two = files(left), files(right)
+    one, two = normalization.files(left, normalize=False), normalization.files(right, normalize=False)
     result = [f"默认选择：{left}\n另一份：{right}\n"]
     for name in sorted(one.keys() | two.keys()):
-        a = one[name].read_bytes() if name in one else b""
-        b = two[name].read_bytes() if name in two else b""
-        if a == b:
+        if one.get(name) == two.get(name):
             continue
-        result.append(f"文件：{name}" + ("（脚本或可执行文件）" if Path(name).suffix in {".py", ".js", ".sh"} else ""))
+        a, old_mode = one.get(name, (b'', None))
+        b, new_mode = two.get(name, (b'', None))
+        status = '新增' if name not in one else '删除' if name not in two else '改变'
+        result.append(f"文件：{name}（{status}）" + ("（脚本或可执行文件）" if Path(name).suffix in {".py", ".js", ".sh"} else ""))
+        if old_mode is not None and new_mode is not None and old_mode != new_mode:
+            result.append('文件类型或执行权限不同。')
         try:
             result.extend(difflib.unified_diff(a.decode().splitlines(), b.decode().splitlines(), fromfile="默认选择", tofile="另一份", lineterm=""))
         except UnicodeError:
