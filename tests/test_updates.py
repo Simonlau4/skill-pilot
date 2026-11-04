@@ -386,7 +386,7 @@ class LarkTests(unittest.TestCase):
             before = {p:store.physical_state(home/p) for p in snapshot_paths}
             check_result={'available':True,'latest_version':'1.0.98','current_version':'1.0.97','message':'lark-cli 有新版（含 28 个飞书技能）'}
             def fake_npm(command, **kwargs):
-                self.assertEqual(command,['npm','install','-g','@larksuite/cli@1.0.98'])
+                self.assertEqual(command,['node-fixture','npm-fixture','install','-g','@larksuite/cli@1.0.98'])
                 root=Path(kwargs['env']['HOME'])
                 self.assertNotEqual(root,home)
                 package=root/'prefix/lib/node_modules/@larksuite/cli'
@@ -414,8 +414,9 @@ class LarkTests(unittest.TestCase):
                 return
             real_run=subprocess.run
             def dispatch(command, **kwargs):
-                return fake_npm(command,**kwargs) if command[0]=='npm' else real_run(command,**kwargs)
-            with patch.object(lark.subprocess,'run',side_effect=dispatch):
+                return fake_npm(command,**kwargs) if command[0]=='node-fixture' else real_run(command,**kwargs)
+            with patch.object(lark, '_npm_command', return_value=['node-fixture', 'npm-fixture']), \
+                    patch.object(lark.subprocess,'run',side_effect=dispatch):
                 result=updates.apply(review,['lark-doc'],confirmed=True,confirm_lark=True)
             self.assertIn('new official',(home/'.skill-pilot/store/lark-doc/SKILL.md').read_text())
             self.assertEqual(before[str(unused.relative_to(home))],store.physical_state(unused))
