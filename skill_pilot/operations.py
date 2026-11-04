@@ -553,50 +553,47 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
 def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=False, review_check=None):
     home, registry, agents = load(home)
     guard(home / '.skill-pilot', home)
-    if recheck:
-        review, plan, before = _recheck_assignment(changes, home, registry, agents)
-        if expected != review['revision']:
+    # CLI callers use the same observed starting state as dashboard jobs.
+    if not recheck and expected is None:
+        expected = revision(home, agents)
+    review, plan, before = _recheck_assignment(changes, home, registry, agents)
+    if expected != review['revision']:
+        if recheck:
             raise AssignmentChanged('状态又有变化，正在重新核对；你的选择已保留。')
-        if review['conflicts']:
+        raise ValueError('目录内容已经变了，请刷新后重新核对。')
+    if review['conflicts']:
+        if recheck:
             return {'needs_attention': True, **review}
-        if review_check:
-            attention = review_check(review)
-            if attention:
-                return attention
-        if (plan['dependency_warnings'] or plan['path_warnings']) and not confirmed:
-            return {'needs_confirmation': True, **review}
-        if not plan['changed']:
-            return {'message': '这些改动已经完成，已与最新状态对齐。'}
-        had_drift = any((set(before[a]) & set(registry['skills'])) !=
-            {n for n, s in registry['skills'].items() if a in s['assigned_agents']} for a in agents)
-        def check_current():
-            if revision(home, agents) != expected:
-                raise AssignmentChanged('状态又有变化，正在重新核对；你的选择已保留。')
-            return registry
-        def apply_latest(current, checked):
-            working = plan['registry']
-            reconcile_assignments(working, home, checked, plan['changed'])
-            for name in plan['changed']:
-                current['skills'][name] = working['skills'][name]
-            if 'codex_config' in working:
-                current['codex_config'] = working['codex_config']
-            expected_visibility = {a: sorted((set(before[a]) - set(plan['changed'])) |
-                {n for n in plan['changed'] if a in working['skills'][n]['assigned_agents']}) for a in agents}
-            result = {'reasons': plan['reasons'], '_expected_visibility': expected_visibility}
-            if had_drift:
-                result['_assignment_before'] = before
-            return plan['changed'], [], result
-        return _run(home, registry, agents, check_current, plan['message'], apply_latest)
-    plan = assignment_plan(registry, agents, changes, home)
+        raise ValueError('；'.join(dict.fromkeys(c['message'] for c in review['conflicts'])))
+    if review_check:
+        attention = review_check(review)
+        if attention:
+            return attention
     if (plan['dependency_warnings'] or plan['path_warnings']) and not confirmed:
-        return {'needs_confirmation': True, **{k: v for k, v in plan.items() if k != 'registry'}}
+        return {'needs_confirmation': True, **review}
     if not plan['changed']:
-        return {'message': plan['message'], 'reasons': plan['reasons']}
-    def mutate(current, checked):
-        current.update(plan['registry'])
-        reconcile_assignments(current, home, checked, plan['changed'])
-        return plan['changed'], [], {'reasons': plan['reasons']}
-    return _run(home, registry, agents, expected or revision(home, agents), plan['message'], mutate)
+        return {'message': '这些改动已经完成，已与最新状态对齐。' if recheck else plan['message'],
+                'reasons': plan['reasons']}
+    had_drift = any((set(before[a]) & set(registry['skills'])) !=
+        {n for n, s in registry['skills'].items() if a in s['assigned_agents']} for a in agents)
+    def check_current():
+        if revision(home, agents) != expected:
+            raise AssignmentChanged('状态又有变化，请刷新后重新核对；你的选择已保留。')
+        return registry
+    def apply_latest(current, checked):
+        working = plan['registry']
+        reconcile_assignments(working, home, checked, plan['changed'])
+        for name in plan['changed']:
+            current['skills'][name] = working['skills'][name]
+        if 'codex_config' in working:
+            current['codex_config'] = working['codex_config']
+        expected_visibility = {a: sorted((set(before[a]) - set(plan['changed'])) |
+            {n for n in plan['changed'] if a in working['skills'][n]['assigned_agents']}) for a in agents}
+        result = {'reasons': plan['reasons'], '_expected_visibility': expected_visibility}
+        if had_drift:
+            result['_assignment_before'] = before
+        return plan['changed'], [], result
+    return _run(home, registry, agents, check_current, plan['message'], apply_latest)
 
 
 def decide_dependencies(decisions, expected=None, home=None):
@@ -818,9 +815,15 @@ def absorb(all_skills=False, selected=None, expected=None, home=None):
     def mutate(current, checked):
         names = sorted(grouped)
         content = [n for n in names if n not in current['skills']]
+        actual = visibility(home, profiles.managed(home, agents))
+        before = {a: actual[a]['available'] for a in agents}
+        had_drift = any({a for a in agents if name in before[a]} !=
+                        set(current['skills'][name]['assigned_agents'])
+                        for name in names if name in current['skills'])
         for name in names:
             copies = [s for s in candidates if s['name'] == name]
             assigned = sorted({a for s in copies for a in s['assigned_agents']} |
+                              {a for a in agents if name in before[a]} |
                               set(current['skills'].get(name, {}).get('assigned_agents', [])))
             if name not in current['skills']:
                 _put(home, current, grouped[name], assigned, [], checked)
@@ -833,8 +836,9 @@ def absorb(all_skills=False, selected=None, expected=None, home=None):
                 shutil.move(str(source), str(moved))
                 current['skills'][name]['entries'].append(item['relative'])
                 source.symlink_to(str(home / '.skill-pilot/store' / name), target_is_directory=True)
-            reconcile_assignments(current, home, checked, [name])
-        return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names}}
+        reconcile_assignments(current, home, checked, names)
+        return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names},
+                                **({'_assignment_before': before} if had_drift else {})}
     return _run(home, registry, agents, start, f'收编了 {len(grouped)} 个技能的独立副本', mutate)
 
 
@@ -912,7 +916,9 @@ def undo(operation_id, expected=None, home=None):
         if not later and record.get('after_revision') != revision(home, agents):
             raise ValueError('这次操作后出现了外部改动，请先核对这些变化，再撤销。文件没有改动。')
         try:
-            if record.get('agents_changed') and not record['skills']:
+            # Removing an unregistered alias can leave the tracked store unchanged.
+            if ((record.get('agents_changed') and not record['skills']) or
+                    not github.git(store, 'diff-tree', '--no-commit-id', '--name-only', '-r', operation_id)):
                 _commit(home, current, [], [], '撤销：' + record['message'])
             else:
                 github.git(store, '-c', 'user.name=Skill Pilot', '-c', 'user.email=local@skill-pilot.invalid',
