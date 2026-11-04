@@ -848,6 +848,19 @@
   </form>
 </dialog>
 
+<dialog id="absorb-dialog" class="dialog dialog-wide" aria-labelledby="absorb-title">
+  <div class="dialog-form">
+    <h2 id="absorb-title">核对技能副本</h2>
+    <p>所选版本将供所有正在使用该技能的助手共用，助手名单保持不变。原文件会备份，可以在操作记录里撤销。</p>
+    <p id="absorb-message" role="status"></p>
+    <div id="absorb-choices" class="dialog-body list"></div>
+    <div class="dialog-actions">
+      <button id="absorb-close" type="button" class="btn">取消</button>
+      <button id="absorb-apply" type="button" class="btn btn-primary" disabled>按所选版本统一管理</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="install-dialog" class="dialog dialog-wide">
   <form method="dialog" class="dialog-form">
     <h2>安装技能</h2>
