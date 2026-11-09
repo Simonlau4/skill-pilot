@@ -89,10 +89,11 @@ const hint = text => `<button type="button" class="hint" data-hint="${escape(tex
 /* 空状态：一个大图标加一句话，后面可以跟一个说明图标或一个按钮。 */
 const emptyInner = (name, text, extra = '') => `${icon(name, 'ico-lg')}<span>${escape(text)}</span>${extra}`;
 
-async function api(path, body) {
+async function api(path, body, extra) {
   const options = body === undefined
     ? {headers}
     : {method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify(body)};
+  if (extra?.signal) options.signal = extra.signal;
   const response = await fetch(path, options);
   let result = null;
   try { result = await response.json(); } catch { /* 没有内容时按下面的默认文案处理 */ }
@@ -1430,8 +1431,12 @@ function renderActionBar() {
 /* ==================== 技能页：左边选 agent，右边是它的技能，改动先进底部托盘 ==================== */
 
 const PREVIEW_DEBOUNCE_MS = 100;
+// 核对正常很快结束。到点仍没有结果就停下来，避免「应用更改」一直灰着。
+const PREVIEW_TIMEOUT_MS = 30000;
 let previewBusy = false;
 let previewSequence = 0;
+let previewProblem = null;
+let previewController = null;
 let assignmentSubmitting = false;   // 提交分配任务期间不让托盘再改，避免提交的不是眼前这份
 let submittingAssignmentKeys = new Set();   // 只锁这次正在提交的那几处开关
 let previewTimer = null;
@@ -2160,15 +2165,23 @@ function renderSkillsActionBar() {
   const extra = paths.length ? `<details><summary>有 ${paths.length} 份文件引用了当前技能位置，应用后可能需要调整引用</summary>
       <ul>${paths.map(warning => `<li class="mono">${pathLabel(warning.file)}</li>`).join('')}</ul></details>` : '';
   const removing = changes.some(change => !change.enabled);
+  const checking = previewBusy;
+  const problem = previewProblem?.message || '';
+  const note = problem ? problem
+    : checking ? '正在核对…'
+    : state.pending?.conflicts?.length ? '请处理对应改动下的冲突，其他选择已保留。'
+    : changeSummary(changes) + (removing ? '（撤下的技能保留在本地，随时可恢复）' : '');
   showActionBar({
     text: `有 ${changes.length} 处待应用的改动`,
-    note: state.pending?.conflicts?.length ? '请处理对应改动下的冲突，其他选择已保留。'
-      : changeSummary(changes) + (removing ? '（撤下的技能保留在本地，随时可恢复）' : ''),
+    note,
     items,
     extra,
     buttons: [
       {label: '全部放弃', kind: 'btn btn-quiet', disabled: assignmentSubmitting, action: () => discardPending()},
-      {label: `应用更改 (${changes.length})`, kind: 'btn btn-primary', disabled: previewBusy || assignmentSubmitting || Boolean(writeBusy) || jobsBlocked() || !state.table.write_allowed, action: button => applyAssignment(button)},
+      ...(problem && !checking ? [{label: '重新核对', kind: 'btn', disabled: assignmentSubmitting, action: () => retryAssignmentPreview()}] : []),
+      {label: checking ? '正在核对…' : `应用更改 (${changes.length})`, kind: 'btn btn-primary',
+        disabled: checking || Boolean(problem) || assignmentSubmitting || Boolean(writeBusy) || jobsBlocked() || !state.table.write_allowed,
+        action: button => applyAssignment(button)},
     ],
   });
 }
@@ -2177,12 +2190,40 @@ function renderSkillsActionBar() {
    每次拨动都会让在途的预览结果作废，所以旧结果永远不会盖掉新的改动；
    100 毫秒内的连续拨动还会合并成一次请求。 */
 function invalidatePreview() {
-  return ++previewSequence;
+  const next = ++previewSequence;
+  // 停掉已经发出的核对。序号先变，这次的返回和报错都不能再改页面。
+  previewController?.abort();
+  previewController = null;
+  return next;
 }
 
 function schedulePreview() {
   clearTimeout(previewTimer);
+  previewProblem = null;
+  previewBusy = true;
+  state.pending = null;
   previewTimer = setTimeout(runPreview, PREVIEW_DEBOUNCE_MS);
+  if (state.table && state.page === 'skills') renderSkillsActionBar();
+}
+
+function previewFailure(message) {
+  const text = String(message || '没核对上').replace(/[。．.]+$/u, '');
+  return `${text}。你的选择还在。`;
+}
+
+function rememberPreviewFailure(error) {
+  // 任务还在写文件时，这次核对失败先不打扰；任务结束后会再核对一次。
+  if (jobsHasActive()) return;
+  previewProblem = {message: error?.name === 'AbortError'
+    ? '核对时间太长，已停下来。你的选择还在。'
+    : previewFailure(error?.message)};
+  toast({text: previewProblem.message, tone: 'error', sticky: true});
+}
+
+function retryAssignmentPreview() {
+  if (assignmentSubmitting || !state.assignmentIntents.size) return;
+  invalidatePreview();
+  schedulePreview();
 }
 
 function renderAssignmentViews() {
@@ -2195,22 +2236,36 @@ function renderAssignmentViews() {
 async function runPreview() {
   // 这次请求认领当前的序号；期间只要有人再拨，序号就会变，结果直接作废。
   const sequence = previewSequence;
+  if (!state.assignmentIntents.size) return;
   previewBusy = true;
-  renderSkillsActionBar();
+  previewProblem = null;
+  const controller = new AbortController();
+  previewController = controller;
+  const timer = setTimeout(() => controller.abort(), PREVIEW_TIMEOUT_MS);
+  if (state.page === 'skills') renderSkillsActionBar();
   try {
-    const result = await api('/api/assignment/preview', {changes: [...state.assignmentIntents.values()], recheck: true});
+    const result = await api('/api/assignment/preview', {
+      changes: [...state.assignmentIntents.values()], recheck: true,
+    }, {signal: controller.signal});
     if (sequence !== previewSequence) return;
+    if (result?.superseded) {
+      rememberPreviewFailure({message: '核对被打断了，请重新核对'});
+      return;
+    }
+    previewProblem = null;
     acceptAssignmentPlan(result);
   } catch (error) {
     if (sequence !== previewSequence) return;
-    // 网络或读取失败不撤销用户的选择；再次应用时会重新读取。
-    state.pending ||= {changed: pendingChanges().map(c => c.skill)};
-    // 任务写入期间预览偶尔读不到，先安静等着，任务结束后 finishJobs 会再预览一次。
-    if (!jobsHasActive()) toast({text: error.message, tone: 'error'});
+    // 失败、超时都不撤销用户的选择。
+    rememberPreviewFailure(error);
   } finally {
-    // 只有最新那次请求负责收起忙碌态；被作废的旧请求什么都不动。
-    if (sequence === previewSequence) previewBusy = false;
-    renderAssignmentViews();
+    clearTimeout(timer);
+    if (previewController === controller) previewController = null;
+    // 只有最新那次请求负责收起忙碌态；被作废的旧请求不改页面。
+    if (sequence === previewSequence) {
+      previewBusy = false;
+      renderAssignmentViews();
+    }
   }
 }
 
@@ -2226,6 +2281,7 @@ function discardPending() {
   clearTimeout(previewTimer);
   invalidatePreview();
   previewBusy = false;
+  previewProblem = null;
   state.draft = clone(state.saved);
   state.pending = null;
   state.assignmentIntents.clear();
@@ -2266,6 +2322,9 @@ function changeAssignment(name, agentId, enabled) {
   } else {
     // 先作废在途的预览结果，再记下这一次；这样第二次拨动不会被第一个请求的返回盖掉。
     invalidatePreview();
+    previewProblem = null;
+    previewBusy = true;
+    state.pending = null;
     renderAssignmentViews();
     schedulePreview();
   }
@@ -2321,13 +2380,26 @@ async function applyAssignment(button) {
 
     let plan;
     try {
-      plan = await withBusy(button, '正在核对…', () => api('/api/assignment/preview', {
-        changes: [...state.assignmentIntents.values()], recheck: true,
-      }));
+      plan = await withBusy(button, '正在核对…', () => {
+        const controller = new AbortController();
+        previewController = controller;
+        const timer = setTimeout(() => controller.abort(), PREVIEW_TIMEOUT_MS);
+        return api('/api/assignment/preview', {
+          changes: [...state.assignmentIntents.values()], recheck: true,
+        }, {signal: controller.signal}).finally(() => {
+          clearTimeout(timer);
+          if (previewController === controller) previewController = null;
+        });
+      });
     } catch (error) {
       previewBusy = false;
-      // 其他任务正在写入时预览偶尔读不到，先安静留着选择；任务结束后会再预览。
-      if (!jobsHasActive()) toast({text: error.message, tone: 'error', sticky: true});
+      rememberPreviewFailure(error);
+      renderAssignmentViews();
+      return;
+    }
+    if (plan?.superseded) {
+      previewBusy = false;
+      rememberPreviewFailure({message: '核对被打断了，请重新核对'});
       renderAssignmentViews();
       return;
     }
@@ -2600,6 +2672,7 @@ async function refreshTable(preserveDraft = true) {
   clearTimeout(previewTimer);
   invalidatePreview();
   previewBusy = false;
+  previewProblem = null;
   const pending = state.pending;
   state.table = table;
   state.tableReadAt = new Date().toISOString();
