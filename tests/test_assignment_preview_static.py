@@ -178,3 +178,170 @@ function reset() {
 """
         result = subprocess.run(['node', '-e', script], cwd=STATIC.parents[2], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_apply_discards_stale_success_failure_and_cancel(self):
+        script = r"""
+const fs = require('fs'), vm = require('vm');
+const source = fs.readFileSync('skill_pilot/web/static/app.js', 'utf8');
+const start = source.indexOf('function pendingChanges()');
+const end = source.indexOf("$('skills-list').addEventListener", start);
+const slice = source.slice(start, end);
+const bars = [], toasts = [], calls = [], confirms = [], jobs = [];
+let rejectOnAbort = true, confirmAnswer = true;
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const plan = removed => ({
+  marker: removed.join(','),
+  base_assignments: {alpha: ['codex'], beta: ['codex']},
+  assignments: {
+    alpha: removed.includes('alpha') ? [] : ['codex'],
+    beta: removed.includes('beta') ? [] : ['codex'],
+  },
+  changes: removed.map(skill => ({skill, agent: 'codex', enabled: false})),
+  conflicts: [], auto_added: [], cell_notes: {}, dependency_warnings: [], path_warnings: [],
+});
+const names = value => (value || []).map(item => item.skill || item.name).sort().join(',');
+const context = {
+  bars, toasts, calls, confirms, jobs, plan, delay,
+  state: {
+    page: 'skills',
+    table: {write_allowed: true, skills: [{name: 'alpha', title: '甲', requires: []}, {name: 'beta', title: '乙', requires: []}]},
+    agents: [{id: 'codex', name: 'Codex'}],
+    saved: {alpha: ['codex'], beta: ['codex']},
+    draft: {alpha: ['codex'], beta: ['codex']},
+    assignmentIntents: new Map(),
+    skillIndex: new Map([['alpha', {name: 'alpha', title: '甲', requires: []}], ['beta', {name: 'beta', title: '乙', requires: []}]]),
+    pending: null, autoAdded: new Map(), detail: null, jobsBlocked: '',
+  },
+  setTimeout, clearTimeout, AbortController,
+  previewBusy: false, previewSequence: 0, previewProblem: null, previewController: null,
+  assignmentSubmitting: false, submittingAssignmentKeys: new Set(), previewTimer: null,
+  PREVIEW_DEBOUNCE_MS: 20, PREVIEW_TIMEOUT_MS: 500, writeBusy: null,
+  document: {activeElement: null, querySelector() { return null; }},
+  CSS: {escape: value => value},
+  $: () => ({tabIndex: 0, focus() {}}),
+  assignedNow: (name, agentId) => (context.state.saved[name] || []).includes(agentId),
+  assignedAfter: (name, agentId) => (context.state.draft[name] || []).includes(agentId),
+  autoAddedBy: () => '', titleOf: name => name, swatch: () => '', nameOf: id => id,
+  escape: value => String(value ?? ''),
+  jobsBlocked: () => false, jobsHasActive: () => false, assignmentJobAt: () => null,
+  renderSkillTable() {}, renderAgentSummary() {}, renderDetail() {},
+  hideActionBar() {}, showActionBar(opts) { bars.push(opts); },
+  toast(item) { toasts.push(item); },
+  clone: value => JSON.parse(JSON.stringify(value)),
+  withBusy(button, label, work) { return work(); },
+  confirmDialog(options) { confirms.push(options); return Promise.resolve(confirmAnswer); },
+  submitJob(parameters) { jobs.push(parameters); return Promise.resolve({job: {id: 'job'}}); },
+  api(path, body, extra) {
+    return new Promise((resolve, reject) => {
+      const item = {path, body, signal: extra && extra.signal, resolve, reject};
+      calls.push(item);
+      if (extra?.signal) extra.signal.addEventListener('abort', () => {
+        item.aborted = true;
+        if (rejectOnAbort) reject(Object.assign(new Error('aborted'), {name: 'AbortError'}));
+      });
+    });
+  },
+};
+vm.createContext(context);
+vm.runInContext(slice, context);
+const fail = message => { console.error(message); process.exit(1); };
+function reset() {
+  const {state} = context;
+  state.saved = {alpha: ['codex'], beta: ['codex']};
+  state.draft = {alpha: ['codex'], beta: ['codex']};
+  state.assignmentIntents = new Map();
+  state.pending = null;
+  state.autoAdded = new Map();
+  context.previewBusy = false;
+  context.previewProblem = null;
+  context.previewController = null;
+  context.assignmentSubmitting = false;
+  clearTimeout(context.previewTimer);
+  calls.length = 0; bars.length = 0; toasts.length = 0; confirms.length = 0; jobs.length = 0;
+  rejectOnAbort = true; confirmAnswer = true; context.PREVIEW_TIMEOUT_MS = 500;
+}
+const {state} = context;
+const last = () => bars[bars.length - 1];
+const withdrawn = skill => !(state.draft[skill] || []).includes('codex');
+(async () => {
+  reset();
+  vm.runInContext("changeAssignment('alpha', 'codex', false)", context);
+  await delay(60);
+  calls.at(-1).resolve(plan(['alpha']));
+  await delay(30);
+  const applying = vm.runInContext('applyAssignment({})', context);
+  await delay(20);
+  const applyCall = calls.at(-1);
+  vm.runInContext("changeAssignment('beta', 'codex', false)", context);
+  await delay(60);
+  calls.at(-1).resolve(plan(['alpha', 'beta']));
+  await delay(40);
+  await applying;
+  if (toasts.some(item => String(item.text).includes('时间太长'))) fail('取消上一次应用被说成核对时间太长');
+  if (String(last().note).includes('时间太长')) fail('新核对成功后仍留着超时说明：' + last().note);
+  if (!withdrawn('alpha') || !withdrawn('beta') || state.assignmentIntents.size !== 2) fail('第二次撤下没有留住');
+  if (state.pending?.marker !== 'alpha,beta') fail('新核对结果丢了');
+
+  reset();
+  rejectOnAbort = false;
+  vm.runInContext("changeAssignment('alpha', 'codex', false)", context);
+  await delay(60);
+  calls.at(-1).resolve(plan(['alpha']));
+  await delay(30);
+  const staleApply = vm.runInContext('applyAssignment({})', context);
+  await delay(20);
+  const staleCall = calls.at(-1);
+  vm.runInContext("changeAssignment('beta', 'codex', false)", context);
+  await delay(60);
+  calls.at(-1).resolve(plan(['alpha', 'beta']));
+  await delay(30);
+  staleCall.resolve(plan(['alpha']));
+  await delay(40);
+  await staleApply;
+  if (state.pending?.marker !== 'alpha,beta') fail('旧的成功结果盖住了新选择：' + state.pending?.marker);
+  if (!withdrawn('alpha') || !withdrawn('beta')) fail('旧计划把新的撤下改回去了');
+  if (confirms.length || jobs.length) fail('过期核对仍然打开了确认或提交');
+
+  reset();
+  vm.runInContext("changeAssignment('alpha', 'codex', false)", context);
+  await delay(60);
+  calls.at(-1).resolve(plan(['alpha']));
+  await delay(30);
+  const failed = vm.runInContext('applyAssignment({})', context);
+  await delay(20);
+  calls.at(-1).reject(new Error('读取失败'));
+  await delay(30);
+  await failed;
+  if (!toasts.some(item => String(item.text).includes('读取失败')) || !withdrawn('alpha')) fail('这次应用自己的失败没有留下选择');
+  if (confirms.length || jobs.length) fail('失败后不应确认或提交');
+
+  reset();
+  context.PREVIEW_TIMEOUT_MS = 40;
+  vm.runInContext("changeAssignment('alpha', 'codex', false)", context);
+  await delay(60);
+  calls.at(-1).resolve(plan(['alpha']));
+  await delay(30);
+  const timed = vm.runInContext('applyAssignment({})', context);
+  await delay(80);
+  await timed;
+  if (!toasts.some(item => String(item.text).includes('时间太长')) || !withdrawn('alpha')) fail('这次应用自己超时后应说明并留下选择');
+
+  reset();
+  vm.runInContext("changeAssignment('alpha', 'codex', false); changeAssignment('beta', 'codex', false);", context);
+  await delay(60);
+  calls.at(-1).resolve(plan(['alpha', 'beta']));
+  await delay(30);
+  const ok = vm.runInContext('applyAssignment({})', context);
+  await delay(20);
+  calls.at(-1).resolve(plan(['alpha', 'beta']));
+  await delay(40);
+  await ok;
+  if (confirms.length !== 1) fail('当前核对应确认一次，实际 ' + confirms.length);
+  const confirmed = names(confirms[0].groups.flatMap(group => group.items));
+  const sent = names(jobs[0] && jobs[0].changes);
+  if (confirmed !== 'alpha,beta' || sent !== 'alpha,beta') fail('确认和提交不一致：' + confirmed + ' / ' + sent);
+  if (state.assignmentIntents.size) fail('已经提交的选择不应留在托盘里');
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+        result = subprocess.run(['node', '-e', script], cwd=STATIC.parents[2], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)

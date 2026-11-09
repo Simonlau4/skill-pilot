@@ -2374,7 +2374,9 @@ async function applyAssignment(button) {
     const seenWarnings = new Set(previous.dependency_warnings || []);
     const seenPaths = new Set((previous.path_warnings || []).map(w => JSON.stringify(w)));
     clearTimeout(previewTimer);
-    invalidatePreview();
+    // 这次应用只认领自己的序号。核对返回前如果又改了选择，序号会变，这次的成功、失败和取消都作废。
+    const sequence = invalidatePreview();
+    const stillCurrent = () => sequence === previewSequence;
     // 核对期间和提交前都保持忙碌，重画后新画出来的「应用更改」也不会被连点。
     previewBusy = true;
 
@@ -2392,11 +2394,13 @@ async function applyAssignment(button) {
         });
       });
     } catch (error) {
+      if (!stillCurrent()) return;
       previewBusy = false;
       rememberPreviewFailure(error);
       renderAssignmentViews();
       return;
     }
+    if (!stillCurrent()) return;
     if (plan?.superseded) {
       previewBusy = false;
       rememberPreviewFailure({message: '核对被打断了，请重新核对'});
@@ -2428,6 +2432,7 @@ async function applyAssignment(button) {
         note: '你的选择已保留；取消也不用重选。处理完成后仍可撤销。',
         okText: newImpact ? '继续应用' : '撤下',
       });
+      if (!stillCurrent()) return;
       if (!ok) {
         previewBusy = false;
         renderAssignmentViews();
@@ -2435,6 +2440,7 @@ async function applyAssignment(button) {
       }
     }
 
+    if (!stillCurrent()) return;
     const submitted = [...state.assignmentIntents.values()];
     if (!submitted.length) {
       previewBusy = false;
