@@ -1,9 +1,27 @@
 from .platform_support import readlink
 """M2 reconciliation keeps existing entry paths, including compatibility aliases."""
+import contextvars
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import profiles
+
+# 同一次只读核对里，技能目录和“谁读这个目录”会被每个技能重复问一遍。
+# 问到的结果只在这次核对里复用，结束就丢掉，下次文件变了会重新看。
+_resolved_dirs = contextvars.ContextVar('skill_pilot_resolved_dirs', default=None)
+_root_readers = contextvars.ContextVar('skill_pilot_root_readers', default=None)
+
+
+@contextmanager
+def reuse_directory_lookups():
+    directories = _resolved_dirs.set({})
+    readers = _root_readers.set({})
+    try:
+        yield
+    finally:
+        _resolved_dirs.reset(directories)
+        _root_readers.reset(readers)
 
 
 def desired_links(registry, home):
@@ -113,7 +131,40 @@ def effective_assignments(registry, home, rules=None):
 
 def _follow_directory(path):
     """Resolve a directory. A link loop raises RuntimeError on Python 3.11+."""
-    return Path(path).resolve()
+    path = Path(path)
+    cache = _resolved_dirs.get()
+    key = None if cache is None else str(path)
+    if key is not None and key in cache:
+        cached = cache[key]
+        if isinstance(cached, BaseException):
+            raise cached
+        return cached
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError) as error:
+        if key is not None:
+            cache[key] = error
+        raise
+    if key is not None:
+        cache[key] = resolved
+    return resolved
+
+
+def _readers_covering(root, name, home, catalog):
+    """Who can read a skill placed directly in this root.
+
+    The skill name is only the last piece of the path, so ordinary skills in
+    the same root share one answer. That answer is not kept after the check.
+    """
+    single = bool(name) and name not in ('.', '..') and '/' not in name and '\\' not in name
+    cache = _root_readers.get()
+    key = (id(catalog), '' if home is None else str(home), root)
+    if single and cache is not None and key in cache:
+        return cache[key]
+    readers = {p['id'] for p in catalog if _reads_resolved(p, Path(root) / name, home)}
+    if single and cache is not None:
+        cache[key] = readers
+    return readers
 
 
 def _reads_resolved(profile, entry, home):
@@ -150,7 +201,7 @@ def assignment_entries(name, agents, home=None, catalog=None):
     recipients = [p for p in catalog if p['id'] in assigned]
     roots = list(dict.fromkeys([p['link_root'] for p in recipients] +
                               [r for p in recipients for r in p['skill_roots']]))
-    readers = {r: {p['id'] for p in catalog if _reads_resolved(p, Path(r) / name, home)} for r in roots}
+    readers = {r: _readers_covering(r, name, home, catalog) for r in roots}
     blocked = {p['id'] for p in catalog if p['id'] not in assigned and not p['disable']}
     safe = [r for r in roots if not readers[r] & blocked]
     missing = assigned - set().union(*(readers[r] for r in safe))

@@ -172,6 +172,9 @@ class Dashboard(ThreadingHTTPServer):
                                 'message': '', 'error': ''}
         self.agents_thread = None
         self.inventory_lock = threading.Lock()
+        self.preview_generation = 0
+        self.preview_generation_lock = threading.Lock()
+        self.preview_work_lock = threading.Lock()
         super().__init__(("127.0.0.1", 0), Handler, bind_and_activate=not bool(resume))
         if resume:
             self.socket.close()
@@ -202,6 +205,23 @@ class Dashboard(ThreadingHTTPServer):
         # 打开看板时的自动检查不挡住关看板和刷新应用新版；手动检查和升级仍要等。
         thread = self.program_thread
         return bool(thread and thread.is_alive() and not self.program_progress.get('automatic'))
+
+    def preview_assignment(self, changes, recheck):
+        """Run one read-only assignment check. A newer check replaces an older one."""
+        with self.preview_generation_lock:
+            self.preview_generation += 1
+            generation = self.preview_generation
+
+        def cancelled():
+            return generation != self.preview_generation
+
+        with self.preview_work_lock:
+            if cancelled():
+                return {'superseded': True}
+            try:
+                return operations.preview_assign(changes, self.home, recheck, cancelled)
+            except operations.PreviewSuperseded:
+                return {'superseded': True}
 
     def background_busy(self):
         return (any(thread and thread.is_alive() for thread in (self.update_thread, self.labels_thread, self.agents_thread)) or
@@ -1139,7 +1159,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, result)
                 return
             if path == '/api/assignment/preview':
-                self.reply(200, operations.preview_assign(body['changes'], self.server.home, body.get('recheck') is True))
+                self.reply(200, self.server.preview_assignment(body['changes'], body.get('recheck') is True))
                 return
             if path == '/api/config/preview':
                 self.reply(200, sharing.preview_import(body.get('config'), body.get('agents'), self.server.home))

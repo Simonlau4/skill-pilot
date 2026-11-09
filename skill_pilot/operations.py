@@ -17,7 +17,8 @@ from .scan import SKIP_CONTENT, content_digest, metadata, scan_root, tokens, rea
 from .store import (PROJECT, _restore, backup, backup_kind, check_links, git_tree, guard, physical_state, remove,
                     target_home, transaction, write_allowed, write_json)
 from .sync import (assignment_entries, reconcile_assignments, visibility, cell_notes, notes,
-                   external_disable_rules, externally_disabled, effective_assignments, disabled_lists)
+                   external_disable_rules, externally_disabled, effective_assignments, disabled_lists,
+                   reuse_directory_lookups)
 from .sources import github, normalize
 from . import labels, tags, normalization
 
@@ -30,6 +31,10 @@ class RollbackError(ValueError):
 
 class AssignmentChanged(ValueError):
     """The page should recheck its pending assignments against the latest state."""
+
+
+class PreviewSuperseded(Exception):
+    """A newer read-only assignment check replaced this one before it finished."""
 
 
 def curated_dependencies():
@@ -51,13 +56,14 @@ def load(home=None):
     registry = json.loads(path.read_text())
     catalog = profiles.by_id(home)
     agents = [p['id'] for p in profiles.managed(home)]
+    readonly = profiles.readonly_roots(home)
     for name, skill in registry['skills'].items():
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
             raise ValueError('登记表中的技能名称不正确。')
         for entry in skill.get('entries', []):
             if not any(profiles.reads(catalog[agent], entry) for agent in agents):
                 raise ValueError('登记表中有不属于已接入 agent 的技能入口。')
-            if '..' in Path(entry).parts or any(Path(entry).is_relative_to(r) for r in profiles.readonly_roots(home)):
+            if '..' in Path(entry).parts or any(Path(entry).is_relative_to(r) for r in readonly):
                 raise ValueError('登记表涉及只读目录，已停止操作。')
     confirmed, _ = curated_dependencies()
     for name, skill in registry['skills'].items():
@@ -311,25 +317,65 @@ def assignment_plan(registry, agents, changes, home=None):
             'message': '、'.join(summary) or '分配没有变化'}
 
 
-def preview_assign(changes, home=None, recheck=False):
+def _stop_if_superseded(cancelled):
+    if cancelled and cancelled():
+        raise PreviewSuperseded()
+
+
+def _foreign_skill_names(home, agents):
+    """Names of real skill folders outside the store.
+
+    Recheck only needs the names. Hashing every file or comparing trees does
+    not change the set, and the managed roots were already read once above.
+    """
+    catalog = profiles.managed(home, agents)
+    names = set()
+    for root in sorted({r for p in catalog for r in p['skill_roots']}):
+        inventory = scan_root(home / root, profiles.root_nested(root, catalog),
+                              excluded=profiles.exclusions(home / root, home), digest=False)
+        if inventory['errors']:
+            raise ValueError('有技能目录没有完整读出，请刷新后再收编。')
+        for skill in inventory['skills']:
+            path = Path(skill['path'])
+            if not skill['valid'] or path.is_symlink() or not path.is_dir():
+                continue
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', skill['name']):
+                raise ValueError('新装技能的名称不能安全用作文件夹名称，请先核对。')
+            if path.resolve().is_relative_to(home / '.skill-pilot/store'):
+                continue
+            check_links(path, home)
+            names.add(skill['name'])
+    return names
+
+
+def preview_assign(changes, home=None, recheck=False, cancelled=None):
     home, registry, agents = load(home)
+    _stop_if_superseded(cancelled)
     if recheck:
-        return _recheck_assignment(changes, home, registry, agents)[0]
-    plan = assignment_plan(registry, agents, changes, home)
-    active = effective_assignments(plan['registry'], home)
-    cost = {n: listing_tokens(n, metadata((home / '.skill-pilot/store' / n / 'SKILL.md').read_text()))
-            for n in registry['skills']}
-    return {k: v for k, v in plan.items() if k != 'registry'} | {
-        'assignments': active,
-        'cell_notes': cell_notes(plan['registry'], home, agents),
-        'after': {a: {'count': sum(a in assigned for assigned in active.values()),
-                      'description_tokens': sum(cost[n] for n, assigned in active.items() if a in assigned)}
-                  for a in agents}}
+        return _recheck_assignment(changes, home, registry, agents, cancelled)[0]
+    with reuse_directory_lookups():
+        plan = assignment_plan(registry, agents, changes, home)
+        active = effective_assignments(plan['registry'], home)
+        cost = {n: listing_tokens(n, metadata((home / '.skill-pilot/store' / n / 'SKILL.md').read_text()))
+                for n in registry['skills']}
+        return {k: v for k, v in plan.items() if k != 'registry'} | {
+            'assignments': active,
+            'cell_notes': cell_notes(plan['registry'], home, agents),
+            'after': {a: {'count': sum(a in assigned for assigned in active.values()),
+                          'description_tokens': sum(cost[n] for n, assigned in active.items() if a in assigned)}
+                      for a in agents}}
 
 
-def _recheck_assignment(changes, home, registry, agents):
+def _recheck_assignment(changes, home, registry, agents, cancelled=None):
     """Reapply only explicit intent to observed assignments, without adopting files."""
+    with reuse_directory_lookups():
+        return _recheck_assignment_body(changes, home, registry, agents, cancelled)
+
+
+def _recheck_assignment_body(changes, home, registry, agents, cancelled):
+    _stop_if_superseded(cancelled)
     start = revision(home, agents)
+    _stop_if_superseded(cancelled)
     actual = visibility(home, profiles.managed(home, agents))
     before = {a: actual[a]['available'] for a in agents}
     live = copy.deepcopy(registry)
@@ -358,8 +404,9 @@ def _recheck_assignment(changes, home, registry, agents):
         for change in valid:
             conflict(change, str(error))
         plan = assignment_plan(live, agents, [], home)
+    _stop_if_superseded(cancelled)
     # Any external replacement of a selected entry needs a source decision.
-    foreign = {s['name'] for s in external_skills(home, agents, live)}
+    foreign = _foreign_skill_names(home, agents)
     for name in plan['changed']:
         target = home / '.skill-pilot/store' / name
         info = metadata((target / 'SKILL.md').read_text()) if (target / 'SKILL.md').is_file() else {}
@@ -399,6 +446,7 @@ def _recheck_assignment(changes, home, registry, agents):
     assignments = {n: s['assigned_agents'] for n, s in plan['registry']['skills'].items()}
     effects = [{'skill': n, 'agent': a, 'enabled': a in assignments[n]}
                for n in assignments for a in agents if (a in base[n]) != (a in assignments[n])]
+    _stop_if_superseded(cancelled)
     result = {k: v for k, v in plan.items() if k != 'registry'} | {
         'revision': start, 'base_assignments': base, 'assignments': assignments, 'changes': effects,
         'conflicts': conflicts, 'cell_notes': cell_notes(plan['registry'], home, agents)}
