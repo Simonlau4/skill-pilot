@@ -21,6 +21,7 @@ const start = source.indexOf('function pendingChanges()');
 const end = source.indexOf("$('skills-list').addEventListener", start);
 const slice = source.slice(start, end);
 const bars = [], toasts = [], calls = [];
+let listRenders = 0;
 let rejectOnAbort = true;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const plan = removed => ({
@@ -59,7 +60,7 @@ const context = {
   swatch: () => '', escape: value => String(value ?? ''),
   jobsBlocked: () => Boolean(context.state.jobsBlocked),
   jobsHasActive: () => false, assignmentJobAt: () => null,
-  renderSkillTable() {}, renderAgentSummary() {}, renderDetail() {},
+  renderSkillTable() { listRenders++; }, renderAgentSummary() {}, renderDetail() {},
   hideActionBar() { bars.push(null); },
   showActionBar(opts) { bars.push(opts); },
   toast(item) { toasts.push(item); },
@@ -90,11 +91,23 @@ function reset() {
   context.previewController = null;
   clearTimeout(context.previewTimer);
   calls.length = 0; bars.length = 0; toasts.length = 0;
+  listRenders = 0;
   rejectOnAbort = true;
 }
 (async () => {
   const {state} = context;
   const last = () => bars[bars.length - 1];
+  reset();
+  vm.runInContext("changeAssignments(['alpha', 'beta'], 'codex', false)", context);
+  assert.strictEqual(listRenders, 1, '批量暂存只重画一次');
+  await delay(80);
+  assert.strictEqual(calls.length, 1, '批量暂存只发出一次核对');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(calls[0].body.changes)), [
+    {skill: 'alpha', agent: 'codex', enabled: false},
+    {skill: 'beta', agent: 'codex', enabled: false},
+  ]);
+  calls[0].resolve(plan(['alpha', 'beta']));
+  await delay(0);
   reset();
   vm.runInContext("changeAssignment('alpha', 'codex', false); changeAssignment('beta', 'codex', false);", context);
   await delay(80);

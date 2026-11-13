@@ -659,6 +659,9 @@ input[type="checkbox"]:disabled { cursor: default; }
 .skills-results-head h3 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 var(--fs-body)/20px var(--font-sans); letter-spacing: 0; }
 .skills-results-head .link-btn { flex: none; font-size: var(--fs-small); line-height: 20px; }
 #skills-result-count { margin-left: auto; flex: none; color: var(--muted); font-size: var(--fs-small); line-height: 20px; }
+.skills-selection { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2) var(--sp-3); margin: 0 var(--sp-3) 6px; font-size: var(--fs-small); }
+.skills-selection .check-hit { gap: var(--sp-2); padding: 0 var(--sp-2); }
+#skills-selected-count { color: var(--muted); }
 #filters-show { flex: none; min-height: 32px; padding: 0 var(--sp-2); font-size: var(--fs-body); line-height: 20px; }
 #filters-show:not([hidden]) + h3 { padding-left: var(--sp-3); border-left: 1px solid var(--line-strong); }
 #filters-show .btn-icon { transform: rotate(180deg); }
@@ -942,13 +945,16 @@ input[type="checkbox"]:disabled { cursor: default; }
 .list-group-head span { color: var(--muted); }
 .skill-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 88px;
+  --skill-row-columns: minmax(0, 1fr) 84px 88px;
+  grid-template-columns: 32px var(--skill-row-columns);
   gap: var(--sp-4);
   align-items: center;
   padding: 12px var(--sp-5);
   border-bottom: 1px solid var(--line);
   transition: background-color var(--speed) var(--ease);
 }
+.skills-list.is-readonly .skill-row { grid-template-columns: var(--skill-row-columns); }
+.skills-list.is-readonly .skill-select { display: none; }
 .skill-row:last-child { border-bottom: 0; }
 .skill-row:hover { background: var(--panel-soft); }
 .skill-row.is-pending { background: var(--pending-bg); }
@@ -2095,7 +2101,7 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 @media (max-width: 720px) {
   #mode-badge { display: none; }
   .jobs-toggle { max-width: 46vw; }
-  .skill-row { grid-template-columns: minmax(0, 1fr) 88px; }
+  .skill-row { --skill-row-columns: minmax(0, 1fr) 88px; }
   .skill-row .meta { display: none; }
   .who-row { grid-template-columns: minmax(0, 1fr) 44px; }
   .who-row p { grid-column: 1 / -1; grid-row: 2; }
