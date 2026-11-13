@@ -1164,6 +1164,7 @@ const state = {
   jobs: [],          // 后台任务：技能、清理、更新和团队安装共用一份队列
   jobsVersion: -1,
   jobsBlocked: '',
+  skillSelected: new Set(),
   assignmentIntents: new Map(), // 只记用户亲手选的改动，依赖始终根据最新状态重算。
   autoAdded: new Map(),   // 「技能|agent」→ 需要它的那个技能（预览的 auto_added）
   detail: null,
@@ -1620,6 +1621,9 @@ function skillRowHtml(skill, agent) {
   const jobChange = job ? assignmentJobChange(job, skill.name, agent.id) : null;
   const on = jobChange ? jobChange.enabled : assignedAfter(skill.name, agent.id);
   const pending = !job && on !== assignedNow(skill.name, agent.id);
+  // 「有新版」可能同时显示两个状态。批量动作仍只处理当前栏里尚未加入草稿的技能。
+  const selectable = state.table.write_allowed && !job && !pending && on === (state.tab === 'on')
+    && !submittingAssignmentKeys.has(skill.name + '|' + agent.id);
   const error = state.pending?.conflicts?.find(c => c.skill === skill.name && c.agent === agent.id)?.message;
   const note = cellNote(skill, agent);
   const locked = Boolean(writeBusy) || !state.table.write_allowed;
@@ -1642,6 +1646,8 @@ function skillRowHtml(skill, agent) {
     : updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有可用更新"
         aria-label="${escape('更新「' + titleOf(skill.name) + '」')}" ${writeBusy || jobsBlocked() ? 'disabled' : ''}><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg></button>` : '';
   return `<div class="skill-row${pending ? ' is-pending' : ''}${job ? ' is-job' : ''}" data-row="${escape(skill.name)}">
+    <span class="skill-select">${selectable ? `<label class="check-hit"><input type="checkbox" data-skill-select="${escape(skill.name)}"
+      aria-label="${escape('选择「' + titleOf(skill.name) + '」')}"></label>` : ''}</span>
     <div class="skill-cell">
       <button class="skill-name" data-open="${escape(skill.name)}"><span class="t">${escape(skill.title || skill.name)}</span>${skill.title ? `<span class="skill-id">${escape(skill.name)}</span>` : ''}${flags}</button>
       <span class="skill-sub"><span class="skill-sum" title="${escape(sum)}">${escape(sum)}</span>${tags ? `<span class="row-tags">${tags}</span>` : ''}</span>
@@ -2029,11 +2035,41 @@ function renderSkillList(markup) {
     const updated = next[index];
     row.className = updated.className;
     if (!row.dataset.row) { if (row.innerHTML !== updated.innerHTML) row.innerHTML = updated.innerHTML; return; }
-    for (let cell = 0; cell < 2; cell++) {
+    for (let cell = 0; cell < 3; cell++) {
       if (row.children[cell].innerHTML !== updated.children[cell].innerHTML) row.children[cell].innerHTML = updated.children[cell].innerHTML;
     }
     renderButtons(row.querySelector('.row-end'), updated.querySelector('.row-end').innerHTML, 'data-skill');
   });
+}
+
+let skillSelectionScope = '';
+const skillSelectionBoxes = () => [...$('skills-list').querySelectorAll('[data-skill-select]')];
+const skillSelectionLocked = () => Boolean(writeBusy) || jobsBlocked() || !state.table?.write_allowed;
+
+function renderSkillSelection(agent) {
+  const scope = agent ? agent.id + '|' + state.tab : '';
+  if (scope !== skillSelectionScope) state.skillSelected.clear();
+  skillSelectionScope = scope;
+  const boxes = skillSelectionBoxes();
+  const names = new Set(boxes.map(box => box.dataset.skillSelect));
+  for (const name of state.skillSelected) {
+    if (!names.has(name)) state.skillSelected.delete(name);
+  }
+  const count = state.skillSelected.size;
+  const locked = skillSelectionLocked();
+  for (const box of boxes) {
+    box.checked = state.skillSelected.has(box.dataset.skillSelect);
+    box.disabled = locked;
+  }
+  $('skills-selection').hidden = !state.table?.write_allowed || !$('skills-list').querySelector('[data-row]');
+  const all = $('skills-select-all');
+  all.checked = boxes.length > 0 && count === boxes.length;
+  all.indeterminate = count > 0 && count < boxes.length;
+  all.disabled = locked || !boxes.length;
+  $('skills-selected-count').textContent = `已选 ${count} 个`;
+  const stage = $('skills-stage-selected');
+  stage.textContent = state.tab === 'on' ? '批量撤下' : '批量启用';
+  stage.disabled = locked || !count;
 }
 
 /* 右边顶部：agent 名字、技能数和生效方式、占用条。
@@ -2065,6 +2101,7 @@ function renderSkillTable() {
     $('skills-tabs').innerHTML = '';
     $('skills-filters').innerHTML = '';
     $('skills-list').innerHTML = '<p class="empty">正在读取技能列表…</p>';
+    renderSkillSelection(null);
     listedSkillNames = [];
     $('tags-batch').hidden = true;
     return;
@@ -2098,9 +2135,11 @@ function renderSkillTable() {
     : state.chip || state.tag ? emptyInner('skills', '该分类下暂无技能', '<button class="link-btn" data-empty="all">查看全部</button>')
     : state.tab === 'on' ? emptyInner('skills', `${agent.name} 暂未启用技能`, '<button class="link-btn" data-empty="off">前往「可添加」</button>')
     : emptyInner('check-circle', '全部技能已在此启用');
+  $('skills-list').classList.toggle('is-readonly', !state.table.write_allowed);
   renderSkillList(groupedRows(rows).map(group =>
     `<div class="list-group-head"><strong>${escape(group.name)}</strong><span>${group.skills.length} 个</span></div>`
     + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`);
+  renderSkillSelection(agent);
   listedSkillNames = rows.map(skill => skill.name);
   $('tags-batch').hidden = !state.table.write_allowed || listedSkillNames.length < 2;
   $('tags-batch').disabled = Boolean(writeBusy);
@@ -2307,16 +2346,27 @@ function revertAutos(name, agentId) {
 }
 
 function changeAssignment(name, agentId, enabled) {
-  if (writeBusy || submittingAssignmentKeys.has(name + '|' + agentId)
-      || !state.table?.write_allowed || assignmentJobAt(name, agentId)) return;
   const active = document.activeElement;
   const refocus = active?.dataset?.skill === name && active?.dataset?.agent === agentId
     ? (active.closest('#detail-body') ? '#detail-body' : '#skills-list') : null;
-  setDraft(name, agentId, enabled);
-  const key = name + '|' + agentId;
-  if (enabled === assignedNow(name, agentId)) state.assignmentIntents.delete(key);
-  else state.assignmentIntents.set(key, {skill: name, agent: agentId, enabled});
-  if (!enabled) revertAutos(name, agentId);
+  if (changeAssignments([name], agentId, enabled) && refocus) {
+    document.querySelector(`${refocus} [data-skill="${CSS.escape(name)}"][data-agent="${CSS.escape(agentId)}"]`)?.focus();
+  }
+}
+
+function changeAssignments(names, agentId, enabled) {
+  if (writeBusy || !state.table?.write_allowed) return false;
+  let changed = false;
+  for (const name of names) {
+    const key = name + '|' + agentId;
+    if (submittingAssignmentKeys.has(key) || assignmentJobAt(name, agentId)) continue;
+    setDraft(name, agentId, enabled);
+    if (enabled === assignedNow(name, agentId)) state.assignmentIntents.delete(key);
+    else state.assignmentIntents.set(key, {skill: name, agent: agentId, enabled});
+    if (!enabled) revertAutos(name, agentId);
+    changed = true;
+  }
+  if (!changed) return false;
   if (!pendingChanges().length) {
     discardPending();
   } else {
@@ -2328,7 +2378,7 @@ function changeAssignment(name, agentId, enabled) {
     renderAssignmentViews();
     schedulePreview();
   }
-  if (refocus) document.querySelector(`${refocus} [data-skill="${CSS.escape(name)}"][data-agent="${CSS.escape(agentId)}"]`)?.focus();
+  return true;
 }
 
 const toggleAssignment = (name, agentId) => changeAssignment(name, agentId, !assignedAfter(name, agentId));
@@ -2485,6 +2535,30 @@ $('skills-list').addEventListener('click', event => {
   }
   const open = event.target.closest('[data-open]');
   if (open) openDetail(open.dataset.open);
+});
+
+$('skills-list').addEventListener('change', event => {
+  const name = event.target.dataset.skillSelect;
+  if (!name || skillSelectionLocked()) return;
+  if (event.target.checked) state.skillSelected.add(name);
+  else state.skillSelected.delete(name);
+  renderSkillSelection(currentAgent());
+});
+
+$('skills-select-all').addEventListener('change', event => {
+  if (skillSelectionLocked()) return;
+  state.skillSelected = new Set(event.target.checked ? skillSelectionBoxes().map(box => box.dataset.skillSelect) : []);
+  renderSkillSelection(currentAgent());
+});
+
+$('skills-stage-selected').addEventListener('click', () => {
+  const agent = currentAgent();
+  if (!agent || skillSelectionLocked()) return;
+  const names = skillSelectionBoxes().map(box => box.dataset.skillSelect).filter(name => state.skillSelected.has(name));
+  if (changeAssignments(names, agent.id, state.tab === 'off')) {
+    $('action-summary').tabIndex = -1;
+    $('action-summary').focus({preventScroll: true});
+  }
 });
 
 /* 筛选：点已选中的就取消。 */
