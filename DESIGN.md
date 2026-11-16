@@ -264,3 +264,7 @@ components:
 设计板在 `docs/brand/skill-pilot-brandkit.png`；深浅标志与单独的导航图标在 `skill_pilot/web/static/brand/`，浏览器小图标在 `skill_pilot/web/static/favicon.svg`。页面直接内嵌图形，加载不依赖外部服务。
 
 Mac 应用图标使用同一枚 SP 标志，深墨色圆角方底，四周留透明边缘以匹配系统应用图标。1024 × 1024 原稿在 `assets/SkillPilot.svg`，安装素材在 `assets/SkillPilot.icns`，包含 16、32、128、256、512 点及各自两倍尺寸。`scripts/build-app.sh` 会复制图标并写入应用图标配置，重新生成启动器时仍会保留它。
+
+## 本机错误诊断
+
+「设置 → 诊断与备份」提供折叠的错误记录与诊断报告。错误列表显示中文提示、时间和操作，点击后生成已脱敏的完整报告，再复制或导出。正常校验提示不写入故障列表。页面不直接展示技术堆栈；诊断正文使用可选择、可换行的文本框。

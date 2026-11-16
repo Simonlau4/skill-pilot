@@ -217,6 +217,17 @@ class TeamTests(unittest.TestCase):
         self.ok(self.a, '/api/team/listings/apply', {'review': preview['review']})
         return preview
 
+    def without_diagnostics(self):
+        ignored = {'.skill-pilot/logs/errors.jsonl', '.skill-pilot/logs/.errors.lock', '.skill-pilot/logs'}
+        result = []
+        for path in sorted(self.home.rglob('*')):
+            name = path.relative_to(self.home).as_posix()
+            if name in ignored:
+                continue
+            value = os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None
+            result.append((name, value, path.lstat().st_mode))
+        return result
+
     def library(self, home):
         paths = ('.codex/skills', '.claude/skills', '.skill-pilot/registry.json', '.skill-pilot/bases')
         return {path: store.physical_state(home / path) for path in paths} | {
@@ -1674,7 +1685,7 @@ class TeamTests(unittest.TestCase):
         result = self.ok(self.a, '/api/team/settings', {'url': url, 'name': '不会另建成员'})
         self.assertEqual(result['member']['id'], self.first['id'])
         self.assertEqual(len(self.hub.store.members()), 2)
-        before = store.physical_state(self.home)
+        before = self.without_diagnostics()
         with socket.socket() as unused:
             unused.bind(('127.0.0.1', 0))
             closed_url = 'http://127.0.0.1:' + str(unused.getsockname()[1])
@@ -1687,12 +1698,12 @@ class TeamTests(unittest.TestCase):
             self.assertEqual(self.request(self.a, '/api/team/settings', {
                 'url': self.url, 'key': 'wrong', 'name': '示例成员'})[0], 409)
             self.assertEqual([call.args[1] for call in network.call_args_list], ['/api/me'])
-        self.assertEqual(store.physical_state(self.home), before)
+        self.assertEqual(self.without_diagnostics(), before)
 
 
     def test_invalid_join_responses_never_save_credentials_or_send_authorization(self):
         self.configure()
-        before = store.physical_state(self.home)
+        before = self.without_diagnostics()
         joined = {'service': 'skill-pilot-team', 'api': 2,
                   'member': {'id': 'a' * 32, 'name': '示例成员'}, 'token': 'example-joined-token'}
         invalid = [dict(joined, service='other'), dict(joined, api=1), dict(joined, api=True),
@@ -1713,7 +1724,7 @@ class TeamTests(unittest.TestCase):
                 self.assertEqual(result['error'], team.FORMAT_ERROR)
                 self.assertEqual(requests, [('/api/me', 'Bearer ' + self.first['token']), ('/api/join', None)])
                 self.assertNotIn(joined['token'], json.dumps(result))
-                self.assertEqual(store.physical_state(self.home), before)
+                self.assertEqual(self.without_diagnostics(), before)
 
 
     def test_saved_key_403_can_join_and_new_token_is_verified_and_redacted(self):
@@ -1815,7 +1826,7 @@ class TeamTests(unittest.TestCase):
 
     def test_network_errors_version_format_and_size_leave_files_unchanged(self):
         self.configure()
-        before = store.physical_state(self.home)
+        before = self.without_diagnostics()
         me = {'service': 'skill-pilot-team', 'api': 2, 'member': {'id': self.first['id'], 'name': '示例成员'}}
         responses = [(401, {'error': self.first['token']}, {}, '口令不对'),
                      (200, dict(me, api=1), {}, '版本不匹配'), (200, dict(me, api=True), {}, '版本不匹配'),
@@ -1829,7 +1840,7 @@ class TeamTests(unittest.TestCase):
                 self.assertEqual(code, 409, result)
                 self.assertIn(message, result['error'])
                 self.assertNotIn(self.first['token'], json.dumps(result) + stderr.getvalue())
-            self.assertEqual(store.physical_state(self.home), before)
+            self.assertEqual(self.without_diagnostics(), before)
 
     def test_timeouts_incomplete_responses_redirect_and_echo_cannot_leak_credentials(self):
         self.configure()

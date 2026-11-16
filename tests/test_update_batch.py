@@ -235,6 +235,7 @@ class UpdateBatchTests(unittest.TestCase):
         rmtree(row['_upstream_path'])
         result = updates.apply(review, ['sample', 'zlast'], confirmed=True)
         self.assertEqual(result['updated'], ['zlast'])
+        self.assertTrue(result['failed'][0].pop('error_id'))
         self.assertEqual(result['failed'], [{'name': 'sample', 'error': '这项更新的文件没能读写，请重新检查更新后再试。'}])
 
     def test_unconfirmed_merge_does_not_block_other_skills(self):

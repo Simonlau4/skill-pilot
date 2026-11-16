@@ -2395,3 +2395,6 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 @media (prefers-reduced-motion: reduce) {
   .home-tip { transition: none; }
 }
+
+#diag-text { width: 100%; resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
+#diag-errors .list-item { overflow-wrap: anywhere; }

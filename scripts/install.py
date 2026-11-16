@@ -55,7 +55,12 @@ cd {quote(str(PROJECT))} || exit 1
 exec {quote(sys.executable)} -B -m skill_pilot "$@"
 ''')
     launcher.write_text(f'''#!/bin/sh
-/usr/bin/nohup {quote(str(cli))} ui >/dev/null 2>&1 < /dev/null &
+export PATH={quote(search_path)}:"${{PATH:-/usr/bin:/bin}}"
+if [ ! -x {quote(sys.executable)} ] || [ ! -f {quote(str(PROJECT / 'scripts/launch.py'))} ]; then
+  /usr/bin/osascript -e 'display alert "Skill Pilot 暂时打不开" message "请重新安装，或运行 skill-pilot doctor 查看诊断。"' >/dev/null 2>&1
+  exit 1
+fi
+/usr/bin/nohup {quote(sys.executable)} -B {quote(str(PROJECT / 'scripts/launch.py'))} >/dev/null 2>&1 < /dev/null &
 exit 0
 ''')
     with (app / 'Contents/Info.plist').open('wb') as stream:

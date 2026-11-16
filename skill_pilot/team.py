@@ -182,6 +182,8 @@ def status(home, config=None, strict=True):
         if strict:
             raise
         result['error'] = str(error) if isinstance(error, ValueError) else '没能读取团队商店，请稍后重试。'
+        from .diagnostics import failure
+        result.update(failure(home, 'backend', '连接分享站', error, result['error']))
     return result
 
 

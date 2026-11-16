@@ -258,9 +258,11 @@ def run(home, mode, progress):
             progress.update(done=progress['done'] + len(accepted), message='正在整理技能的中文名和说明…')
         save()
         progress['message'] = f"已整理好 {progress['done']} 个技能" + ('，还有没整理成的，可以再试一次。' if progress['done'] < progress['total'] else '。')
-    except (ValueError, OSError, KeyError, TypeError) as error:
+    except Exception as error:
         # Only service errors are safe to expose; filesystem exceptions may include private data.
         progress['error'] = str(error) if isinstance(error, ServiceError) else '整理没能完成，请检查设置和技能文件后再试。'
+        from .diagnostics import failure
+        progress.update(failure(home, 'backend', '整理中文介绍', error, progress['error']))
         progress['message'] = progress['error']
     finally:
         progress['running'] = False

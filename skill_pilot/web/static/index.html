@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/app.css?token=__SESSION_TOKEN__">
   <script defer src="/vendor/gsap.min.js?token=__SESSION_TOKEN__"></script>
   <script defer src="/vendor/ScrollTrigger.min.js?token=__SESSION_TOKEN__"></script>
+  <script defer src="/diagnostics.js?token=__SESSION_TOKEN__"></script>
   <script defer src="/app.js?token=__SESSION_TOKEN__"></script>
 </head>
 <body>
@@ -590,6 +591,24 @@
               <p class="set-lead">检查技能版本冲突与目录状态，管理整理前的备份。</p>
             </div>
           </div>
+
+          <details class="fold" id="diag-errors-box">
+            <summary>错误记录与诊断报告</summary>
+            <p class="muted">诊断只保存在这台电脑。复制或导出前，可以先核对已脱敏的内容。</p>
+            <div class="toolbar">
+              <button id="diag-refresh" class="btn btn-small" type="button">查看最近错误</button>
+              <button id="diag-bundle" class="btn btn-small" type="button">生成诊断报告</button>
+            </div>
+            <div id="diag-errors" class="list" aria-live="polite"></div>
+            <div id="diag-report" hidden>
+              <label for="diag-text">待复制或导出的内容</label>
+              <textarea id="diag-text" class="input" rows="12" readonly></textarea>
+              <div class="toolbar">
+                <button id="diag-copy" class="btn btn-small" type="button">复制诊断信息</button>
+                <button id="diag-export" class="btn btn-small" type="button">导出诊断文件</button>
+              </div>
+            </div>
+          </details>
 
           <details class="fold" id="diag-conflicts-box">
             <summary>版本差异 <span id="conflict-count" class="tag tag-quiet"></span></summary>

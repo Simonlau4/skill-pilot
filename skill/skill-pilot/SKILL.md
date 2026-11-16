@@ -7,6 +7,7 @@ description: 管理本机各 agent 的技能，查看和导出技能清单、打
 
 以下查看命令可以直接运行，需要结构化结果时加 `--json`。
 
+- `skill-pilot doctor --json`（看板打不开或报错时，只读查看已脱敏的环境和最近错误，协助整理诊断信息；不上传）
 - `skill-pilot status`
 - `skill-pilot list --agent claude`
 - `skill-pilot check-updates`（只检查和报告，不安装；只查有 agent 在用且有上游来源的技能，自制的和已撤下的不查）

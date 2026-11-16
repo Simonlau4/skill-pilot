@@ -18,6 +18,7 @@ def main():
     inventory = commands.add_parser("scan", help="盘点本机 agent 和技能")
     inventory.add_argument("--json", action="store_true", help="输出完整机器可读结果")
     commands.add_parser("ui", help="打开中文看板").add_argument('--json', action='store_true')
+    commands.add_parser('doctor', help='只读查看脱敏环境与最近错误').add_argument('--json', action='store_true')
     hub = commands.add_parser('hub', help='运行团队分享站或管理成员')
     hub_commands = hub.add_subparsers(dest='hub_command', required=True)
     serving = hub_commands.add_parser('serve', help='启动分享站')
@@ -142,6 +143,11 @@ def main():
     release.add_argument('--yes', action='store_true')
     release.add_argument('--json', action='store_true')
     args = parser.parse_args()
+    if args.command == 'doctor':
+        from .diagnostics import bundle
+        result = bundle()
+        print(result['text'] if args.json else '本机诊断（已脱敏）\n' + result['text'])
+        return
     if args.command == 'hub':
         from . import team_hub
         try:

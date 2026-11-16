@@ -99,6 +99,7 @@ async function api(path, body, extra) {
   try { result = await response.json(); } catch { /* 没有内容时按下面的默认文案处理 */ }
   if (!response.ok) {
     const error = new Error((result && result.error) || '操作没能完成，请稍后再试。');
+    error.error_id = result?.error_id || '';
     error.retry = Boolean(result && result.retry);
     error.recheck = Boolean(result && result.recheck);
     error.blocked = Boolean(result && result.blocked);
@@ -8901,3 +8902,41 @@ async function start() {
 }
 
 start();
+
+
+/* 本机错误诊断：只在用户操作时生成环境摘要。 */
+async function refreshErrors() {
+  try {
+    const rows = await api('/api/diagnostics/errors');
+    $('diag-errors').innerHTML = rows.map(row => `<div class="list-item"><div><strong>${escape(row.user_message)}</strong><p class="muted">${escape(new Date(row.time).toLocaleString())} · ${escape(row.action)}</p></div><button class="btn btn-small" data-diagnostic="${escape(row.error_id)}">查看诊断</button></div>`).join('') || '<p class="muted">暂无错误记录。</p>';
+  } catch (error) { toast({text: error.message, tone: 'error'}); }
+}
+async function showDiagnostic(errorId = '') {
+  try {
+    const result = await api('/api/diagnostics/bundle', errorId ? {error_id: errorId} : {});
+    $('diag-text').value = result.text;
+    $('diag-report').hidden = false;
+  } catch (error) { toast({text: error.message, tone: 'error'}); }
+}
+$('diag-refresh').addEventListener('click', refreshErrors);
+$('diag-bundle').addEventListener('click', () => withBusy($('diag-bundle'), '正在生成…', () => showDiagnostic()));
+$('diag-errors').addEventListener('click', event => {
+  const button = event.target.closest('[data-diagnostic]');
+  if (button) withBusy(button, '正在生成…', () => showDiagnostic(button.dataset.diagnostic));
+});
+$('diag-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('diag-text').value);
+    toast({text: '诊断信息已复制。'});
+  } catch {
+    $('diag-text').focus(); $('diag-text').select();
+    toast({text: '请复制已选中的诊断内容。'});
+  }
+});
+$('diag-export').addEventListener('click', () => {
+  const url = URL.createObjectURL(new Blob([$('diag-text').value], {type: 'application/json;charset=utf-8'}));
+  const link = document.createElement('a');
+  link.href = url; link.download = 'skill-pilot-diagnostics.json'; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+$('diag-errors-box').addEventListener('toggle', () => { if ($('diag-errors-box').open) refreshErrors(); });

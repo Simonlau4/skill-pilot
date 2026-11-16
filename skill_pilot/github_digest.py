@@ -212,6 +212,7 @@ class Digests:
         self.download_lock = threading.Lock()
         self.cache = read_cache(home)
         self.repos, self.errors, self.queue, self.attempted = {}, {}, [], set()
+        self.error_ids = {}
         self.running, self.error, self.closed, self.thread = False, '', False, None
 
     def _save(self):
@@ -231,7 +232,7 @@ class Digests:
         if not writable or not has_locations(row) or not labels.settings(self.home).get('api_key'):
             return {'digest_status': 'off'}
         error = self.errors.get((row['repository'], row['pushed_at']))
-        return {'digest_status': 'failed', 'digest_error': error} if error else {'digest_status': 'pending'}
+        return {'digest_status': 'failed', 'digest_error': error, **self.error_ids.get((row['repository'], row['pushed_at']), {})} if error else {'digest_status': 'pending'}
 
     def _needs_work(self, row):
         entry = self.cache.get(row['repository'], {})
@@ -370,17 +371,26 @@ class Digests:
                             self.cache[repository] = entry
                             self._save()
                 except labels.ServiceError as error:
+                    from .diagnostics import failure
+                    captured = failure(self.home, 'backend', '整理热门技能介绍', error)
                     message = str(error) if str(error) in SERVICE_ERRORS else 'AI 整理没能完成，请稍后重试。'
                     batch_error = message in BATCH_ERRORS
                 except DownloadError as error:
+                    from .diagnostics import failure
+                    captured = failure(self.home, 'backend', '下载热门技能介绍', error)
                     message = str(error)
-                except CacheError:
+                except CacheError as error:
+                    from .diagnostics import failure
+                    captured = failure(self.home, 'backend', '保存热门技能介绍', error)
                     message, batch_error = SAVE_ERROR, True
-                except (OSError, ValueError):
+                except (OSError, ValueError) as error:
+                    from .diagnostics import failure
+                    captured = failure(self.home, 'backend', '读取热门技能介绍', error)
                     message = labels.PARSE_ERROR
                 else:
                     continue
                 with self.lock:
+                    self.error_ids[(repository, row['pushed_at'])] = captured
                     self.errors[(repository, row['pushed_at'])] = message
                     if batch_error:
                         self.error = message

@@ -1,3 +1,4 @@
+from . import diagnostics
 from .platform_support import copytree
 from .platform_support import rmtree, create_links
 """M4 read-only reviews, confirmed batches, and preview-only Codex merging."""
@@ -131,17 +132,18 @@ def check(home=None, review=None, lock=None):
             result['done'] += 1; result['remaining'] -= 1
             result['update_count'] = sum(r['has_update'] for r in result['skills'])
             result['latest_count'] = sum(r['status'] == '已是最新' for r in result['skills'])
-            if row.get('error'): result['errors'].append({'name': row['name'], 'error': row['error']})
+            if row.get('error'): result['errors'].append({'name': row['name'], 'error': row['error'], **({'error_id': row['error_id']} if row.get('error_id') else {})})
     def scan_group(group, items):
         with lock: result['current'].append('飞书工具' if group == 'lark' else group)
         reader = Reader(Path(temporary) / hashlib.sha256(group.encode()).hexdigest()[:16], time.monotonic() + REPOSITORY_TIMEOUT)
-        packages, failure = {}, None
+        packages, failure, failure_id = {}, None, {}
         if group == 'lark':
             try:
                 result['lark'] = {**lark.check(timeout=reader.remaining(), home=home), 'skill_count': len(items)}
                 if result['lark']['available']:
                     packages = lark.prepare({n: s for n, _, s in items}, temporary, result['lark']['latest_version'], reader.deadline)
             except (ValueError, OSError, KeyError, TypeError) as error:
+                failure_id = diagnostics.failure(home, 'backend', '检查飞书更新', error)
                 failure = str(error); result['lark'] = {'available': False, 'message': '飞书更新没查清楚', 'error': failure}
         if group == 'team':
             from . import team
@@ -149,6 +151,7 @@ def check(home=None, review=None, lock=None):
                 team_config, _, cards = team._fetch(home)
                 listings = {(r['member']['id'], r['name']): r for card in cards for r in card['listings']}
             except (ValueError, OSError) as error:
+                failure_id = diagnostics.failure(home, 'backend', '检查团队更新', error)
                 failure = str(error)
         for name, skill, source in items:
             row = {'name': name, 'source': source, 'has_update': False, 'local_modified': False, 'status': '已是最新'}
@@ -205,8 +208,9 @@ def check(home=None, review=None, lock=None):
                                 row['blocked_reason'] = '新版引用了技能文件夹外的文件，已停止安装；请先核对来源位置。'
                                 row['status'] = '有更新，需先核对来源'
                 _apply_watch(row, skill, home)
-            except (ValueError, OSError, KeyError, TypeError) as error:
+            except Exception as error:
                 row.update(status='没查清楚', error=str(error), has_update=False)
+                row.update(failure_id or diagnostics.failure(home, 'backend', '检查技能更新', error))
             publish(row)
         with lock:
             result['api_calls'] += reader.api_calls
@@ -216,8 +220,14 @@ def check(home=None, review=None, lock=None):
             scan_group('skip', result['_groups']['skip'])
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda item: scan_group(*item), ((g, items) for g, items in result['_groups'].items() if g != 'skip')))
+    except Exception as error:
+        captured = diagnostics.failure(home, 'backend', '检查技能更新', error)
+        with lock:
+            result.update(error='更新检查没有完成，请重新检查。', **captured)
     finally:
-        with lock: result['running'] = False
+        with lock:
+            result['running'] = False
+            result['current'] = []
     return result
 
 
@@ -402,8 +412,9 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
             if len(names) == 1:
                 raise
             reason = str(error) if isinstance(error, ValueError) else '这项更新的文件没能读写，请重新检查更新后再试。'
+            captured = diagnostics.failure(review['home'], 'job', '更新技能', error)
             for name in group:
-                failed.append({'name': name, 'error': reason})
+                failed.append({'name': name, 'error': reason, **captured})
                 if name in by_name:
                     by_name[name].update(update_error=reason, status='没更新')
         else:

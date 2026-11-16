@@ -728,6 +728,7 @@ class DigestRouteTests(unittest.TestCase):
                 threading.Event().wait(.005)
             self.server.github_digests.thread.join(timeout=3)
             result = self.request('/api/team/github/digests')[1]['repos']['acme/example']
+            self.assertTrue(result.pop('error_id'))
             self.assertEqual(result, {'digest_status': 'failed', 'digest_error': labels.BUSY})
             status, result = self.request('/api/team/github/retry', {'repository': 'acme/example'})
             self.assertEqual(status, 200)
