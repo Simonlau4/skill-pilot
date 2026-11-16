@@ -1,4 +1,5 @@
 import importlib.util
+import http.client
 import json
 import os
 from pathlib import Path
@@ -7,13 +8,15 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
+from types import SimpleNamespace
 import unittest
 import urllib.error
 import urllib.request
 from unittest.mock import patch
 
 from tests import set_up_home
-from skill_pilot import diagnostics, self_update
+from skill_pilot import diagnostics, labels, self_update
 from skill_pilot.web.server import Dashboard
 
 
@@ -75,6 +78,84 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(rows[0]['fingerprint'], rows[1]['fingerprint'])
         self.assertNotEqual(rows[0]['error_id'], rows[1]['error_id'])
         self.assertNotEqual(rows[0]['fingerprint'], self.record(OSError('one'))['fingerprint'])
+
+    def test_escaped_credentials_are_hidden_through_ai_connection_failure(self):
+        secret = 'demoKEYpartA\r\npartBdoNotLog'
+        config = {'api_key': secret, 'base_url': 'https://ai.example.test', 'model': 'demo'}
+        (self.private / 'settings.json').write_text(json.dumps({'llm': config}))
+        def invalid_header(request, **kwargs):
+            # Use the real HTTP header validator, without making a connection.
+            connection = http.client.HTTPConnection('localhost')
+            connection.putrequest('POST', '/')
+            connection.putheader('Authorization', request.get_header('Authorization'))
+        with patch('skill_pilot.labels.urllib.request.OpenerDirector.open', side_effect=invalid_header):
+            result = labels.test(self.home)
+        self.assertTrue(result['error_id'])
+        stored = self.log.read_text()
+        self.assertIn('ValueError', stored)
+        self.assertNotIn('demoKEYpartA', stored)
+        self.assertNotIn('partBdoNotLog', stored)
+        for value in (repr(secret), repr(secret.encode()), json.dumps(secret)):
+            clean = diagnostics.sanitize(value, self.home)
+            self.assertNotIn('demoKEYpartA', clean)
+            self.assertNotIn('partBdoNotLog', clean)
+
+    def test_lock_release_uses_the_supported_cross_platform_contract(self):
+        streams = []
+        locks = SimpleNamespace(LOCK_EX=2, flock=lambda stream, operation: streams.append(stream))
+        with patch.object(diagnostics, 'fcntl', locks):
+            row = self.record()
+        self.assertTrue(row['error_id'])
+        self.assertEqual(diagnostics.recent(self.home)[0]['error_id'], row['error_id'])
+        self.assertTrue(streams[0].closed)
+
+    def test_parse_and_timeout_are_faults_but_missing_configuration_is_not(self):
+        from skill_pilot.sources.update_github import Reader
+        try:
+            tomllib.loads('broken = [')
+        except tomllib.TOMLDecodeError as error:
+            self.assertTrue(self.record(error)['error_id'])
+        try:
+            Reader(self.home / 'temporary repository', deadline=0).remaining()
+        except ValueError as error:
+            self.assertEqual(self.record(error)['error_type'], 'TimeoutError')
+        self.assertNotIn('error_id', labels.test(self.home))
+        self.assertEqual(len(diagnostics.recent(self.home)), 2)
+
+    def test_frontend_locations_strip_query_credentials_and_keep_distinct_sites(self):
+        script = r'''
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const handlers = {}, requests = [];
+const context = {
+  URL, URLSearchParams, location: {search: '?token=local-session', href: 'http://localhost/'},
+  window: {addEventListener: (name, fn) => handlers[name] = fn, dispatchEvent: () => {}},
+  CustomEvent: class {},
+  fetch: async (url, options) => { requests.push(JSON.parse(options.body)); return {ok: false}; }
+};
+vm.runInNewContext(fs.readFileSync('skill_pilot/web/static/diagnostics.js', 'utf8'), context);
+(async () => {
+  await handlers.error({error: new TypeError('first'), filename: 'http://localhost/app.js?token=private-token', lineno: 12, colno: 4});
+  for (const stack of [
+    'TypeError: second\n    at run (http://localhost/app.js?token=private-token:45:9)',
+    'run@http://localhost/diagnostics.js?token=private-token:8:2',
+    'run@http://localhost/vendor.js?token=private-token:8:2'
+  ]) await handlers.unhandledrejection({reason: {name: 'TypeError', message: 'second', stack}});
+  assert.deepEqual(requests.map(r => r.location), ['app.js:12:4', 'app.js:45:9', 'diagnostics.js:8:2', '']);
+  assert(!JSON.stringify(requests).includes('private-token'));
+  console.log(JSON.stringify(requests));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        result = subprocess.run(['node', '-e', script], cwd=diagnostics.PROJECT, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = []
+        for item in json.loads(result.stdout)[:2]:
+            error = RuntimeError(item['message'])
+            error.diagnostic_type = item['error_type']
+            error.diagnostic_location = item['location']
+            rows.append(diagnostics.record(self.home, 'frontend', '页面运行', error))
+        self.assertNotEqual(rows[0]['fingerprint'], rows[1]['fingerprint'])
 
     def test_wrapped_system_failure_is_not_validation(self):
         try:
@@ -224,6 +305,14 @@ class DiagnosticsWebTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertNotIn('error_id', data)
         self.assertFalse(self.log.exists())
+
+    def test_cleanup_preview_fault_is_recorded_even_with_400_status(self):
+        with patch('skill_pilot.web.server.cleanup.preview', side_effect=OSError('private failure')):
+            status, data = self.request('/api/cleanup/preview', {'skills': []})
+        self.assertEqual(status, 400)
+        self.assertTrue(data['error_id'])
+        self.assertNotIn('private failure', data['error'])
+        self.assertEqual(len(diagnostics.recent(self.home)), 1)
 
     def test_frontend_auth_size_read_only_and_bundle(self):
         route = '/api/diagnostics/client-error'

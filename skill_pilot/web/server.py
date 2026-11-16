@@ -1013,7 +1013,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def reply(self, status, body, content_type="application/json; charset=utf-8"):
         error = sys.exception()
-        if isinstance(body, dict) and body.get('error') and status >= 409 and error is not None and not self.request_validation:
+        if isinstance(body, dict) and body.get('error') and status >= 400 and error is not None and not self.request_validation:
             route = urllib.parse.urlsplit(self.path).path.split('/')
             action = {'table': '读取技能名单', 'scan': '盘点技能', 'settings': '保存设置',
                       'team': '团队商店', 'updates': '技能更新', 'jobs': '执行任务',

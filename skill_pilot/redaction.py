@@ -150,6 +150,7 @@ def _abbreviate_home(detail, home):
 
 
 def hide_credentials(detail):
+    detail = re.sub(r'(?im)(invalid header value)\s+[^\r\n]*', r'\1 [凭据已隐藏]', detail)
     detail = re.sub(r"\b(?:https?|file|ssh|git)://[^\s'\"<>]+", '[链接已隐藏]', detail)
     detail = re.sub(r'(?im)\b(authorization|proxy-authorization|api[_-]?key|access[_-]?token|token|password|secret)\s*[\"\']?\s*[:=][^\r\n]*', '[凭据已隐藏]', detail)
     return re.sub(r'\b(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]+', '[凭据已隐藏]', detail)

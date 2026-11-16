@@ -119,7 +119,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def completion(config, system, body, wait=None):
     if not config.get('api_key'):
-        raise ServiceError('请先到设置里填好 AI 服务的 key。')
+        raise ValueError('请先到设置里填好 AI 服务的 key。')
     wait = WAIT if wait is None else wait
     deadline = time.monotonic() + wait
     try:
@@ -164,7 +164,7 @@ def test(home):
         if not isinstance(result, dict) or result.get('ok') is not True:
             raise ServiceError(PARSE_ERROR)
         return {'ok': True, 'message': '连接成功，可以给技能起中文名了。'}
-    except ServiceError as error:
+    except ValueError as error:
         from .diagnostics import failure
         return {'ok': False, 'message': str(error), **failure(home, 'backend', '测试 AI 连接', error)}
 

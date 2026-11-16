@@ -29,7 +29,7 @@ class Reader:
     def remaining(self, maximum=120):
         left = maximum if self.deadline is None else min(maximum, self.deadline - time.monotonic())
         if left <= 0:
-            raise ValueError('这个仓库检查超时，可以稍后重试。')
+            raise ValueError('这个仓库检查超时，可以稍后重试。') from TimeoutError('仓库检查超过允许时间。')
         return left
 
     def git(self, directory, *args):

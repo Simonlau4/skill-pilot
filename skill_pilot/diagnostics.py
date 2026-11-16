@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import traceback
+import tomllib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,10 +33,7 @@ def log_lock(path, home):
     fd = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     with os.fdopen(fd, 'a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+        yield  # Closing the file releases the lock on both supported platforms.
 
 
 def read_json(path):
@@ -69,7 +67,12 @@ def sanitize(value, home, limit=6000):
             hidden.update(p.name for p in (private / name).iterdir())
         except OSError:
             pass
-    for name in sorted(hidden, key=len, reverse=True):
+    variants = set(hidden)
+    for secret in hidden:
+        variants.update({repr(secret)[1:-1], repr(secret.encode('utf-8'))[2:-1],
+                         json.dumps(secret, ensure_ascii=False)[1:-1],
+                         json.dumps(secret, ensure_ascii=True)[1:-1]})
+    for name in sorted(variants, key=len, reverse=True):
         if name:
             text = text.replace(name, '[私人内容已隐藏]')
     text = hide_credentials(text)
@@ -96,7 +99,7 @@ def is_fault(error):
     if type(error).__name__ == 'RequestError':
         return getattr(error, 'status', 500) >= 500
     return any(not isinstance(e, (ValueError, StopIteration)) or
-               isinstance(e, (json.JSONDecodeError, UnicodeError)) or
+               isinstance(e, (json.JSONDecodeError, tomllib.TOMLDecodeError, UnicodeError)) or
                type(e).__name__ in {'ServiceError', 'DownloadError', 'CacheError', 'RollbackError'}
                for e in causes(error))
 
