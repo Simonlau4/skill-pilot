@@ -63,6 +63,8 @@ def export_config(home=None, agent=None, *, translated_description=False):
         elif origin['kind'] == 'lark':
             source = {'kind': 'manual', 'url': 'https://open.feishu.cn/lark-cli/skills/',
                       'reason': '飞书官方技能，请通过官方安装方式补齐。'}
+        if name in registry.get('external_skills', {}):
+            source = {'kind': 'manual', 'reason': '由外部工具维护，请通过原应用安装并启用。'}
         path, base = (home / '.skill-pilot' / folder / name for folder in ('store', 'bases'))
         try:
             modified = (not (path / 'SKILL.md').is_file() or not (base / 'SKILL.md').is_file() or
@@ -147,6 +149,8 @@ def read_config(path):
 
 def _blocked(rows, registry, unavailable=()):
     blocked = {n: '当前没有对应的 agent，请指定接收方。' for n in unavailable}
+    blocked.update({n: '由外部工具维护，请在原应用中启用；不会重新收进 Skill Pilot。'
+                    for n in rows if n in registry.get('external_skills', {})})
     for name, row in rows.items():
         if name not in blocked and name not in registry['skills']:
             if row['local_modified']:

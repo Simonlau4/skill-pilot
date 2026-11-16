@@ -23,6 +23,21 @@ def arrow_block(text, prefix):
 
 
 class JobsStaticTests(unittest.TestCase):
+    def test_external_skill_has_no_assignment_control_and_is_excluded_from_cleanup(self):
+        app = source()
+        script = '\n'.join(extract_function(app, marker) for marker in
+                           ('function switchHtml(', 'function cleanupTabSkills(')) + '''
+const assert = require('node:assert/strict');
+const state = {cleanupTab: 'on', saved: {native: ['codex'], ordinary: ['codex']},
+  table: {skills: [{name: 'native', read_only: true}, {name: 'ordinary'}]}};
+const control = switchHtml(state.table.skills[0], {id: 'codex'}, true, false, false);
+assert.match(control, /外部维护/);
+assert.doesNotMatch(control, /button|data-skill/);
+assert.deepEqual(cleanupTabSkills().map(s => s.name), ['ordinary']);
+'''
+        result = subprocess.run(['node', '-e', script], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_jobs_entry_panel_and_blocked_banner_exist(self):
         html = (STATIC / 'index.html').read_text()
         for marker in ('id="jobs-toggle"', 'id="jobs-panel"', 'id="jobs-list"', 'id="jobs-close"',

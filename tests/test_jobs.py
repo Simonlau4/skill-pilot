@@ -23,6 +23,25 @@ from skill_pilot.web.server import Dashboard
 
 
 class JobTests(unittest.TestCase):
+    def test_release_http_requires_preview_confirmation_and_preserves_live_entry(self):
+        app = self.root / 'Example App.app/skills/acme-b'
+        self.skill(app, 'acme-b')
+        entry = self.home / '.codex/skills/acme-b'
+        entry.unlink()
+        entry.symlink_to(app, target_is_directory=True)
+        before = visibility(self.home)
+        plan = self.ok('/api/external/preview', {'name': 'acme-b'})
+        body = {'name': 'acme-b', 'revision': plan['revision'], 'plan_id': plan['plan_id']}
+        self.assertEqual(self.request('/api/external/release', body)[0], 400)
+        with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
+            self.assertEqual(self.request('/api/external/release', {**body, 'confirmed': True})[0], 403)
+        result = self.ok('/api/external/release', {**body, 'confirmed': True})
+        self.assertEqual(visibility(self.home), before)
+        self.assertEqual(entry.resolve(), app)
+        self.assertTrue(next(s for s in operations.table(self.home)['skills'] if s['name'] == 'acme-b')['read_only'])
+        self.ok('/api/undo', {'id': result['id'], 'revision': operations.table(self.home)['revision'], 'confirmed': True})
+        self.assertEqual(visibility(self.home), before)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='skill pilot jobs ')
         self.addCleanup(temporary.cleanup)

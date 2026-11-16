@@ -276,6 +276,7 @@ def backup(home, plan, checked, kind="organize"):
             paths.append(real.relative_to(home).as_posix())
     protected_roots = profiles.readonly_roots(home)
     if kind == 'operation':
+        protected_roots.update(plan.get('protected', []))
         # App-owned entries may live outside home. Leave both the entry and its
         # target alone, including during rollback; never archive their contents.
         def protect_external(path):

@@ -121,6 +121,9 @@ def preview_join(requests, home=None):
         if inventory['errors']:
             raise ValueError('新 agent 的技能目录没有完整读出，请先核对。')
         for skill in inventory['skills']:
+            if skill['name'] in registry.get('external_skills', {}):
+                skipped.append({'path': skill['path'], 'reason': '由外部工具维护，保留入口，不收进统一仓库'})
+                continue
             if not skill['valid']:
                 skipped.append({'path': skill['path'], 'reason': skill.get('warning') or '技能不可用，原样留着'})
                 continue

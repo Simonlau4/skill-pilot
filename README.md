@@ -16,6 +16,7 @@ Token 是衡量文本长度的单位；看板按技能说明的长度估算，�
   - **Windows**：从开始菜单打开 **Skill Pilot**。
   - 关闭所有看板页面后，后台程序会自动退出。
 - **在对话里调用**：首次整理后，打开看板会给已接入的 Agent 安装 `skill-pilot` 技能，平时在对话里可直接说“看看 Claude 有哪些技能”“把 X 也给 Antigravity 启用”。
+- **退出托管并保留入口**：应用自行维护的技能，可以在技能详情里点“退出托管并保留入口”。先确认所有入口都能读取库外副本，再清理 Skill Pilot 的重复副本；原应用文件、入口和 Agent 可用名单保持不变。退出后在“外部维护”页只读展示，不再参与分配、更新、清理或自动收编。命令行用 `skill-pilot release <技能> --json` 预览，加 `--yes` 执行；操作记录可撤销。如果入口仍依赖库内文件，会先提示由原应用接管；退出后有外部改动时，撤销也会先要求核对。
 - **命令行**：`skill-pilot status`、`skill-pilot list --agent claude`、`skill-pilot check-updates`、`skill-pilot cleanup --list`，加 `--json` 输出结构化结果。安装和团队分享也能在命令行完成：`skill-pilot install <GitHub 链接或本机文件夹> --agent claude`、`skill-pilot team publish <技能>`、`skill-pilot team install <技能名> --agent claude`；会改动的命令不带 `--yes` 只预览，完整命令见 `skill-pilot --help`。
 
 看板里的主要模块：

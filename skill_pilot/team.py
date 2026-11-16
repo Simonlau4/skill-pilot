@@ -26,7 +26,8 @@ TIMEOUT = 10
 FORMAT_ERROR = '分享站的技能格式不对，请联系管理员检查。'
 PACKS_UNSUPPORTED = '分享站版本较旧，暂不能整理技能包，请联系管理员更新分享站。'
 LOCAL_LABELS = {'mine': '我上架的', 'installed': '已装', 'update': '有新版', 'installable': '可以装',
-                'lark': '要用飞书官方方式装', 'conflict': '本机有同名技能', 'blocked': '暂时装不了'}
+                'lark': '要用飞书官方方式装', 'conflict': '本机有同名技能', 'blocked': '暂时装不了',
+                'external': '由外部工具维护'}
 SECRET_NAMES = ('.env', '.env.*', '*.pem', '*.key', '*.p12', 'id_rsa*', 'id_ed25519*',
                 '.npmrc', '.pypirc', 'credentials*')
 SECRET_CONTENT = re.compile(
@@ -314,6 +315,8 @@ def _origin(skill):
 
 def _local(row, registry):
     name, source = row['name'], row['source']
+    if name in registry.get('external_skills', {}):
+        return 'external', name
     skills = registry['skills']
     if source['kind'] == 'github':
         for local_name, skill in skills.items():
@@ -352,7 +355,7 @@ def _plan(card, cards, registry):
         if state in {'installed', 'update'}:
             reuse.add(local_name)
             return
-        if state in {'lark', 'conflict'}:
+        if state in {'lark', 'conflict', 'external'}:
             errors[name] = LOCAL_LABELS[state] + '。'
             return
         install[name] = row
@@ -385,7 +388,7 @@ def catalog(home):
             if skipped:
                 state = 'blocked'
                 reason = next(r['reason'] for r in skipped if r['name'] == row['name'])
-        if state in {'lark', 'conflict'}:
+        if state in {'lark', 'conflict', 'external'}:
             reason = LOCAL_LABELS[state] + '。'
         if state in {'installed', 'update'} and not registry['skills'].get(local_name, {}).get('withdrawn'):
             current.add(card['key'])

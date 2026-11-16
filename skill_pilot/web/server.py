@@ -1160,6 +1160,8 @@ class Handler(BaseHTTPRequestHandler):
                         '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
+        read_routes.add('/api/external/preview')
+        write_routes.add('/api/external/release')
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
                            '/api/settings/extra-sources', '/api/tags', '/api/team/settings'}
         program_routes = {'/api/program/check', '/api/program/apply'}
@@ -1283,6 +1285,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/cleanup/preview':
                 self.reply(200, cleanup.preview(body.get('skills'), self.server.home))
                 return
+            if path == '/api/external/preview':
+                from .. import external
+                self.reply(200, external.preview(body.get('name'), self.server.home))
+                return
             if path == '/api/cleanup/delete/preview':
                 self.reply(200, cleanup.delete_preview(body.get('skills'), self.server.home))
                 return
@@ -1372,6 +1378,11 @@ class Handler(BaseHTTPRequestHandler):
                     with self.server.update_review(body['review_id']) as review:
                         result = updates.apply(review, body['skills'], body.get('choices'), True,
                                                body.get('merge_ids'), body.get('confirm_lark_cli', False))
+                elif path == '/api/external/release':
+                    from .. import external
+                    if not body.get('revision') or not body.get('plan_id'):
+                        raise ValueError('请先核对这次退出托管。')
+                    result = external.release(body.get('name'), True, self.server.home, body['revision'], body['plan_id'])
                 elif path == '/api/cleanup/apply':
                     result = cleanup.apply(body.get('skills'), True, self.server.home, body['revision'])
                 elif path == '/api/cleanup/delete/apply':

@@ -1617,6 +1617,7 @@ function pendingNote(name, agentId) {
 }
 
 function switchHtml(skill, agent, on, pending, locked, job = null) {
+  if (skill.read_only) return '<span class="row-note">外部维护</span>';
   const queued = job ? (job.status === 'running' ? '处理中' : '排队中') : '';
   return `<button class="switch${pending ? ' is-pending' : ''}${job ? ' is-job' : ''}" role="switch" aria-checked="${on}" style="--c:${agentColor(agent.id)}"
         data-skill="${escape(skill.name)}" data-agent="${escape(agent.id)}"
@@ -1629,7 +1630,7 @@ function skillRowHtml(skill, agent) {
   const on = jobChange ? jobChange.enabled : assignedAfter(skill.name, agent.id);
   const pending = !job && on !== assignedNow(skill.name, agent.id);
   // 「有新版」可能同时显示两个状态。批量动作仍只处理当前栏里尚未加入草稿的技能。
-  const selectable = state.table.write_allowed && !job && !pending && on === (state.tab === 'on')
+  const selectable = !skill.read_only && state.table.write_allowed && !job && !pending && on === (state.tab === 'on')
     && !submittingAssignmentKeys.has(skill.name + '|' + agent.id);
   const error = state.pending?.conflicts?.find(c => c.skill === skill.name && c.agent === agent.id)?.message;
   const note = cellNote(skill, agent);
@@ -1648,7 +1649,7 @@ function skillRowHtml(skill, agent) {
   const tags = (skill.tags || []).map(tag => tagPickHtml(tag)).join('');
   const sum = skill.summary || skill.description;
   const updateJob = updateJobFor(skill.name);
-  const updateEnd = updateJob
+  const updateEnd = skill.read_only ? '' : updateJob
     ? `<span class="update-job-note">${updateJob.status === 'running' ? '处理中' : '排队中'}</span>`
     : updateRow(skill.name) ? `<button class="update-up" data-update-up="${escape(skill.name)}" title="有可用更新"
         aria-label="${escape('更新「' + titleOf(skill.name) + '」')}" ${writeBusy || jobsBlocked() ? 'disabled' : ''}><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg></button>` : '';
@@ -2068,7 +2069,7 @@ function renderSkillSelection(agent) {
     box.checked = state.skillSelected.has(box.dataset.skillSelect);
     box.disabled = locked;
   }
-  $('skills-selection').hidden = !state.table?.write_allowed || !$('skills-list').querySelector('[data-row]');
+  $('skills-selection').hidden = !state.table?.write_allowed || !boxes.length;
   const all = $('skills-select-all');
   all.checked = boxes.length > 0 && count === boxes.length;
   all.indeterminate = count > 0 && count < boxes.length;
@@ -2117,15 +2118,20 @@ function renderSkillTable() {
 
   const skills = state.table.skills;
   const nOn = skills.filter(skill => assignedNow(skill.name, agent.id)).length;
+  const nOff = skills.filter(skill => !skill.read_only && !assignedNow(skill.name, agent.id)).length;
+  const nExternal = skills.filter(skill => skill.read_only).length;
+  if (!nExternal && state.tab === 'external') state.tab = 'on';
   renderButtons($('skills-tabs'), `<button class="seg" data-tab="on" aria-pressed="${state.tab === 'on'}">已启用<span class="n">${nOn}</span></button>
-    <button class="seg" data-tab="off" aria-pressed="${state.tab === 'off'}">可添加<span class="n">${skills.length - nOn}</span></button>`, 'data-tab');
+    <button class="seg" data-tab="off" aria-pressed="${state.tab === 'off'}">可添加<span class="n">${nOff}</span></button>
+    ${nExternal ? `<button class="seg" data-tab="external" aria-pressed="${state.tab === 'external'}">外部维护<span class="n">${nExternal}</span></button>` : ''}`, 'data-tab');
   $('skills-search').placeholder = `搜索 ${agent.name} 的技能`;
 
   const query = $('skills-search').value.trim().toLowerCase();
   const matches = skill => matchesQuery(skill, query);
-  const pending = skills.filter(skill => updateRow(skill.name));
+  const pending = skills.filter(skill => !skill.read_only && updateRow(skill.name));
   if (state.chip === UPDATES_CHIP && !pending.length) state.chip = '';   // 都更新完了，回到全部
-  const inTab = skills.filter(skill => (state.tab === 'on') === assignedNow(skill.name, agent.id)).filter(matches);
+  const inTab = skills.filter(skill => state.tab === 'external' ? skill.read_only
+    : state.tab === 'on' ? assignedNow(skill.name, agent.id) : !skill.read_only && !assignedNow(skill.name, agent.id)).filter(matches);
   const withUpdate = pending.filter(matches);   // 有新版的不分“在用 / 可以加的”
   const scope = state.chip === UPDATES_CHIP ? withUpdate : inTab;
   const hasTag = skill => !state.tag || (skill.tags || []).includes(state.tag);
@@ -2147,7 +2153,7 @@ function renderSkillTable() {
     `<div class="list-group-head"><strong>${escape(group.name)}</strong><span>${group.skills.length} 个</span></div>`
     + group.skills.map(skill => skillRowHtml(skill, agent)).join('')).join('') || `<div class="empty">${empty}</div>`);
   renderSkillSelection(agent);
-  listedSkillNames = rows.map(skill => skill.name);
+  listedSkillNames = rows.filter(skill => !skill.read_only).map(skill => skill.name);
   $('tags-batch').hidden = !state.table.write_allowed || listedSkillNames.length < 2;
   $('tags-batch').disabled = Boolean(writeBusy);
   animateSkillResults(agent);
@@ -2157,7 +2163,7 @@ function renderSkillTable() {
 
 function pendingChanges() {
   if (!state.table) return [];
-  const changes = state.table.skills.flatMap(skill => state.agents
+  const changes = state.table.skills.filter(skill => !skill.read_only).flatMap(skill => state.agents
     .filter(agent => assignedAfter(skill.name, agent.id) !== assignedNow(skill.name, agent.id))
     .map(agent => ({skill: skill.name, agent: agent.id, enabled: assignedAfter(skill.name, agent.id)})));
   for (const change of state.pending?.changes || []) {
@@ -2366,7 +2372,7 @@ function changeAssignments(names, agentId, enabled) {
   let changed = false;
   for (const name of names) {
     const key = name + '|' + agentId;
-    if (submittingAssignmentKeys.has(key) || assignmentJobAt(name, agentId)) continue;
+    if (state.skillIndex.get(name)?.read_only || submittingAssignmentKeys.has(key) || assignmentJobAt(name, agentId)) continue;
     setDraft(name, agentId, enabled);
     if (enabled === assignedNow(name, agentId)) state.assignmentIntents.delete(key);
     else state.assignmentIntents.set(key, {skill: name, agent: agentId, enabled});
@@ -6057,6 +6063,15 @@ function renderDetail(assignmentsOnly = false) {
   const skill = state.table?.skills.find(s => s.name === state.detail);
   if (!skill) { closeDetail(); return; }
   $('detail-title').textContent = skill.title || skill.name;
+  if (skill.read_only) {
+    $('detail-body').innerHTML = `<p class="detail-summary">由 ${escape(skill.owner)} 维护，Skill Pilot 只读展示。</p>
+      <p class="item-note">${skill.external_missing ? '暂未找到可用入口，请在原应用中检查安装。' : '入口保持原样，更新和启用请在原应用中操作。'}</p>
+      <h3 class="sub-title">Agent 使用情况</h3><div class="who">${state.agents.map(agent =>
+        `<div class="who-row"><span class="who-name">${swatch(agent.id)}${escape(agent.name)}</span><p>${skill.assigned_agents.includes(agent.id) ? '已启用' : '未启用'}</p></div>`).join('')}</div>
+      ${skill.version ? `<p class="item-note">技能版本：${escape(skill.version)}</p>` : ''}
+      <h3 class="sub-title">Agent 实际读取的说明</h3><p class="detail-desc">${escape(skill.description)}</p>`;
+    return;
+  }
   const locked = Boolean(writeBusy) || !state.table.write_allowed;
   const disabledFor = new Set(state.agents.filter(agent => (state.inventory?.disabled?.[agent.id]?.names || []).includes(skill.name)).map(agent => agent.id));
 
@@ -6110,7 +6125,7 @@ function renderDetail(assignmentsOnly = false) {
   const entries = entriesFor(skill.name).map(({root, skill: entry}) => {
     const manual = (entry.manual_only_for || []).map(nameOf);
     const status = [
-      entry.broken ? '链接已失效' : entry.kind === 'link' ? '链接到统一仓库' : '存放完整文件',
+      entry.broken ? '链接已失效' : entry.kind === 'link' ? '共享技能入口' : '存放完整文件',
       (root.readers || []).map(nameOf).join(' / '),
       manual.length ? `${manual.join('、')} 只允许手动调用` : '',
       entry.model_invocable === false ? '只允许手动调用' : '',
@@ -6153,6 +6168,7 @@ function renderDetail(assignmentsOnly = false) {
       : `<p class="detail-desc">${escape(skill.description)}</p>`}
 
     <h3 class="sub-title">其他</h3>
+    <p><button class="btn btn-small btn-quiet" data-release="${escape(skill.name)}" ${locked ? 'disabled' : ''}>退出托管并保留入口</button></p>
     <dl class="detail-list">
       <dt>来源</dt><dd>${escape(skill.source_label || '未记录')}</dd>
       <dt>本地修改</dt><dd>${skill.local_modified ? `${icon('edit')} 已修改${hint('此技能已有本地修改，更新前需选择保留的内容。')}` : `${icon('check-circle')} 未修改`}</dd>
@@ -6353,6 +6369,25 @@ $('detail-body').addEventListener('click', async event => {
   const button = event.target.closest('button');
   if (!button) return;
   if (button.dataset.githubInstall !== undefined) { queueGithubInstall(button.dataset.githubInstall, button); return; }
+  if (button.dataset.release) {
+    try {
+      const name = button.dataset.release;
+      const plan = await api('/api/external/preview', {name});
+      const ok = await confirmDialog({title: '退出托管并保留入口',
+        lines: [`「${titleOf(name)}」交由 ${plan.owner} 维护。`,
+          `保留使用入口：${plan.agents.map(nameOf).join('、')}。`,
+          '清理 Skill Pilot 库内副本，保留只读展示；原应用文件保持原样。'],
+        note: '执行前会备份库内副本，可在操作记录中撤销。', okText: '退出托管'});
+      if (!ok) return;
+      await runWrite({button, busyText: '正在退出托管…', work: async () => {
+        const result = await api('/api/external/release', {name, revision: plan.revision, plan_id: plan.plan_id, confirmed: true});
+        await refreshEverything();
+        return result;
+      }, success: result => ({text: result.message,
+        undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton})})});
+    } catch (error) { toast({text: error.message, tone: 'error', sticky: true}); }
+    return;
+  }
   if (button.dataset.githubDetailRetry) { loadGithubDetail(button.dataset.githubDetailRetry); return; }
   if (button.dataset.githubDigestRetry) { retryGithubDigest(button.dataset.githubDigestRetry, button); return; }
   if (button.dataset.goto) { closeDetail(); gotoPlace(button.dataset.goto); return; }
@@ -7188,7 +7223,7 @@ function cleanupMeta(skill) {
 
 /* 在用：至少给了一个 agent。未启用：哪个 agent 都没给，包括撤下来的和从没启用过的。 */
 function cleanupTabSkills(tab = state.cleanupTab) {
-  return (state.table?.skills || []).filter(skill => {
+  return (state.table?.skills || []).filter(skill => !skill.read_only).filter(skill => {
     const assigned = (state.saved[skill.name] || []).length > 0;
     return tab === 'on' ? assigned : !assigned;
   });
@@ -7370,7 +7405,7 @@ function renderCleanup() {
       if (!known.has(name) || (state.saved[name] || []).length || cleanupJobFor(name)) state.idleSelected.delete(name);
     }
   }
-  renderCleanupTabs(state.table?.skills || []);
+  renderCleanupTabs((state.table?.skills || []).filter(skill => !skill.read_only));
   renderCleanupFilters(cleanupTabSkills());
   const rows = cleanupVisibleRows();
   $('cleanup-result-count').textContent = state.table ? `${rows.length} 个技能` : '';

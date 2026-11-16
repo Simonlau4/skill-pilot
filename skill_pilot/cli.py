@@ -137,6 +137,10 @@ def main():
             command.add_argument('--yes', action='store_true')
         if name == 'undo':
             command.add_argument('id')
+    release = commands.add_parser('release', help='退出托管，保留外部入口并清理库内副本')
+    release.add_argument('skill')
+    release.add_argument('--yes', action='store_true')
+    release.add_argument('--json', action='store_true')
     args = parser.parse_args()
     if args.command == 'hub':
         from . import team_hub
@@ -399,9 +403,12 @@ def main():
             if review and not keep_review:
                 rmtree(review['temporary'], ignore_errors=True)
         return
-    if args.command in {'status', 'list', 'assign', 'unassign', 'absorb', 'install', 'log', 'undo'}:
+    if args.command in {'status', 'list', 'assign', 'unassign', 'absorb', 'install', 'log', 'undo', 'release'}:
         try:
-            if args.command in {'status', 'list'}:
+            if args.command == 'release':
+                from . import external
+                data = external.release(args.skill, confirmed=args.yes)
+            elif args.command in {'status', 'list'}:
                 data = operations.table()
                 if args.command == 'list':
                     if args.agent not in {a['id'] for a in data['agents']}:
