@@ -400,7 +400,7 @@ class HubStore:
 
     def _save_feedback(self, rows):
         rows = rows[-feedback.MAX_RECORDS:]
-        while len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').encode()) > feedback.MAX_BYTES:
+        while len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').replace('\n', os.linesep).encode()) > feedback.MAX_BYTES:
             rows.pop(0)
         atomic_write(self.data / 'feedback.json', rows)
 

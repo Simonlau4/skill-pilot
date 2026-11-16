@@ -164,6 +164,20 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(self.request('/api/diagnostics/submit', {'ticket': prepared['ticket']})[0], 400)
             send.assert_not_called()
 
+    def test_backup_limit_counts_windows_text_line_endings(self):
+        rows = [{'detail': 'x' * 75, 'state': 'sent'} for _ in range(2)]
+        limit = len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').encode())
+        original = os.fdopen
+        def windows_text(fd, mode, **kwargs):
+            return original(fd, mode, **kwargs, newline='\r\n')
+        with patch.object(os, 'linesep', '\r\n'), patch.object(os, 'fdopen', windows_text), \
+                patch.object(feedback, 'MAX_BYTES', limit):
+            self.hub.store._save_feedback(rows)
+        raw = (self.data / 'feedback.json').read_bytes()
+        self.assertIn(b'\r\n', raw)
+        self.assertLessEqual(len(raw), limit)
+        self.assertEqual(len(json.loads(raw)), 1)
+
     def test_disabled_old_offline_hubs_and_manual_report(self):
         self.assertEqual(self.request('/api/me', hub=True)[1]['api'], 2)
         self.hub.feedback_webhook = ''
