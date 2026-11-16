@@ -6,6 +6,7 @@ import re
 import threading
 import unicodedata
 import urllib.error
+from .diagnostics import failure
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -371,20 +372,16 @@ class Digests:
                             self.cache[repository] = entry
                             self._save()
                 except labels.ServiceError as error:
-                    from .diagnostics import failure
                     captured = failure(self.home, 'backend', '整理热门技能介绍', error)
                     message = str(error) if str(error) in SERVICE_ERRORS else 'AI 整理没能完成，请稍后重试。'
                     batch_error = message in BATCH_ERRORS
                 except DownloadError as error:
-                    from .diagnostics import failure
                     captured = failure(self.home, 'backend', '下载热门技能介绍', error)
                     message = str(error)
                 except CacheError as error:
-                    from .diagnostics import failure
                     captured = failure(self.home, 'backend', '保存热门技能介绍', error)
                     message, batch_error = SAVE_ERROR, True
-                except (OSError, ValueError) as error:
-                    from .diagnostics import failure
+                except Exception as error:
                     captured = failure(self.home, 'backend', '读取热门技能介绍', error)
                     message = labels.PARSE_ERROR
                 else:

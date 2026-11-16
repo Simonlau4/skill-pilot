@@ -165,7 +165,8 @@ def test(home):
             raise ServiceError(PARSE_ERROR)
         return {'ok': True, 'message': '连接成功，可以给技能起中文名了。'}
     except ServiceError as error:
-        return {'ok': False, 'message': str(error)}
+        from .diagnostics import failure
+        return {'ok': False, 'message': str(error), **failure(home, 'backend', '测试 AI 连接', error)}
 
 
 def run(home, mode, progress):
@@ -187,7 +188,7 @@ def run(home, mode, progress):
                     for n in names]
         skills = describe(sorted((n for n in registry if needs_work(have.get(n))), key=lambda n: (n in have, n)))
         scheduled = {s['name'] for s in skills}
-        progress.update(done=0, total=len(skills), message='正在整理技能的中文名和说明…', error='')
+        progress.update(done=0, total=len(skills), message='正在整理技能的中文名和说明…', error='', error_id='')
         def save():
             current = load(home)[1]['skills']
             for group in groups:

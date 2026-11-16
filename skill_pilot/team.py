@@ -119,7 +119,7 @@ def _request(config, path, method='GET', data=None):
                 raise ValueError
             return _redact(result, key)
         except (ValueError, UnicodeError, RecursionError):
-            raise ValueError(FORMAT_ERROR) from None
+            raise RequestError(502, FORMAT_ERROR) from None
     except urllib.error.HTTPError as error:
         status = error.code
         try:
@@ -146,7 +146,7 @@ def _member(value):
     if (not isinstance(value, dict) or not isinstance(value.get('id'), str) or
             not re.fullmatch(r'[0-9a-f]{32}', value['id']) or
             not isinstance(value.get('name'), str) or not value['name'].strip()):
-        raise ValueError(FORMAT_ERROR)
+        raise RequestError(502, FORMAT_ERROR)
     return {key: value[key] for key in ('id', 'name')}
 
 
@@ -212,7 +212,7 @@ def save_settings(home, body, write_lock=None):
         if (joined.get('service') != 'skill-pilot-team' or type(joined.get('api')) is not int or
                 joined['api'] != 2 or not isinstance(joined.get('token'), str) or
                 not re.fullmatch(r'[A-Za-z0-9_-]+', joined['token'])):
-            raise ValueError(FORMAT_ERROR)
+            raise RequestError(502, FORMAT_ERROR)
         _member(joined.get('member'))
         config['key'] = joined['token']
         result = status(home, config)
@@ -289,7 +289,7 @@ def _catalog(config):
                 seen_packs.add(key)
             catalog['packs'] = sorted(packs, key=lambda p: p['updated_at'], reverse=True)
     except (ValueError, TypeError, KeyError, AttributeError):
-        raise ValueError(FORMAT_ERROR) from None
+        raise RequestError(502, FORMAT_ERROR) from None
     if 'github' in data:
         try:
             catalog['github'] = team_hub.clean_github(data['github'])
@@ -501,7 +501,7 @@ def package(config, member, name, version, destination):
         if data.get('name') != name or data.get('version') != version or team_hub.package_version(files) != version:
             raise ValueError
     except (ValueError, TypeError):
-        raise ValueError(FORMAT_ERROR) from None
+        raise RequestError(502, FORMAT_ERROR) from None
     destination = Path(destination)
     destination.mkdir(parents=True)
     for row in files:
@@ -868,7 +868,7 @@ def listings_remove(home, names, confirmed=True):
                     data = _request(config, '/api/packages/' + member['id'] + '/' + name + '?version=' + row['source']['version'])
                     files = team_hub.clean_files(data.get('files'))
                     if team_hub.package_version(files) != row['source']['version']:
-                        raise ValueError(FORMAT_ERROR)
+                        raise RequestError(502, FORMAT_ERROR)
                     row['source'] = {k: v for k, v in row['source'].items() if k not in {'version', 'file_count', 'size'}}
                     row['source']['files'] = files
                 replacements.append(team_hub.clean_listing(row))

@@ -93,8 +93,8 @@ def causes(error):
 
 def is_fault(error):
     """Plain ValueError is the existing validation contract; wrapped failures count."""
-    if type(error).__name__ == 'RequestError' and getattr(error, 'status', 500) < 500:
-        return False
+    if type(error).__name__ == 'RequestError':
+        return getattr(error, 'status', 500) >= 500
     return any(not isinstance(e, (ValueError, StopIteration)) or
                isinstance(e, (json.JSONDecodeError, UnicodeError)) or
                type(e).__name__ in {'ServiceError', 'DownloadError', 'CacheError', 'RollbackError'}
@@ -232,7 +232,9 @@ def environment(home, project=PROJECT):
     registry = read_json(home / '.skill-pilot/registry.json').get('skills', {})
     registry = registry if isinstance(registry, dict) else {}
     team = read_json(home / '.skill-pilot/team.json')
-    return {'os': platform.system() + ' ' + platform.release(), 'architecture': platform.machine(),
+    os_version = ('macOS ' + platform.mac_ver()[0] if platform.system() == 'Darwin'
+                  else platform.system() + ' ' + platform.release())
+    return {'os': os_version, 'architecture': platform.machine(),
             'python_version': platform.python_version(), 'install_mode': '源码' if checkout else '压缩包',
             'app_version': revision[:12] if isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{7,64}', revision) else '未能读取',
             'modified': modified, 'tools': tools, 'agent_count': len(agents),

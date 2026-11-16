@@ -19,7 +19,9 @@ def main():
         sys.argv = ['skill-pilot', 'ui']
         start()
         return 0
-    except Exception as error:
+    except (Exception, SystemExit) as error:
+        if isinstance(error, SystemExit) and error.code in (None, 0):
+            return 0
         try:
             from skill_pilot.diagnostics import record
             record(home, 'startup', '打开看板', error, '看板未能打开，请运行 skill-pilot doctor。', force=True)
