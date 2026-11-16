@@ -305,6 +305,29 @@ class OperationsTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_release_keeps_last_owned_disable_and_other_settings_editable(self):
+        for initial in (b'', b'[skills]\nconfig = [{ name="existing", enabled=false }] # keep\n',
+                        b'[[skills.config]]\nname="existing"\nenabled=false\n'):
+            with self.subTest(initial=initial), tempfile.TemporaryDirectory() as temporary:
+                set_up_home(self, temporary)
+                path = self.home / '.codex/config.toml'
+                path.parent.mkdir()
+                path.write_bytes(initial)
+                registry = {}
+                checked = lambda p: store.guard(p, self.home)
+                codex_config.write(self.home, registry, ['one', 'two'], checked)
+                codex_config.release(self.home, registry, 'two', checked)
+                self.assertEqual(set(registry['codex_config']['fragments']), {'one'})
+                codex_config.write(self.home, registry, [], checked)
+                expected = ['existing', 'two'] if initial else ['two']
+                self.assertEqual(codex_config.read(self.home)['names'], expected)
+                self.assertEqual(codex_config.read_external(self.home, registry)['names'], expected)
+                if initial:
+                    self.assertIn('existing', path.read_text())
+                path.write_text(path.read_text().replace('"two"', '"renamed"'))
+                codex_config.write(self.home, registry, ['one'], checked)
+                self.assertIn('renamed', codex_config.read(self.home)['names'])
+
     def test_lossless_multiple_owned_and_external_entries(self):
         initial = b'[skills]\nconfig = [ { name="existing", enabled=false } ] # unchanged\n'
         result, ownership = codex_config.render(initial, {}, {'one','two'})

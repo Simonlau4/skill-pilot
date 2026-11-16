@@ -68,9 +68,10 @@ def load(home=None):
             if '..' in Path(entry).parts or any(Path(entry).is_relative_to(r) for r in readonly):
                 raise ValueError('登记表涉及只读目录，已停止操作。')
     confirmed, _ = curated_dependencies()
+    known = registry['skills'].keys() | registry.get('external_skills', {}).keys()
     for name, skill in registry['skills'].items():
         rejected = {n for n, decision in skill.get('dependency_decisions', {}).items() if decision == 'rejected'}
-        extra = confirmed.get(name, set()) & set(registry['skills']) - rejected
+        extra = confirmed.get(name, set()) & known - rejected
         if extra - set(skill.get('requires', [])):
             skill['requires'] = sorted(set(skill.get('requires', [])) | extra)
     return home, registry, agents
@@ -754,8 +755,9 @@ def install(review, names, assigned=None, expected=None, home=None, confirmed=Tr
         for item in items:
             _put(home, current, item, [], [], checked)
         dependencies, _ = curated_dependencies()
+        known = current['skills'].keys() | current.get('external_skills', {}).keys()
         for name in names:
-            current['skills'][name]['requires'] = sorted(dependencies.get(name, set()) & current['skills'].keys())
+            current['skills'][name]['requires'] = sorted(dependencies.get(name, set()) & known)
         changes = [{'skill': s['name'], 'agent': a, 'enabled': True} for s in items for a in assigned]
         plan = assignment_plan(current, agents, changes, home)
         current.update(plan['registry'])

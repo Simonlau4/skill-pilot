@@ -70,6 +70,43 @@ class ExternalTests(unittest.TestCase):
         self.assertEqual(row['assigned_agents'], [])
         self.assertIn('ordinary', visibility(self.home)['claude']['available'])
 
+    def test_release_shared_skill_keeps_disable_through_writes_rollback_and_undo(self):
+        self.entry.unlink()
+        self.entry.symlink_to(self.home / '.skill-pilot/store/app-skill', target_is_directory=True)
+        changes = [{'skill': name, 'agent': agent, 'enabled': enabled}
+                   for name in ('app-skill', 'ordinary')
+                   for agent, enabled in (('codex', False), ('dsh', True))]
+        operations.apply_assign(changes, confirmed=True, home=self.home)
+        entry = self.home / '.agents/skills/app-skill'
+        entry.unlink()
+        entry.symlink_to(self.app, target_is_directory=True)
+        config = self.home / '.codex/config.toml'
+        registry_path = self.home / '.skill-pilot/registry.json'
+        original_config, original_registry = config.read_bytes(), registry_path.read_bytes()
+        before = visibility(self.home)
+        with patch.object(operations, '_commit', side_effect=OSError('cannot commit')):
+            with self.assertRaisesRegex(ValueError, '恢复原样'):
+                external.release('app-skill', True, self.home)
+        self.assertEqual(config.read_bytes(), original_config)
+        self.assertEqual(registry_path.read_bytes(), original_registry)
+        released = external.release('app-skill', True, self.home)
+        self.assertEqual(visibility(self.home), before)
+        fragments = operations.load(self.home)[1]['codex_config']['fragments']
+        self.assertNotIn('app-skill', fragments)
+        self.assertIn('ordinary', fragments)
+        assigned = operations.apply_assign([{'skill': 'ordinary', 'agent': 'claude', 'enabled': True}],
+                                           confirmed=True, home=self.home)
+        enabled = operations.apply_assign([{'skill': 'ordinary', 'agent': 'codex', 'enabled': True}],
+                                          confirmed=True, home=self.home)
+        self.assertNotIn('app-skill', visibility(self.home)['codex']['available'])
+        self.assertIn('app-skill', visibility(self.home)['dsh']['available'])
+        self.assertIn('ordinary', visibility(self.home)['claude']['available'])
+        for result in (enabled, assigned, released):
+            operations.undo(result['id'], home=self.home)
+        self.assertEqual(config.read_bytes(), original_config)
+        self.assertEqual(registry_path.read_bytes(), original_registry)
+        self.assertEqual(visibility(self.home), before)
+
     def test_store_reference_missing_source_changed_preview_and_readonly_are_rejected(self):
         with self.assertRaisesRegex(ValueError, '库内副本'):
             external.release('ordinary', True, self.home)
@@ -148,6 +185,41 @@ class ExternalTests(unittest.TestCase):
         self.assertIn('外部工具维护', row['source']['reason'])
         imported = sharing.preview_import(exported, home=self.home)
         self.assertNotIn('app-skill', imported['install'])
+
+    def test_install_keeps_external_dependency_and_checks_target_agent(self):
+        external.release('app-skill', True, self.home)
+        path = self.root / 'Downloaded dependent'
+        path.mkdir()
+        (path / 'SKILL.md').write_text('---\nname: dependent\ndescription: needs app-skill\n---\n')
+        review = operations.inspect_local(str(path), self.home)
+        with patch.object(operations, 'curated_dependencies', return_value=({'dependent': {'app-skill'}}, {})):
+            with self.assertRaisesRegex(ValueError, '外部工具维护'):
+                operations.install(review, ['dependent'], ['claude'], home=self.home)
+            self.assertNotIn('dependent', operations.load(self.home)[1]['skills'])
+            self.assertFalse((self.home / '.skill-pilot/store/dependent').exists())
+            installed = operations.install(review, ['dependent'], ['codex'], home=self.home)
+            saved = json.loads((self.home / '.skill-pilot/registry.json').read_text())
+            self.assertEqual(saved['skills']['dependent']['requires'], ['app-skill'])
+            self.assertIn('dependent', visibility(self.home)['codex']['available'])
+            operations.undo(installed['id'], home=self.home)
+            operations.install(review, ['dependent'], home=self.home)
+            with self.assertRaisesRegex(ValueError, '外部工具维护'):
+                operations.apply_assign([{'skill': 'dependent', 'agent': 'claude', 'enabled': True}],
+                                        confirmed=True, home=self.home)
+        self.assertFalse((self.home / '.skill-pilot/store/app-skill').exists())
+        self.assertEqual(self.entry.resolve(), self.app)
+
+    def test_load_includes_external_dependencies_and_respects_rejection(self):
+        external.release('app-skill', True, self.home)
+        path = self.home / '.skill-pilot/registry.json'
+        original = path.read_bytes()
+        with patch.object(operations, 'curated_dependencies', return_value=({'ordinary': {'app-skill'}}, {})):
+            self.assertEqual(operations.load(self.home)[1]['skills']['ordinary']['requires'], ['app-skill'])
+            self.assertEqual(path.read_bytes(), original)
+            registry = json.loads(original)
+            registry['skills']['ordinary']['dependency_decisions'] = {'app-skill': 'rejected'}
+            path.write_text(json.dumps(registry))
+            self.assertEqual(operations.load(self.home)[1]['skills']['ordinary']['requires'], [])
 
     def test_cli_preview_release_and_later_operation_undo_order(self):
         env = {**os.environ, 'SKILL_PILOT_HOME': str(self.home), 'PYTHONDONTWRITEBYTECODE': '1'}

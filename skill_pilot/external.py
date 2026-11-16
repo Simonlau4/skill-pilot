@@ -72,6 +72,9 @@ def release(name, confirmed=False, home=None, expected=None, plan_id=None):
         current.setdefault('external_skills', {})[name] = {
             'owner': view['owner'], 'entries': view['entries'],
             'released_at': datetime.now(timezone.utc).isoformat()}
+        for profile in profiles.managed(home):
+            if profile['disable']:
+                profiles.adapter(profile).release(home, current, name, checked)
         del current['skills'][name]
         for relative in ('store/' + name, 'bases/' + name, 'store/.skill-pilot-state/' + name + '.json'):
             remove(home / '.skill-pilot' / relative, checked)

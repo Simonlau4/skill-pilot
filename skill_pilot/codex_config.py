@@ -148,6 +148,25 @@ def render(original, ownership, desired):
     return result, ownership
 
 
+def release(home, registry, name, checked):
+    """Keep this exclusion as a user setting, leaving other exclusions managed."""
+    ownership = registry.get('codex_config', {})
+    fragments = ownership.get('fragments', {})
+    if name not in fragments:
+        return
+    path = checked(home / CONFIG_PATH)
+    original = path.read_bytes()
+    # Put the retained entry before managed entries so removing an earlier
+    # managed fragment later cannot leave a leading comma in the config array.
+    retained, ownership = render(original, ownership, [name])
+    ownership['fragments'].pop(name)
+    ownership.pop('scaffold', None)
+    result, ownership = render(retained, ownership, set(fragments) - {name})
+    if result != original:
+        path.write_bytes(result)
+    registry['codex_config'] = ownership
+
+
 def write(home, registry, desired, checked):
     path = checked(home / CONFIG_PATH)
     exists = path.exists()
