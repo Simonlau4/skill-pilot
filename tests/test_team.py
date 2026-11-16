@@ -1592,7 +1592,7 @@ class TeamTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), original)
                 self.assertEqual(len(self.hub.store.members()), 3)
             public = self.ok(self.a, '/api/team')
-            self.assertEqual(set(public), {'url', 'has_key', 'configured', 'member'})
+            self.assertEqual(set(public), {'url', 'has_key', 'configured', 'member', 'feedback_supported', 'feedback_configured'})
             self.assertEqual(public['member'], result['member'])
             self.assertNotIn(saved['key'], json.dumps([result, public]) + stderr.getvalue())
         self.assertEqual(operations.history(self.home), history)

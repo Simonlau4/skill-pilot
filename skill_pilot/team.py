@@ -16,7 +16,7 @@ import urllib.request
 from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 
-from . import labels, operations, relations, sharing, store, tags, team_hub
+from . import diagnostics, feedback, labels, operations, relations, sharing, store, tags, team_hub
 from .scan import SKIP_CONTENT, metadata
 from .sources import github, normalize
 from .store import git_tree, guard
@@ -95,6 +95,8 @@ def _request(config, path, method='GET', data=None):
              team_hub.MAX_INSTALL_BODY if path == '/api/installs/me' else MAX_BODY)
     if path == '/api/packs/me':
         limit = team_hub.MAX_PACK_BODY
+    if path == '/api/feedback':
+        limit = feedback.MAX_BODY
     if body is not None and len(body) > limit:
         raise ValueError('技能包内容超过 64 KB，请缩短后重试。' if path == '/api/packs/me' else
                          '上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
@@ -161,13 +163,15 @@ def _connection_version(config):
     return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
 
-def _me(config):
+def _me(config, capabilities=False):
     result = _request(config, '/api/me')
     if type(result.get('api')) is not int or result['api'] != 2:
         raise ValueError('分享站和你的 Skill Pilot 版本不匹配，请一起换成新版。')
     if result.get('service') != 'skill-pilot-team':
         raise ValueError('这个地址不是 Skill Pilot 分享站，请核对地址。')
-    return _member(result.get('member'))
+    member = _member(result.get('member'))
+    return ({'member': member, 'feedback_supported': result.get('feedback_supported') is True,
+             'feedback_configured': result.get('feedback_configured') is True} if capabilities else member)
 
 
 def status(home, config=None, strict=True):
@@ -177,7 +181,7 @@ def status(home, config=None, strict=True):
         public_url = config.get('url', '').replace(config['key'], '[已隐藏]') if config else ''
         result.update(url=public_url, has_key=bool(config.get('key')), configured=bool(config))
         if config:
-            result['member'] = _me(config)
+            result.update(_me(config, capabilities=True))
     except (ValueError, OSError) as error:
         if strict:
             raise
@@ -185,6 +189,69 @@ def status(home, config=None, strict=True):
         from .diagnostics import failure
         result.update(failure(home, 'backend', '连接分享站', error, result['error']))
     return result
+
+
+def feedback_preview(home, error_id='', note=''):
+    report = diagnostics.bundle(home, error_id, note)['report']
+    if not error_id:
+        report['errors'] = []  # A manual report must not silently include unrelated past failures.
+    payload = feedback.envelope(report)
+    if not error_id:
+        import uuid
+        payload.update(error_id=uuid.uuid4().hex, fingerprint='manual')
+    result = {'payload': payload, 'member': None, 'can_send': False, 'reason': '', 'submitted': False}
+    config = {}
+    try:
+        config = settings(home)
+        if not store.write_allowed(home):
+            result['reason'] = '只读模式不能发送反馈，请复制或导出诊断信息。'
+        elif not config:
+            result['reason'] = '尚未连接分享站，请复制或导出诊断信息。'
+        else:
+            info = _me(config, capabilities=True)
+            result['member'] = info['member']
+            if not info['feedback_supported']:
+                result['reason'] = '分享站版本较旧，暂不支持反馈，请联系管理员更新。'
+            elif not info['feedback_configured']:
+                result['reason'] = '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。'
+            elif payload['action'] == '连接分享站':
+                result['reason'] = '这次是分享站连接失败，请复制或导出诊断信息发给维护者。'
+            else:
+                result['can_send'] = True
+    except (ValueError, OSError):
+        result['reason'] = '连不上分享站，请复制或导出诊断信息发给维护者。'
+    version = _connection_version(config)
+    saved = diagnostics.read_json(Path(home) / '.skill-pilot/feedback.json').get('submitted', [])
+    result['submitted'] = version + ':' + payload['error_id'] in saved
+    if result['submitted']:
+        result.update(can_send=False, reason='这条反馈已提交。')
+    payload.update(status='待排查', reporter=(result['member'] or {}).get('name', '未连接'))
+    result['_connection'] = version
+    return result
+
+
+def submit_feedback(home, prepared):
+    if not store.write_allowed(home):
+        raise ValueError('只读模式不能发送反馈，请复制或导出诊断信息。')
+    if not prepared.get('can_send'):
+        raise ValueError('当前不能发送反馈，请重新打开反馈窗口。')
+    config = _connection(home)
+    info = _me(config, capabilities=True)
+    if (_connection_version(config) != prepared['_connection'] or info['member'] != prepared['member'] or
+            not info['feedback_supported'] or not info['feedback_configured']):
+        raise ValueError('分享站连接或署名已改变，请重新打开反馈窗口核对。')
+    try:
+        result = _request(config, '/api/feedback', 'POST', prepared['payload'])
+    except (ValueError, OSError) as error:
+        raise ValueError(diagnostics.sanitize(str(error), home, 400)) from None
+    if result.get('submitted') is not True:
+        raise ValueError('分享站没有确认提交成功，请复制或导出诊断信息。')
+    path = Path(home) / '.skill-pilot/feedback.json'
+    saved = diagnostics.read_json(path).get('submitted', [])
+    saved = saved if isinstance(saved, list) else []
+    key = prepared['_connection'] + ':' + prepared['payload']['error_id']
+    labels.atomic_write(home, 'feedback.json', json.dumps({'submitted': [*saved, key][-200:]}) + '\n', 0o600)
+    return {'submitted': True}
 
 
 def save_settings(home, body, write_lock=None):

@@ -125,6 +125,8 @@ class Dashboard(ThreadingHTTPServer):
         extra_sources.ensure(self.home)
         self.install_reviews = session.get('install_reviews', {})
         self.team_upload_reviews = session.get('team_upload_reviews', {})
+        self.feedback_previews = {}
+        self.feedback_lock = threading.Lock()
         self.jobs = []
         self.jobs_version = 0
         self.jobs_blocked = session.get('jobs_blocked', '')
@@ -1153,7 +1155,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(403, {"error": "请求来源不属于本次看板。"})
             return
         path = urllib.parse.urlsplit(self.path).path
-        if path in {'/api/diagnostics/bundle', '/api/diagnostics/client-error'}:
+        if path in {'/api/diagnostics/bundle', '/api/diagnostics/client-error',
+                    '/api/diagnostics/preview', '/api/diagnostics/submit'}:
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 0 < length <= 16384:
@@ -1162,8 +1165,29 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict) or any(not isinstance(v, str) for v in body.values()):
                     raise ValueError('诊断内容格式不正确。')
+                if path.endswith('/submit') and not preview_allowed(self.server.home):
+                    self.reply(403, {'error': '只读模式不能发送反馈，请复制或导出诊断信息。'})
+                    return
                 if path.endswith('/bundle'):
                     self.reply(200, diagnostics.bundle(self.server.home, body.get('error_id'), body.get('note', '')))
+                elif path.endswith('/preview'):
+                    prepared = team.feedback_preview(self.server.home, body.get('error_id', ''), body.get('note', ''))
+                    ticket = secrets.token_urlsafe(24)
+                    with self.server.feedback_lock:
+                        self.server.feedback_previews = {k: v for k, v in self.server.feedback_previews.items()
+                                                        if v['expires'] > time.monotonic()}
+                        if len(self.server.feedback_previews) >= 100:
+                            self.server.feedback_previews.pop(next(iter(self.server.feedback_previews)))
+                        self.server.feedback_previews[ticket] = {'expires': time.monotonic() + 600, 'prepared': prepared}
+                    self.reply(200, {k: v for k, v in prepared.items() if k != '_connection'} | {'ticket': ticket})
+                elif path.endswith('/submit'):
+                    with self.server.feedback_lock:
+                        entry = self.server.feedback_previews.get(body.get('ticket'))
+                        if not entry or entry['expires'] <= time.monotonic():
+                            raise ValueError('预览已过期，请重新打开反馈窗口。')
+                        result = team.submit_feedback(self.server.home, entry['prepared'])
+                        del self.server.feedback_previews[body['ticket']]
+                    self.reply(200, result)
                 elif not preview_allowed(self.server.home):
                     self.reply(403, {'error': '当前处于只读模式，错误记录未写入。'})
                 else:
@@ -1176,8 +1200,11 @@ class Handler(BaseHTTPRequestHandler):
                     row = diagnostics.record(self.server.home, 'frontend', '页面脚本',
                         error, '页面出了点问题，请刷新重试。', force=True)
                     self.reply(200, {'error_id': row.get('error_id', '')})
-            except ValueError:
-                self.reply(400, {'error': '诊断内容格式不正确，或记录已过期。'})
+            except (ValueError, OSError) as error:
+                message = (diagnostics.sanitize(str(error), self.server.home, 400)
+                           if path.endswith('/submit') else '诊断内容格式不正确，或记录已过期。')
+                self.request_validation = True
+                self.reply(400, {'error': message})
             return
         if path in {'/api/heartbeat', '/api/runtime/refresh'}:
             # Consume small optional bodies before closing the HTTP/1.0

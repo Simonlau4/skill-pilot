@@ -240,6 +240,7 @@ const button = {isConnected: true};
             extract_function(source, 'function githubCardHtml('),
             extract_function(source, 'function githubListHtml('),
             extract_function(source, 'function githubSkillsHtml('),
+            extract_function(source, 'function feedbackButton('),
             extract_function(source, 'function githubDigestStatusHtml('),
             extract_function(source, 'function githubDetailHtml('),
         ]

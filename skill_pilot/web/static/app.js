@@ -173,12 +173,13 @@ $('confirm-body').addEventListener('click', event => {
 
 /* 提示条：成功会自己消失，出错留着让用户看清。
    带撤销的提示，撤销自己也会先弹确认框，用户取消时提示条留着。 */
-function toast({text, tone = 'ok', undo = null, sticky = false}) {
+function toast({text, tone = 'ok', undo = null, sticky = false, error_id = ''}) {
   const item = document.createElement('div');
   item.className = 'toast' + (tone === 'error' ? ' toast-error' : '');
   const message = document.createElement('p');
   message.textContent = text;
   item.append(message);
+  if (tone === 'error') appendFeedback(item, error_id);
   if (undo) {
     const button = document.createElement('button');
     button.className = 'btn btn-small';
@@ -191,7 +192,7 @@ function toast({text, tone = 'ok', undo = null, sticky = false}) {
         item.remove();
       } catch (error) {
         button.disabled = false;
-        toast({text: error.message, tone: 'error', sticky: true});
+        toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
       }
     });
     item.append(button);
@@ -321,6 +322,7 @@ function renderTasks() {
       <span class="task-text">${escape(task.text)}</span>
       ${track}
       ${action}
+      ${task.tone === 'error' ? feedbackButton(task.error_id) : ''}
     </div>`;
   }).join('');
   for (const fill of bar.querySelectorAll('[data-ratio]')) {
@@ -428,9 +430,9 @@ async function runWrite({button = null, busyText, taskText = busyText, success =
   renderBusyAreas();
 
   if (failure) {
-    setTask('write', {text: failure.message, tone: 'error'});
+    setTask('write', {error_id: failure.error_id, text: failure.message, tone: 'error'});
     onError?.(failure);
-    toast({text: failure.message, tone: 'error', sticky: true});
+    toast({error_id: failure.error_id, text: failure.message, tone: 'error', sticky: true});
     return null;
   }
   clearTask('write');
@@ -563,7 +565,7 @@ function jobConflictHtml(job) {
 
 function jobFailedHtml(job) {
   if (!['failed', 'attention'].includes(job.status) || !(job.failed || []).length) return '';
-  return `<ul class="job-details">${job.failed.map(item => `<li>${escape(titleOf(item.name))}：${escape(item.error || '原因未知')}</li>`).join('')}</ul>`;
+  return `<ul class="job-details">${job.failed.map(item => `<li>${escape(titleOf(item.name))}：${escape(item.error || '原因未知')}${feedbackButton(item.error_id)}</li>`).join('')}</ul>`;
 }
 
 function jobImpactHtml(job) {
@@ -598,6 +600,7 @@ function jobItemHtml(job) {
       <span class="tag ${status.tone}">${escape(status.label)}</span>
     </div>
     <p class="job-status">${escape(jobStatusLine(job))}</p>
+    ${['failed', 'attention'].includes(job.status) ? feedbackButton(job.error_id) : ''}
     ${jobConflictHtml(job)}${jobFailedHtml(job)}${jobImpactHtml(job)}
     ${actions.length ? `<div class="job-actions">${actions.map(action => jobActionButton(job, action)).join('')}</div>` : ''}
   </li>`;
@@ -786,7 +789,7 @@ async function submitJob(parameters, {button = null, busyText = '正在提交…
         readJobs();
       }
       onError?.(error);
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
       return null;
     }
   });
@@ -879,7 +882,7 @@ async function retryJob(job, button = null) {
         renderJobAvailability();
         readJobs();
       }
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
 }
@@ -896,7 +899,7 @@ async function checkUpdatesForRetry() {
       if (progress) showReview(progress);
     }
   } catch (error) {
-    setTask('updates', {text: error.message, tone: 'error', retry: () => refreshUpdates()});
+    setTask('updates', {error_id: error.error_id, text: error.message, tone: 'error', retry: () => refreshUpdates()});
     throw error;
   } finally {
     updateState.starting = false;
@@ -932,7 +935,7 @@ async function confirmRetryJob(job, button = null) {
         renderJobAvailability();
         readJobs();
       }
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
 }
@@ -959,7 +962,7 @@ async function clearEndedJobs(button) {
       readQueue();   // 团队页的安装队列和这里是同一份记录，清理完一起刷新
       toast({text: '已清除结束的任务'});
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
 }
@@ -1029,9 +1032,9 @@ function finishJobs(finished) {
         undo: job.operations?.length && jobUndoAvailable(job) ? button => undoJob(job, button) : null,
       });
     } else if (job.status === 'failed') {
-      toast({text: jobStatusLine(job), tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), error_id: job.error_id, tone: 'error', sticky: true});
     } else if (job.status === 'attention') {
-      toast({text: jobStatusLine(job), tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), error_id: job.error_id, tone: 'error', sticky: true});
     }
   }
   for (const key of packKeys) announcePackBatch(key, state.jobs);
@@ -1042,7 +1045,7 @@ function finishJobs(finished) {
     if (updatesFinished) await refreshUpdates();
     if (installed && state.table?.llm_configured) startLabels('missing');
     const failed = results.find(result => result.status === 'rejected');
-    if (failed) toast({text: '任务结果刷新失败：' + (failed.reason?.message || '请刷新页面后再看。'), tone: 'error', sticky: true});
+    if (failed) toast({text: '任务结果刷新失败：' + (failed.reason?.message || '请刷新页面后再看。'), error_id: failed.reason?.error_id, tone: 'error', sticky: true});
     // 任务写入期间失败的预览，现在再读一次。
     if (!jobsHasActive() && !assignmentSubmitting && state.assignmentIntents.size) {
       invalidatePreview();
@@ -1787,10 +1790,10 @@ function setDetailTagBusy(busy) {
   updateDetailTagAdd();
 }
 
-function showDetailTagError(message) {
+function showDetailTagError(message, errorId = '') {
   const error = $('detail-tag-error');
   if (!error) return;
-  error.textContent = message;
+  error.innerHTML = escape(message) + feedbackButton(errorId);
   error.hidden = false;
 }
 
@@ -1812,10 +1815,10 @@ async function writeDetailTag(action, value) {
   } catch (error) {
     setDetailTagBusy(false);
     if (state.detail === name) {
-      showDetailTagError(error.message);
+      showDetailTagError(error.message, error.error_id);
       $('detail-tag-input')?.focus();
     } else {
-      toast({text: error.message, tone: 'error'});
+      toast({error_id: error.error_id, text: error.message, tone: 'error'});
     }
   }
 }
@@ -1878,7 +1881,7 @@ async function applyBatchTag(action) {
       : `已从 ${names.length} 个技能去掉「${canonical}」`});
   } catch (error) {
     tagDialogBusy = false;
-    $('tag-dialog-error').textContent = error.message;
+    $('tag-dialog-error').innerHTML = escape(error.message) + feedbackButton(error.error_id);
     $('tag-dialog-error').hidden = false;
     renderTagDialogControls();
     $('tag-dialog-input').focus();
@@ -2228,7 +2231,7 @@ function renderSkillsActionBar() {
     text: `有 ${changes.length} 处待应用的改动`,
     note,
     items,
-    extra,
+    extra: extra + (problem ? feedbackButton(previewProblem?.error_id) : ''),
     buttons: [
       {label: '全部放弃', kind: 'btn btn-quiet', disabled: assignmentSubmitting, action: () => discardPending()},
       ...(problem && !checking ? [{label: '重新核对', kind: 'btn', disabled: assignmentSubmitting, action: () => retryAssignmentPreview()}] : []),
@@ -2267,10 +2270,10 @@ function previewFailure(message) {
 function rememberPreviewFailure(error) {
   // 任务还在写文件时，这次核对失败先不打扰；任务结束后会再核对一次。
   if (jobsHasActive()) return;
-  previewProblem = {message: error?.name === 'AbortError'
+  previewProblem = {error_id: error?.error_id, message: error?.name === 'AbortError'
     ? '核对时间太长，已停下来。你的选择还在。'
     : previewFailure(error?.message)};
-  toast({text: previewProblem.message, tone: 'error', sticky: true});
+  toast({error_id: previewProblem.error_id, text: previewProblem.message, tone: 'error', sticky: true});
 }
 
 function retryAssignmentPreview() {
@@ -2679,7 +2682,7 @@ async function applyAbsorb(review, choices, button) {
       await refreshEverything();
       return written;
     },
-    onError: error => { $('absorb-message').textContent = error.message; },
+    onError: error => { $('absorb-message').innerHTML = escape(error.message) + feedbackButton(error.error_id); },
     success: written => ({
       text: '技能副本已经纳入统一管理',
       undo: undoButton => undoOperation(written.id, {skills: review.skills, message: written.message, button: undoButton}),
@@ -2724,7 +2727,7 @@ $('new-absorb').addEventListener('click', async event => {
     });
     if (ok) await applyAbsorb(review, {}, button);
   } catch (error) {
-    toast({text: error.message, tone: 'error', sticky: true});
+    toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
   } finally {
     renderNewSkills();
   }
@@ -2751,7 +2754,7 @@ async function refreshInventory() {
       renderDiagnostics();
       renderFooter();
     } catch (error) {
-      toast({text: '技能清单读取失败：' + error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: '技能清单读取失败：' + error.message, tone: 'error', sticky: true});
     } finally {
       clearTask('inventory');
       inventoryRequest = null;
@@ -2817,7 +2820,7 @@ async function refreshAgents() {
   clearTimeout(agentsPollTimer);
   if (state.agentsView?.discovery?.running) {
     agentsPollTimer = setTimeout(() => refreshAgents().catch(error => {
-      state.agentsView.discovery = {...state.agentsView.discovery, running: false, error: error.message + '，请重新扫描。'};
+      state.agentsView.discovery = {...state.agentsView.discovery, running: false, error_id: error.error_id, error: error.message + '，请重新扫描。'};
       renderAgents();
       if (homeVisible) renderHome();
     }), 500);
@@ -2840,6 +2843,7 @@ function renderProgram() {
   $('program-message').textContent = message;
   $('program-error').textContent = progress.error || '';
   $('program-error').hidden = !progress.error;
+  if (progress.error) appendFeedback($('program-error'), progress.error_id);
   $('program-check').disabled = progress.running || Boolean(writeBusy);
   $('program-check').setAttribute('aria-busy', String(progress.running && progress.phase === 'check'));
   $('program-check').querySelector('span').textContent = progress.running && progress.phase === 'check'
@@ -2863,7 +2867,7 @@ async function refreshProgramUpdate() {
     programUpdate = await api('/api/program/progress');
     renderProgram();
   } catch (error) {
-    $('program-error').textContent = error.message;
+    $('program-error').innerHTML = escape(error.message) + feedbackButton(error.error_id);
     $('program-error').hidden = false;
   }
 }
@@ -2889,7 +2893,7 @@ async function programAction(action) {
   renderProgram();
   const fail = error => {
     programFailedAction = action;
-    programUpdate = {...programUpdate, running: false, phase: 'error', available: false, error: error.message};
+    programUpdate = {...programUpdate, running: false, phase: 'error', available: false, error: error.message, error_id: error.error_id};
   };
   const work = async () => {
     const result = await api('/api/program/' + action,
@@ -2900,7 +2904,7 @@ async function programAction(action) {
       programUpdate = await api('/api/program/progress');
       renderProgram();
     }
-    if (programUpdate.error) throw new Error(programUpdate.error);
+    if (programUpdate.error) throw Object.assign(new Error(programUpdate.error), {error_id: programUpdate.error_id});
     return programUpdate;
   };
   try {
@@ -2990,7 +2994,7 @@ async function refreshSettings() {
     for (const input of $('llm-form').querySelectorAll('input, select, button')) input.disabled = !state.table?.write_allowed;
     renderLabelCounts();
   } catch (error) {
-    toast({text: error.message, tone: 'error'});
+    toast({error_id: error.error_id, text: error.message, tone: 'error'});
   }
 }
 
@@ -3022,7 +3026,7 @@ $('config-export').addEventListener('click', async () => {
       toast({text: `已导出 ${config.skills.length} 个技能的配置。${manual ? `其中 ${manual} 个需要对方另行补齐，文件里已标明。` : '可将文件交给对方的 Agent 导入。'}`});
     });
   } catch (error) {
-    toast({text: error.message, tone: 'error'});
+    toast({error_id: error.error_id, text: error.message, tone: 'error'});
   }
 });
 
@@ -3089,7 +3093,7 @@ async function previewConfigImport() {
     renderConfigImportReview(plan);
   } catch (error) {
     if (sequence !== configImportSequence) return;
-    $('config-import-message').textContent = error.message;
+    $('config-import-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
     $('config-import-retry').hidden = false;
   } finally {
     if (sequence === configImportSequence) {
@@ -3135,7 +3139,7 @@ $('config-import-file').addEventListener('change', async event => {
       throw new Error('这不是 Skill Pilot 配置文件，请重新导出。');
     }
   } catch (error) {
-    if (sequence === configImportSequence) $('config-import-message').textContent = error.message;
+    if (sequence === configImportSequence) $('config-import-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
   } finally {
     if (sequence === configImportSequence) {
       configImportReading = false;
@@ -3166,7 +3170,7 @@ $('config-import-apply').addEventListener('click', async event => {
     button: event.currentTarget, busyText: '正在下载并导入…',
     onError: error => {
       configImportPlan = null;
-      $('config-import-message').textContent = error.message;
+      $('config-import-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
       $('config-import-retry').hidden = false;
       renderConfigImportControls();
     },
@@ -3204,7 +3208,7 @@ async function refreshTeam() {
   try {
     state.team = await api('/api/team');
   } catch (error) {
-    state.team = {configured: false, url: '', has_key: false, member: null, error: error.message};
+    state.team = {configured: false, url: '', has_key: false, member: null, error: error.message, error_id: error.error_id};
   }
   document.querySelector('.nav-item[data-page="team"]').hidden = !state.team.configured;
   renderTeamSettings();
@@ -3222,6 +3226,7 @@ function renderTeamSettings() {
   $('team-key').placeholder = team.has_key ? '已保存；不改就留空' : '粘贴管理员给你的口令';
   $('team-message').textContent = [team.error || (team.member ? `已连接，你是 ${team.member.name}。` : ''),
     teamSettingsWritable() ? '' : '只读模式下不能修改。'].filter(Boolean).join(' ');
+  if (team.error) appendFeedback($('team-message'), team.error_id);
   $('team-goto').hidden = !team.configured;
   const locked = !teamSettingsWritable() || Boolean(writeBusy);
   for (const element of $('team-form').querySelectorAll('input, #team-save, #team-key-toggle')) element.disabled = locked;
@@ -3258,8 +3263,8 @@ $('team-form').addEventListener('submit', event => {
       toast({text: `已连上分享站，你是 ${result.member.name}。`});
     } catch (error) {
       failed = true;
-      $('team-message').textContent = error.message;
-      toast({text: error.message, tone: 'error'});
+      $('team-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      toast({error_id: error.error_id, text: error.message, tone: 'error'});
     }
   }).finally(() => {
     // withBusy 会放开按钮，这里按最新状态重画（只读、写入中会重新禁用），并保留刚才的报错。
@@ -3325,7 +3330,7 @@ function applyQueue(result, {force = false} = {}) {
   if (finished) loadStore({syncQueue: false}).catch(() => {});
   // 整个队列都结束后，在后台刷新一次技能页数据，不锁页面、不挡操作。
   if (beforeActive && !afterActive) {
-    refreshEverything().catch(error => toast({text: error.message, tone: 'error', sticky: true}));
+    refreshEverything().catch(error => toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true}));
   }
   if (changed) {
     if (state.page === 'team') renderTeam();
@@ -3366,7 +3371,7 @@ async function clearStoreQueue(button) {
       queueVersion += 1;
       applyQueue(result, {force: true});
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
 }
@@ -3377,7 +3382,7 @@ async function retryStoreQueue(key, button) {
     try {
       applyQueue(await addToStoreQueue(item?.kind === 'github_install' ? {github: item.repository} : {key}), {force: true});
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
 }
@@ -3390,9 +3395,11 @@ async function loadStore({syncQueue = true} = {}) {
     if (sequence !== storeSequence) return;
     state.store = result;
     state.storeError = '';
+    state.storeErrorId = '';
   } catch (error) {
     if (sequence !== storeSequence) return;
     state.storeError = error.message;
+    state.storeErrorId = error.error_id;
   }
   renderTeam();
   if (state.storeDetail) renderStoreDetail();
@@ -3769,7 +3776,7 @@ async function queueGithubInstall(repository, button) {
     try {
       applyQueue(await addToStoreQueue({github: repository}), {force: true});
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
   if (button.isConnected) return;
@@ -3848,6 +3855,7 @@ function githubApplyEntry(repository, entry) {
   const repo = githubRepo(repository);
   if (!repo || !entry || typeof entry !== 'object') return false;
   const before = JSON.stringify([repo.digest_status, repo.digest, repo.digest_error]);
+  repo.error_id = entry.error_id || '';
   if (entry.digest_status) repo.digest_status = entry.digest_status;
   if (entry.digest) repo.digest = entry.digest;
   else delete repo.digest;
@@ -3947,6 +3955,7 @@ function githubDigestStatusHtml(repo) {
       data-github-digest-retry="${escape(repo.repository)}">重试</button>`;
     return `<div class="store-get store-get-warn github-digest-note" role="alert">
       ${icon('warning')}<span>${escape(repo.digest_error || '这次没能整理中文介绍，请稍后重试。')}</span>
+      ${feedbackButton(repo.error_id)}
       ${retry ? `<span class="store-get-actions">${retry}</span>` : ''}
     </div>`;
   }
@@ -4008,14 +4017,14 @@ function renderGithubDetail() {
     body.innerHTML = '<p class="github-detail-loading" role="status">正在读取仓库详情…</p>';
   } else if (detail.error && !detail.data) {
     body.innerHTML = `<div class="store-get store-get-warn">
-      <p class="store-get-line">${icon('warning')}<span>${escape(detail.error)}</span></p>
+      <p class="store-get-line">${icon('warning')}<span>${escape(detail.error)}</span>${feedbackButton(detail.error_id)}</p>
       <p class="row-note">没能读到这个仓库的详情，请重试。</p>
       <div class="store-get-actions"><button class="btn btn-small" type="button"
         data-github-detail-retry="${escape(detail.repository)}">重试</button></div>
     </div>`;
   } else {
     const notice = detail.error
-      ? `<p class="row-note is-error">没读到最新内容：${escape(detail.error)}
+      ? `<p class="row-note is-error">没读到最新内容：${escape(detail.error)}${feedbackButton(detail.error_id)}
         <button class="link-btn" type="button" data-github-detail-retry="${escape(detail.repository)}">重试</button></p>`
       : '';
     // 详情是打开时读的：本机状态以刚刷新的目录为准，装好后按钮和标签跟着变。
@@ -4038,7 +4047,7 @@ async function loadGithubDetail(repository) {
     githubDetail = {repository, data, error: '', loading: false};
   } catch (error) {
     if (sequence !== githubDetailSequence || state.storeDetail !== githubDetailKey(repository)) return;
-    githubDetail = {repository, data: githubDetail?.data || null, error: githubErrorText(error), loading: false};
+    githubDetail = {repository, data: githubDetail?.data || null, error: githubErrorText(error), error_id: error.error_id, loading: false};
   }
   renderGithubDetail();
 }
@@ -4067,7 +4076,7 @@ async function retryGithubDigest(repository, button) {
       if (githubDetail?.repository === repository) await loadGithubDetail(repository);
       if (githubHasPending()) scheduleGithubDigestPoll();
     } catch (error) {
-      toast({text: githubErrorText(error), tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: githubErrorText(error), tone: 'error', sticky: true});
     }
   });
 }
@@ -4081,6 +4090,7 @@ function renderTeam() {
   const problem = (team && team.error) || state.storeError;
   $('store-error').hidden = !problem;
   $('store-error-text').textContent = problem || '';
+  if (problem) appendFeedback($('store-error-text'), team?.error_id || state.storeErrorId);
   const cards = state.store?.cards || null;
   const ready = Boolean(team?.member) && !team?.error;
   const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
@@ -4250,7 +4260,7 @@ $('store-mine').addEventListener('click', async () => {
   try {
     await loadCandidates();
   } catch (error) {
-    toast({text: error.message, tone: 'error'});
+    toast({error_id: error.error_id, text: error.message, tone: 'error'});
   }
   renderTeam();
 });
@@ -4340,7 +4350,7 @@ async function gotoStoreTag(tag) {
     try {
       await refreshTable();
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
       return;
     }
   }
@@ -4368,7 +4378,7 @@ async function gotoStoreSkill(button) {
     try {
       await refreshTable();
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
       return;
     }
   }
@@ -4406,7 +4416,7 @@ async function unlistStore(name, button) {
       renderTeam();
       toast({text: `已下架「${card ? storeTitle(card) : name}」${extra.length ? `等 ${names.length} 个技能` : ''}。`});
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
   // 这一行没了：焦点交给顶上来的那一行，没有就交给列表标题。
@@ -4576,7 +4586,7 @@ function storeInstallHtml(card) {
     status = '<p class="store-queue-state" role="status">正在安装…</p>';
     action = '';
   } else if (queued?.status === 'failed') {
-    status = `<p class="store-get-error" role="alert">安装失败：${escape(queued.message || '原因未知')}</p>`;
+    status = `<p class="store-get-error" role="alert">安装失败：${escape(queued.message || '原因未知')}${feedbackButton(queued.error_id)}</p>`;
     action = `<button class="btn btn-primary" type="button" data-store-install${readOnly ? ' disabled' : ''}>重试</button>`;
   } else if (queued?.status === 'done') {
     status = '<p class="store-queue-state" role="status">安装完成</p>';
@@ -4586,7 +4596,7 @@ function storeInstallHtml(card) {
     <p class="store-get-line">安装后保存至技能库，分配给 Agent 后生效。</p>
     <p class="store-cost">${cost}</p>
     ${status}
-    ${!queued && get?.error ? `<p class="store-get-error" role="alert">${escape(get.error)}</p>` : ''}
+    ${!queued && get?.error ? `<p class="store-get-error" role="alert">${escape(get.error)}${feedbackButton(get.error_id)}</p>` : ''}
     ${!queued ? storeNeedsBlockHtml(card) : ''}
     ${action ? `<div class="store-get-actions">${action}</div>` : ''}
     ${readOnly && action ? '<p class="row-note">只读预览，无法安装技能。</p>' : ''}
@@ -4851,6 +4861,7 @@ async function queueStorePack(pack) {
     if (state.storeDetail === pack.key) focusStorePanel('.store-get button, .store-get a');
   } catch (error) {
     storeGet.error = error.message;
+    storeGet.error_id = error.error_id;
     if (state.storeDetail !== pack.key) return;
     renderStoreDetail();
     focusStorePanel('.store-get button');
@@ -4877,7 +4888,7 @@ async function unpackStorePack(pack, button) {
       if (state.storeMine) await loadCandidates().catch(() => {});
       renderTeam();
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
 }
@@ -4962,7 +4973,7 @@ async function openPackDialog(targetId = '') {
     await loadCandidates();
   } catch (error) {
     $('store-pack-list').replaceChildren();
-    $('store-pack-message').textContent = error.message;
+    $('store-pack-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
     return;
   }
   const data = storeCandidateData || {};
@@ -5071,8 +5082,8 @@ async function savePackDialog() {
       if (state.storeMine) await loadCandidates().catch(() => {});
       renderTeam();
     } catch (error) {
-      $('store-pack-message').textContent = error.message;
-      toast({text: error.message, tone: 'error', sticky: true});
+      $('store-pack-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   });
 }
@@ -5179,6 +5190,7 @@ async function queueStoreInstall(card) {
     if (storeGet === get) focusStorePanel('.store-get button, .store-get a');
   } catch (error) {
     get.error = error.message;
+    get.error_id = error.error_id;
     if (storeGet !== get) return;
     renderStoreDetail();
     focusStorePanel('.store-get button');
@@ -5211,8 +5223,8 @@ async function rateStore(form, remove) {
       await loadStore();
       focusStorePanel('[data-store-rate] [type="submit"]');
     } catch (error) {
-      if (form.isConnected) message.textContent = error.message;
-      else toast({text: error.message, tone: 'error'});
+      if (form.isConnected) message.innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      else toast({error_id: error.error_id, text: error.message, tone: 'error'});
     }
   });
 }
@@ -5233,7 +5245,7 @@ async function openPublish(preselect = []) {
     await loadCandidates();
   } catch (error) {
     $('store-pick-list').replaceChildren();
-    $('store-publish-message').textContent = error.message;
+    $('store-publish-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
     return;
   }
   for (const name of preselect) {
@@ -5442,7 +5454,7 @@ async function previewStore({initial = false} = {}) {
   } catch (error) {
     if (storePick === pick) {
       pick.plan = null;
-      $('store-publish-message').textContent = error.message;
+      $('store-publish-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
       updateReviewActions();
     }
     return null;
@@ -5577,7 +5589,7 @@ $('store-publish-apply').addEventListener('click', async event => {
       if (state.storeMine) await loadCandidates().catch(() => {});
       renderTeam();
     } catch (error) {
-      $('store-publish-message').textContent = error.message;
+      $('store-publish-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
     }
   });
   storePublishing = false;
@@ -5600,8 +5612,8 @@ $('extra-source-form').addEventListener('submit', event => {
       await saveExtraSource(path, false);
       $('extra-source-path').value = '';
     } catch (error) {
-      $('extra-source-message').textContent = error.message;
-      toast({text: error.message, tone: 'error'});
+      $('extra-source-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      toast({error_id: error.error_id, text: error.message, tone: 'error'});
     }
   });
 });
@@ -5615,8 +5627,8 @@ $('extra-sources').addEventListener('click', event => {
     try {
       await saveExtraSource(path, true);
     } catch (error) {
-      $('extra-source-message').textContent = error.message;
-      toast({text: error.message, tone: 'error'});
+      $('extra-source-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      toast({error_id: error.error_id, text: error.message, tone: 'error'});
     }
   });
 });
@@ -5638,12 +5650,13 @@ $('llm-form').addEventListener('submit', event => {
       $('llm-key').value = '';
       const result = await api('/api/settings/llm/test', {});
       $('llm-message').textContent = result.message;
-      toast({text: result.message, tone: result.ok ? 'ok' : 'error'});
+      if (!result.ok) appendFeedback($('llm-message'), result.error_id);
+      toast({text: result.message, tone: result.ok ? 'ok' : 'error', error_id: result.error_id});
       await refreshTable(true);
       if (result.ok && state.table.labels_pending) startLabels('missing');
     } catch (error) {
-      $('llm-message').textContent = error.message;
-      toast({text: error.message, tone: 'error'});
+      $('llm-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      toast({error_id: error.error_id, text: error.message, tone: 'error'});
     } finally {
       unlock();
       await refreshSettings();
@@ -5666,7 +5679,7 @@ $('llm-clear').addEventListener('click', async event => {
       await refreshSettings();
       toast({text: '已删除密钥。'});
     } catch (error) {
-      toast({text: error.message, tone: 'error'});
+      toast({error_id: error.error_id, text: error.message, tone: 'error'});
     }
   });
 });
@@ -5686,7 +5699,7 @@ async function startLabels(mode) {
   } catch (error) {
     labelsRunning = false;
     renderLabelCounts();
-    setTask('labels', {text: error.message, tone: 'error', retry: () => startLabels('missing')});
+    setTask('labels', {error_id: error.error_id, text: error.message, tone: 'error', retry: () => startLabels('missing')});
   }
 }
 
@@ -5708,14 +5721,14 @@ async function pollLabels() {
     }
     labelsRunning = false;
     await refreshTable(true);
-    if (progress.error) throw new Error(progress.error);
+    if (progress.error) throw Object.assign(new Error(progress.error), {error_id: progress.error_id});
     clearTask('labels');
     toast({text: progress.message});
   } catch (error) {
     labelsRunning = false;
     renderLabelCounts();
-    setTask('labels', {text: error.message, tone: 'error', retry: () => startLabels('missing')});
-    toast({text: error.message, tone: 'error'});
+    setTask('labels', {error_id: error.error_id, text: error.message, tone: 'error', retry: () => startLabels('missing')});
+    toast({error_id: error.error_id, text: error.message, tone: 'error'});
   }
 }
 
@@ -5736,7 +5749,7 @@ async function refreshLog() {
     renderLog();
     renderJobs();   // 已撤销的记录不再给任务列表里的「撤销」
   } catch (error) {
-    toast({text: error.message, tone: 'error', sticky: true});
+    toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
   }
 }
 
@@ -5744,7 +5757,7 @@ async function refreshEverything() {
   // Agent 名单独立读取，不阻挡写操作的完成提示。
   await Promise.all([refreshTable(), refreshInventory()]);
   await Promise.all([refreshLog(), loadCleanup()]);
-  refreshAgents().catch(error => toast({text: error.message, tone: 'error', sticky: true}));
+  refreshAgents().catch(error => toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true}));
 }
 
 /* ==================== 设置页的 agent 一栏：接入新 agent、不再管理 ==================== */
@@ -5765,6 +5778,7 @@ function renderAgents() {
   const checked = discovery.checked_at ? `上次检查：${new Date(discovery.checked_at).toLocaleString('zh-CN')}` : '';
   $('agents-scan-status').textContent = discovery.error || [discovery.message, checked].filter(Boolean).join(' · ')
     || '打开看板时自动检查新安装的 Agent，也可手动重新扫描。';
+  if (discovery.error) appendFeedback($('agents-scan-status'), discovery.error_id);
   const managed = view?.managed || [];
   const suggested = view?.suggested || [];
   const ignored = ignoredAgents(view);
@@ -5815,7 +5829,7 @@ $('agents-scan').addEventListener('click', async () => {
     await api('/api/agents/scan', {});
     await refreshAgents();
   } catch (error) {
-    state.agentsView.discovery = {...state.agentsView.discovery, running: false, error: error.message + '，请重试。'};
+    state.agentsView.discovery = {...state.agentsView.discovery, running: false, error_id: error.error_id, error: error.message + '，请重试。'};
     renderAgents();
   }
 });
@@ -5829,7 +5843,7 @@ async function leaveAgent(id) {
   try {
     plan = await api('/api/agents/leave/preview', {agent: id});
   } catch (error) {
-    toast({text: error.message, tone: 'error', sticky: true});
+    toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     return;
   }
   const lost = plan.lost_skills || [];
@@ -5933,7 +5947,7 @@ async function showJoinPreview(agents) {
     joinPlan = await api('/api/agents/join/preview', {agents});
     joinPlan.requests = agents;
   } catch (error) {
-    toast({text: error.message, tone: 'error', sticky: true});
+    toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     return;
   }
   renderJoin(joinPlan);
@@ -6032,7 +6046,7 @@ $('join-apply').addEventListener('click', async event => {
   await runWrite({
     button: event.currentTarget,
     busyText: '正在接入…',
-    onError: error => { $('join-message').textContent = error.message; },
+    onError: error => { $('join-message').innerHTML = escape(error.message) + feedbackButton(error.error_id); },
     work: async () => {
       const result = await api('/api/agents/join/apply', {agents: joinPlan.requests, plan_id: joinPlan.plan_id, revision: joinPlan.revision, choices, confirmed: true});
       $('agents-join-dialog').close();
@@ -6386,7 +6400,7 @@ $('detail-body').addEventListener('click', async event => {
         return result;
       }, success: result => ({text: result.message,
         undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton})})});
-    } catch (error) { toast({text: error.message, tone: 'error', sticky: true}); }
+    } catch (error) { toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true}); }
     return;
   }
   if (button.dataset.githubDetailRetry) { loadGithubDetail(button.dataset.githubDetailRetry); return; }
@@ -6472,6 +6486,7 @@ async function decideDependency(skill, requires, confirmed, button) {
 let railReview = null;            // 左栏卡片记着的这次读取结果
 let installSummaryExpanded = false; // 读到多个技能时，卡片是否已经展开全部
 let dialogReview = null;          // 安装窗口这次显示的结果，点「安装」时用它
+let installReadErrorId = '';
 let installReadError = '';        // 读取失败的原因；卡片上带「重试」
 let installInspectSequence = 0;   // 读取的先后顺序：后发的记更大的号，旧结果回来时丢掉
 let installInspectedUrl = '';     // 已经读过（或正在读）的链接，同一个链接不重复读
@@ -6580,7 +6595,7 @@ function renderInstallRail() {
   if (installReadError) {
     card.hidden = false;
     card.innerHTML = `<p class="rail-note-title">${icon('warning')}<strong>解析未完成</strong></p>
-      <p class="item-note">${escape(installReadError)}</p>
+      <p class="item-note">${escape(installReadError)}${feedbackButton(installReadErrorId)}</p>
       <div class="install-actions-row">
         <button class="btn btn-small" data-install-retry${writable ? '' : ' disabled'}>重试</button>
         ${installDismissButton()}
@@ -6651,6 +6666,7 @@ async function inspectInstall(force = false) {
     installInspectedUrl = '';   // 没读成，再粘贴同一个链接还要能重读（不只是靠「重试」）
     installReadingUrl = '';
     installReadError = error.message;
+    installReadErrorId = error.error_id;
     renderInstallRail();
   }
 }
@@ -6767,7 +6783,7 @@ async function showIncomingConflicts(result, reviewId) {
       $('incoming-comparisons').append(item);
       shown += 1;
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
   }
   return shown === conflicts.length;
@@ -6789,7 +6805,7 @@ $('install-apply').addEventListener('click', async event => {
   }, {
     button,
     busyText: '正在提交…',
-    onError: error => { $('install-message').textContent = error.message; },
+    onError: error => { $('install-message').innerHTML = escape(error.message) + feedbackButton(error.error_id); },
   });
   if (!result) return;
   $('install-dialog').close();
@@ -6835,7 +6851,7 @@ async function refreshUpdates() {
     const review = await api('/api/updates/progress');
     if (review) showReview(review);
   } catch (error) {
-    setTask('updates', {text: error.message, tone: 'error', retry: () => refreshUpdates()});
+    setTask('updates', {error_id: error.error_id, text: error.message, tone: 'error', retry: () => refreshUpdates()});
   }
 }
 
@@ -6857,7 +6873,8 @@ function showReview(review) {
       ratio: review.total ? review.done / review.total : null,
     });
   } else {
-    clearTask('updates');
+    if (review.error) setTask('updates', {text: review.error, error_id: review.error_id, tone: 'error', retry: () => checkUpdates()});
+    else clearTask('updates');
   }
   renderUpdateBar();
   // 查出新结果、或更新完一批，列表和详情才重画；进度没变就不动，免得打断正在做的事。
@@ -6971,17 +6988,17 @@ function renderUpdateBar() {
   all.innerHTML = `${icon('update-up', 'btn-icon')}<span>全部更新</span><span class="n">${batch.length}</span>`;
   all.disabled = checking || updateState.busy || Boolean(writeBusy) || !updatesWritable();
 
-  const sentence = !review || checking ? '' : updateResultSentence(review);
+  const sentence = !review || checking ? '' : review.error || updateResultSentence(review);
   const skipped = review ? uncheckedReasons(review) : {count: 0, known: false};
   const allCurrent = sentence && review.total && !waiting.length && !failed.length && !skipped.count && skipped.known;
   const mark = !sentence ? '' : waiting.length ? icon('update-up', 'ico-up') : allCurrent ? icon('check-circle', 'ico-ok') : icon('info');
   const status = sentence ? `<span>${mark}${escape(sentence)}</span>` : '';
-  $('updates-status').innerHTML = status
+  $('updates-status').innerHTML = status + (review?.error ? feedbackButton(review.error_id) : '')
     + (problems.length && !checking ? `<button class="link-btn" data-failed-toggle aria-expanded="${updateState.failedOpen}">${icon('warning')}${failureCounts}</button>` : '');
   renderUncheckedSkills(review, checking);
   const panel = $('updates-failed');
   panel.hidden = !problems.length || checking || !updateState.failedOpen;
-  panel.innerHTML = problems.map(row => `<p><strong>${nameHtml(row.name)}</strong>：${escape(row.error || row.update_error || row.blocked_reason)}</p>`).join('');
+  panel.innerHTML = problems.map(row => `<p><strong>${nameHtml(row.name)}</strong>：${escape(row.error || row.update_error || row.blocked_reason)}${feedbackButton(row.error_id)}</p>`).join('');
 }
 
 $('updates-status').addEventListener('click', event => {
@@ -6998,7 +7015,7 @@ async function checkUpdates() {
   try {
     showReview(await api('/api/updates/check', {}));
   } catch (error) {
-    setTask('updates', {text: error.message, tone: 'error', retry: () => checkUpdates()});
+    setTask('updates', {error_id: error.error_id, text: error.message, tone: 'error', retry: () => checkUpdates()});
   } finally {
     updateState.starting = false;
     renderUpdateBar();
@@ -7059,7 +7076,7 @@ function detailUpdateHtml(row) {
       <button class="btn btn-primary btn-small" data-update-one="${escape(row.name)}" ${canAct ? '' : 'disabled'}>${job ? (job.status === 'running' ? '处理中' : '排队中') : row.source?.kind === 'lark' ? '更新整组飞书技能' : '更新'}</button>
     </div>
     ${explanation ? `<div class="update-extra"><p>${escape(explanation)}</p></div>` : ''}
-    ${notice ? `<div class="update-extra">${notice.pre ? `<pre>${escape(notice.pre)}</pre>` : `<p class="item-note">${escape(notice.text)}</p>`}</div>` : ''}
+    ${notice ? `<div class="update-extra">${notice.pre ? `<pre>${escape(notice.pre)}</pre>` : `<p class="item-note">${escape(notice.text)}${feedbackButton(notice.error_id)}</p>`}</div>` : ''}
     ${merge ? `<div class="update-extra">
       <p><strong>合并预览</strong></p>
       <p>${escape(merge.explanation)}</p>
@@ -7090,8 +7107,8 @@ async function chooseUpdate(select) {
     updateState.notices.set(name, result.comparison ? {pre: result.comparison} : {text: '未发现本地修改。'});
   } catch (error) {
     updateState.choices.set(name, 'upstream');
-    updateState.notices.set(name, {text: error.message});
-    toast({text: error.message, tone: 'error', sticky: true});
+    updateState.notices.set(name, {error_id: error.error_id, text: error.message});
+    toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
   } finally {
     updateState.busy = false;
     renderDetail();
@@ -7104,7 +7121,7 @@ async function withDetailWork(button, label, work) {
     try {
       await work();
     } catch (error) {
-      toast({text: error.message, tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     }
     renderDetail();
   });
@@ -7488,7 +7505,7 @@ async function loadCleanup() {
   try {
     state.cleanup = await api('/api/cleanup');
   } catch (error) {
-    toast({text: '清理信息读取失败：' + error.message, tone: 'error'});
+    toast({error_id: error.error_id, text: '清理信息读取失败：' + error.message, tone: 'error'});
   }
   renderCleanup();
   if (homeVisible) renderHomeTodos();
@@ -7511,7 +7528,7 @@ async function applyCleanup(button) {
   try {
     plan = await withBusy(button, '正在核对…', () => api('/api/cleanup/preview', {skills}));
   } catch (error) {
-    toast({text: error.message, tone: 'error', sticky: true});
+    toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     return;
   }
   const files = new Set((plan.path_warnings || []).map(warning => warning.file));
@@ -7545,7 +7562,7 @@ async function applyCleanupDelete(button) {
   try {
     plan = await withBusy(button, '正在核对…', () => api('/api/cleanup/delete/preview', {skills}));
   } catch (error) {
-    toast({text: error.message, tone: 'error', sticky: true});
+    toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
     return;
   }
   const targets = Array.isArray(plan.skills) && plan.skills.length ? plan.skills : skills;
@@ -7684,7 +7701,7 @@ $('log-export').addEventListener('click', async () => {
       toast({text: `已导出全部 ${records.length} 条操作记录。`});
     });
   } catch (error) {
-    toast({text: error.message, tone: 'error'});
+    toast({error_id: error.error_id, text: error.message, tone: 'error'});
   }
 });
 
@@ -7839,7 +7856,7 @@ $('migration-agents').addEventListener('change', event => {
 /* 出错时写在看得见的那一块：技能页的引导，或者设置里的整理与还原。 */
 function migrationError(error) {
   const box = $(state.page === 'settings' ? 'migration-error-settings' : 'migration-error');
-  box.textContent = error.message;
+  box.innerHTML = escape(error.message) + feedbackButton(error.error_id);
   box.hidden = false;
 }
 
@@ -7955,7 +7972,7 @@ async function finishMigration(title, result) {
     try {
       await refreshTable();
     } catch (error) {
-      toast({text: '技能清单读取失败：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
+      toast({error_id: error.error_id, text: '技能清单读取失败：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
     }
     await loadCleanup();
   } else {
@@ -8849,7 +8866,7 @@ async function refreshProgram() {
     return true;
   }
   const change = await response.json();
-  if (!response.ok) throw new Error(change.error);
+  if (!response.ok) throw Object.assign(new Error(change.error), {error_id: change.error_id});
   if (!change.supported || !change.changed) return true;
   setTask('program', {text: change.busy ? '等当前操作完成后，自动应用新版…' : '正在应用新版…'});
   for (;;) {
@@ -8874,7 +8891,7 @@ async function start() {
   try {
     if (!await refreshProgram()) return;
   } catch (error) {
-    setTask('program', {text: error.message || '新版没能应用，请刷新重试。', tone: 'error', retry: () => location.reload()});
+    setTask('program', {error_id: error.error_id, text: error.message || '新版没能应用，请刷新重试。', tone: 'error', retry: () => location.reload()});
     return;
   }
   renderAgentSummary();
@@ -8888,7 +8905,7 @@ async function start() {
   try {
     if (renderMigrationStatus()) await refreshTable();
   } catch (error) {
-    toast({text: '技能清单读取失败：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
+    toast({error_id: error.error_id, text: '技能清单读取失败：' + error.message + ' 关掉页面重新打开看板再试。', tone: 'error', sticky: true});
   }
   await refreshLog();
   refreshMigrationStatus();
@@ -8908,15 +8925,15 @@ start();
 async function refreshErrors() {
   try {
     const rows = await api('/api/diagnostics/errors');
-    $('diag-errors').innerHTML = rows.map(row => `<div class="list-item"><div><strong>${escape(row.user_message)}</strong><p class="muted">${escape(new Date(row.time).toLocaleString())} · ${escape(row.action)}</p></div><button class="btn btn-small" data-diagnostic="${escape(row.error_id)}">查看诊断</button></div>`).join('') || '<p class="muted">暂无错误记录。</p>';
-  } catch (error) { toast({text: error.message, tone: 'error'}); }
+    $('diag-errors').innerHTML = rows.map(row => `<div class="list-item"><div><strong>${escape(row.user_message)}</strong><p class="muted">${escape(new Date(row.time).toLocaleString())} · ${escape(row.action)}</p></div><button class="btn btn-small" data-diagnostic="${escape(row.error_id)}">查看诊断</button>${feedbackButton(row.error_id)}</div>`).join('') || '<p class="muted">暂无错误记录。</p>';
+  } catch (error) { toast({error_id: error.error_id, text: error.message, tone: 'error'}); }
 }
 async function showDiagnostic(errorId = '') {
   try {
     const result = await api('/api/diagnostics/bundle', errorId ? {error_id: errorId} : {});
     $('diag-text').value = result.text;
     $('diag-report').hidden = false;
-  } catch (error) { toast({text: error.message, tone: 'error'}); }
+  } catch (error) { toast({error_id: error.error_id, text: error.message, tone: 'error'}); }
 }
 $('diag-refresh').addEventListener('click', refreshErrors);
 $('diag-bundle').addEventListener('click', () => withBusy($('diag-bundle'), '正在生成…', () => showDiagnostic()));
@@ -8940,3 +8957,119 @@ $('diag-export').addEventListener('click', () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 $('diag-errors-box').addEventListener('toggle', () => { if ($('diag-errors-box').open) refreshErrors(); });
+
+function feedbackButton(errorId) {
+  return errorId ? `<button class="btn btn-small" type="button" data-feedback="${escape(errorId)}">反馈问题</button>` : '';
+}
+
+function appendFeedback(element, errorId) {
+  if (errorId) element.insertAdjacentHTML('beforeend', feedbackButton(errorId));
+}
+
+let feedbackSequence = 0;
+let feedbackErrorId = '';
+let feedbackTicket = '';
+let feedbackSending = false;
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-feedback]');
+  if (!button || feedbackSending) return;
+  feedbackErrorId = button.dataset.feedback;
+  $('feedback-note').value = '';
+  $('feedback-dialog').showModal();
+  updateFeedbackPreview();
+});
+window.addEventListener('diagnostic-error', event => {
+  if (event.detail?.error_id) toast({text: '页面出了点问题，请刷新重试。', tone: 'error', error_id: event.detail.error_id});
+});
+
+async function updateFeedbackPreview() {
+  const sequence = ++feedbackSequence;
+  feedbackTicket = '';
+  $('feedback-send').hidden = true;
+  $('feedback-preview').hidden = true;
+  $('feedback-copy').disabled = $('feedback-export').disabled = true;
+  $('feedback-text').value = '';
+  $('feedback-identity').textContent = '正在核对署名与诊断信息…';
+  $('feedback-summary').textContent = '';
+  $('feedback-message').textContent = '';
+  const note = $('feedback-note').value;
+  try {
+    const result = await api('/api/diagnostics/preview', {error_id: feedbackErrorId, note});
+    if (sequence !== feedbackSequence || !$('feedback-dialog').open) return;
+    feedbackTicket = result.ticket;
+    const payload = result.payload;
+    $('feedback-identity').textContent = result.member
+      ? `将以 ${result.member.name} 的名义提交，方便维护者联系你。` : '暂时无法确认署名，可把诊断信息发给维护者。';
+    $('feedback-summary').innerHTML = `<p>${escape(payload.user_message || '主动反馈使用中的问题')}</p>
+      <p class="muted">错误编号：${escape(payload.error_id)}<br>错误特征编号：${escape(payload.fingerprint)}</p>
+      <p class="muted">${escape([payload.os, payload.install_mode, 'Python ' + payload.python_version, payload.app_version].join(' · '))}</p>`;
+    $('feedback-text').value = JSON.stringify(payload, null, 2);
+    $('feedback-message').textContent = result.reason || '核对内容后再发送。';
+    $('feedback-send').hidden = !result.can_send;
+    $('feedback-send').disabled = false;
+    $('feedback-send').textContent = '发送到飞书表格';
+    $('feedback-copy').disabled = $('feedback-export').disabled = false;
+  } catch (error) {
+    if (sequence !== feedbackSequence) return;
+    $('feedback-identity').textContent = '没能生成诊断预览。';
+    $('feedback-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+    $('feedback-preview').hidden = false;
+  }
+}
+
+$('feedback-note').addEventListener('input', () => {
+  ++feedbackSequence;
+  feedbackTicket = '';
+  $('feedback-send').hidden = true;
+  $('feedback-preview').hidden = false;
+  $('feedback-copy').disabled = $('feedback-export').disabled = true;
+  $('feedback-message').textContent = '说明已改变，请更新预览后核对。';
+});
+$('feedback-preview').addEventListener('click', updateFeedbackPreview);
+$('feedback-close').addEventListener('click', () => $('feedback-dialog').close());
+$('feedback-dialog').addEventListener('close', () => { ++feedbackSequence; });
+$('feedback-send').addEventListener('click', async () => {
+  if (!feedbackTicket || feedbackSending) return;
+  feedbackSending = true;
+  const ticket = feedbackTicket;
+  const sequence = feedbackSequence;
+  $('feedback-send').disabled = true;
+  $('feedback-send').textContent = '正在发送…';
+  $('feedback-note').disabled = true;
+  try {
+    await api('/api/diagnostics/submit', {ticket});
+    if (sequence === feedbackSequence) {
+      $('feedback-message').textContent = '已提交到飞书表格，谢谢你的反馈。';
+      $('feedback-send').textContent = '已提交';
+      feedbackTicket = '';
+    }
+    if (feedbackErrorId) document.querySelectorAll('[data-feedback]').forEach(button => {
+      if (button.dataset.feedback === feedbackErrorId) { button.textContent = '已提交'; button.disabled = true; }
+    });
+  } catch (error) {
+    if (sequence === feedbackSequence) {
+      $('feedback-send').hidden = true;
+      $('feedback-message').textContent = error.message + ' 可复制或导出诊断信息发给维护者。';
+      feedbackTicket = '';
+    }
+  } finally {
+    feedbackSending = false;
+    $('feedback-note').disabled = false;
+  }
+});
+$('feedback-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('feedback-text').value);
+    $('feedback-message').textContent = '诊断信息已复制。';
+  } catch {
+    $('feedback-text').closest('details').open = true;
+    $('feedback-text').focus(); $('feedback-text').select();
+    $('feedback-message').textContent = '已选中诊断信息，请用系统复制快捷键复制。';
+  }
+});
+$('feedback-export').addEventListener('click', () => {
+  const url = URL.createObjectURL(new Blob([$('feedback-text').value], {type: 'application/json;charset=utf-8'}));
+  const link = document.createElement('a');
+  link.href = url; link.download = 'skill-pilot-feedback.json'; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});

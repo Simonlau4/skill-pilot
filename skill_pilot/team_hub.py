@@ -22,7 +22,7 @@ from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import sharing, tags
+from . import feedback, sharing, tags
 
 MAX_BODY = 20 * 1024 * 1024
 MAX_RATING_BODY = 64 * 1024
@@ -389,6 +389,49 @@ class HubStore:
             fcntl.flock(stream, fcntl.LOCK_EX)
             yield
 
+    def _feedback(self):
+        path = self.data / 'feedback.json'
+        if not path.exists():
+            return []
+        rows = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(rows, list):
+            raise HubError(500, '反馈备份没能读懂，请联系管理员检查。')
+        return rows
+
+    def _save_feedback(self, rows):
+        rows = rows[-feedback.MAX_RECORDS:]
+        while len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').encode()) > feedback.MAX_BYTES:
+            rows.pop(0)
+        atomic_write(self.data / 'feedback.json', rows)
+
+    def _receive_feedback(self, member, data):
+        payload = feedback.clean(data)
+        if not payload['error_id'] or not payload['fingerprint']:
+            raise HubError(400, '反馈缺少错误编号，请重新打开反馈窗口。')
+        rows = self._feedback()
+        current = datetime.now(timezone.utc)
+        for row in reversed(rows):
+            if (row['member_id'] == member['id'] and
+                    (row['payload']['error_id'] == payload['error_id'] or
+                     row['payload']['fingerprint'] == payload['fingerprint']) and
+                    (current - datetime.fromisoformat(row['payload']['submitted_at'])).total_seconds() < feedback.COOLDOWN):
+                if row['state'] == 'sent' and row['payload']['error_id'] == payload['error_id']:
+                    return row, True
+                raise HubError(429, '刚刚提交过同类反馈，本次未再次提交。请五分钟后再试，或复制、导出诊断信息发给维护者。')
+        payload.update(status='待排查', submitted_at=current.isoformat(), reporter=feedback.text(member['name'], 40))
+        row = {'id': secrets.token_hex(16), 'member_id': member['id'], 'member_name': payload['reporter'],
+               'payload': payload, 'state': 'pending'}
+        self._save_feedback([*rows, row])
+        return row, False
+
+    def finish_feedback(self, row_id, state):
+        with self.locked():
+            rows = self._feedback()
+            for row in rows:
+                if row['id'] == row_id:
+                    row['state'] = state
+            self._save_feedback(rows)
+
     def _github(self):
         try:
             return clean_github(json.loads((self.data / 'github-trending.json').read_text(encoding='utf-8')))
@@ -746,7 +789,7 @@ class Handler(BaseHTTPRequestHandler):
             if '?' in self.path and (not package or set(query) != {'version'} or
                     len(query['version']) != 1 or not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
-            allowed = ({'POST'} if path == '/api/join' else
+            allowed = ({'POST'} if path in {'/api/join', '/api/feedback'} else
                        {'GET'} if path in {'/api/me', '/api/catalog'} or package else
                        {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} else {'DELETE'} if listing else
                        {'PUT', 'DELETE'} if path == '/api/ratings' else set())
@@ -768,7 +811,9 @@ class Handler(BaseHTTPRequestHandler):
                                  'member': {key: member[key] for key in ('id', 'name')},
                                  'token': member['token']})
                 return
-            data = (self._read_body(MAX_INSTALL_BODY, '上报内容超过 64 KB，请缩短后重试。')
+            data = (self._read_body(feedback.MAX_BODY, '反馈内容超过 64 KB，请缩短后重试。')
+                    if path == '/api/feedback' else
+                    self._read_body(MAX_INSTALL_BODY, '上报内容超过 64 KB，请缩短后重试。')
                     if path == '/api/installs/me' else
                     self._read_body(MAX_PACK_BODY, '技能包内容超过 64 KB，请缩短后重试。')
                     if path == '/api/packs/me' else
@@ -779,7 +824,13 @@ class Handler(BaseHTTPRequestHandler):
                 # A member may have been removed while the upload body was arriving.
                 member = store._authenticate(self.headers.get('Authorization', ''))
                 if path == '/api/me':
-                    result = {'service': 'skill-pilot-team', 'api': 2, 'member': member}
+                    result = {'service': 'skill-pilot-team', 'api': 2, 'member': member,
+                              'feedback_supported': True, 'feedback_configured': bool(self.server.feedback_webhook)}
+                elif path == '/api/feedback':
+                    if not self.server.feedback_webhook:
+                        raise HubError(503, '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。')
+                    row, duplicate = store._receive_feedback(member, data)
+                    result = {'submitted': True, 'duplicate': duplicate}
                 elif path == '/api/catalog':
                     result = store._catalog(member['id'])
                 elif path == '/api/listings/me':
@@ -794,6 +845,14 @@ class Handler(BaseHTTPRequestHandler):
                     result = store._package(package[1], package[2], query.get('version', [None])[0])
                 else:
                     result = store._rate(member, data, self.command == 'DELETE')
+            if path == '/api/feedback' and not duplicate:
+                # Do not hold the store lock across the external request.
+                try:
+                    feedback.forward(self.server.feedback_webhook, row['payload'])
+                except ValueError as error:
+                    store.finish_feedback(row['id'], 'failed')
+                    raise HubError(502, str(error)) from None
+                store.finish_feedback(row['id'], 'sent')
             self._json(200, result)
         except HubError as error:
             self._json(error.status, {'error': str(error)})
@@ -806,10 +865,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class HubServer(ThreadingHTTPServer):
-    def __init__(self, data, host='0.0.0.0', port=8765, open=False):
+    def __init__(self, data, host='0.0.0.0', port=8765, open=False, feedback_webhook=''):
         if not 0 <= port <= 65535:
             raise ValueError('端口应为 0 到 65535 之间的数字。')
         self.open = open
+        self.feedback_webhook = feedback.webhook_url(feedback_webhook)
         self.store = HubStore(data)
         with self.store.locked():
             self.store._members()
@@ -818,7 +878,8 @@ class HubServer(ThreadingHTTPServer):
 
 def run(args):
     if args.hub_command == 'serve':
-        with HubServer(args.data, args.host, args.port, open=args.open) as server:
+        with HubServer(args.data, args.host, args.port, open=args.open,
+                       feedback_webhook=args.feedback_webhook or os.environ.get('SKILL_PILOT_HUB_FEEDBACK_WEBHOOK', '')) as server:
             access = ('开放加入，知道地址的同事填名字就能加入。' if args.open else
                       '只有管理员发了口令的成员能用。')
             print(f'分享站已启动，监听 {args.host}:{server.server_port}；{access}按 Ctrl+C 停止。', flush=True)

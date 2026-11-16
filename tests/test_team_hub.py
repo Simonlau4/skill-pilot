@@ -227,6 +227,7 @@ class TeamHubTests(unittest.TestCase):
         if os.name != 'nt':
             self.assertEqual(stat.S_IMODE((self.data / 'members.json').stat().st_mode), 0o600)
         self.assertEqual(self.request(), (200, {'service': 'skill-pilot-team', 'api': 2,
+            'feedback_supported': True, 'feedback_configured': False,
             'member': {k: self.first[k] for k in ('id', 'name')}}))
         for name in ('', '  ', 'Acme\nexample', 'Acme\x00example'):
             with self.assertRaises(ValueError):
@@ -766,7 +767,7 @@ class TeamHubCliTests(unittest.TestCase):
                 server.server_port = 8765
                 server.serve_forever.side_effect = KeyboardInterrupt
                 cli.main()
-                server_class.assert_called_once_with(str(self.data), '0.0.0.0', 8765, open=opened)
+                server_class.assert_called_once_with(str(self.data), '0.0.0.0', 8765, open=opened, feedback_webhook='')
                 self.assertIn(message, output.getvalue())
                 thread.assert_called_once()
                 self.assertTrue(thread.call_args.kwargs['daemon'])

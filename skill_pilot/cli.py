@@ -25,6 +25,7 @@ def main():
     serving.add_argument('--host', default='0.0.0.0', help='监听地址，默认局域网所有地址')
     serving.add_argument('--port', type=int, default=8765, help='监听端口，默认 8765')
     serving.add_argument('--open', action='store_true', help='开放加入：知道地址的同事填名字就能加入，不用口令')
+    serving.add_argument('--feedback-webhook', help='飞书多维表格自动化接收地址；也可设置 SKILL_PILOT_HUB_FEEDBACK_WEBHOOK')
     member = hub_commands.add_parser('add-member', help='添加成员并显示一次口令')
     member.add_argument('name', help='成员显示名')
     members = hub_commands.add_parser('members', help='查看成员名单，不显示口令')

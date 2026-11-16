@@ -594,10 +594,11 @@
 
           <details class="fold" id="diag-errors-box">
             <summary>错误记录与诊断报告</summary>
-            <p class="muted">诊断只保存在这台电脑。复制或导出前，可以先核对已脱敏的内容。</p>
+            <p class="muted">诊断默认保存在这台电脑。复制、导出或发送反馈前，可以先核对已脱敏的内容。</p>
             <div class="toolbar">
               <button id="diag-refresh" class="btn btn-small" type="button">查看最近错误</button>
               <button id="diag-bundle" class="btn btn-small" type="button">生成诊断报告</button>
+              <button class="btn btn-small" type="button" data-feedback="">反馈问题</button>
             </div>
             <div id="diag-errors" class="list" aria-live="polite"></div>
             <div id="diag-report" hidden>
@@ -922,5 +923,27 @@
   </form>
 </dialog>
 
+<dialog id="feedback-dialog" class="dialog dialog-wide" aria-labelledby="feedback-title">
+  <div class="dialog-form">
+    <h2 id="feedback-title">反馈问题</h2>
+    <p id="feedback-identity" class="muted"></p>
+    <div id="feedback-summary" class="feedback-summary"></div>
+    <label for="feedback-note">当时你在做什么？（可选，写一两句即可）</label>
+    <textarea id="feedback-note" class="input" rows="2" maxlength="1500"></textarea>
+    <details class="fold">
+      <summary>核对完整待发送内容</summary>
+      <p class="muted">提交时间由分享站补充。发送前请核对，说明里不要填写密钥或私人资料。</p>
+      <textarea id="feedback-text" class="input" rows="10" readonly aria-label="完整待发送内容"></textarea>
+    </details>
+    <p id="feedback-message" class="row-note" role="status" aria-live="polite"></p>
+    <div class="dialog-actions feedback-actions">
+      <button id="feedback-close" class="btn" type="button">关闭</button>
+      <button id="feedback-copy" class="btn" type="button">复制诊断信息</button>
+      <button id="feedback-export" class="btn" type="button">导出诊断文件</button>
+      <button id="feedback-preview" class="btn btn-primary" type="button" hidden>更新预览</button>
+      <button id="feedback-send" class="btn btn-primary" type="button" hidden>发送到飞书表格</button>
+    </div>
+  </div>
+</dialog>
 </body>
 </html>

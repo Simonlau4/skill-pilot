@@ -2398,3 +2398,8 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 
 #diag-text { width: 100%; resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
 #diag-errors .list-item { overflow-wrap: anywhere; }
+:is(.feedback-summary, #feedback-identity, #feedback-message) { overflow-wrap: anywhere; }
+.feedback-actions { flex-wrap: wrap; }
+#feedback-dialog textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+#feedback-dialog #feedback-text { width: calc(100% - 2 * var(--sp-4)); }
+[data-feedback] { margin-left: 8px; }
