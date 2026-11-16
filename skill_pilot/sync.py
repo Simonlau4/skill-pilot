@@ -269,7 +269,7 @@ def notes(home, agent_ids=None):
     return result
 
 
-def reconcile_assignments(registry, home, checked, changed_names, entries_override=None):
+def reconcile_assignments(registry, home, checked, changed_names, entries_override=None, *, placements=None, preserved_entries=None):
     from .scan import scan_root
     from .store import check_links
     external = external_disable_rules(registry, home)
@@ -289,10 +289,12 @@ def reconcile_assignments(registry, home, checked, changed_names, entries_overri
                 entries[name].add(Path(item['path']).relative_to(home).as_posix())
     for name in sorted(changed_names):
         skill = registry['skills'][name]
+        preserved = set((preserved_entries or {}).get(name, []))
         target = home / '.skill-pilot/store' / name
         check_links(target, home)
         desired = (entries_override[name] if entries_override and name in entries_override else
-                   assignment_entries(name, skill['assigned_agents'], home))
+                   (placements[name] if placements and name in placements else
+                    assignment_entries(name, skill['assigned_agents'], home)))
         if not entries_override or name not in entries_override:
             watched = {Path(path) for rules in external.values() for path in rules.get('entry_paths', [])}
             # Keep a user-disabled alias when adding another reader. Removing it
@@ -300,8 +302,9 @@ def reconcile_assignments(registry, home, checked, changed_names, entries_overri
             protected = [entry for entry in entries[name]
                          if home / entry in watched or home / entry / 'SKILL.md' in watched]
             desired = sorted(set(desired) | set(protected))
+        desired = [entry for entry in desired if entry not in preserved]
         # Validate the entire chain before rewriting or removing any entry.
-        for relative in sorted(entries[name] | set(desired)):
+        for relative in sorted((entries[name] | set(desired)) - preserved):
             path = checked(home / relative)
             if path.exists() or path.is_symlink():
                 if not path.is_symlink() or path.resolve() != target.resolve():
@@ -316,9 +319,9 @@ def reconcile_assignments(registry, home, checked, changed_names, entries_overri
             checked(path.parent).mkdir(parents=True, exist_ok=True)
             path.symlink_to(str(target), target_is_directory=True)
         kept = {(home / e).parent.resolve() / Path(e).name for e in desired}
-        for relative in sorted(entries[name] - set(desired)):
+        for relative in sorted(entries[name] - set(desired) - preserved):
             path = checked(home / relative)
             if path.is_symlink() and path.parent.resolve() / path.name not in kept:
                 path.unlink()
-        skill['entries'] = desired
+        skill['entries'] = desired + [e for e in skill.get('entries', []) if e in preserved and e not in desired]
     reconcile_disabled(registry, home, checked)

@@ -73,7 +73,7 @@ class PreviewSpeedTests(unittest.TestCase):
         self.assertLess(root_hits, 12, f'{elapsed:.3f}s roots={root_hits} digests={digests["n"]}')
         self.assertLessEqual(digests['n'], len(names) + 8, digests['n'])
 
-    def test_real_folder_outside_the_store_still_blocks_the_change(self):
+    def test_unaffected_real_folder_outside_the_store_is_preserved(self):
         self.skill('.codex/skills/other', 'other')
         plan = store.preview(self.home)
         store.apply(plan['plan_id'], self.home)
@@ -81,8 +81,13 @@ class PreviewSpeedTests(unittest.TestCase):
         before = store.physical_state(self.home)
         review = operations.preview_assign(
             [{'skill': 'other', 'agent': 'codex', 'enabled': False}], self.home, recheck=True)
-        self.assertTrue(any('替换' in item['message'] for item in review['conflicts']))
+        self.assertEqual(review['conflicts'], [])
         self.assertEqual(store.physical_state(self.home), before)
+        external = store.physical_state(self.home / '.claude/skills/other')
+        operations.apply_assign([{'skill': 'other', 'agent': 'codex', 'enabled': False}],
+            review['revision'], True, self.home, recheck=True)
+        self.assertNotIn('other', operations.visibility(self.home)['codex']['available'])
+        self.assertEqual(store.physical_state(self.home / '.claude/skills/other'), external)
 
 
 class PreviewSupersedeTests(unittest.TestCase):

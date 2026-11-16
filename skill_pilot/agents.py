@@ -160,7 +160,7 @@ def preview_join(requests, home=None):
             'must_select_together': profiles.enrollment_groups(catalog, managed, home, ids), 'read_only': True}
 
 
-def join(requests, plan_id, expected=None, choices=None, home=None):
+def join(requests, plan_id, expected=None, choices=None, home=None, *, preserve_existing=False):
     home, registry, managed = operations.load(home)
     guard(home / '.skill-pilot', home)
     plan = preview_join(requests, home)
@@ -193,6 +193,14 @@ def join(requests, plan_id, expected=None, choices=None, home=None):
         for skill in plan['skills']:
             name, option = skill['name'], chosen[skill['name']]
             target = home / '.skill-pilot/store' / name
+            if preserve_existing and name in current_registry['skills']:
+                # Enrollment may record existing readers without making a source
+                # choice for independently edited copies. Keep those files and
+                # entry records intact; later content changes still need review.
+                record = current_registry['skills'][name]
+                record['assigned_agents'] = sorted(set(record['assigned_agents']) | set(skill['assigned_agents']))
+                changed.append(name)
+                continue
             if name not in current_registry['skills']:
                 operations._put(home, current_registry, {'name': name, 'path': option['path'], 'source': {'source': '来源不明'}}, [], [], checked, normalize_content=False)
                 content.append(name)
@@ -217,10 +225,12 @@ def join(requests, plan_id, expected=None, choices=None, home=None):
             if after[agent]['available'] != original['available'] or after[agent]['automatic'] != original['automatic']:
                 raise ValueError('接入后 agent 能看到的技能名单变了，已经恢复原样。')
             for name, versions in original['versions'].items():
-                expected_versions = [content_digest(home / '.skill-pilot/store' / name)] if name in chosen and (agent in plan['agents'] or chosen[name]['id'] != 'store') else versions
+                expected_versions = ([content_digest(home / '.skill-pilot/store' / name)]
+                    if not preserve_existing and name in chosen and (agent in plan['agents'] or chosen[name]['id'] != 'store') else versions)
                 if after[agent]['versions'][name] != expected_versions:
                     raise ValueError('接入后的内容与所选版本不一致，已经恢复原样。')
-        return changed, content, {'agents': plan['agents'], 'after': after, '_agents_changed': True}
+        return changed, content, {'agents': plan['agents'], 'after': after, '_agents_changed': True,
+                                  '_expected_visibility': {a: state['available'] for a, state in after.items()}}
     return operations._run(home, registry, managed, current, '接入了 ' + '、'.join(p['name'] for p in plan['profiles']), mutate, extra_paths=plan['roots'])
 
 

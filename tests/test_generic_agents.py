@@ -86,6 +86,49 @@ class GenericAgentTests(unittest.TestCase):
     skill = test_operations.OperationsTests.skill
     assign = test_operations.OperationsTests.assign
 
+    def test_preserving_join_records_reader_without_overwriting_conflicting_copy(self):
+        self.incoming()
+        before = visibility(self.home)
+        incoming = store.physical_state(self.home / '.zcode/skills/grilling')
+        canonical = store.physical_state(self.home / '.skill-pilot/store/grilling')
+        plan = agents.preview_join(['zcode'], self.home)
+        result = agents.join(['zcode'], plan['plan_id'], plan['revision'], home=self.home, preserve_existing=True)
+        self.assertEqual({a: visibility(self.home)[a] for a in before}, before)
+        self.assertEqual(visibility(self.home)['zcode'], plan['before']['zcode'])
+        self.assertEqual(store.physical_state(self.home / '.zcode/skills/grilling'), incoming)
+        self.assertEqual(store.physical_state(self.home / '.skill-pilot/store/grilling'), canonical)
+        operations.undo(result['id'], home=self.home)
+        self.assertEqual(visibility(self.home), before)
+
+    def test_join_preserves_unrelated_external_dsh_grant(self):
+        path = self.home / '.dsh/skills/other'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(self.home / '.skill-pilot/store/other', target_is_directory=True)
+        self.incoming()
+        before = visibility(self.home)
+        result = self.join()
+        self.assertIn('zcode', profiles.state(self.home)['onboarded'])
+        self.assertEqual(visibility(self.home)['dsh'], before['dsh'])
+        operations.undo(result['id'], home=self.home)
+        self.assertEqual(visibility(self.home), before)
+
+    def test_record_existing_dsh_grants_keeps_files_config_and_other_assignments(self):
+        path = self.home / '.dsh/skills/other'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(self.home / '.skill-pilot/store/other', target_is_directory=True)
+        before = visibility(self.home)
+        config = (self.home / '.codex/config.toml').read_bytes()
+        entry = store.physical_state(path)
+        result = operations.reconcile_observed('dsh', self.home)
+        self.assertEqual(result['changed'], ['other'])
+        self.assertIn('dsh', operations.load(self.home)[1]['skills']['other']['assigned_agents'])
+        self.assertEqual(visibility(self.home), before)
+        self.assertEqual((self.home / '.codex/config.toml').read_bytes(), config)
+        self.assertEqual(store.physical_state(path), entry)
+        self.assertEqual(operations.reconcile_observed('dsh', self.home)['changed'], [])
+        operations.undo(result['id'], home=self.home)
+        self.assertEqual(visibility(self.home), before)
+
     def fingerprint(self):
         return test_operations.OperationsTests.fingerprint(self) | {
             r: store.physical_state(self.home / r) for r in ['.zcode/skills', '.joint/skills']}

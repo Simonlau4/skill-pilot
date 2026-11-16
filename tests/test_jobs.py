@@ -404,10 +404,10 @@ class JobTests(unittest.TestCase):
         plan = operations.preview_assign(changes, self.home, recheck=True)
         seen = {k: plan[k] for k in ('changes', 'dependency_warnings', 'path_warnings')}
         reconcile = operations.reconcile_assignments
-        def fail_c(registry, home, checked, names, *args):
+        def fail_c(registry, home, checked, names, *args, **kwargs):
             if 'acme-c' in names:
                 raise ValueError('模拟一个技能无法写入')
-            return reconcile(registry, home, checked, names, *args)
+            return reconcile(registry, home, checked, names, *args, **kwargs)
         with patch.object(operations, 'reconcile_assignments', side_effect=fail_c):
             job = self.submit('assignment', changes=changes, seen=seen)
             self.submit('assignment', **self.assignment('acme-extra'))
@@ -487,8 +487,8 @@ class JobTests(unittest.TestCase):
         changes = [self.assignment(n)['changes'][0] for n in ('acme-b', 'acme-c', 'acme-dep')]
         plan = operations.preview_assign(changes, self.home, recheck=True)
         reconcile = operations.reconcile_assignments
-        def fail_dependency(registry, home, checked, names, *args):
-            reconcile(registry, home, checked, names, *args)
+        def fail_dependency(registry, home, checked, names, *args, **kwargs):
+            reconcile(registry, home, checked, names, *args, **kwargs)
             if 'acme-dep' in names:
                 raise ValueError('模拟依赖写入后失败')
         with patch.object(operations, 'reconcile_assignments', side_effect=fail_dependency):

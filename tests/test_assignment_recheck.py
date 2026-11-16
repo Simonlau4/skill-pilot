@@ -33,6 +33,78 @@ class AssignmentRecheckTests(unittest.TestCase):
         self.assertEqual(plan['changes'], self.changes())
         self.assertEqual(store.physical_state(self.home), before)
 
+    def test_enabling_another_reader_preserves_dsh_independent_copy_and_undo(self):
+        self.skill('.dsh/skills/other', 'other', 'DSH independent content')
+        original = store.physical_state(self.home / '.dsh/skills/other')
+        config = (self.home / '.codex/config.toml').read_bytes()
+        before = self.fingerprint()
+        review = self.preview(self.changes(agent='claude', enabled=True))
+        self.assertEqual(review['conflicts'], [])
+        result = self.apply(self.changes(agent='claude', enabled=True), review)
+        self.assertEqual(store.physical_state(self.home / '.dsh/skills/other'), original)
+        self.assertIn('other', visibility(self.home)['claude']['available'])
+        self.assertIn('other', visibility(self.home)['dsh']['available'])
+        self.assertEqual((self.home / '.codex/config.toml').read_bytes(), config)
+        operations.undo(result['id'], home=self.home)
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_removing_independent_copy_still_requires_source_review(self):
+        self.skill('.dsh/skills/other', 'other', 'DSH independent content')
+        before = self.fingerprint()
+        plan = self.preview(self.changes(agent='dsh', enabled=False))
+        self.assertTrue(plan['conflicts'])
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_untouched_reader_keeps_shared_and_independent_versions_and_undo(self):
+        self.assign('other', 'dsh')
+        self.assert_shared_copy_preserved()
+
+    def test_untouched_reader_keeps_unregistered_shared_entry_and_undo(self):
+        shared = self.home / '.agents/skills/other'
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.symlink_to(self.home / '.skill-pilot/store/other', target_is_directory=True)
+        self.assert_shared_copy_preserved()
+
+    def assert_shared_copy_preserved(self):
+        path = self.skill('.dsh/skills/other', 'other', 'independent manual copy')
+        manifest = path / 'SKILL.md'
+        manifest.write_text(manifest.read_text().replace('description: 示例技能\n',
+                            'description: 示例技能\ndisable-model-invocation: true\n'))
+        before = self.fingerprint()
+        visible = visibility(self.home)
+        self.assertIn('other', visible['dsh']['automatic'])
+        self.assertEqual(len(visible['dsh']['versions']['other']), 2)
+        changes = self.changes(agent='claude', enabled=True)
+        review = self.preview(changes)
+        self.assertEqual(review['conflicts'], [])
+        result = self.apply(changes, review)
+        after = visibility(self.home)
+        for agent in visible.keys() - {'claude'}:
+            self.assertEqual(after[agent], visible[agent])
+        self.assertIn('other', after['claude']['available'])
+        self.assertTrue((self.home / '.agents/skills/other').is_symlink())
+        operations.undo(result['id'], home=self.home)
+        self.assertEqual(self.fingerprint(), before)
+        self.assertEqual(visibility(self.home), visible)
+
+    def test_actual_destination_replacement_remains_blocked(self):
+        self.skill('.claude/skills/renamed-folder', 'other', 'independent recipient')
+        before = self.fingerprint()
+        # Removing the target reader would require changing its external copy,
+        # even though its directory basename differs from its manifest name.
+        plan = self.preview(self.changes(agent='claude', enabled=False))
+        self.assertTrue(plan['conflicts'])
+        self.assertEqual(self.fingerprint(), before)
+
+    def test_independent_copy_edit_after_preview_rechecks_instead_of_overwriting(self):
+        path = self.skill('.dsh/skills/other', 'other', 'DSH independent content')
+        changes = self.changes(agent='claude', enabled=True)
+        review = self.preview(changes)
+        (path / 'SKILL.md').write_text((path / 'SKILL.md').read_text() + '\nnew external edit\n')
+        with self.assertRaises(operations.AssignmentChanged):
+            self.apply(changes, review)
+        self.assertIn('new external edit', (path / 'SKILL.md').read_text())
+
     def test_unrelated_content_and_new_files_survive_save_and_undo(self):
         changes = self.changes()
         self.preview(changes)
