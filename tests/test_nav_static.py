@@ -369,3 +369,15 @@ function fail(message) { console.error(message); process.exit(1); }
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_deepseek_default_model_is_flash(self):
+        source = (STATIC / 'app.js').read_text()
+        start = source.index('const LLM_DEFAULTS = {')
+        end = source.index('};', start) + 2
+        script = source[start:end] + '''
+if (JSON.stringify(LLM_DEFAULTS.deepseek) !== JSON.stringify(['https://api.deepseek.com', 'deepseek-flash'])) {
+  throw new Error('Unexpected deepseek defaults: ' + JSON.stringify(LLM_DEFAULTS.deepseek));
+}
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
