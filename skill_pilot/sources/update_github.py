@@ -65,11 +65,11 @@ class Reader:
     def repository(self, source):
         key = source['repository'] + '\n' + source.get('branch', '')
         if key in self.repo_errors:
-            raise ValueError(self.repo_errors[key])
+            raise ValueError(str(self.repo_errors[key])) from self.repo_errors[key]
         try:
             return self._repository(source, key)
         except ValueError as error:
-            self.repo_errors[key] = str(error)
+            self.repo_errors[key] = error
             raise
 
     def _repository(self, source, key):
@@ -134,7 +134,7 @@ class Reader:
         except (OSError, subprocess.TimeoutExpired) as error:
             raise ValueError('上游文件读取超时，请稍后重试。') from error
         if result.returncode:
-            raise ValueError('上游文件内容没有读完整，请稍后重试。')
+            raise ValueError('上游文件内容没有读完整，请稍后重试。') from subprocess.CalledProcessError(result.returncode, result.args)
         staging.mkdir()
         offset = 0
         links = []

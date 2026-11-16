@@ -161,6 +161,7 @@ class Dashboard(ThreadingHTTPServer):
         self.reload_callback = None
         self.reload_pending = False
         self.reload_error = ''
+        self.reload_error_id = ''
         self.reload_thread = None
         self.closing = False
         self.github_digests = github_digest.Digests(self.home, lambda: self.closing or self.reload_pending or
@@ -878,11 +879,13 @@ class Dashboard(ThreadingHTTPServer):
             if not changed:
                 self.reload_pending = False
                 self.reload_error = ''
+                self.reload_error_id = ''
                 if self.program_progress['phase'] == 'ready':
                     self.program_progress.update(phase='latest', message='SP 已升级到最新版')
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
                 self.reload_error = ''
+                self.reload_error_id = ''
                 self.reload_thread = threading.Thread(target=self.reload_when_idle, daemon=True)
                 self.reload_thread.start()
             return {'supported': bool(self.reload_callback), 'changed': changed,
@@ -898,6 +901,8 @@ class Dashboard(ThreadingHTTPServer):
                         self.reload_callback()
                     except Exception as error:
                         self.reload_error = str(error) if isinstance(error, ValueError) else '新版没能应用，当前程序保持运行，请稍后刷新重试。'
+                        captured = self_update.record_failure(self.home, 'apply', error) or {}
+                        self.reload_error_id = captured.get('error_id', '')
                     finally:
                         self.reload_pending = False
                     return
@@ -1110,7 +1115,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             self.reply(200, {"pid": os.getpid(), "read_only": not preview_allowed(self.server.home),
                              'version': self.server.code_version, 'reloading': self.server.reload_pending,
-                             'reload_error': self.server.reload_error})
+                             'reload_error': self.server.reload_error, 'error_id': self.server.reload_error_id})
         elif path in ("/api/migration/plan", "/api/backups", "/api/migration/compare"):
             try:
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)

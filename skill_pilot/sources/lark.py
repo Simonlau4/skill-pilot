@@ -35,8 +35,10 @@ def check(timeout=60, home=None):
         data = json.loads(result.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         raise ValueError('飞书版本没能查到，请稍后重试。') from error
-    if result.returncode or not data.get('ok'):
-        raise ValueError('飞书版本没能查到，请稍后重试。')
+    if result.returncode:
+        raise ValueError('飞书版本没能查到，请稍后重试。') from subprocess.CalledProcessError(result.returncode, result.args)
+    if not data.get('ok'):
+        raise ValueError('飞书版本没能查到，请稍后重试。') from RuntimeError('飞书工具报告检查失败。')
     return {'available': data.get('action') == 'update_available',
             'current_version': data['current_version'], 'latest_version': data['latest_version'],
             'message': 'lark-cli 有新版（含 28 个飞书技能）' if data.get('action') == 'update_available' else '已是最新',
@@ -57,7 +59,8 @@ def prepare(sources, temporary, version, deadline=None):
     def get(url):
         if deadline is None: return download(url)
         left = deadline - time.monotonic()
-        if left <= 0: raise ValueError('飞书检查超时，可以稍后重试。')
+        if left <= 0:
+            raise ValueError('飞书检查超时，可以稍后重试。') from TimeoutError('飞书检查超过允许时间。')
         return download(url, timeout=min(45, left))
     for name, source in sources.items():
         index_url = source['base_url'].rstrip('/') + '/.well-known/agent-skills/index.json'

@@ -239,6 +239,39 @@ vm.runInNewContext(fs.readFileSync('skill_pilot/web/static/diagnostics.js', 'utf
         self.assertEqual(len(diagnostics.recent(self.home)), 1)
         self.assertTrue((self.private / 'logs/program-update.jsonl').exists())
 
+    def test_external_process_failures_retain_type_without_private_output(self):
+        from skill_pilot.sources import github, lark
+        from skill_pilot.sources.update_github import Reader
+        reader = Reader(self.home / 'upstream snapshot')
+        failed = subprocess.CompletedProcess(['test-tool'], 1, b'private output', b'private stderr')
+        actions = [lambda: self_update.run_installer(self.home, self.home),
+                   lambda: github.api('repos/example/demo'),
+                   lambda: reader.snapshot(self.home, 'abc')]
+        for action in actions:
+            with patch('subprocess.run', return_value=failed), patch.object(reader, 'git', return_value=''):
+                with self.assertRaises(ValueError) as caught:
+                    action()
+            row = self.record(caught.exception)
+            self.assertEqual(row['error_type'], 'CalledProcessError')
+            self.assertNotIn('private', row['detail'])
+        for returncode in (1, 0):
+            result = subprocess.CompletedProcess(['test-tool'], returncode, '{"ok": false}', 'private stderr')
+            with patch('subprocess.run', return_value=result), patch('shutil.which', return_value='test-tool'):
+                with self.assertRaises(ValueError) as caught:
+                    lark.check(home=self.home)
+            self.assertTrue(self.record(caught.exception)['error_id'])
+
+    def test_cached_repository_failure_preserves_its_cause(self):
+        from skill_pilot.sources.update_github import Reader
+        reader = Reader(self.home / 'repository cache')
+        with patch.object(reader, '_repository', side_effect=ValueError('读取失败')) as load:
+            load.side_effect.__cause__ = OSError('无法读取')
+            for _ in range(2):
+                with self.assertRaises(ValueError) as caught:
+                    reader.repository({'repository': 'example/repo'})
+                self.assertEqual(self.record(caught.exception)['error_type'], 'OSError')
+            self.assertEqual(load.call_count, 1)
+
     def test_desktop_startup_failure_is_recorded_and_alerted(self):
         spec = importlib.util.spec_from_file_location('test_launcher', diagnostics.PROJECT / 'scripts/launch.py')
         launcher = importlib.util.module_from_spec(spec)
@@ -313,6 +346,40 @@ class DiagnosticsWebTests(unittest.TestCase):
         self.assertTrue(data['error_id'])
         self.assertNotIn('private failure', data['error'])
         self.assertEqual(len(diagnostics.recent(self.home)), 1)
+
+    def test_failed_version_validation_reaches_both_logs_and_progress(self):
+        failed = subprocess.CompletedProcess(['validation'], 1, b'private body', b'private key')
+        with patch('skill_pilot.self_update.check', side_effect=lambda home: self_update.validate(home, home)), \
+                patch('subprocess.run', return_value=failed):
+            self.server.program_work('check')
+        row = diagnostics.recent(self.home)[0]
+        self.assertEqual(self.server.program_progress['error_id'], row['error_id'])
+        self.assertEqual(row['error_type'], 'CalledProcessError')
+        self.assertNotIn('private', row['detail'])
+        self.assertTrue((self.private / 'logs/program-update.jsonl').exists())
+
+    def test_failed_external_query_reaches_http_response_and_log(self):
+        from skill_pilot.sources import github
+        failed = subprocess.CompletedProcess(['query'], 1, 'private body', 'private key')
+        with patch('skill_pilot.sources.github.inspect', side_effect=lambda url: github.api('repos/example/repo')), \
+                patch('subprocess.run', return_value=failed):
+            status, data = self.request('/api/install/inspect', {'url': 'https://github.com/example/repo'})
+        self.assertEqual(status, 409)
+        row = diagnostics.recent(self.home)[0]
+        self.assertEqual(data['error_id'], row['error_id'])
+        self.assertEqual(row['error_type'], 'CalledProcessError')
+        self.assertNotIn('private', row['detail'])
+
+    def test_failed_refresh_reaches_status_and_log(self):
+        from skill_pilot.web import runtime
+        failed = subprocess.CompletedProcess(['validation'], 1, b'private body', b'private key')
+        self.server.reload_callback = lambda: runtime.replace(self.server, None)
+        self.server.reload_pending = True
+        with patch('subprocess.run', return_value=failed):
+            self.server.reload_when_idle()
+        _, status = self.request('/api/status')
+        self.assertEqual(status['error_id'], diagnostics.recent(self.home)[0]['error_id'])
+        self.assertTrue(status['reload_error'])
 
     def test_frontend_auth_size_read_only_and_bundle(self):
         route = '/api/diagnostics/client-error'

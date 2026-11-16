@@ -34,8 +34,10 @@ def ask(material, schema, instruction):
                                     stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=300)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise ValueError('Codex 没能完成这次核对，请稍后再试；文件没有改动。') from error
-        if result.returncode or not (root / 'result.json').exists():
-            raise ValueError('Codex 没能完成这次核对；文件没有改动。')
+        if result.returncode:
+            raise ValueError('Codex 没能完成这次核对；文件没有改动。') from subprocess.CalledProcessError(result.returncode, result.args)
+        if not (root / 'result.json').exists():
+            raise ValueError('Codex 没能完成这次核对；文件没有改动。') from FileNotFoundError('核对结果没有生成。')
         return json.loads((root / 'result.json').read_text())
 
 

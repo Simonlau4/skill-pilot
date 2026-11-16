@@ -135,7 +135,7 @@ def api(endpoint, timeout=45):
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ValueError('GitHub 来源查询超时或工具暂时不可用，请稍后重试。') from error
     if result.returncode:
-        raise ValueError('GitHub 来源查询暂时没能完成。')
+        raise ValueError('GitHub 来源查询暂时没能完成。') from subprocess.CalledProcessError(result.returncode, result.args)
     return json.loads(result.stdout)
 
 

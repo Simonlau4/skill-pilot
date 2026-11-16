@@ -8856,7 +8856,7 @@ async function refreshProgram() {
     await new Promise(resolve => setTimeout(resolve, 400));
     let status;
     try { status = await api('/api/status'); } catch { continue; }
-    if (status.reload_error) throw new Error(status.reload_error);
+    if (status.reload_error) throw Object.assign(new Error(status.reload_error), {error_id: status.error_id});
     if (status.version !== change.version || !status.reloading) {
       location.reload();
       return false;

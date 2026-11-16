@@ -43,7 +43,7 @@ def replace(server, lock):
                            cwd=PACKAGE.parent, env={**env, 'SKILL_PILOT_READ_ONLY': '1'},
                            stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
     if check.returncode:
-        raise ValueError('新版还没有准备完整，当前程序保持运行，请稍后刷新重试。')
+        raise ValueError('新版还没有准备完整，当前程序保持运行，请稍后刷新重试。') from subprocess.CalledProcessError(check.returncode, check.args)
     if candidate != version():
         raise ValueError('新版仍在修改中，当前程序保持运行，请稍后刷新重试。')
     if server.closing:
