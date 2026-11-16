@@ -2927,7 +2927,7 @@ $('rail-notes').addEventListener('click', event => {
 setInterval(() => { if (programUpdate.running && !programActionRunning) refreshProgramUpdate(); }, 1500);
 
 const LLM_DEFAULTS = {
-  deepseek: ['https://api.deepseek.com', 'deepseek-chat'],
+  deepseek: ['https://api.deepseek.com', 'deepseek-flash'],
   qwen: ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen-plus'],
   kimi: ['https://api.moonshot.cn/v1', 'moonshot-v1-32k'],
   glm: ['https://open.bigmodel.cn/api/paas/v4', 'glm-4-flash'],
