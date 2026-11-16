@@ -351,6 +351,226 @@ class JobTests(unittest.TestCase):
             self.assertEqual(completed['message'], '此前已更新：示例乙。已更新：示例丙。')
         self.assertEqual(calls, [['acme-b'], ['acme-c'], ['acme-c']])
 
+    def app_skill_link(self):
+        app = self.skill(self.root / 'Example Browser.app' / 'Resources' / 'browser-skill', 'browser-skill')
+        shared = self.home / '.local/share/browser/skills'
+        shared.parent.mkdir(parents=True)
+        shared.symlink_to(app, target_is_directory=True)
+        entry = self.home / '.claude/skills/vendor/browser-skill'
+        entry.parent.mkdir(parents=True)
+        entry.symlink_to(shared, target_is_directory=True)
+        return entry, app
+
+    def test_app_skill_does_not_block_unrelated_assignment_rollback_or_undo(self):
+        entry, app = self.app_skill_link()
+        before = store.physical_state(app)
+        link = os.readlink(entry)
+        # A failed write must preserve even a nested app-owned entry during rollback.
+        with patch.object(operations, '_validate', side_effect=ValueError('模拟校验失败')):
+            self.submit('assignment', **self.assignment())
+            self.assertEqual(self.wait_jobs()[-1]['status'], 'failed')
+        self.assertFalse(self.server.jobs_blocked)
+        self.assertEqual(os.readlink(entry), link)
+        self.submit('assignment', **self.assignment())
+        item = self.wait_jobs()[-1]
+        self.assertEqual(item['status'], 'done', item)
+        self.assertIn('acme-b', visibility(self.home)['claude']['available'])
+        operations.undo(item['operations'][0], home=self.home)
+        self.assertNotIn('acme-b', visibility(self.home)['claude']['available'])
+        self.assertEqual(os.readlink(entry), link)
+        self.assertEqual(store.physical_state(app), before)
+
+    def test_batch_assignment_keeps_success_retries_only_failure_and_continues_queue(self):
+        changes = [self.assignment(n)['changes'][0] for n in ('acme-b', 'acme-c')]
+        plan = operations.preview_assign(changes, self.home, recheck=True)
+        seen = {k: plan[k] for k in ('changes', 'dependency_warnings', 'path_warnings')}
+        reconcile = operations.reconcile_assignments
+        def fail_c(registry, home, checked, names, *args):
+            if 'acme-c' in names:
+                raise ValueError('模拟一个技能无法写入')
+            return reconcile(registry, home, checked, names, *args)
+        with patch.object(operations, 'reconcile_assignments', side_effect=fail_c):
+            job = self.submit('assignment', changes=changes, seen=seen)
+            self.submit('assignment', **self.assignment('acme-extra'))
+            items = self.wait_jobs()
+        self.assertEqual([i['status'] for i in items], ['failed', 'done'])
+        self.assertEqual(items[0]['completed'], ['acme-b'])
+        self.assertEqual([r['name'] for r in items[0]['failed']], ['acme-c'])
+        self.assertIn('acme-b', visibility(self.home)['claude']['available'])
+        self.assertNotIn('acme-c', visibility(self.home)['claude']['available'])
+        with patch.object(operations, 'apply_assign', wraps=operations.apply_assign) as apply:
+            retry = self.ok('/api/jobs/retry', {'id': job['id']})['job']
+            item = self.wait_jobs()[-1]
+        self.assertEqual(retry['changes'], [changes[1]])
+        self.assertTrue(all(c.args[0] == [changes[1]] for c in apply.call_args_list))
+        self.assertEqual(item['status'], 'done')
+        self.assertEqual(item['completed'], ['acme-b', 'acme-c'])
+        self.assertEqual(len(item['operations']), 2)
+        for operation in reversed(item['operations']):
+            operations.undo(operation, home=self.home)
+        self.assertNotIn('acme-b', visibility(self.home)['claude']['available'])
+        self.assertNotIn('acme-c', visibility(self.home)['claude']['available'])
+        self.assertIn('acme-extra', visibility(self.home)['claude']['available'])
+
+    def test_batch_assignment_conflict_leaves_app_entry_and_completes_other_skill(self):
+        changes = [self.assignment(n)['changes'][0] for n in ('acme-b', 'acme-c')]
+        plan = operations.preview_assign(changes, self.home, recheck=True)
+        app = self.skill(self.root / 'Application files' / 'acme-b', 'acme-b')
+        entry = self.home / '.codex/skills/acme-b'
+        entry.unlink()
+        entry.symlink_to(app, target_is_directory=True)
+        self.submit('assignment', changes=changes,
+                    seen={k: plan[k] for k in ('changes', 'dependency_warnings', 'path_warnings')})
+        item = self.wait_jobs()[-1]
+        self.assertEqual(item['status'], 'attention', item)
+        self.assertEqual(item['completed'], ['acme-c'])
+        self.assertEqual(item['remaining_changes'], [changes[0]])
+        self.assertEqual(entry.resolve(), app)
+        self.assertIn('acme-c', visibility(self.home)['claude']['available'])
+
+    def test_external_file_in_one_skill_does_not_block_other_skill_or_get_written(self):
+        external = self.root / 'Application setting.txt'
+        external.write_text('keep application data')
+        link = self.home / '.skill-pilot/store/acme-b/app-setting'
+        link.symlink_to(external)
+        changes = [self.assignment(n)['changes'][0] for n in ('acme-b', 'acme-c')]
+        plan = operations.preview_assign(changes, self.home, recheck=True)
+        self.submit('assignment', changes=changes,
+                    seen={k: plan[k] for k in ('changes', 'dependency_warnings', 'path_warnings')})
+        item = self.wait_jobs()[-1]
+        self.assertEqual(item['status'], 'failed', item)
+        self.assertEqual(item['completed'], ['acme-c'])
+        self.assertEqual(link.resolve(), external)
+        self.assertEqual(external.read_text(), 'keep application data')
+        with self.assertRaises(ValueError):
+            store.guard(link, self.home)
+        operations.undo(item['operations'][0], home=self.home)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(external.read_text(), 'keep application data')
+
+    def test_in_home_linked_root_keeps_nested_application_entry_on_rollback(self):
+        entry, app = self.app_skill_link()
+        root = self.home / '.claude/skills'
+        relocated = self.home / 'Shared skills'
+        root.rename(relocated)
+        root.symlink_to(relocated, target_is_directory=True)
+        with patch.object(operations, '_validate', side_effect=ValueError('模拟写入后失败')):
+            self.submit('assignment', **self.assignment())
+            item = self.wait_jobs()[-1]
+        self.assertEqual(item['status'], 'failed')
+        self.assertFalse(self.server.jobs_blocked)
+        self.assertTrue(root.is_symlink())
+        self.assertEqual(entry.resolve(), app)
+        self.assertNotIn('acme-b', visibility(self.home)['claude']['available'])
+
+    def test_dependency_failure_is_atomic_but_unrelated_selection_finishes(self):
+        self.registry(lambda r: r['skills']['acme-b'].update(requires=['acme-dep']))
+        changes = [self.assignment(n)['changes'][0] for n in ('acme-b', 'acme-c', 'acme-dep')]
+        plan = operations.preview_assign(changes, self.home, recheck=True)
+        reconcile = operations.reconcile_assignments
+        def fail_dependency(registry, home, checked, names, *args):
+            reconcile(registry, home, checked, names, *args)
+            if 'acme-dep' in names:
+                raise ValueError('模拟依赖写入后失败')
+        with patch.object(operations, 'reconcile_assignments', side_effect=fail_dependency):
+            self.submit('assignment', changes=changes,
+                        seen={k: plan[k] for k in ('changes', 'dependency_warnings', 'path_warnings')})
+            item = self.wait_jobs()[-1]
+        self.assertEqual(item['completed'], ['acme-c'])
+        self.assertEqual(set(item['remaining']), {'acme-b', 'acme-dep'})
+        self.assertEqual(visibility(self.home)['claude']['available'], ['acme-c'])
+
+    def test_partial_assignment_new_confirmation_keeps_completed_results(self):
+        changes = [self.assignment(n)['changes'][0] for n in ('acme-b', 'acme-c')]
+        plan = operations.preview_assign(changes, self.home, recheck=True)
+        self.registry(lambda r: r['skills']['acme-b'].update(requires=['acme-dep']))
+        job = self.submit('assignment', changes=changes,
+                          seen={k: plan[k] for k in ('changes', 'dependency_warnings', 'path_warnings')})
+        item = self.wait_jobs()[-1]
+        self.assertEqual(item['status'], 'attention', item)
+        self.assertEqual(item['attention'], 'confirmation')
+        self.assertEqual(item['completed'], ['acme-c'])
+        self.assertEqual(visibility(self.home)['claude']['available'], ['acme-c'])
+        self.ok('/api/jobs/retry', {'id': job['id'], 'seen': item['preview']})
+        done = self.wait_jobs()[-1]
+        self.assertEqual(done['status'], 'done', done)
+        self.assertEqual(done['completed'], ['acme-b', 'acme-c'])
+        self.assertEqual(visibility(self.home)['claude']['available'], ['acme-b', 'acme-c', 'acme-dep'])
+
+    def test_batch_install_corrupt_download_does_not_discard_valid_skill(self):
+        review = self.install_review('acme-new')
+        other = self.skill(Path(review['temporary']) / 'acme-broken', 'acme-broken')
+        review['skills'].append({'name': 'acme-broken', 'path': str(other),
+                                'digest': 'outdated', 'source': {'source': '自制'}})
+        job = self.submit('install', review_id=review['id'], skills=['acme-new', 'acme-broken'], agents=[])
+        item = self.wait_jobs()[-1]
+        self.assertEqual(item['status'], 'failed', item)
+        self.assertEqual(item['completed'], ['acme-new'])
+        self.assertIn('acme-new', operations.load(self.home)[1]['skills'])
+        review['skills'][1]['digest'] = content_digest(other)
+        retry = self.ok('/api/jobs/retry', {'id': job['id']})['job']
+        self.assertEqual(retry['skills'], ['acme-broken'])
+        self.assertEqual(self.wait_jobs()[-1]['status'], 'done')
+
+    def test_cleanup_and_restore_batches_keep_independent_successes(self):
+        for kind in ('cleanup_withdraw', 'restore', 'cleanup_delete'):
+            with self.subTest(kind=kind):
+                if kind == 'restore':
+                    params = {'skills': ['acme-b', 'missing-skill']}
+                else:
+                    plan = (cleanup.preview if kind == 'cleanup_withdraw' else cleanup.delete_preview)(['acme-b'], self.home)
+                    fields = ['dependency_warnings', 'path_warnings'] + (['irreplaceable'] if kind == 'cleanup_delete' else [])
+                    params = {'skills': ['acme-b', 'missing-skill'], 'seen': {k: plan[k] for k in fields}}
+                self.submit(kind, **params)
+                item = self.wait_jobs()[-1]
+                self.assertEqual(item['status'], 'failed', item)
+                self.assertEqual(item['completed'], ['acme-b'])
+                self.assertEqual(item['remaining'], ['missing-skill'])
+                self.assertEqual(len(item['operations']), 1)
+
+    def test_large_partial_batch_keeps_all_successful_backups_for_undo(self):
+        review = self.install_review('acme-first')
+        for index in range(11):
+            name = 'acme-new-' + str(index)
+            path = self.skill(Path(review['temporary']) / name, name)
+            review['skills'].append({'name': name, 'path': str(path),
+                                    'digest': content_digest(path), 'source': {'source': '自制'}})
+        review['skills'][-1]['digest'] = 'corrupt download'
+        names = [s['name'] for s in review['skills']]
+        job = self.submit('install', review_id=review['id'], skills=names, agents=[])
+        item = self.wait_jobs()[-1]
+        self.assertEqual(len(item['completed']), 11, item)
+        records = [r for r in operations.history(self.home) if r['id'] in item['operations']]
+        self.assertEqual(len(records), 11)
+        self.assertEqual({r['batch'] for r in records}, {job['id']})
+        for record in records:
+            self.assertTrue((self.home / '.skill-pilot/backups' / record['backup_id'] / 'files.tar').is_file())
+        for operation in reversed(item['operations']):
+            operations.undo(operation, home=self.home)
+        self.assertFalse(set(names) & set(operations.load(self.home)[1]['skills']))
+
+    def test_partial_batch_rollback_failure_stops_queue_and_keeps_prior_operations(self):
+        changes = [self.assignment(n)['changes'][0] for n in ('acme-b', 'acme-c')]
+        plan = operations.preview_assign(changes, self.home, recheck=True)
+        execute = self.server._execute_job
+        def fail(item):
+            selected = item['_parameters'].get('changes', [])
+            if len(selected) > 1:
+                raise ValueError('模拟整批未开始写入')
+            if selected and selected[0]['skill'] == 'acme-c':
+                raise operations.RollbackError('模拟恢复失败')
+            return execute(item)
+        with patch.object(self.server, '_execute_job', side_effect=fail):
+            with self.server.write_lock:
+                self.submit('assignment', changes=changes,
+                            seen={k: plan[k] for k in ('changes', 'dependency_warnings', 'path_warnings')})
+                self.submit('assignment', **self.assignment('acme-extra'))
+            items = self.wait_jobs()
+        self.assertTrue(self.server.jobs_blocked)
+        self.assertEqual(len(items[0]['operations']), 1)
+        self.assertEqual(items[0]['completed'], ['acme-b'])
+        self.assertNotIn('acme-extra', visibility(self.home)['claude']['available'])
+
     def test_failed_task_does_not_block_an_independent_task(self):
         with self.blocked_first():
             self.submit('install', review_id='expired', skills=['acme-a'], agents=['claude'])

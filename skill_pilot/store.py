@@ -272,10 +272,26 @@ def backup(home, plan, checked, kind="organize"):
     paths = plan["roots"] + [".skill-pilot/" + n for n in ("store", "bases", "registry.json", "agents.json")]
     for relative in list(paths):
         real = (home / relative).resolve()
-        if real != home / relative and real.is_dir():
+        if real != home / relative and real.is_dir() and (kind != 'operation' or real.is_relative_to(home)):
             paths.append(real.relative_to(home).as_posix())
-    paths = sorted(set(paths))
     protected_roots = profiles.readonly_roots(home)
+    if kind == 'operation':
+        # App-owned entries may live outside home. Leave both the entry and its
+        # target alone, including during rollback; never archive their contents.
+        def protect_external(path):
+            relative = path.relative_to(home).as_posix()
+            if any(relative == p or relative.startswith(p + '/') for p in protected_roots):
+                return
+            if path.is_symlink() or is_junction(path):
+                if not path.resolve().is_relative_to(home):
+                    protected_roots.add(relative)
+            elif path.is_dir():
+                for child in path.iterdir():
+                    protect_external(child)
+        for relative in paths:
+            protect_external(home / relative)
+        paths = [r for r in paths if not any(r == p or r.startswith(p + '/') for p in protected_roots)]
+    paths = sorted(set(paths))
     protected = sorted(protected_roots | {(home / p).resolve().relative_to(home).as_posix() for p in protected_roots
                                           if (home / p).resolve().is_relative_to(home)})
     manifest = {"backup_id": backup_id, "kind": kind, "home": str(home), "plan_id": plan["plan_id"], "paths": paths,
@@ -324,14 +340,27 @@ def _restore(home, backup_id, checked):
                 checked(target if target.is_absolute() else destination.parent / target)
             if member.islnk() or member.isdev() or member.isfifo():
                 raise ValueError("备份里有不支持的文件，已经停止还原。")
+        def remove_unprotected(path):
+            relative = path.relative_to(home).as_posix()
+            if any(relative == p or relative.startswith(p + '/') for p in protected):
+                return
+            if (any(p.startswith(relative + '/') for p in protected) and
+                    path.is_dir() and not path.is_symlink() and not is_junction(path)):
+                checked(path)
+                for child in path.iterdir():
+                    remove_unprotected(child)
+                if not any(path.iterdir()):
+                    path.rmdir()
+            else:
+                remove(path, checked)
+
         for relative in manifest["paths"]:
             path = checked(home / relative)
             if path.is_dir() and not path.is_symlink() and relative in manifest["existing"]:
                 for child in path.iterdir():
-                    if child.relative_to(home).as_posix() not in protected:
-                        remove(child, checked)
+                    remove_unprotected(child)
             else:
-                remove(path, checked)
+                remove_unprotected(path)
         # Archive links and destinations were checked above; data filter would
         # reject the intentionally absolute in-home links and change permissions.
         for member in archive.getmembers():

@@ -475,7 +475,8 @@ const cleanupJobFor = name => latestActiveJob(job => CLEANUP_JOB_KINDS.has(job.k
   && (job.skills || []).includes(name));
 const updateJobFor = name => latestActiveJob(job => job.kind === 'update' && (job.skills || []).includes(name));
 
-const jobStatusInfo = job => ({
+const jobStatusInfo = job => (job.completed?.length || job.updated?.length) && ['failed', 'attention'].includes(job.status)
+  ? {tone: 'tag-warn', label: '部分完成'} : ({
   waiting: {tone: 'tag-quiet', label: '排队中'},
   running: {tone: 'tag', label: '处理中'},
   done: {tone: 'tag-ok', label: '已完成'},
@@ -485,6 +486,7 @@ const jobStatusInfo = job => ({
 
 function jobStatusLine(job) {
   const message = job.message || '';
+  if ((job.completed?.length || job.updated?.length) && ['failed', 'attention'].includes(job.status)) return `部分完成：${message}`;
   if (job.status === 'failed') return `没完成：${message || '原因未知'}`;
   if (job.status === 'attention') return `需要处理：${message || '请查看下面的原因。'}`;
   if (job.status === 'done') return pastTense(message || '任务已完成');
@@ -501,12 +503,13 @@ function jobUndoAvailable(job) {
 }
 
 function jobActions(job) {
+  const undo = jobUndoAvailable(job) ? ['undo'] : [];
   if (job.status === 'done') return job.operations?.length && jobUndoAvailable(job) ? ['undo'] : [];
-  if (job.status === 'failed') return ['retry'];
-  if (job.status === 'attention' && job.attention === 'confirmation') return ['confirm'];
+  if (job.status === 'failed') return ['retry', ...undo];
+  if (job.status === 'attention' && job.attention === 'confirmation') return ['confirm', ...undo];
   if (job.status === 'attention' && job.attention === 'conflict') {
-    if (job.kind === 'assignment') return ['retry'];
-    if (job.kind === 'install') return ['compare'];
+    if (job.kind === 'assignment') return ['retry', ...undo];
+    if (job.kind === 'install') return ['compare', ...undo];
   }
   return [];
 }
@@ -549,7 +552,7 @@ function jobImpactText(impact) {
 
 function jobConflictHtml(job) {
   const conflicts = job.conflicts || [];
-  if (!conflicts.length) return '';
+  if (!conflicts.length || job.failed?.length) return '';
   return `<ul class="job-details">${conflicts.map(conflict => {
     const who = conflict.agent ? `${nameOf(conflict.agent)}：` : '';
     const name = conflict.skill || conflict.name || '';
@@ -558,7 +561,7 @@ function jobConflictHtml(job) {
 }
 
 function jobFailedHtml(job) {
-  if (job.status !== 'failed' || !(job.failed || []).length) return '';
+  if (!['failed', 'attention'].includes(job.status) || !(job.failed || []).length) return '';
   return `<ul class="job-details">${job.failed.map(item => `<li>${escape(titleOf(item.name))}：${escape(item.error || '原因未知')}</li>`).join('')}</ul>`;
 }
 
@@ -573,6 +576,10 @@ function jobImpactHtml(job) {
 
 function jobActionButton(job, action) {
   const labels = {undo: '撤销', retry: '重试', confirm: '重新确认', compare: '对比同名技能'};
+  if ((job.completed?.length || job.updated?.length) && job.status !== 'done') {
+    labels.retry = '重试未完成项';
+    labels.undo = '撤销已完成项';
+  }
   const label = labels[action];
   if (!label) return '';
   const tone = action === 'undo' ? ' btn-quiet' : action === 'confirm' ? ' btn-primary' : '';
@@ -3599,14 +3606,14 @@ function storeQueueRowHtml(item, locked = false) {
   const status = item.status === 'done'
     ? `<span class="tag tag-ok">安装完成</span>${github ? githubQueueNote(item) : extra ? `<small class="item-note">含 ${extra} 个前置依赖</small>` : ''}`
     : item.status === 'failed'
-      ? `<span class="tag tag-danger">安装失败：${escape(item.message || '原因未知')}</span>`
+      ? `<span class="tag ${item.installed?.length ? 'tag-warn' : 'tag-danger'}">${item.installed?.length ? '部分安装完成' : '安装失败'}：${escape(item.message || '原因未知')}</span>`
       : item.status === 'running'
         ? '<span class="tag">正在安装</span>'
         : '<span class="tag tag-quiet">排队中</span>';
   const action = item.status === 'done'
     ? github ? githubQueueAction(item) : `<button class="link-btn" type="button" data-store-goto="${escape(item.name)}">前往分配</button>`
     : item.status === 'failed'
-      ? `<button class="btn btn-small btn-quiet" type="button" data-store-queue-retry="${escape(item.key)}"${locked ? ' disabled' : ''}>重试</button>`
+      ? `${github && item.installed?.length ? githubQueueAction(item) : ''}<button class="btn btn-small btn-quiet" type="button" data-store-queue-retry="${escape(item.key)}"${locked ? ' disabled' : ''}>${item.installed?.length ? '重试未完成项' : '重试'}</button>`
       : '';
   return `<div class="item-row">
     <div>

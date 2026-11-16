@@ -171,6 +171,38 @@ class GitHubQueueTests(unittest.TestCase):
         self.assertNotIn('acme-new', operations.load(self.home)[1]['skills'])
         self.assertEqual(self.ok('/api/team/catalog')['github']['repos'][0]['local']['status'], 'installable')
 
+    def test_one_bad_download_keeps_other_install_and_retry_does_not_install_new_additions(self):
+        review = self.review('acme-new', 'acme-broken')
+        review['skills'][1]['digest'] = 'corrupt download'
+        with patch.object(github, 'inspect', return_value=review):
+            self.enqueue()
+            item = self.wait_jobs()[0]
+        self.assertEqual(item['status'], 'failed', item)
+        self.assertEqual(item['installed'], ['acme-new'])
+        self.assertEqual(item['remaining'], ['acme-broken'])
+        self.assertEqual(len(item['operations']), 1)
+        missing = self.review('acme-added-later')
+        with patch.object(github, 'inspect', return_value=missing):
+            self.ok('/api/jobs/retry', {'id': item['id']})
+            item = self.wait_jobs()[0]
+        self.assertEqual(item['status'], 'failed')
+        self.assertEqual(item['remaining'], ['acme-broken'])
+        self.assertIn('此前已完成', item['message'])
+        self.assertEqual(len(item['operations']), 1)
+        self.assertNotIn('acme-added-later', operations.load(self.home)[1]['skills'])
+        retry = self.review('acme-new', 'acme-broken', 'acme-added-later')
+        with patch.object(github, 'inspect', return_value=retry):
+            self.ok('/api/jobs/retry', {'id': item['id']})
+            done = self.wait_jobs()[0]
+        self.assertEqual(done['status'], 'done', done)
+        self.assertEqual(done['completed'], ['acme-broken', 'acme-new'])
+        self.assertEqual(len(done['operations']), 2)
+        self.assertNotIn('acme-added-later', operations.load(self.home)[1]['skills'])
+        for operation in reversed(done['operations']):
+            operations.undo(operation, home=self.home)
+        self.assertNotIn('acme-new', operations.load(self.home)[1]['skills'])
+        self.assertNotIn('acme-broken', operations.load(self.home)[1]['skills'])
+
     def test_materials_only_cache_with_null_digest_uses_repository_title(self):
         snapshot = github_catalog('acme/skills')
         snapshot['repos'][0].update(branch='main', readme_path='README.md',

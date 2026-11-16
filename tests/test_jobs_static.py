@@ -79,6 +79,11 @@ if (jobActions({status: 'attention', attention: 'conflict', kind: 'assignment'})
 if (jobActions({status: 'attention', attention: 'conflict', kind: 'install'}).join(',') !== 'compare') fail('安装同名冲突应给对比同名技能');
 if (jobActions({status: 'attention', attention: 'conflict', kind: 'cleanup_delete'}).length) fail('其他冲突不应乱给操作');
 if (jobActions({status: 'done', operations: []}).length) fail('没有写入的完成任务不应给撤销');
+const partial = {status: 'failed', completed: ['acme-a'], operations: ['op-a'], message: '已完成：示例甲。未完成：示例乙。'};
+if (!jobStatusLine(partial).startsWith('部分完成：')) fail('部分完成不能笼统显示没完成');
+if (jobActions(partial).join(',') !== 'retry,undo') fail('部分完成应能重试剩余项并撤销成功项');
+state.logs = [{id: 'op-a', undone: true}];
+if (jobActions(partial).join(',') !== 'retry') fail('成功项已撤销后不能再次撤销');
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

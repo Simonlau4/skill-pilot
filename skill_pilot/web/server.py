@@ -306,10 +306,16 @@ class Dashboard(ThreadingHTTPServer):
                             summary='安装「' + title + '」', installed=[], reuse=[], skipped=[], operation=None,
                             message='等待安装。')
             if previous:
-                if kind == 'update':
+                if previous['status'] in {'failed', 'attention'}:
+                    item['_batch'] = previous.get('_batch', previous['id'])
                     item['_completed_operations'] = list(previous['operations'])
-                    item['_updated'] = list(previous.get('updated', []))
                     item['operations'] = list(previous['operations'])
+                    item['_completed'] = list(previous.get('completed', []))
+                    item['completed'] = list(previous.get('completed', []))
+                    if kind == 'github_install' and (previous.get('remaining') or previous.get('_retry_skills')):
+                        item['_retry_skills'] = list(previous.get('remaining') or previous['_retry_skills'])
+                    if kind == 'update':
+                        item['_updated'] = list(previous.get('updated', []))
                 self.jobs.remove(previous)
             self.jobs.append(item)
             self.jobs_version += 1
@@ -338,6 +344,10 @@ class Dashboard(ThreadingHTTPServer):
             if previous is None or previous['status'] not in {'failed', 'attention'}:
                 raise JobInputError('只能重试失败或需要处理的任务。')
             parameters = copy.deepcopy(previous['_parameters'])
+            if previous.get('remaining_changes'):
+                parameters['changes'] = copy.deepcopy(previous['remaining_changes'])
+            elif previous.get('remaining'):
+                parameters['skills'] = list(previous['remaining'])
             if parameters['kind'] == 'update' and previous.get('failed'):
                 parameters['skills'] = [r['name'] for r in previous['failed']]
             for field in ('seen', 'review_id', 'choices', 'merge_ids', 'confirm_lark_cli'):
@@ -518,6 +528,7 @@ class Dashboard(ThreadingHTTPServer):
                 except operations.RollbackError as error:
                     with self.jobs_lock:
                         item['operations'] += [r['id'] for r in getattr(error, 'operations', [])]
+                        item['completed'] = sorted(set(item.get('completed', []) + getattr(error, 'completed', [])))
                         item['updated'] = item.get('_updated', []) + getattr(error, 'updated', [])
                     self.stop_jobs()
                     result = None
@@ -532,6 +543,9 @@ class Dashboard(ThreadingHTTPServer):
                     except (OSError, ValueError):
                         pass  # Preserve the task's write result if a later scan fails.
                 if result is not None:
+                    if item.get('_completed'):
+                        result['completed'] = sorted(set(item['_completed'] + result.get('completed', [])))
+                        result['message'] = '此前已完成：' + self.skill_message('、'.join(item['_completed'])) + '。' + result['message']
                     with self.jobs_lock:
                         item.update({'status': 'done', **result})
                         self.jobs_version += 1
@@ -552,6 +566,94 @@ class Dashboard(ThreadingHTTPServer):
                     'preview': {k: copy.deepcopy(plan[k]) for k in (*seen, 'revision') if k in plan}}
 
     def execute_job(self, item):
+        parameters = item['_parameters']
+        kind = item['kind']
+        if kind not in {'assignment', 'install', 'cleanup_withdraw', 'cleanup_delete', 'restore'}:
+            return self._execute_job(item)
+        names = sorted({c['skill'] for c in parameters['changes']} if kind == 'assignment' else parameters['skills'])
+        # Keep dependency-connected selections atomic, including selections that
+        # share a dependency. Ordinary successful batches still use one write.
+        graph = {}
+        registry = operations.load(self.home)[1]['skills']
+        dependencies = {n: set(s.get('requires', [])) for n, s in registry.items()}
+        if kind == 'install':
+            for name, required in operations.curated_dependencies()[0].items():
+                dependencies.setdefault(name, set()).update(required)
+        for name, required in dependencies.items():
+            for dependency in required:
+                graph.setdefault(name, set()).add(dependency)
+                graph.setdefault(dependency, set()).add(name)
+        pending, groups = set(names), []
+        while pending:
+            connected, todo = set(), [min(pending)]
+            while todo:
+                name = todo.pop()
+                if name not in connected:
+                    connected.add(name)
+                    todo.extend(graph.get(name, set()) - connected)
+            groups.append(sorted(connected & pending))
+            pending -= connected
+        token = operations.operation_batch.set(item.get('_batch', item['id']))
+        try:
+            try:
+                result = self._execute_job(item)
+            except operations.RollbackError:
+                raise
+            except (ValueError, OSError):
+                if len(groups) < 2:
+                    raise
+            else:
+                if result.get('status', 'done') == 'done':
+                    return {**result, 'completed': names}
+                if len(groups) < 2:
+                    return result
+            completed, failed, ids, conflicts, impacts = [], [], [], [], []
+            preview = copy.deepcopy(parameters.get('seen', {}))
+            for group in groups:
+                child_parameters = copy.deepcopy(parameters)
+                if kind == 'assignment':
+                    child_parameters['changes'] = [c for c in parameters['changes'] if c['skill'] in group]
+                else:
+                    child_parameters['skills'] = group
+                try:
+                    result = self._execute_job({**item, '_parameters': child_parameters})
+                except operations.RollbackError as error:
+                    error.operations = [{'id': i} for i in ids] + getattr(error, 'operations', [])
+                    error.completed = completed
+                    raise
+                except (ValueError, OSError) as error:
+                    result = {'status': 'failed', 'message': str(error) if isinstance(error, ValueError)
+                              else '文件没能读写，请核对后重试。'}
+                ids.extend(result.get('operations', []))
+                if result.get('status', 'done') == 'done':
+                    completed.extend(group)
+                    continue
+                for name in group:
+                    reason = '；'.join(c['message'] for c in result.get('conflicts', [])
+                                      if c.get('skill', c.get('name')) == name) or result['message']
+                    failed.append({'name': name, 'error': self.job_message(self.skill_message(reason))})
+                conflicts.extend(result.get('conflicts', []))
+                impacts.extend(result.get('new_impacts', []))
+                for key in preview:
+                    for value in result.get('preview', {}).get(key, []):
+                        if value not in preview[key]:
+                            preview[key].append(value)
+            remaining = [r['name'] for r in failed]
+            status = 'attention' if impacts or conflicts else 'failed' if failed else 'done'
+            message = '已完成：' + ('、'.join(completed) or '无') + '。'
+            if remaining:
+                message += '未完成：' + '、'.join(remaining) + '。'
+                if completed:
+                    message += '已完成的部分已保留。'
+            return {'status': status, 'message': self.skill_message(message), 'completed': completed,
+                    'failed': failed, 'remaining': remaining, 'operations': ids, 'conflicts': conflicts,
+                    **({'remaining_changes': [c for c in parameters['changes'] if c['skill'] in remaining]} if kind == 'assignment' else {}),
+                    **({'attention': 'confirmation', 'new_impacts': impacts, 'preview': preview} if impacts else
+                       {'attention': 'conflict'} if conflicts else {})}
+        finally:
+            operations.operation_batch.reset(token)
+
+    def _execute_job(self, item):
         parameters = item['_parameters']
         kind = item['kind']
         names = parameters.get('skills', [])
@@ -581,7 +683,7 @@ class Dashboard(ThreadingHTTPServer):
             else:
                 raise ValueError('技能状态连续发生变化，文件没有改动，请重新核对后重试。')
         elif kind == 'install':
-            review = self.install_reviews.get(parameters['review_id'])
+            review = item.get('_install_review') or self.install_reviews.get(parameters['review_id'])
             if review is None or not Path(review['temporary']).is_dir():
                 raise ValueError('安装预览已失效，请重新读取安装来源。')
             _, _, agents = operations.load(self.home)
@@ -640,22 +742,34 @@ class Dashboard(ThreadingHTTPServer):
         elif kind == 'github_install':
             review = github.inspect('https://github.com/' + parameters['repository'])
             try:
-                if not review['skills']:
+                missing = []
+                if item.get('_retry_skills'):
+                    missing = [{'name': n, 'error': '这个技能已不在本次安装来源中，请重新核对来源。'}
+                               for n in item['_retry_skills'] if n not in {s['name'] for s in review['skills']}]
+                    review['skills'] = [s for s in review['skills'] if s['name'] in item['_retry_skills']]
+                if not review['skills'] and not missing:
                     raise ValueError('这个仓库里没有找到可安装的技能。')
                 registry = operations.load(self.home)[1]
                 collisions = {c['name']: c['same_content'] for c in operations.conflicts(review['skills'], registry, self.home)}
                 installed = [s['name'] for s in review['skills'] if s['name'] not in collisions]
                 reuse = [n for n, same in collisions.items() if same]
                 skipped = [n for n, same in collisions.items() if not same]
-                result = operations.install(review, installed, [], home=self.home) if installed else {}
-                if result.get('conflicts'):
-                    raise ValueError(result['message'])
+                result = self.execute_job({**item, 'kind': 'install', '_install_review': review,
+                    '_parameters': {'kind': 'install', 'skills': installed, 'agents': [],
+                                    'review_id': review['id']}}) if installed else {}
+                installed = [n for n in installed if n in result.get('completed', [])]
+                failed = result.get('failed', []) + missing
+                for conflict in result.get('conflicts', []):
+                    if not any(r['name'] == conflict['name'] for r in failed):
+                        failed.append({'name': conflict['name'], 'error': conflict['message']})
                 message = (f'已安装 {len(installed)} 个技能。' if installed else '本机已经有了。' if reuse else
-                           '安装失败：同名技能内容不同，现有内容已保留。')
+                           '安装失败。' if failed else '安装失败：同名技能内容不同，现有内容已保留。')
                 if reuse and (installed or skipped):
                     message += f'沿用 {len(reuse)} 个技能：' + '、'.join(reuse) + '。'
                 if skipped:
                     message += f'跳过 {len(skipped)} 个同名但内容不同的技能：' + '、'.join(skipped) + '。可到技能页粘贴仓库链接核对。'
+                if failed:
+                    message += '未完成：' + '；'.join(r['name'] + '：' + r['error'] for r in failed) + '。'
                 tag = None
                 if len(installed) >= 2:
                     name = item['title']
@@ -667,10 +781,12 @@ class Dashboard(ThreadingHTTPServer):
                     else:
                         tag = next((t for t in tags.read(self.home).get(installed[0], [])
                                     if t.casefold() == tags.clean_tag(name).casefold()), None)
-                return {'status': 'done' if installed or reuse else 'failed', 'message': self.job_message(message),
+                ids = result.get('operations', [])
+                return {'status': 'done' if (installed or reuse) and not failed else 'failed', 'message': self.job_message(message),
                         'installed': installed, 'reuse': reuse, 'skipped': skipped, 'skills': installed + reuse,
+                        'completed': installed, 'failed': failed, 'remaining': [r['name'] for r in failed],
                         **({'tag': tag} if tag else {}),
-                        'operation': result.get('id'), 'operations': [result['id']] if 'id' in result else []}
+                        'operation': ids[0] if len(ids) == 1 else None, 'operations': ids}
             finally:
                 rmtree(review['temporary'], ignore_errors=True)
         else:

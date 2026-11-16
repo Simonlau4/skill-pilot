@@ -2,6 +2,7 @@ from .platform_support import copytree
 from .platform_support import rmtree
 """M3 assignment, installation, absorption and reversible local operations."""
 import copy
+from contextvars import ContextVar
 from .platform_support import fcntl, user_home, user_id, check_directory_links
 import hashlib
 import json
@@ -23,6 +24,7 @@ from .sources import github, normalize
 from . import labels, tags, normalization
 
 DEPENDENCY_DECISIONS = PROJECT / 'docs/dependency-decisions.json'
+operation_batch = ContextVar('operation_batch', default=None)
 
 
 class RollbackError(ValueError):
@@ -343,7 +345,6 @@ def _foreign_skill_names(home, agents):
                 raise ValueError('新装技能的名称不能安全用作文件夹名称，请先核对。')
             if path.resolve().is_relative_to(home / '.skill-pilot/store'):
                 continue
-            check_links(path, home)
             names.add(skill['name'])
     return names
 
@@ -525,6 +526,7 @@ def _commit(home, registry, names, content_names, message):
 
 
 def _run(home, registry, agents, expected, message, mutation, undo_of=None, extra_paths=None, batch=None):
+    batch = batch or operation_batch.get()
     checked = lambda p: guard(p, home)
     checked(home / '.skill-pilot')
     with transaction(home) as lock:
@@ -533,9 +535,8 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
             registry = expected()
         elif revision(home, agents) != expected:
             raise ValueError('目录内容已经变了，请刷新后重新核对。')
-        for root in sorted({r for p in profiles.managed(home, agents) for r in p['skill_roots']}):
-            check_links(home / root, home)
-        check_links(home / '.skill-pilot', home)
+        # Selected writes still use guard/check_links. Unrelated app-owned
+        # entries are excluded from the backup and preserved on rollback.
         snapshot = _snapshot(home, agents, checked, extra_paths)
         try:
             names, content, result = mutation(registry, checked)
