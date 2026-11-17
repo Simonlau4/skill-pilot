@@ -800,11 +800,19 @@ def inspect_local(folder, home=None):
         raise ValueError('找不到这个文件夹，请核对位置。')
     if any(path.is_relative_to((home / '.skill-pilot').resolve()) for path in (raw, root)):
         raise ValueError('这个文件夹已经在统一仓库里，不用再安装。')
-    roots = {r for p in profiles.all_profiles(home) for r in p['skill_roots']} | profiles.readonly_roots(home)
-    for relative in roots:
+    def inside(relative):
         directory = home / relative
-        if any(path.is_relative_to(directory) or path.is_relative_to(directory.resolve()) for path in (raw, root)):
-            raise ValueError('这个文件夹在 agent 自己的技能目录里，不能从这里安装；新放进去的技能请用收编统一管理。')
+        return any(path.is_relative_to(directory) or path.is_relative_to(directory.resolve()) for path in (raw, root))
+    catalog = profiles.all_profiles(home)
+    notes = []
+    if any(inside(r) for r in profiles.readonly_roots(home)):
+        # App-managed folders sit inside the skill roots, so they are checked first.
+        # They are only read: the store gets a copy and absorbing never reaches them.
+        owner = '、'.join(p['name'] for p in catalog if any(inside(r) for r, _ in p['readonly_roots'])) or '原应用'
+        notes.append(f'这个文件夹由 {owner} 自己管理：只复制一份进技能库，原文件不动。'
+                     f'如果再分配给 {owner}，它会同时看到两份同名技能。')
+    elif any(inside(r) for p in catalog for r in p['skill_roots']):
+        raise ValueError('这个文件夹在 agent 自己的技能目录里，不能从这里安装；新放进去的技能请用收编统一管理。')
     skills = scan_root(root, user_root=False)
     if skills['errors']:
         raise ValueError('文件夹里的技能没有读完整，已停止安装。')
@@ -825,7 +833,7 @@ def inspect_local(folder, home=None):
         raise ValueError('这个文件夹里没有找到带名称和说明的 SKILL.md。')
     if len({s['name'] for s in found}) != len(found):
         raise ValueError('文件夹里有多个同名技能，请指定具体的技能文件夹。')
-    return {'url': str(root), 'skills': found}
+    return {'url': str(root), 'skills': found, 'notes': notes}
 
 
 def reconcile_observed(agent, home=None):

@@ -143,6 +143,36 @@ class TeamCommandTests(unittest.TestCase):
         self.assertEqual(team.unpublish(self.home, ['acme-main', 'acme-base'])['names'], ['acme-base', 'acme-main'])
         self.assertEqual(set(self.shared()), {'acme-main', 'acme-base'})
 
+    def test_publish_can_group_the_named_skills_into_a_titled_pack(self):
+        self.configure()
+        names = ['first-notes', 'chart-rules']
+        for name in names:
+            folder = self.root / 'Example drafts' / name
+            self.skill(folder, name)
+            operations.install(operations.inspect_local(folder, self.home), [name], ['codex'], home=self.home)
+        packs = lambda: [(p['title'], p['skills']) for p in
+                         team._catalog({'url': self.url, 'key': self.first['token']}).get('packs', [])]
+        # Unrelated names get no suggestion, so the title is the only way to group them.
+        self.assertEqual(team.publish(self.home, names)['packs'], [])
+        with self.assertRaisesRegex(ValueError, '2'):
+            team.publish(self.home, names[:1], pack='示例套装')
+        shown = run(self.home, 'team', 'publish', *names, '--pack', '示例套装')
+        self.assertEqual(shown.returncode, 2, shown.stdout + shown.stderr)
+        self.assertIn('技能包「示例套装」：first-notes、chart-rules（新建）', shown.stdout)
+        self.assertNotIn('--skip-pack', shown.stdout)
+        self.assertEqual(self.shared(), {})
+        team.publish(self.home, names, pack='示例套装', confirmed=True)
+        self.assertEqual(packs(), [('示例套装', names)])
+        # The same title adds to that pack, and a named skill leaves the suggested one.
+        team.publish(self.home, ['acme-extra', 'acme-other'], pack='示例套装', confirmed=True)
+        self.assertEqual(packs(), [('示例套装', names + ['acme-extra', 'acme-other'])])
+        # A member that cannot be published stops the upload instead of shipping a smaller pack.
+        (self.home / '.skill-pilot/store/acme-local/SKILL.md').unlink()
+        before = self.shared()
+        with self.assertRaisesRegex(ValueError, 'acme-local'):
+            team.publish(self.home, ['acme-local', 'acme-main'], pack='另一套', confirmed=True)
+        self.assertEqual(self.shared(), before)
+
 
 class LocalInstallTests(unittest.TestCase):
     setUp, skill, fingerprint = test_operations.OperationsTests.setUp, test_operations.OperationsTests.skill, test_operations.OperationsTests.fingerprint
@@ -183,6 +213,24 @@ class LocalInstallTests(unittest.TestCase):
                                 (self.home / 'Missing', '找不到')):
             with self.assertRaisesRegex(ValueError, message):
                 operations.inspect_local(folder, self.home)
+
+    def test_folder_in_an_app_managed_directory_is_copied_and_left_untouched(self):
+        bucket = self.home / '.claude/skills/synced/Example bucket'
+        synced = self.skill('.claude/skills/synced/Example bucket/chart-rules', 'chart-rules')
+        self.skill('.claude/skills/synced/Example bucket/writing-rules', 'writing-rules')
+        (synced / 'guide.md').write_text('示例资料\n')
+        before = store.physical_state(self.home / '.claude/skills/synced')
+        review = operations.inspect_local(synced, self.home)
+        self.assertIn('Claude', review['notes'][0])
+        result = operations.install(review, ['chart-rules'], ['codex'], home=self.home)
+        self.assertEqual(operations.load(self.home)[1]['skills']['chart-rules']['assigned_agents'], ['codex'])
+        self.assertEqual((self.home / '.codex/skills/chart-rules/guide.md').read_text(), '示例资料\n')
+        shown = run(self.home, 'install', str(bucket), '--skill', 'writing-rules', '--agent', 'claude')
+        self.assertEqual(shown.returncode, 2, shown.stdout + shown.stderr)
+        self.assertIn('原文件不动', shown.stdout)
+        self.assertIn('两份', shown.stdout)
+        operations.undo(result['id'], home=self.home)
+        self.assertEqual(store.physical_state(self.home / '.claude/skills/synced'), before)
 
     def test_command_line_preview_is_read_only(self):
         folder = self.skill('Drafts/new skill', 'new-skill')
