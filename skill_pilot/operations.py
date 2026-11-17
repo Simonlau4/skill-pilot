@@ -620,6 +620,8 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
                 record['batch'] = batch
             if result.get('released'):
                 record['released'] = result['released']
+            if result.get('_bundled_version'):
+                record['bundled_version'] = result.pop('_bundled_version')
             write_json(home / '.skill-pilot/logs' / (commit + '.json'), record, checked)
         except Exception as error:
             try:
@@ -869,6 +871,30 @@ def bootstrap(home):  # 首次安装；撤销或撤下后不再自动安装。
     return install({'skills': [{'name': 'skill-pilot', 'path': str(path), 'digest': content_digest(path),
                                'source': {'source': '自制'}}]}, ['skill-pilot'], agents, home=home)
 
+
+def sync_bundled_skill(home):
+    """Follow the installed program without changing grants or replacing local edits."""
+    home = Path(home)
+    if not write_allowed(home) or not (home / '.skill-pilot/registry.json').is_file():
+        return
+    _, registry, agents = load(home)
+    skill = registry['skills'].get('skill-pilot')
+    if not skill or skill.get('withdrawn') or normalize(skill['source'])['kind'] != 'skip':
+        return
+    incoming = PROJECT / 'skill/skill-pilot'
+    current = home / '.skill-pilot/store/skill-pilot'
+    base = home / '.skill-pilot/bases/skill-pilot'
+    if not all((path / 'SKILL.md').is_file() for path in (incoming, current, base)):
+        return
+    version, installed = normalization.tree(incoming), normalization.tree(current)
+    if installed == version or installed != normalization.tree(base):
+        return
+    if any(row.get('bundled_version') == version and row['undone'] for row in history(home)):
+        return
+    return update_local('skill-pilot', incoming, expected=revision(home, agents), home=home,
+                        confirmed=True, _bundled_version=version)
+
+
 def _local_folder(name, folder, home, registry):
     if not isinstance(name, str) or name not in registry['skills']:
         raise ValueError('这个技能不在登记表里，请刷新后再选。')
@@ -887,7 +913,7 @@ def _local_folder(name, folder, home, registry):
     return incoming
 
 
-def update_local(name, folder, expected=None, home=None, confirmed=False):
+def update_local(name, folder, expected=None, home=None, confirmed=False, _bundled_version=None):
     home, registry, agents = load(home)
     incoming = _local_folder(name, folder, home, registry)
     same = normalization.tree(incoming) == normalization.tree(home / '.skill-pilot/store' / name)
@@ -896,6 +922,9 @@ def update_local(name, folder, expected=None, home=None, confirmed=False):
                 'message': '内容和正在使用的一样，没有需要更新的。' if same else f'将用这份文件更新「{name}」。请核对后加 --yes 执行。'}
     if same:
         return {'name': name, 'changed': False, 'message': '内容和正在使用的一样，没有需要更新的。'}
+    if _bundled_version and (registry['skills'][name].get('withdrawn') or
+            normalization.tree(home / '.skill-pilot/store' / name) != normalization.tree(home / '.skill-pilot/bases' / name)):
+        return
     guard(home / '.skill-pilot', home)
     def mutate(current, checked):
         destination = checked(home / '.skill-pilot/store' / name)
@@ -908,8 +937,9 @@ def update_local(name, folder, expected=None, home=None, confirmed=False):
         base.parent.mkdir(parents=True, exist_ok=True)
         copytree(destination, base, symlinks=True)
         current['skills'][name]['base_digest'] = content_digest(destination)
-        return [name], [name], {}
-    return _run(home, registry, agents, expected or revision(home, agents), f'用本地文件更新了「{name}」', mutate)
+        return [name], [name], {'_bundled_version': _bundled_version} if _bundled_version else {}
+    message = '随程序同步了 Skill Pilot 技能说明' if _bundled_version else f'用本地文件更新了「{name}」'
+    return _run(home, registry, agents, expected or revision(home, agents), message, mutate)
 
 
 def absorb(all_skills=False, selected=None, expected=None, home=None, choices=None, preview=False):

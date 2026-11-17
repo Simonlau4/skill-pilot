@@ -49,7 +49,7 @@ def make_fixture(case, checkout=False):
     private = case.home / '.skill-pilot'
     private.mkdir()
     (private / 'settings.json').write_text('{"private_example": "do not replace"}')
-    (private / 'registry.json').write_text('{"private_example": "keep allocations"}')
+    (private / 'registry.json').write_text('{"skills": {}, "private_example": "keep allocations"}')
     case.personal_before = store.physical_state(private)
 
 
