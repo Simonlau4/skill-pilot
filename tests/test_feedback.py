@@ -304,7 +304,7 @@ assert(context.jobFailedHtml({status:'failed', failed:[{name:'demo', error_id:'x
     def test_async_program_update_results_and_inline_errors_keep_ids(self):
         source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text()
         functions = '\n'.join(extract_function(source, signature) for signature in (
-            'async function programAction(', 'function showReview(', 'function renderUpdateBar(',
+            'async function programAction(', 'function programText(', 'function showReview(', 'function renderUpdateBar(',
             'function showDetailTagError(', 'function feedbackButton('))
         script = r'''
 const assert = require('node:assert/strict');

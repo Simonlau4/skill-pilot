@@ -1526,6 +1526,39 @@ pre {
 .action-extra ul { margin-top: var(--sp-1); }
 .action-extra li { padding: 2px 0; overflow-wrap: anywhere; }
 
+/* ---------- 程序更新小弹窗 ---------- */
+
+.program-popup {
+  position: fixed;
+  right: var(--sp-6);
+  bottom: var(--sp-6);
+  z-index: var(--z-actionbar);
+  width: min(380px, calc(100vw - 32px));
+  max-height: min(560px, calc(100dvh - var(--program-popup-bottom, 24px) - 24px));
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-5);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity var(--speed) var(--ease), transform var(--speed) var(--ease);
+  overflow-wrap: anywhere;
+}
+.program-popup.is-open { opacity: 1; transform: none; }
+#action-bar.is-open ~ .program-popup { bottom: var(--program-popup-bottom, 24px); }
+.program-popup-head { display: flex; align-items: flex-start; gap: var(--sp-2); }
+.program-popup-head h2 { flex: 1; padding-top: 6px; font-size: var(--fs-lead); }
+.program-popup-head .btn { flex: none; }
+.program-popup-body { overflow-y: auto; overscroll-behavior: contain; margin: var(--sp-3) 0; }
+.program-popup-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--sp-2); }
+.program-changes { margin: var(--sp-3) 0; }
+.program-changes ul { list-style: disc; padding-left: var(--sp-5); margin: var(--sp-2) 0; }
+.program-changes li + li { margin-top: var(--sp-1); }
+.program-changes .muted, .program-popup-body .muted { font-size: var(--fs-small); }
+
 /* ---------- 提示条 ---------- */
 
 .toasts {
