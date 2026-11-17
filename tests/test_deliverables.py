@@ -279,9 +279,11 @@ class DeliverableDashboardTests(unittest.TestCase):
 
         tools = self.root / 'Example tools'
         tools.mkdir()
-        (tools / 'acme-tool').write_text('#!/bin/sh\nexit 0\n')
-        (tools / 'acme-tool').chmod(0o755)
-        with patch.dict(os.environ, {'PATH': str(tools)}):
+        entry = tools / ('acme-tool.cmd' if os.name == 'nt' else 'acme-tool')
+        entry.write_text('this tool must never be executed')
+        entry.chmod(0o755)
+        with patch.dict(os.environ, {'PATH': str(tools)}), \
+                patch('subprocess.run', side_effect=AssertionError('工具检查不执行命令')):
             found = self.ok(self.b, '/api/tools/check?names=acme-tool,acme-missing')
         self.assertEqual(found, {'acme-tool': True, 'acme-missing': False})
         for bad in ('../acme-tool', 'acme tool', '', 'a,' * 40):
