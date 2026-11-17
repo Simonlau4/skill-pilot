@@ -157,6 +157,13 @@ class Dashboard(ThreadingHTTPServer):
         self.program_progress = session.get('program_progress', {'running': False, 'phase': 'idle',
             'message': '从 GitHub 官方项目获取新版', 'error': '', 'available': False, 'current': '', 'latest': ''})
         self.program_progress.setdefault('automatic', False)
+        try:
+            operations.sync_bundled_skill(self.home)
+        except Exception as error:
+            diagnostics.failure(self.home, 'self_update', '同步 Skill Pilot 技能说明', error)
+            if isinstance(error, operations.RollbackError):
+                self.jobs_blocked = str(error)
+            self.program_progress.update(phase='error', error='程序可继续使用，但自带技能说明没能同步，请查看诊断后重新打开看板。')
         if self.program_progress['phase'] == 'ready':
             self.program_progress.update(phase='latest', message='SP 已升级到最新版')
         # 换进程时没有还在跑的线程。自动检查被关掉或刷新打断时，按还没查到处理，避免一直显示正在检查。

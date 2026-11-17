@@ -339,6 +339,20 @@ Dashboard.execute_job = delayed_job
                                 datetime.fromisoformat(discovery_before['checked_at']))
         self.assertEqual(state_without_discovery(), before)
 
+    def test_skill_only_upgrade_refreshes_the_installed_skill_in_the_same_session(self):
+        shutil.copytree(store.PROJECT / 'skill', self.code / 'skill')
+        plan = store.preview(self.home)
+        store.apply(plan['plan_id'], self.home)
+        self.env.pop('SKILL_PILOT_READ_ONLY')
+        self.start()
+        initial = self.request('/api/status')[1]
+        incoming = self.code / 'skill/skill-pilot/SKILL.md'
+        incoming.write_text(incoming.read_text() + '\n新的成品操作说明。\n')
+        self.assertTrue(self.request('/api/runtime/refresh', {})[1]['changed'])
+        current = self.wait_status(lambda s: s['version'] != initial['version'])
+        self.assertEqual(current['pid'], initial['pid'])
+        self.assertEqual((self.home / '.skill-pilot/store/skill-pilot/SKILL.md').read_bytes(), incoming.read_bytes())
+
     def test_unloadable_update_keeps_old_program_available_then_allows_retry(self):
         self.start()
         initial = self.request('/api/status')[1]

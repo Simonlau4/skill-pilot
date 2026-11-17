@@ -15,6 +15,10 @@ def version():
     digest = hashlib.sha256()
     for path in sorted(p for p in PACKAGE.rglob('*') if p.suffix in {'.py', '.json'} and '__pycache__' not in p.parts):
         digest.update(str(path.relative_to(PACKAGE)).encode() + b'\0' + path.read_bytes())
+    bundled = PACKAGE.parent / 'skill/skill-pilot'
+    if bundled.is_dir():
+        from ..normalization import tree
+        digest.update(tree(bundled).encode())
     return digest.hexdigest()
 
 
