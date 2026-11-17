@@ -949,20 +949,39 @@ def listings_remove(home, names, confirmed=True):
     return {'message': '技能已下架。'}
 
 
-def publish(home, names, notes=None, rejected=None, skip_packs=(), confirmed=False):
+def publish(home, names, notes=None, rejected=None, skip_packs=(), confirmed=False, pack=None):
     """Command-line publishing: the dashboard preview, then upload and read back."""
     notes = notes or {}
     if set(notes) - set(names):
         raise ValueError('推荐语只能写给这次要上架的技能。')
     skills = [{'name': n, **({'note': notes[n]} if notes.get(n) else {})} for n in names]
     saved, result = listings_preview(home, skills, rejected)
-    if skip_packs:
+    if skip_packs or pack is not None:
         unknown = set(skip_packs) - {p['id'] for p in result['packs']}
         if unknown:
             raise ValueError('预览里没有这些技能包：' + '、'.join(sorted(unknown)))
         packs = [{k: p[k] for k in ('id', 'title', 'note', 'skills') if k in p}
                  for p in result['packs'] if p['id'] not in skip_packs]
+        if pack is not None:
+            if not result['packs_supported']:
+                raise ValueError('分享站版本较旧，暂不能整理技能包，请联系管理员更新分享站。')
+            title = tags.clean_tag(pack)
+            # The same title means the same pack: named skills join it, nothing leaves it.
+            mine = next((p for p in packs if p['title'] == title), None) or {
+                'id': 'pack-' + hashlib.sha256(title.encode()).hexdigest()[:10], 'title': title, 'skills': []}
+            mine['skills'] = list(dict.fromkeys([*mine['skills'], *names]))
+            if len(mine['skills']) < 2:
+                raise ValueError('技能包至少要有 2 个技能，请多列一个再试。')
+            # A skill sits in one pack only, so the named ones leave any other pack.
+            others = [{**p, 'skills': [n for n in p['skills'] if n not in names]} for p in packs if p is not mine]
+            packs = [p for p in others if len(p['skills']) >= 2] + [mine]
         saved, result = listings_preview(home, skills, rejected, packs)
+        if pack is not None:
+            failed = set(names) & {row['name'] for row in result['errors']}
+            if failed and confirmed:
+                raise ValueError('技能包里的这些技能不能上架，这次没有上传：' + '、'.join(sorted(failed)) + '。请先看预览里的原因。')
+            for row in result['packs']:
+                row['requested'] = row['id'] == mine['id']
     if not confirmed:
         return {**result, 'needs_confirmation': bool(result['listings'])}
     listings_apply(home, saved)

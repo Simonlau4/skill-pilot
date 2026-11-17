@@ -98,6 +98,7 @@ def main():
     team_publish.add_argument('--no-require', action='append', default=[], metavar='技能=依赖',
                               help='预览认错的依赖，不算作这个技能需要的')
     team_publish.add_argument('--skip-pack', action='append', default=[], metavar='编号', help='不要预览里的这个技能包')
+    team_publish.add_argument('--pack', metavar='包名', help='把这次列出的技能组成一个技能包；包名已有时加进那个包')
     team_unpublish = team_commands.add_parser('unpublish', help='从分享站下架自己上架的技能')
     team_unpublish.add_argument('skills', nargs='+', metavar='SKILL')
     team_install = team_commands.add_parser('install', help='按名称从团队商店安装')
@@ -294,7 +295,7 @@ def main():
             elif args.team_command == 'publish':
                 result = team.publish(home, args.skills, dict(pairs(args.note, '--note')),
                                       [list(p) for p in pairs(args.no_require, '--no-require')],
-                                      args.skip_pack, args.yes)
+                                      args.skip_pack, args.yes, args.pack)
             elif args.team_command == 'unpublish':
                 result = team.unpublish(home, args.skills, args.yes)
             else:
@@ -331,7 +332,7 @@ def main():
                     print(f'不能上架 {row["name"]}：{row["reason"]}')
                 for pack in result['packs']:
                     print(f'技能包「{pack["title"]}」：' + '、'.join(pack['skills']) + ('（已有）' if pack['existing'] else '（新建）') +
-                          (f'；不要的话加 --skip-pack {pack["id"]}' if not args.yes else ''))
+                          (f'；不要的话加 --skip-pack {pack["id"]}' if not args.yes and not pack.get('requested') else ''))
             else:
                 print(result['message'])
                 if result.get('operations'):
