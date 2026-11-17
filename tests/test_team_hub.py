@@ -559,7 +559,7 @@ class TeamHubTests(unittest.TestCase):
                          (200, {'keys': [key]}))
         self.assertEqual(self.request('/api/listings/me/example', 'DELETE')[0], 200)
         self.assertEqual(self.request('/api/catalog', token=self.second['token'])[1],
-                         {'cards': [], 'my_installs': [], 'packs': []})
+                         {'cards': [], 'my_installs': [], 'packs': [], 'deliverables': []})
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
                          (200, {'keys': []}))
         self.put()

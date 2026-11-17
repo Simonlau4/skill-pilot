@@ -37,9 +37,10 @@ SECRET_CONTENT = re.compile(
 
 
 class RequestError(ValueError):
-    def __init__(self, status, message):
+    def __init__(self, status, message, body=None):
         super().__init__(message)
         self.status = status
+        self.body = body or {}
 
 
 def _settings(value):
@@ -125,9 +126,11 @@ def _request(config, path, method='GET', data=None):
     except urllib.error.HTTPError as error:
         status = error.code
         try:
-            detail = json.loads(error.read(team_hub.MAX_RATING_BODY).decode('utf-8')).get('error')
+            # A deliverable's first try names every missing file: up to 2000 of them, past 64 KB.
+            payload = json.loads(error.read(team_hub.MAX_MANIFEST_BODY).decode('utf-8'))
+            detail = payload.get('error')
         except (ValueError, UnicodeError, AttributeError, HTTPException):
-            detail = None
+            payload, detail = {}, None
         finally:
             error.close()
         message = ('这个分享站需要管理员发的口令，请点「管理员给了口令？」填上。'
@@ -139,7 +142,7 @@ def _request(config, path, method='GET', data=None):
                    '这个技能已经下架，请刷新商店。' if status == 404 else
                    '上架内容超过 20 MB，请分批上架。' if status == 413 else
                    '分享站暂时没能完成操作，请稍后重试。')
-        raise RequestError(status, message) from None
+        raise RequestError(status, message, _redact(payload, key) if isinstance(payload, dict) else {}) from None
     except (OSError, HTTPException):
         raise ValueError('连不上分享站，请检查地址和网络，或请管理员确认分享站已开启。') from None
 
@@ -362,6 +365,27 @@ def _catalog(config):
             catalog['github'] = team_hub.clean_github(data['github'])
         except ValueError:
             pass
+    if 'deliverables' in data:
+        # A malformed deliverable list hides that row of the store; the skills still load.
+        try:
+            rows, keys = [], set()
+            for row in data['deliverables']:
+                member = _member(row.get('member'))
+                identity = row.get('id')
+                key = 'deliverable:' + member['id'] + ':' + str(identity)
+                if (not isinstance(identity, str) or not re.fullmatch(team_hub.DELIVERABLE_ID, identity) or
+                        row.get('key') != key or key in keys or not isinstance(row.get('updated_at'), str) or
+                        type(row.get('file_count')) is not int or row['file_count'] < 1 or
+                        type(row.get('size')) is not int or row['size'] < 0 or type(row.get('has_recipe')) is not bool or
+                        type(row.get('has_teardown', False)) is not bool):
+                    raise ValueError
+                rows.append({'key': key, 'id': identity, 'member': member, **team_hub.deliverable_info(row),
+                             **{k: row[k] for k in ('file_count', 'size', 'has_recipe', 'updated_at')},
+                             'has_teardown': row.get('has_teardown', False)})
+                keys.add(key)
+            catalog['deliverables'] = sorted(rows, key=lambda r: r['updated_at'], reverse=True)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            catalog['deliverables'] = []
     return catalog
 
 
@@ -524,7 +548,14 @@ def catalog(home):
                                 'installable': states.count('installable'),
                                 'blocked': sum(s in {'lark', 'conflict', 'blocked'} for s in states)},
                       'tokens': sum(indexed[k]['tokens'] for k in keys if indexed[k]['local']['status'] not in {'installed', 'update'})})
-    catalog = {'member': member, 'cards': result, 'packs': packs, 'packs_supported': 'packs' in data}
+    catalog = {'member': member, 'cards': result, 'packs': packs, 'packs_supported': 'packs' in data,
+               'deliverables_supported': 'deliverables' in data}
+    local_names = registry['skills'].keys() | registry.get('external_skills', {}).keys()
+    store_names = {listing['name'] for card in cards for listing in card['listings']}
+    catalog['deliverables'] = [{**row, 'mine': row['member']['id'] == member['id'],
+                                'skills': [{'name': n, 'installed': n in local_names, 'in_store': n in store_names}
+                                           for n in row['skills']]}
+                               for row in data.get('deliverables', [])]
     if 'github' in data:
         listed = {r['source']['repository'].lower() for c in cards for r in c['listings']
                   if r['source']['kind'] == 'github'}
@@ -541,6 +572,149 @@ def catalog(home):
         if repos:
             catalog['github'] = {'fetched_at': data['github']['fetched_at'], 'repos': repos}
     return catalog
+
+
+TEXT_SUFFIXES = {'.html', '.htm', '.css', '.js', '.mjs', '.json', '.md', '.txt', '.csv', '.svg'}
+EXTERNAL = re.compile(r'''(?:(?:src|href)\s*=\s*["']?|url\(\s*["']?|@import\s+["'])(?:https?:)?//([^/"'\s)>]+)''', re.I)
+
+
+def _deliverable_files(root):
+    """path → (sha256, size, file) for a demo folder; reads only, never runs anything in it."""
+    files, blocked, external = {}, [], set()
+    def walk(folder):
+        for path in sorted(folder.iterdir()):
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                raise ValueError(f'成品文件夹里的「{relative}」是链接，请换成真实文件再上架。')
+            if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in SECRET_NAMES):
+                blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
+                continue
+            if path.name.startswith('.') or path.name in SKIP_CONTENT | {'__MACOSX'}:
+                continue
+            if path.is_dir():
+                walk(path)
+                continue
+            if not path.is_file():
+                raise ValueError(f'成品文件夹里的「{relative}」读不了，请核对。')
+            size = path.stat().st_size
+            if size > team_hub.MAX_BLOB:
+                raise ValueError(f'「{relative}」超过 {team_hub.MAX_BLOB // 1024 // 1024} MB，请先压缩。')
+            digest = hashlib.sha256()
+            with path.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            if path.suffix.lower() in TEXT_SUFFIXES:
+                text = path.read_text(encoding='utf-8', errors='replace')
+                if SECRET_CONTENT.search(text):
+                    blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
+                    continue
+                external.update(m.lower() for m in EXTERNAL.findall(text))
+            files[relative] = (digest.hexdigest(), size, path)
+    walk(root)
+    return files, blocked, sorted(external)
+
+
+def publish_deliverable(home, folder, identity, title, version='', summary='', skills=(), recipe='', confirmed=False):
+    """Preview, then upload a demo folder file by file; only missing contents travel."""
+    home, root = Path(home), Path(folder).expanduser().absolute()
+    if not root.is_dir():
+        raise ValueError('找不到成品文件夹，请核对位置。')
+    if not isinstance(identity, str) or not re.fullmatch(team_hub.DELIVERABLE_ID, identity):
+        raise ValueError('成品编号只能用字母、数字、点、横线和下划线，最多 64 个字符。')
+    files, blocked, external = _deliverable_files(root)
+    if 'index.html' not in files:
+        raise ValueError('成品文件夹的首页必须叫 index.html，放在最外层。')
+    manifest = {'title': title, 'version': version, 'summary': summary, 'skills': list(skills), 'recipe': recipe,
+                'files': {p: {'sha256': d, 'size': s} for p, (d, s, _) in files.items()}}
+    checked = team_hub.clean_deliverable(manifest)
+    result = {'id': identity, 'title': checked['title'], 'file_count': checked['file_count'], 'size': checked['size'],
+              'blocked': blocked, 'external': external}
+    if not confirmed:
+        return {**result, 'needs_confirmation': True,
+                'message': f'将上架成品「{checked["title"]}」：{checked["file_count"]} 个文件，共 '
+                           f'{checked["size"] / 1024 / 1024:.1f} MB。只限团队成员查看。'}
+    guard(home / '.skill-pilot', home)
+    config = _connection(home)
+    _me(config)
+    by_digest = {d: path for d, _, path in files.values()}
+    uploaded = 0
+    for _ in range(3):
+        try:
+            saved = _request(config, '/api/deliverables/me/' + identity, 'PUT', manifest)
+            break
+        except RequestError as error:
+            missing = error.body.get('missing') if error.status == 409 else None
+            if not isinstance(missing, list) or not set(missing) <= by_digest.keys():
+                if error.status == 404 and not missing:
+                    raise ValueError('分享站版本较旧，暂不能上架成品，请联系管理员更新分享站。') from None
+                raise
+            for digest in missing:
+                _upload_blob(config, digest, by_digest[digest])
+                uploaded += 1
+    else:
+        raise ValueError('上传时文件一直在变，请稍后重新上架。')
+    return {**result, 'key': saved['key'], 'uploaded': uploaded,
+            'message': f'已上架成品「{checked["title"]}」，同事在团队页「成品」里能打开。'}
+
+
+def _upload_blob(config, digest, path):
+    size = path.stat().st_size
+    headers = {'Authorization': 'Bearer ' + config['key'], 'Content-Type': 'application/octet-stream',
+               'Content-Length': str(size)}
+    try:
+        with path.open('rb') as stream:
+            request = urllib.request.Request(config['url'] + '/api/blobs/me/' + digest, data=stream,
+                                             method='PUT', headers=headers)
+            with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=max(TIMEOUT, 120)) as response:
+                response.read(team_hub.MAX_PACK_BODY)
+    except urllib.error.HTTPError as error:
+        with error:
+            try:
+                detail = json.loads(error.read(team_hub.MAX_PACK_BODY).decode('utf-8')).get('error')
+            except (ValueError, UnicodeError, AttributeError, HTTPException):
+                detail = None
+        raise RequestError(error.code, _redact(detail, config['key']) if isinstance(detail, str) and detail else
+                           '成品文件没能上传，请稍后重试。') from None
+    except (OSError, HTTPException):
+        raise ValueError('上传成品文件时连不上分享站，请检查网络后重试。') from None
+
+
+def deliverable_detail(home, member_id, identity):
+    """The recipe text of one deliverable; files stay with the hub until a viewer asks for them."""
+    row = _request(_connection(home), '/api/deliverables/' + member_id + '/' + identity)
+    recipe = row.get('recipe', '')
+    if not isinstance(recipe, str) or len(recipe.encode()) > team_hub.MAX_RECIPE:
+        raise RequestError(502, FORMAT_ERROR)
+    return {'recipe': recipe}
+
+
+def remove_deliverable(home, identity, confirmed=False):
+    if not confirmed:
+        return {'needs_confirmation': True, 'message': f'将从分享站下架成品「{identity}」，同事就看不到了。'}
+    guard(Path(home) / '.skill-pilot', home)
+    _request(_connection(home), '/api/deliverables/me/' + urllib.parse.quote(identity, safe=''), 'DELETE')
+    return {'message': f'已下架成品「{identity}」。'}
+
+
+def open_deliverable_file(home, member_id, identity, path, byte_range=None):
+    """The hub's reply for one demo file, left open for streaming; the caller closes it."""
+    config = _connection(home)
+    headers = {'Authorization': 'Bearer ' + config['key']}
+    if byte_range:
+        headers['Range'] = byte_range
+    address = (config['url'] + '/api/deliverables/' + member_id + '/' + identity + '/' +
+               urllib.parse.quote(path, safe='/'))
+    try:
+        return urllib.request.build_opener(labels.NoRedirect).open(
+            urllib.request.Request(address, headers=headers), timeout=max(TIMEOUT, 60))
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise RequestError(error.code, '成品里没有这个文件，或已经下架。' if error.code == 404 else
+                           '请求的文件范围超出文件大小。' if error.code == 416 else
+                           '分享站没认出你，请到设置里重新连接。' if error.code == 401 else
+                           '分享站暂时没能完成操作，请稍后重试。') from None
+    except (OSError, HTTPException):
+        raise ValueError('连不上分享站，请检查地址和网络。') from None
 
 
 def tag_pack(home, names, title):

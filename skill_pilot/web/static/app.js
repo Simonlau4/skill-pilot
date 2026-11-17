@@ -1310,6 +1310,7 @@ function showPage(page) {
   if (page === 'cleanup') { renderCleanup(); loadCleanup(); }
   if (page === 'settings') renderSettings();
   if (page === 'team') enterTeam();
+  if (page === 'tools') enterTools();
   if (page === 'home') {
     // 先回到顶部再量下面两栏的位置，免得从别页滚下来时误以为它们已经在眼前。
     window.scrollTo({top: 0, behavior: 'auto'});
@@ -3217,6 +3218,7 @@ async function refreshTeam() {
     state.team = {configured: false, url: '', has_key: false, member: null, error: error.message, error_id: error.error_id};
   }
   document.querySelector('.nav-item[data-page="team"]').hidden = !state.team.configured;
+  document.querySelector('.nav-item[data-page="tools"]').hidden = !state.team.configured;
   renderTeamSettings();
   renderTeam();
   if (homeVisible) renderHomeTodos();
@@ -3266,6 +3268,8 @@ $('team-form').addEventListener('submit', event => {
       state.store = null;
       forgetCandidates();
       document.querySelector('.nav-item[data-page="team"]').hidden = false;
+      document.querySelector('.nav-item[data-page="tools"]').hidden = false;
+      toolsView.rows = null;
       toast({text: `已连上分享站，你是 ${result.member.name}。`});
     } catch (error) {
       failed = true;
@@ -4122,7 +4126,7 @@ function renderStoreShelves(cards) {
     return;
   }
   if (!cards.length) {
-    box.innerHTML = `<div class="empty store-empty">${emptyInner('team', '暂无团队技能')}
+    box.innerHTML = storeDeliverablesShelfHtml() + `<div class="empty store-empty">${emptyInner('team', '暂无团队技能')}
       <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>` + (storeBrowsing() ? storeGithubShelfHtml() : '');
     return;
   }
@@ -4131,6 +4135,7 @@ function renderStoreShelves(cards) {
     return;
   }
   const githubShelf = storeGithubShelfHtml();
+  const deliverableShelf = storeDeliverablesShelfHtml();
   const shown = new Set();
   const packs = [...(state.store?.packs || [])].sort((a, b) => storePackTime(b) - storePackTime(a));
   const packShelf = packs.length ? `<section class="shelf" aria-labelledby="shelf-packs">
@@ -4142,10 +4147,10 @@ function renderStoreShelves(cards) {
     </section>` : '';
   // 三排推荐仍按原来的门槛；技能包少的时候也能单独出现在前面。
   if (cards.length < SHELF_MIN) {
-    box.innerHTML = packShelf + githubShelf;
+    box.innerHTML = deliverableShelf + packShelf + githubShelf;
     return;
   }
-  box.innerHTML = packShelf + STORE_SHELVES.map(shelf => {
+  box.innerHTML = deliverableShelf + packShelf + STORE_SHELVES.map(shelf => {
     // 包里的技能由包卡片代表，不再单独占一排推荐。
     const picked = shelf.pick(cards).filter(card => !card.packs?.length && !shown.has(card.key))
       .sort(STORE_SORTS[shelf.sort]).slice(0, SHELF_SIZE);
@@ -4159,6 +4164,400 @@ function renderStoreShelves(cards) {
     </section>` : '';
   }).join('') + githubShelf;
 }
+
+/* 成品：同事做出来的东西和它用了哪些技能。演示在新标签页的隔离环境里打开，碰不到看板。 */
+function storeDeliverablesShelfHtml() {
+  const rows = state.store?.deliverables || [];
+  if (!rows.length) return '';
+  return `<section class="shelf" aria-labelledby="shelf-deliverables">
+    <div class="shelf-head">
+      <h2 id="shelf-deliverables">成品</h2>
+      <span class="shelf-note">先看同事做出来的东西，再看它用了哪些技能</span>
+    </div>
+    <div class="deliverable-list">${rows.map(deliverableCardHtml).join('')}</div>
+  </section>`;
+}
+
+function deliverableCardHtml(row) {
+  const have = row.skills.filter(skill => skill.installed).length;
+  const missing = row.skills.length - have;
+  const meta = [`${row.member.name} 上架`, row.version, new Date(row.updated_at).toLocaleDateString('zh-CN'), sizeText(row.size)]
+    .filter(Boolean).join(' · ');
+  const skills = row.skills.map(skill => `<li class="deliverable-skill${skill.installed ? ' is-installed' : ''}">
+      ${skill.installed ? icon('check-circle') : '<span class="deliverable-dot" aria-hidden="true"></span>'}
+      <span class="mono">${escape(skill.name)}</span><span class="sr-only">${skill.installed ? '已安装' : '未安装'}</span></li>`).join('');
+  return `<article class="deliverable-card">
+    <div class="deliverable-head"><h3>${escape(row.title)}</h3><span class="tag tag-quiet">只限团队内部</span></div>
+    <p class="deliverable-meta">${escape(meta)}</p>
+    ${row.summary ? `<p class="deliverable-sum">${escape(row.summary)}</p>` : ''}
+    ${row.skills.length ? `<div class="deliverable-skills">
+      <div class="deliverable-skills-head"><span>用了这些技能</span>
+        <span class="deliverable-count">你的电脑：已安装 ${number(have)} 个${missing ? `，缺 ${number(missing)} 个` : ''}</span></div>
+      <ul>${skills}</ul>
+    </div>` : ''}
+    <div class="deliverable-actions">
+      <a class="btn btn-primary" href="${escape(row.open_url)}" target="_blank" rel="noopener noreferrer">打开演示</a>
+      ${row.has_teardown ? `<button class="btn" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="screens">看拆解</button>` : ''}
+      ${row.has_recipe ? `<button class="btn" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="recipe">照着做一份</button>` : ''}
+    </div>
+  </article>`;
+}
+
+/* ---------- 成品的拆解、配方和工具 ---------- */
+const KIND_LABEL = {skill: '技能', tool: '工具', material: '原料'};
+const KIND_TAG = {skill: 'tag-ok', tool: 'tag-warn', material: 'tag-quiet'};
+const COMMAND_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+const TOOL_CHECK_BATCH = 30;   // /api/tools/check 一次最多查这么多个名字
+const clip = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
+
+/* 拆解数据是同事上传的文件：只取认得的字段、限制长度，显示时一律转义。 */
+function cleanTeardown(data) {
+  const items = new Map();
+  for (const raw of Array.isArray(data?.items) ? data.items.slice(0, 200) : []) {
+    const id = typeof raw?.id === 'string' && COMMAND_NAME.test(raw.id) ? raw.id : '';
+    if (!id || items.has(id) || !KIND_LABEL[raw.kind]) continue;
+    items.set(id, {id, kind: raw.kind, name: clip(raw.name, 80) || id, summary: clip(raw.summary, 400),
+      process: clip(raw.process, 400), check: typeof raw.check === 'string' && COMMAND_NAME.test(raw.check) ? raw.check : '',
+      mac: clip(raw.install?.mac, 300), win: clip(raw.install?.win, 300), without: clip(raw.without, 300)});
+  }
+  const screens = [];
+  for (const raw of Array.isArray(data?.screens) ? data.screens.slice(0, 300) : []) {
+    const image = typeof raw?.image === 'string' && /^_teardown\/[A-Za-z0-9._-]+\.(?:jpe?g|png|webp)$/.test(raw.image) ? raw.image : '';
+    const marks = (Array.isArray(raw?.marks) ? raw.marks.slice(0, 30) : []).filter(mark => items.has(mark?.item)).map((mark, index) => ({
+      n: index + 1, item: mark.item, name: clip(mark.name, 60), how: clip(mark.how, 400), evidence: mark.evidence === '记录' ? '记录' : '推断',
+      x: Math.min(100, Math.max(0, Number(mark.x) || 0)), y: Math.min(100, Math.max(0, Number(mark.y) || 0))}));
+    screens.push({id: clip(raw?.id, 20) || `s${screens.length + 1}`, chapter: clip(raw?.chapter, 10),
+      chapterName: clip(raw?.chapter_name, 60), title: clip(raw?.title, 160), image, marks});
+  }
+  return {items, screens};
+}
+
+/* 配方只认标题、列表、表格、粗体和行内代码；先转义再加标记，不把配方当网页代码。 */
+const mdInline = text => escape(text).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+function mdHtml(source) {
+  const out = [];
+  let list = '', table = false, fence = false;
+  const close = () => {
+    if (list) out.push(`</${list}>`);
+    if (table) out.push('</tbody></table></div>');
+    list = ''; table = false;
+  };
+  for (const line of String(source || '').replace(/\r/g, '').split('\n')) {
+    if (/^```/.test(line)) { close(); fence = !fence; out.push(fence ? '<pre class="md-pre">' : '</pre>'); continue; }
+    if (fence) { out.push(escape(line) + '\n'); continue; }
+    const cells = /^\s*\|(.+)\|\s*$/.exec(line);
+    if (cells) {
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) continue;
+      const row = cells[1].split('|').map(cell => mdInline(cell.trim()));
+      if (!table) { close(); table = true; out.push(`<div class="md-table"><table><thead><tr>${row.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>`); }
+      else out.push(`<tr>${row.map(c => `<td>${c}</td>`).join('')}</tr>`);
+      continue;
+    }
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    const item = /^\s*(?:[-*]|\d+\.)\s+(?:\[[ xX]\]\s+)?(.*)$/.exec(line);
+    if (heading) { close(); const level = heading[1].length + 2; out.push(`<h${level}>${mdInline(heading[2])}</h${level}>`); }
+    else if (item) {
+      const kind = /^\s*\d+\./.test(line) ? 'ol' : 'ul';
+      if (list !== kind) { close(); list = kind; out.push(`<${kind}>`); }
+      out.push(`<li>${mdInline(item[1])}</li>`);
+    } else if (line.trim()) { close(); out.push(`<p>${mdInline(line)}</p>`); }
+    else close();
+  }
+  if (fence) out.push('</pre>');
+  close();
+  return out.join('');
+}
+
+let dd = null;   // 正在看的成品：卡片、演示地址、配方、拆解、当前标签和位置、工具检查结果
+
+function ddItemStatus(item) {
+  if (item.kind === 'skill') {
+    const listed = dd?.row.skills.find(skill => skill.name === item.id);
+    const installed = listed ? listed.installed : (state.table?.skills || []).some(skill => skill.name === item.id);
+    return installed ? '你的电脑：已安装' : '你的电脑：未安装';
+  }
+  if (item.kind === 'tool') return !item.check ? '需要账号或人工确认' : dd?.tools[item.check] ? '本机：有' : '本机：没有';
+  return '原料';
+}
+
+/* 只查本机有没有这些命令；按接口上限分批，结果合在一起。 */
+async function checkTools(names) {
+  const found = {};
+  for (let start = 0; start < names.length; start += TOOL_CHECK_BATCH)
+    Object.assign(found, await api('/api/tools/check?names=' + encodeURIComponent(names.slice(start, start + TOOL_CHECK_BATCH).join(','))));
+  return found;
+}
+
+async function openDeliverable(key, tab) {
+  const row = (state.store?.deliverables || []).find(item => item.key === key);
+  if (!row) return;
+  dd = {row, tab, base: '', recipe: '', teardown: null, screen: 0, picked: 1, item: '', tools: {}, loading: true, error: ''};
+  $('deliverable-dialog-title').textContent = row.title;
+  $('deliverable-dialog-meta').textContent = [`${row.member.name} 上架`, row.version, sizeText(row.size)].filter(Boolean).join(' · ');
+  $('deliverable-dialog-open').href = row.open_url;
+  renderDeliverable();
+  if (!$('deliverable-dialog').open) $('deliverable-dialog').showModal();
+  const current = dd;
+  try {
+    const detail = await api('/api/team/deliverables/detail?key=' + encodeURIComponent(key));
+    current.base = detail.base_url;
+    current.recipe = detail.recipe;
+    if (row.has_teardown) {
+      const response = await fetch(detail.base_url + '_teardown/teardown.json', {cache: 'no-store'});
+      if (!response.ok) throw new Error('拆解文件没能读取，请稍后重试。');
+      current.teardown = cleanTeardown(await response.json());
+    }
+    const names = [...new Set([...(current.teardown?.items.values() || [])].map(item => item.check).filter(Boolean))];
+    current.tools = await checkTools(names);
+  } catch (error) {
+    current.error = error.message || '没能读取成品，请稍后重试。';
+  }
+  current.loading = false;
+  if (dd === current) renderDeliverable();
+}
+
+function renderDeliverable() {
+  if (!dd) return;
+  const tabs = [['screens', '按屏看', dd.row.has_teardown], ['items', '按技能和工具看', dd.row.has_teardown],
+    ['recipe', '照着做一份', dd.row.has_recipe]].filter(tab => tab[2]);
+  if (!tabs.some(tab => tab[0] === dd.tab)) dd.tab = tabs[0]?.[0] || 'recipe';
+  renderButtons($('deliverable-tabs'), tabs.map(([id, label]) =>
+    `<button class="seg" type="button" data-dd-tab="${id}" aria-pressed="${dd.tab === id}">${label}</button>`).join(''), 'data-dd-tab');
+  const body = $('deliverable-dialog-body');
+  if (dd.loading) { body.innerHTML = '<p class="muted" role="status">正在读取…</p>'; return; }
+  if (dd.error) { body.innerHTML = `<p class="row-note is-error" role="alert">${escape(dd.error)}</p>`; return; }
+  body.innerHTML = dd.tab === 'recipe' ? ddRecipeHtml() : dd.tab === 'items' ? ddItemsHtml() : ddScreensHtml();
+}
+
+function ddScreensHtml() {
+  const screens = dd.teardown?.screens || [];
+  if (!screens.length) return `<div class="empty">${emptyInner('file-kept', '这份成品的拆解还没有内容')}</div>`;
+  dd.screen = Math.min(Math.max(dd.screen, 0), screens.length - 1);
+  const screen = screens[dd.screen];
+  const nav = screens.map((item, index) => `<button class="dd-nav-item" type="button" data-dd-screen="${index}" aria-current="${index === dd.screen}">
+      <span class="mono">${escape(item.id)}</span><span class="t">${escape(item.title)}</span></button>`).join('');
+  const spots = screen.marks.map(mark => `<button class="dd-spot ${mark.evidence === '记录' ? 'is-record' : 'is-guess'}${mark.n === dd.picked ? ' is-on' : ''}"
+      type="button" data-dd-pick="${mark.n}" style="left:${mark.x}%;top:${mark.y}%" aria-label="${escape(`第 ${mark.n} 处：${mark.name}`)}">${mark.n}</button>`).join('');
+  const cards = screen.marks.map(mark => {
+    const item = dd.teardown.items.get(mark.item);
+    return `<article class="dd-card${mark.n === dd.picked ? ' is-on' : ''}"><span class="dd-num" aria-hidden="true">${mark.n}</span><div>
+      <div class="dd-card-head"><b>${escape(mark.name)}</b><span class="tag ${KIND_TAG[item.kind]}">${KIND_LABEL[item.kind]}</span><span class="dd-ev">${mark.evidence}</span></div>
+      <span class="mono">${escape(item.name)}</span><p>${escape(mark.how)}</p><span class="muted">${escape(ddItemStatus(item))}</span></div></article>`;
+  }).join('');
+  return `<div class="dd-screens">
+    <nav class="dd-nav" aria-label="逐屏目录">${nav}</nav>
+    <figure class="dd-figure">${screen.image ? `<img src="${escape(dd.base + screen.image)}" alt="${escape(screen.title)}">` : ''}${spots}</figure>
+    <section class="dd-side">
+      <p class="muted">第 ${escape(screen.chapter)} 章 ${escape(screen.chapterName)} · ${number(dd.screen + 1)} / ${number(screens.length)}</p>
+      <h3>${escape(screen.title)}</h3>
+      <div class="dd-cards">${cards || '<p class="muted">这一屏没有标注。</p>'}</div>
+      <div class="dd-pager">
+        <button class="btn" type="button" data-dd-step="-1"${dd.screen ? '' : ' disabled'}>← 上一屏</button>
+        <button class="btn" type="button" data-dd-step="1"${dd.screen < screens.length - 1 ? '' : ' disabled'}>下一屏 →</button>
+      </div>
+    </section>
+  </div>`;
+}
+
+function ddItemsHtml() {
+  const {items, screens} = dd.teardown || {items: new Map(), screens: []};
+  const uses = new Map();
+  screens.forEach((screen, index) => screen.marks.forEach(mark => {
+    if (!uses.has(mark.item)) uses.set(mark.item, []);
+    uses.get(mark.item).push({screen, index, mark});
+  }));
+  const list = [...items.values()];
+  if (!items.has(dd.item)) dd.item = list[0]?.id || '';
+  const current = items.get(dd.item);
+  const group = kind => list.filter(item => item.kind === kind).map(item => {
+    const count = (uses.get(item.id) || []).length;
+    return `<button class="dd-item" type="button" data-dd-item="${escape(item.id)}" aria-pressed="${item.id === dd.item}">
+      <span class="t">${escape(item.name)}</span><span class="n">${count ? `${number(count)} 处` : '不在页面上'}</span></button>`;
+  }).join('');
+  const rows = (uses.get(dd.item) || []).map(use => `<li><button class="dd-use" type="button" data-dd-goto="${use.index}">
+      ${use.screen.image ? `<img src="${escape(dd.base + use.screen.image)}" alt="" loading="lazy">` : ''}
+      <span><b>${escape(use.screen.id)} · ${escape(use.screen.title)}</b><span>${escape(use.mark.name)}：${escape(use.mark.how)}</span>
+      <span class="dd-ev">${use.mark.evidence}</span></span></button></li>`).join('');
+  return `<div class="dd-items">
+    <nav class="dd-nav" aria-label="技能和工具">${['skill', 'tool', 'material'].map(kind => {
+      const html = group(kind);
+      return html ? `<p class="dd-group">${KIND_LABEL[kind]}</p>${html}` : '';
+    }).join('')}</nav>
+    <section class="dd-side dd-wide">${current ? `
+      <h3>${escape(current.name)} <span class="tag ${KIND_TAG[current.kind]}">${KIND_LABEL[current.kind]}</span></h3>
+      <p>${escape(current.summary)}</p><p class="muted">${escape(ddItemStatus(current))}</p>
+      <h4>${rows ? '用在这些屏' : '页面上没有直接用到'}</h4>${rows ? `<ul class="dd-uses">${rows}</ul>` : ''}
+      ${current.process ? `<p class="muted">不在页面上的用法：${escape(current.process)}</p>` : ''}` : '<p class="muted">拆解里还没有技能和工具。</p>'}</section>
+  </div>`;
+}
+
+/* 交给 Agent 的开工指令自带配方、技能和工具：新的 Agent 不用另装什么技能，也不用回看板找。 */
+function ddCommand() {
+  const row = dd.row;
+  const tools = [...(dd.teardown?.items.values() || [])].filter(item => item.kind === 'tool');
+  const lines = [`照着团队成品「${row.title}」${row.version ? `（${row.version}）` : ''}，给 [品牌名] 做一份同样的东西。`,
+    '开工前先逐项检查下面的技能和工具，缺哪个先告诉我，补齐了再开工。', ''];
+  if (row.skills.length) {
+    lines.push('需要的技能：', ...row.skills.map(skill => `- ${skill.name}：${skill.installed ? '已安装'
+      : skill.in_store ? `还没装，先在 Skill Pilot 团队页安装，或运行 skill-pilot team install ${skill.name}`
+      : '还没装，团队商店里也没有，按下面配方里写的方式安装'}`), '');
+  }
+  if (tools.length) {
+    lines.push('需要的工具：', ...tools.map(tool => `- ${tool.name}（${ddItemStatus(tool)}）${tool.mac ? `；Mac 装法：${tool.mac}` : ''}${
+      tool.win ? `；Windows 装法：${tool.win}` : ''}${tool.without ? `；没有的话：${tool.without}` : ''}`), '');
+  }
+  lines.push(...(dd.recipe ? ['配方：', dd.recipe.trim()] : ['上架人没有附配方，照成品本身的结构和内容来做。']));
+  return lines.join('\n');
+}
+
+function ddRecipeHtml() {
+  const row = dd.row;
+  const have = row.skills.filter(skill => skill.installed).length;
+  const tools = [...(dd.teardown?.items.values() || [])].filter(item => item.kind === 'tool');
+  const command = ddCommand();
+  return `<div class="dd-recipe">
+    <article class="dd-md">${dd.recipe ? mdHtml(dd.recipe) : '<p class="muted">上架人没有附复刻配方。</p>'}</article>
+    <aside class="dd-check">
+      <h3>开工前检查</h3>
+      <p>技能：已安装 ${number(have)} 个${row.skills.length > have ? `，缺 ${number(row.skills.length - have)} 个` : ''}</p>
+      <ul class="dd-skill-list">${row.skills.map(skill => `<li>${skill.installed ? icon('check-circle') : '<span class="deliverable-dot" aria-hidden="true"></span>'}
+        <span class="mono">${escape(skill.name)}</span><span class="muted">${skill.installed ? '已安装' : skill.in_store ? '未安装，可在团队页安装' : '未安装，团队商店里没有，见配方'}</span></li>`).join('')}</ul>
+      ${tools.length ? `<p>工具</p><ul class="dd-tool-list">${tools.map(tool => `<li><b>${escape(tool.name)}</b>：${escape(ddItemStatus(tool))}${
+        tool.without ? `；没有的话：${escape(tool.without)}` : ''}</li>`).join('')}</ul>
+      <button class="link-btn" type="button" data-dd-tools>去工具页看怎么装</button>` : ''}
+      <h3>交给 Agent 开工</h3>
+      <p class="muted">复制下面这段（含完整配方、要装的技能和工具），发给 Agent；把方括号换成你的品牌。</p>
+      <pre class="dd-command">${escape(command)}</pre>
+      <button class="btn" type="button" data-dd-copy>复制开工指令</button>
+    </aside>
+  </div>`;
+}
+
+$('store-shelves').addEventListener('click', event => {
+  const button = event.target.closest('[data-deliverable-view]');
+  if (button) openDeliverable(button.dataset.deliverableView, button.dataset.deliverableTab);
+});
+$('deliverable-dialog-close').addEventListener('click', () => $('deliverable-dialog').close());
+$('deliverable-dialog').addEventListener('close', () => { dd = null; });
+$('deliverable-tabs').addEventListener('click', event => {
+  const button = event.target.closest('[data-dd-tab]');
+  if (!button || !dd) return;
+  dd.tab = button.dataset.ddTab;
+  renderDeliverable();
+});
+$('deliverable-dialog-body').addEventListener('click', async event => {
+  if (!dd) return;
+  const target = event.target;
+  const screen = target.closest('[data-dd-screen]'), pick = target.closest('[data-dd-pick]'), step = target.closest('[data-dd-step]');
+  const item = target.closest('[data-dd-item]'), go = target.closest('[data-dd-goto]');
+  if (target.closest('[data-dd-copy]')) {
+    try {
+      await navigator.clipboard.writeText($('deliverable-dialog-body').querySelector('.dd-command').textContent);
+      toast({text: '已复制开工指令。'});
+    } catch {
+      toast({text: '没能复制，请手动选中后复制。', tone: 'warn'});
+    }
+    return;
+  }
+  if (target.closest('[data-dd-tools]')) { $('deliverable-dialog').close(); showPage('tools'); return; }
+  if (screen) { dd.screen = Number(screen.dataset.ddScreen); dd.picked = 1; }
+  else if (pick) dd.picked = Number(pick.dataset.ddPick);
+  else if (step) { dd.screen += Number(step.dataset.ddStep); dd.picked = 1; }
+  else if (item) dd.item = item.dataset.ddItem;
+  else if (go) { dd.tab = 'screens'; dd.screen = Number(go.dataset.ddGoto); dd.picked = 1; }
+  else return;
+  renderDeliverable();
+});
+
+/* 工具页：汇总团队成品拆解里写到的工具；只查本机有没有，不替用户安装。 */
+const toolsView = {rows: null, checked: {}, checkedAt: null, missingOnly: false, loading: false, error: ''};
+const toolPresent = tool => tool.check ? toolsView.checked[tool.check] === true : null;
+
+async function enterTools() {
+  renderTools();
+  if (toolsView.loading) return;
+  toolsView.loading = true;
+  toolsView.error = '';
+  renderTools();
+  try {
+    if (!state.store) await loadStore({syncQueue: false});
+    const merged = new Map();
+    for (const row of (state.store?.deliverables || []).filter(item => item.has_teardown)) {
+      const detail = await api('/api/team/deliverables/detail?key=' + encodeURIComponent(row.key));
+      const response = await fetch(detail.base_url + '_teardown/teardown.json', {cache: 'no-store'});
+      if (!response.ok) continue;
+      for (const item of cleanTeardown(await response.json()).items.values()) {
+        if (item.kind !== 'tool') continue;
+        const known = merged.get(item.id) || {...item, users: []};
+        if (!known.users.includes(row.title)) known.users.push(row.title);
+        for (const field of ['summary', 'check', 'mac', 'win', 'without']) if (!known[field] && item[field]) known[field] = item[field];
+        merged.set(item.id, known);
+      }
+    }
+    toolsView.rows = [...merged.values()];
+    const names = [...new Set(toolsView.rows.map(tool => tool.check).filter(Boolean))];
+    toolsView.checked = await checkTools(names);
+    toolsView.checkedAt = new Date();
+  } catch (error) {
+    toolsView.error = error.message || '没能读取工具，请稍后重试。';
+  }
+  toolsView.loading = false;
+  renderTools();
+}
+
+function toolCommandHtml(label, command) {
+  return command ? `<div class="tool-cmd"><span class="muted">${label}</span><code class="mono">${escape(command)}</code>
+    <button class="btn btn-small" type="button" data-tools-copy="${escape(command)}">复制</button></div>` : '';
+}
+
+function renderTools() {
+  if (state.page !== 'tools') return;
+  const rows = toolsView.rows || [];
+  const missing = rows.filter(tool => toolPresent(tool) === false);
+  renderButtons($('tools-filter'), `<button class="seg" type="button" data-tools-filter="all" aria-pressed="${!toolsView.missingOnly}">全部<span class="n">${number(rows.length)}</span></button>
+    <button class="seg" type="button" data-tools-filter="missing" aria-pressed="${toolsView.missingOnly}">本机缺的<span class="n">${number(missing.length)}</span></button>`, 'data-tools-filter');
+  $('tools-note').textContent = toolsView.checkedAt ? `上次检查：${toolsView.checkedAt.toLocaleTimeString('zh-CN')} · 来源：团队成品写明的工具` : '';
+  $('tools-recheck').disabled = toolsView.loading;
+  const list = $('tools-list');
+  if (toolsView.loading && !toolsView.rows) { list.innerHTML = '<p class="muted" role="status">正在读取团队成品里的工具…</p>'; return; }
+  if (toolsView.error) { list.innerHTML = `<p class="row-note is-error" role="alert">${escape(toolsView.error)}</p>`; return; }
+  const shown = toolsView.missingOnly ? missing : rows;
+  if (!shown.length) {
+    list.innerHTML = `<div class="empty">${emptyInner('jobs', rows.length ? '本机不缺这些工具' : '团队成品里还没写明用到的工具')}</div>`;
+    return;
+  }
+  list.innerHTML = shown.map(tool => {
+    const have = toolPresent(tool);
+    return `<article class="tool-row">
+      <div class="tool-main">
+        <div class="tool-name"><h2>${escape(tool.name)}</h2><span class="tag ${have ? 'tag-ok' : have === false ? 'tag-warn' : 'tag-quiet'}">${
+          have === null ? '需要账号或人工确认' : have ? '本机有' : '本机没有'}</span></div>
+        ${tool.summary ? `<p>${escape(tool.summary)}</p>` : ''}
+        <div class="tool-users">${tool.users.map(user => `<span class="chip">${escape(user)}</span>`).join('')}</div>
+      </div>
+      <div class="tool-install">${toolCommandHtml('Mac', tool.mac)}${toolCommandHtml('Windows', tool.win)}
+        ${tool.without ? `<p class="muted">没有的话：${escape(tool.without)}</p>` : ''}</div>
+    </article>`;
+  }).join('');
+}
+
+$('tools-filter').addEventListener('click', event => {
+  const button = event.target.closest('[data-tools-filter]');
+  if (!button) return;
+  toolsView.missingOnly = button.dataset.toolsFilter === 'missing';
+  renderTools();
+});
+$('tools-recheck').addEventListener('click', () => { toolsView.rows = null; enterTools(); });
+$('tools-list').addEventListener('click', async event => {
+  const button = event.target.closest('[data-tools-copy]');
+  if (!button) return;
+  try {
+    await navigator.clipboard.writeText(button.dataset.toolsCopy);
+    toast({text: '已复制，粘贴到「终端」里运行。'});
+  } catch {
+    toast({text: '没能复制，请手动选中后复制。', tone: 'warn'});
+  }
+});
 
 let storePackOpen = new Set();
 
