@@ -350,7 +350,7 @@ $('task-bar').addEventListener('click', event => {
      任务条转成错误样式（写入不给「重试」，让用户看清原因自己决定）。
    返回 work() 的结果；失败返回 null，不往外抛。 */
 const WRITE_LOCK_SELECTORS = [
-  '#team-form input', '#team-save', '#store-publish', '#store-list [data-store-republish]', '#store-list [data-store-unlist]',
+  '#team-form input', '#team-save', '#store-publish', '#store-update-all', '#store-list [data-store-republish]', '#store-list [data-store-unlist]',
   '#store-shelves [data-store-publish]', '#store-publish-dialog input', '#store-publish-dialog button:not(.hint)',
   '#skills-list button[data-skill]', '#skills-list button[data-update-up]', '#action-bar button', '#skills-refresh',
   '#install-url', '#install-rail button:not(.hint)',
@@ -689,6 +689,7 @@ function renderJobState() {
     renderDetailJobState();
   }
   if (state.page === 'cleanup') { renderCleanup(); renderCleanupActionBar(); }
+  if (state.page === 'team') renderStoreUpdateButton();
   renderUpdateBar();
   if ($('install-dialog').open) renderInstallApply();
 }
@@ -1043,6 +1044,11 @@ function finishJobs(finished) {
   (async () => {
     const results = await Promise.allSettled([refreshTable(), refreshLog(), loadCleanup()]);
     if (updatesFinished) await refreshUpdates();
+    if (finished.some(job => job.kind === 'team_publish')) {
+      forgetCandidates();
+      await loadCandidates().catch(() => { forgetCandidates(); });
+      await loadStore();
+    }
     if (installed && state.table?.llm_configured) startLabels('missing');
     const failed = results.find(result => result.status === 'rejected');
     if (failed) toast({text: '任务结果刷新失败：' + (failed.reason?.message || '请刷新页面后再看。'), error_id: failed.reason?.error_id, tone: 'error', sticky: true});
@@ -4104,6 +4110,7 @@ function renderTeam() {
   $('store-mine').disabled = !cards;
   $('store-mine').setAttribute('aria-pressed', String(state.storeMine));
   $('store-mine-count').textContent = mineCount ? number(mineCount) : '';
+  renderStoreUpdateButton();
   renderStoreQueue();
   renderStoreShelves(cards);
   renderStoreAll(cards);
@@ -4674,6 +4681,36 @@ async function reloadStorePage(button) {
 $('store-refresh').addEventListener('click', event => reloadStorePage(event.currentTarget));
 $('store-retry').addEventListener('click', event => reloadStorePage(event.currentTarget));
 $('store-publish').addEventListener('click', () => openPublish());
+
+let storeUpdateSubmitting = false;
+function renderStoreUpdateButton() {
+  const button = $('store-update-all');
+  const active = latestActiveJob(job => job.kind === 'team_publish');
+  const count = (storeCandidates || []).filter(row => row.listed && row.changed).length;
+  button.hidden = !state.storeMine;
+  button.disabled = storeUpdateSubmitting || Boolean(active) || !teamCanWrite() || jobsBlocked() || !state.team?.member || Boolean(state.team?.error);
+  button.querySelector('span').textContent = storeUpdateSubmitting ? '正在加入队列…' : active ? '更新中…' : `一键更新${count ? ' ' + number(count) : ''}`;
+  button.title = '把我的已上架技能更新为本地最新版；单个失败后继续处理其余技能';
+}
+
+async function updateStoreListings() {
+  if (storeUpdateSubmitting || $('store-update-all').disabled) return;
+  storeUpdateSubmitting = true;
+  renderStoreUpdateButton();
+  try {
+    const result = await api('/api/team/listings/update', {});
+    jobsReadSequence += 1;
+    applyJobs(result);
+    toast({text: result.message});
+    if (result.queued || jobsHasActive()) openJobsPanel();
+  } catch (error) {
+    toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
+  } finally {
+    storeUpdateSubmitting = false;
+    renderStoreUpdateButton();
+  }
+}
+$('store-update-all').addEventListener('click', updateStoreListings);
 
 /* 卡片、列表行、安装队列和空状态里的按钮都在团队页里，统一在这里分派。 */
 $('page-team').addEventListener('click', event => {

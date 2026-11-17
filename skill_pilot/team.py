@@ -1070,6 +1070,36 @@ def listings_apply(home, review):
     return {**result, 'message': '技能已上架。'}
 
 
+def update_listing(home, name, connection):
+    """Refresh one owned listing without changing its note or pack membership."""
+    guard(Path(home) / '.skill-pilot', home)
+    if _connection_version(_connection(home)) != connection:
+        raise ValueError('分享站连接已经变了，请回到我的上架重新更新。')
+    _, member, cards = _fetch(home)
+    owned = _owned(cards, member['id'])
+    if name not in owned:
+        raise ValueError('这个技能已不在我的上架中，请刷新列表。')
+    saved, result = listings_preview(home, [{'name': name, 'note': owned[name].get('note', '')}], packs=[])
+    if saved['connection'] != connection:
+        raise ValueError('分享站连接已经变了，请回到我的上架重新更新。')
+    if result['errors']:
+        raise ValueError('；'.join(row['name'] + '：' + row['reason'] for row in result['errors']))
+    if len(result['listings']) != 1 or result['listings'][0]['name'] != name:
+        raise ValueError('有新增的前置依赖需要核对，请单独点击这个技能的“上架新版”。')
+    row = result['listings'][0]
+    if row['files']['blocked'] or not row['version']:
+        raise ValueError('技能文件不能完整上传，请单独点击“上架新版”查看原因。')
+    # Omitting packs preserves the hub's current packs, including concurrent edits.
+    saved.pop('packs', None)
+    if owned[name]['source'].get('version') == row['version']:
+        return
+    listings_apply(home, saved)
+    _, current_member, cards = _fetch(home)
+    current = _owned(cards, current_member['id']).get(name)
+    if not current or current['source'].get('version') != row['version']:
+        raise ValueError('分享站尚未读到这个技能的新版，请稍后重试。')
+
+
 def packs_apply(home, packs):
     guard(Path(home) / '.skill-pilot', home)
     config, member, data = _fetch(home, with_packs=True)

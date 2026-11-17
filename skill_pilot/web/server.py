@@ -52,7 +52,7 @@ class JobInputError(ValueError):
 def job_parameters(body):
     kind = body.get('kind')
     if not isinstance(kind, str) or kind not in {
-            'assignment', 'install', 'update', 'cleanup_withdraw', 'cleanup_delete', 'restore', 'team_install', 'github_install'}:
+            'assignment', 'install', 'update', 'cleanup_withdraw', 'cleanup_delete', 'restore', 'team_install', 'github_install', 'team_publish'}:
         raise JobInputError('请选择支持的任务类型。')
     result = {'kind': kind}
     def text(value):
@@ -82,6 +82,10 @@ def job_parameters(body):
         if not names(body.get('skills')):
             raise JobInputError('请选择要处理的技能，名称需放在列表中。')
         result['skills'] = sorted(set(body['skills']))
+    if kind == 'team_publish':
+        if not text(body.get('connection')):
+            raise JobInputError('请回到我的上架重新更新。')
+        result['connection'] = body['connection']
     if kind in {'install', 'update'}:
         if not text(body.get('review_id')):
             raise JobInputError('请带上这次已核对的预览编号。')
@@ -300,11 +304,13 @@ class Dashboard(ThreadingHTTPServer):
             agents = parameters.get('agents', sorted({c['agent'] for c in parameters.get('changes', [])}))
             titles = self.skill_titles()
             action = {'assignment': '调整分配', 'install': '安装', 'update': '更新', 'cleanup_withdraw': '撤下',
-                      'cleanup_delete': '删除', 'restore': '恢复', 'team_install': '安装团队技能', 'github_install': '安装'}[kind]
+                      'cleanup_delete': '删除', 'restore': '恢复', 'team_install': '安装团队技能', 'github_install': '安装',
+                      'team_publish': '更新我的上架'}[kind]
             item = {'id': secrets.token_urlsafe(16), 'kind': kind, 'status': 'waiting',
                     'skills': skills, 'agents': agents, 'summary': action + ('「' + '、'.join(titles.get(n, n) for n in skills) + '」' if skills else ''),
                     'message': '等待处理。', 'operations': [], '_parameters': copy.deepcopy(parameters), '_intent': intent}
             if kind == 'assignment': item['changes'] = copy.deepcopy(parameters['changes'])
+            if kind == 'team_publish': item['summary'] = f'更新我的上架（{len(skills)} 个）'
             if 'review_id' in parameters: item['review_id'] = parameters['review_id']
             if kind == 'team_install':
                 info = team_info or {}
@@ -407,6 +413,23 @@ class Dashboard(ThreadingHTTPServer):
             self._add_job({'kind': 'team_install', 'key': key}, previous,
                           {**info, 'name': name, 'title': title, **(pack_info or {})})
             return self.team_queue_status()
+
+    def queue_team_updates(self):
+        with self.jobs_lock:
+            self._accept_jobs()
+        connection = team._connection_version(team._connection(self.home))
+        candidates = team.listing_candidates(self.home)['skills']
+        if connection != team._connection_version(team._connection(self.home)):
+            raise ValueError('分享站连接已经变了，请刷新列表后重试。')
+        with self.jobs_lock:
+            pending = {name for item in self.jobs if item['kind'] == 'team_publish' and item['status'] in ACTIVE_JOBS
+                       and item['_parameters']['connection'] == connection for name in item['skills']}
+            names = sorted(row['name'] for row in candidates if row['listed'] and row['changed'] and row['name'] not in pending)
+            if names:
+                self._add_job({'kind': 'team_publish', 'skills': names, 'connection': connection})
+            return {**self.jobs_status(), 'queued': len(names),
+                    'message': f'已加入 {len(names)} 个上架更新。' if names else
+                               '上架更新已在队列中。' if pending else '已上架的技能没有本地新版。'}
 
     def queue_github(self, repository):
         parameters = job_parameters({'kind': 'github_install', 'repository': repository})
@@ -676,6 +699,22 @@ class Dashboard(ThreadingHTTPServer):
         parameters = item['_parameters']
         kind = item['kind']
         names = parameters.get('skills', [])
+        if kind == 'team_publish':
+            completed, failed = [], []
+            for index, name in enumerate(names):
+                with self.jobs_lock:
+                    item['message'] = f'正在更新 {index + 1}/{len(names)}：' + self.skill_message(name)
+                    self.jobs_version += 1
+                try:
+                    team.update_listing(self.home, name, parameters['connection'])
+                    completed.append(name)
+                except Exception as error:
+                    reason = str(error) if isinstance(error, ValueError) else '更新没能完成，请稍后重试。'
+                    failed.append({'name': name, 'error': self.job_message(self.skill_message(reason)),
+                                   **diagnostics.failure(self.home, 'job', '更新我的上架', error)})
+            return {'status': 'failed' if failed else 'done', 'completed': completed, 'failed': failed,
+                    'remaining': [row['name'] for row in failed],
+                    'message': f'上架更新完成：成功 {len(completed)} 个，失败 {len(failed)} 个。'}
         if kind in {'update', 'cleanup_withdraw', 'cleanup_delete', 'restore'}:
             registry = operations.load(self.home)[1]['skills']
             with self.jobs_lock:
@@ -1360,7 +1399,7 @@ class Handler(BaseHTTPRequestHandler):
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
-                        '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/queue', '/api/team/queue/clear',
+                        '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/listings/update', '/api/team/queue', '/api/team/queue/clear',
                         '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
@@ -1617,6 +1656,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def team_post(self, path, body):
         home = self.server.home
+        if path == '/api/team/listings/update':
+            return self.server.queue_team_updates()
         if path == '/api/team/github/retry':
             return self.server.github_digests.retry(body.get('repository'))
         if path == '/api/team/settings':
