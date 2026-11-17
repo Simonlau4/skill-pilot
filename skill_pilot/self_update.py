@@ -208,6 +208,10 @@ def check(home, project=PROJECT):
             # Borrow the history already on this computer; only new commits are downloaded.
             objects = (project / git(project, 'rev-parse', '--git-path', 'objects')).resolve()
             (candidate / '.git/objects/info/alternates').write_text(str(objects) + '\n')
+            # A recent-history-only install also lends where its history stops.
+            shallow = project / git(project, 'rev-parse', '--git-path', 'shallow')
+            if shallow.is_file():
+                shutil.copyfile(shallow, candidate / '.git/shallow')
             depth = ()
         else:
             depth = ('--depth', '1')

@@ -273,6 +273,23 @@ class CheckoutSelfUpdateTests(unittest.TestCase):
         self.assertEqual(git(self.code, 'rev-parse', 'HEAD'), target)
         self.assertEqual(git(self.code, 'status', '--porcelain'), '')
 
+    def test_recent_history_only_checkout_upgrades_and_still_blocks_divergence(self):
+        (self.upstream / 'README.md').write_text('Second public edition\n')
+        commit(self.upstream, 'Second public edition')
+        shutil.rmtree(self.code)
+        git(self.root, 'clone', '-q', '--depth', '1', self.upstream.as_uri(), str(self.code))
+        self.assertEqual(git(self.code, 'rev-parse', '--is-shallow-repository'), 'true')
+        target = publish(self)
+        commit_file = self.code / 'docs/local.md'
+        commit_file.write_text('local edition')
+        commit(self.code, 'Private local edition')
+        with self.assertRaisesRegex(ValueError, '与公开版本不同'):
+            self.review()
+        git(self.code, 'reset', '-q', '--hard', 'HEAD~1')
+        self_update.apply(self.review(), self.home, self.code)
+        self.assertEqual(git(self.code, 'rev-parse', 'HEAD'), target)
+        self.assertEqual(git(self.code, 'status', '--porcelain'), '')
+
     def test_uncommitted_or_divergent_local_versions_are_not_overwritten(self):
         publish(self)
         (self.code / 'README.md').write_text('local version')
