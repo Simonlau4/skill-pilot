@@ -288,6 +288,36 @@ class DeliverableDashboardTests(unittest.TestCase):
             with self.subTest(names=bad):
                 self.assertEqual(self.request(self.b, '/api/tools/check?names=' + urllib.parse.quote(bad, safe=','))[0], 400)
 
+    def test_playwright_cli_is_detected_from_the_users_desktop_tool_directories(self):
+        suffix = '.cmd' if os.name == 'nt' else ''
+        for folder in ('.local/bin', 'bin', '.npm-global/bin', '.volta/bin', '.nvm/versions/node/v24.1.0/bin', 'AppData/Roaming/npm'):
+            with self.subTest(folder=folder):
+                entry = self.b.home / folder / ('playwright-cli' + suffix)
+                entry.parent.mkdir(parents=True, exist_ok=True)
+                entry.write_text('this tool must never be executed')
+                entry.chmod(0o755)
+                try:
+                    with patch.dict(os.environ, {'PATH': str(self.root / 'Empty path')}), \
+                            patch('subprocess.run', side_effect=AssertionError('工具检查不执行命令')):
+                        found = self.ok(self.b, '/api/tools/check?names=playwright,playwright-cli')
+                    self.assertEqual(found, {'playwright': True, 'playwright-cli': True})
+                finally:
+                    entry.unlink()
+
+    def test_standard_playwright_entry_does_not_claim_the_separate_cli_is_installed(self):
+        tools = self.root / 'Custom tool directory'
+        tools.mkdir()
+        entry = tools / ('playwright.cmd' if os.name == 'nt' else 'playwright')
+        entry.write_text('this tool must never be executed')
+        entry.chmod(0o755)
+        with patch.dict(os.environ, {'PATH': str(tools)}), \
+                patch('skill_pilot.web.server.tool_environment', return_value={'PATH': str(tools)}):
+            self.assertEqual(self.ok(self.b, '/api/tools/check?names=playwright,playwright-cli'),
+                             {'playwright': True, 'playwright-cli': False})
+            entry.unlink()
+            self.assertEqual(self.ok(self.b, '/api/tools/check?names=playwright,playwright-cli'),
+                             {'playwright': False, 'playwright-cli': False})
+
     def test_a_viewer_leaving_mid_file_is_quiet_and_serving_continues(self):
         self.configure()
         root = self.folder()
@@ -454,7 +484,7 @@ if (!html.includes('只限团队内部')) fail('要标明只限团队内部');
         from tests.test_nav_static import STATIC, extract_function
         source = (STATIC / 'app.js').read_text()
         functions = '\n'.join(extract_function(source, name) for name in (
-            'function cleanTeardown(', 'function mdHtml(', 'function ddItemStatus(', 'function ddScreensHtml(',
+            'function cleanTeardown(', 'function mdHtml(', 'function toolStatus(', 'function ddItemStatus(', 'function ddScreensHtml(',
             'function ddItemsHtml(', 'function ddCommand(', 'function ddRecipeHtml('))
         helpers = '\n'.join(line for line in source.splitlines() if line.startswith((
             'const escape =', 'const icon =', 'const number =', 'const emptyInner =', 'const KIND_LABEL =', 'const KIND_TAG =',
@@ -484,7 +514,7 @@ if (!screens.includes('你的电脑：已安装') || !screens.includes('&lt;b&gt
 const items = ddItemsHtml();
 if (!items.includes('data-dd-goto="0"') || !items.includes('1 处')) fail('按技能和工具看要能跳回那一屏：' + items);
 dd.item = 'acme-tool';
-if (!ddItemsHtml().includes('本机：没有')) fail('工具要写本机有没有');
+if (!ddItemsHtml().includes('未检测到')) fail('工具没找到时只能说未检测到');
 const recipe = ddRecipeHtml();
 if (recipe.includes('<script>') || !recipe.includes('&lt;script&gt;')) fail('配方要转义：' + recipe);
 for (const part of ['<h3>配方</h3>', '<th>技能</th>', '<code>acme</code>', '<strong>第一步</strong>', '<ol><li>第二步</li></ol>',
@@ -496,7 +526,7 @@ const command = ddCommand();
 for (const part of ['照着团队成品「示例成品」，给 [品牌名] 做一份', '缺哪个先告诉我', '- acme-writing：已安装',
                     '- acme-missing：还没装，先在 Skill Pilot 团队页安装，或运行 skill-pilot team install acme-missing',
                     '- acme-elsewhere：还没装，团队商店里也没有，按下面配方里写的方式安装',
-                    '- 示例工具（本机：没有）；Mac 装法：brew install acme；没有的话：手动做', '配方：\n# 配方', '- **第一步**'])
+                    '- 示例工具（未检测到）；Mac 装法：brew install acme；没有的话：手动做', '配方：\n# 配方', '- **第一步**'])
   if (!command.includes(part)) fail('开工指令缺：' + part + '\n' + command);
 if (command.includes('deliverables-skill-recipes')) fail('开工指令不能依赖成品没写明的技能：' + command);
 if (!recipe.includes(escape(command))) fail('页面上要显示完整的开工指令');
@@ -505,7 +535,41 @@ if (!recipe.includes(escape(command))) fail('页面上要显示完整的开工�
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         page = extract_function(source, 'function showPage(')
         self.assertIn("if (page === 'tools') enterTools();", page)
-        self.assertIn('只查本机有没有，不替你安装', (STATIC / 'index.html').read_text())
+        self.assertIn('只检查常用命令入口，不替你安装', (STATIC / 'index.html').read_text())
+
+    def test_tool_status_and_install_instructions_do_not_claim_unchecked_tools_are_missing(self):
+        from tests.test_nav_static import STATIC, extract_function
+        source = (STATIC / 'app.js').read_text()
+        functions = '\n'.join(extract_function(source, name) for name in (
+            'function toolStatus(', 'function ddItemStatus(', 'function toolCommandHtml(', 'function renderTools('))
+        helpers = '\n'.join(line for line in source.splitlines() if line.startswith((
+            'const escape =', 'const icon =', 'const number =', 'const emptyInner =', 'const toolsView =', 'const toolPresent =')))
+        script = helpers + r'''
+const fail = message => { console.error(message); process.exit(1); };
+const elements = new Map();
+const $ = id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); };
+function renderButtons(element, html) { element.innerHTML = html; }
+let state = {page: 'tools'}, dd = {tools: {}};
+const tool = {kind: 'tool', name: 'Playwright', check: 'playwright', users: ['示例'], mac: 'example-install', without: '手动做'};
+toolsView.rows = [tool, {name: '在线服务', users: []}];
+''' + functions + r'''
+for (const [value, label] of [[undefined, '尚未检查'], [true, '已检测到'], [false, '未检测到']]) {
+  toolsView.checked = dd.tools = value === undefined ? {} : {playwright: value};
+  if (toolPresent(tool) !== (value ?? null)) fail('尚未检查不能算缺失');
+  if (ddItemStatus(tool) !== label) fail('成品详情要使用同一套状态');
+  renderTools();
+  const html = $('tools-list').innerHTML;
+  if (!html.includes(label) || !html.includes('需要账号或人工确认')) fail('工具状态不正确：' + html);
+  if (html.includes('本机没有') || html.includes('本机有')) fail('不能把命令入口检查说成完整安装检查');
+  if (html.includes('<details>') !== (value === true) || html.includes('<details open')) fail('已检测到时收起安装说明');
+  toolsView.missingOnly = true;
+  renderTools();
+  if ($('tools-list').innerHTML.includes('<h2>Playwright</h2>') !== (value === false)) fail('只把明确未检测到的列入筛选');
+  toolsView.missingOnly = false;
+}
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_tool_checks_go_in_batches_the_dashboard_accepts(self):
         from tests.test_nav_static import STATIC, extract_function
@@ -548,6 +612,9 @@ const $ = () => element;
   await openDeliverable('deliverable:m:one', 'recipe');
   if (dd.error) fail('照着做一份报错：' + dd.error);
   if (Object.keys(dd.tools).length !== 31 || calls !== 2) fail('一份成品 31 个工具要分两批查完：' + calls);
+  api = async () => { throw new Error('模拟断线'); };
+  await enterTools();
+  if (toolsView.error !== '模拟断线' || toolsView.checkedAt !== null || Object.keys(toolsView.checked).length) fail('重查失败不能留下旧结果和旧检查时间');
 })().catch(error => fail(error.stack));
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
