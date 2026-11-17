@@ -12,6 +12,7 @@ import re
 import secrets
 import shutil
 import socket
+from socketserver import TCPServer
 import sys
 import tempfile
 import threading
@@ -127,6 +128,11 @@ def job_parameters(body):
 
 class Dashboard(ThreadingHTTPServer):
     daemon_threads = True
+
+    def server_bind(self):
+        # The dashboard only listens on loopback; reverse DNS must not delay startup.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address
 
     def __init__(self, inventory, resume=None):
         session = resume or {}

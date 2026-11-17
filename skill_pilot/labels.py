@@ -131,9 +131,11 @@ def completion(config, system, body, wait=None):
     deadline = started + wait
     steps = ['准备请求']
     context = {}
+    private = [config.get('api_key', ''), config.get('base_url', '')]
 
     def failure(message, error):
         result = error if isinstance(error, ServiceError) else ServiceError(message)
+        result.diagnostic_secrets = tuple(private)  # In memory only; redact before writing any log.
         result.diagnostic_detail = '\n'.join([
             'AI 连接现场（请求发生时采集）',
             *[f'{key}：{value}' for key, value in context.items()],
@@ -151,6 +153,7 @@ def completion(config, system, body, wait=None):
                 address.hostname if address.scheme == 'https' and address.port in (None, 443) else '',
                 '自定义服务（地址不上传）')
         proxy = urllib.request.ProxyHandler()
+        private.append(proxy.proxies.get(address.scheme, ''))
         context['代理'] = ('已配置，本次地址按规则绕过' if urllib.request.proxy_bypass(address.netloc)
                             else '本次请求使用程序识别到的代理') if proxy.proxies.get(address.scheme) else '程序未发现适用代理'
         context['代理判断范围'] = '仅反映程序配置，无法据此判断系统隧道或网络设备是否介入'

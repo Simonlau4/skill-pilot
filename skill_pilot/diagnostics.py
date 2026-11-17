@@ -11,6 +11,7 @@ import threading
 import traceback
 import tomllib
 import uuid
+import urllib.error
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,26 +47,58 @@ def read_json(path):
         return {}
 
 
-def sanitize(value, home, limit=6000):
+def installed_build(project):
+    project = Path(project)
+    checkout = (project / '.git').exists()
+    revision = read_json(project / '.skill-pilot-install.json').get('revision', '')
+    if checkout:
+        try:
+            result = subprocess.run(['git', '-C', str(project), 'rev-parse', 'HEAD'],
+                env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}, stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=3, text=True, errors='replace')
+            revision = result.stdout.strip() if result.returncode == 0 else ''
+        except (OSError, subprocess.SubprocessError):
+            revision = ''
+    if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{7,64}', revision):
+        from .web.runtime import version
+        try:
+            revision = version()
+        except OSError:
+            revision = ''
+    return {'install_mode': '源码' if checkout else '压缩包',
+            'app_version': revision[:12] or '未能读取'}
+
+
+# Keep the loaded process identity even if an upgrade replaces its files on disk.
+RUNNING_BUILD = installed_build(PROJECT)
+
+
+def sanitize(value, home, limit=6000, *, extra_secrets=()):
     """Redact before truncating, including configured secrets without a prefix."""
     text = str(value)
     private = Path(home) / '.skill-pilot'
-    hidden = set()
+    hidden = {value for value in extra_secrets if isinstance(value, str) and value}
     def secrets_in(value, key=''):
         if isinstance(value, dict):
             for name, item in value.items():
                 secrets_in(item, name)
         elif isinstance(value, str) and value and re.search(r'key|token|secret|password|url|name', key, re.I):
             hidden.add(value)
-            if re.search(r'url', key, re.I):
-                try:
-                    address = urllib.parse.urlsplit(value)
-                    if address.hostname:
-                        hidden.add(address.hostname)
-                except ValueError:
-                    pass
     for name in ('settings.json', 'team.json'):
         secrets_in(read_json(private / name))
+    hosts = set()
+    for value in list(hidden):
+        try:
+            address = urllib.parse.urlsplit(value)
+            if address.hostname:
+                hosts.add(address.hostname)
+                hosts.add(address.hostname.encode('idna').decode('ascii'))
+                for credential in (address.username, address.password):
+                    if credential:
+                        hidden.update((credential, urllib.parse.unquote(credential)))
+        except (ValueError, UnicodeError):
+            pass
+    hidden.update(hosts)
     registry = read_json(private / 'registry.json')
     for field in ('skills', 'external_skills'):
         skills = registry.get(field, {})
@@ -77,13 +110,17 @@ def sanitize(value, home, limit=6000):
         except OSError:
             pass
     variants = set(hidden)
-    for secret in hidden:
-        variants.update({repr(secret)[1:-1], repr(secret.encode('utf-8'))[2:-1],
-                         json.dumps(secret, ensure_ascii=False)[1:-1],
-                         json.dumps(secret, ensure_ascii=True)[1:-1]})
+    # Wrapped network exceptions may escape an already escaped credential again.
+    for _ in range(2):
+        for secret in list(variants):
+            variants.update({repr(secret)[1:-1], repr(secret.encode('utf-8'))[2:-1],
+                             json.dumps(secret, ensure_ascii=False)[1:-1],
+                             json.dumps(secret, ensure_ascii=True)[1:-1]})
     for name in sorted(variants, key=len, reverse=True):
         if name:
             text = text.replace(name, '[私人内容已隐藏]')
+    for host in sorted(hosts, key=len, reverse=True):
+        text = re.sub(re.escape(host), '[私人内容已隐藏]', text, flags=re.I)
     text = hide_credentials(text)
     # Hide a whole path clause, including terminal filenames containing spaces.
     text = re.sub(r"(?<![\w.])(?:[A-Za-z]:[\\/]|\\\\|/|~[\\/])[^\r\n'\"<>|，；：。]*", '[路径已隐藏]', text)
@@ -100,7 +137,8 @@ def causes(error):
     while error is not None and id(error) not in found:
         found.add(id(error))
         yield error
-        error = error.__cause__ or error.__context__
+        reason = error.reason if isinstance(error, urllib.error.URLError) else None
+        error = reason if isinstance(reason, BaseException) else error.__cause__ or error.__context__
 
 
 def is_fault(error):
@@ -163,6 +201,7 @@ def record(home, source, action, error, user_message='操作没有完成，请�
     try:
         home = Path(home)
         chain = list(causes(error))
+        private = [value for e in chain for value in getattr(e, 'diagnostic_secrets', ())]
         cause = chain[-1]
         frames = code_frames(cause) or code_frames(error)
         location = re.sub(r':\d+', '', frames[-1]) if frames else getattr(error, 'diagnostic_location', 'unknown')
@@ -183,14 +222,15 @@ def record(home, source, action, error, user_message='操作没有完成，请�
         context = contextual.diagnostic_detail if contextual is not None else ''
         if context and user_message == '操作没有完成，请重试。':
             user_message = str(contextual)
-        detail = ((sanitize(context, home, 2200) + '\n\n' + sanitize(detail, home, 2500))
-                  if context else sanitize(detail, home, 4500))
+        detail = ((sanitize(context, home, 2200, extra_secrets=private) + '\n\n' +
+                   sanitize(detail, home, 2500, extra_secrets=private))
+                  if context else sanitize(detail, home, 4500, extra_secrets=private))
         if source == 'frontend' and location != 'unknown':
             detail += '\n' + location
         row = {'error_id': uuid.uuid4().hex,
                'fingerprint': hashlib.sha256(f'{source}|{action}|{kind}|{location}'.encode()).hexdigest()[:20],
                'time': datetime.now(timezone.utc).isoformat(), 'source': source, 'action': action,
-               'user_message': sanitize(user_message, home, 400), 'error_type': kind,
+               'user_message': sanitize(user_message, home, 400, extra_secrets=private), 'error_type': kind,
                'detail': detail + ('\n' + '\n'.join(frames) if frames else '')}
         # A late feedback submission must not replace the runtime at failure time.
         try:
@@ -225,6 +265,13 @@ def failure(home, source, action, error, message='操作没有完成，请重试
 
 
 def environment(home, project=PROJECT, *, runtime_only=False):
+    os_version = ('macOS ' + platform.mac_ver()[0] if platform.system() == 'Darwin'
+                  else platform.system() + ' ' + platform.release())
+    runtime = {'os': os_version, 'architecture': platform.machine(),
+               'python_version': platform.python_version(),
+               **(RUNNING_BUILD if runtime_only else installed_build(project))}
+    if runtime_only:
+        return runtime
     from .environment import tool_environment
     from .profiles import PROFILES, ADDITIONAL_PROFILES
     home, project = Path(home), Path(project)
@@ -237,31 +284,20 @@ def environment(home, project=PROJECT, *, runtime_only=False):
             return result.stdout.strip() if result.returncode == 0 else ''
         except (OSError, subprocess.SubprocessError):
             return ''
-    for name in (() if runtime_only else ('git', 'node', 'npm', 'lark-cli')):
+    for name in ('git', 'node', 'npm', 'lark-cli'):
         executable = shutil.which(name, path=env['PATH'])
         text = output([executable, '--version']) if executable else ''
         version = re.search(r'(?<!\d)\d+\.\d+(?:\.\d+)?(?:[-+][a-zA-Z0-9.]+)?', text)
         tools[name] = {'available': bool(executable), 'version': version[0] if version else '未能读取'}
     checkout = (project / '.git').exists()
     installation = read_json(project / '.skill-pilot-install.json')
-    revision = output(['git', '-C', str(project), 'rev-parse', 'HEAD']) if checkout else installation.get('revision', '')
-    modified = bool(output(['git', '-C', str(project), 'status', '--porcelain', '--untracked-files=no'])) if checkout and not runtime_only else None
-    if not runtime_only and not checkout and installation.get('files'):
+    modified = bool(output(['git', '-C', str(project), 'status', '--porcelain', '--untracked-files=no'])) if checkout else None
+    if not checkout and installation.get('files'):
         from .self_update import bundle_files
         try:
             modified = bundle_files(project) != installation['files']
         except (OSError, ValueError):
             pass
-    if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{7,64}', revision):
-        from .web.runtime import version
-        revision = version()
-    os_version = ('macOS ' + platform.mac_ver()[0] if platform.system() == 'Darwin'
-                  else platform.system() + ' ' + platform.release())
-    runtime = {'os': os_version, 'architecture': platform.machine(),
-               'python_version': platform.python_version(), 'install_mode': '源码' if checkout else '压缩包',
-               'app_version': revision[:12] if isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{7,64}', revision) else '未能读取'}
-    if runtime_only:
-        return runtime
     agents = read_json(home / '.skill-pilot/agents.json').get('onboarded', [])
     agents = agents if isinstance(agents, list) else []
     agents = [a for a in agents if isinstance(a, str)]

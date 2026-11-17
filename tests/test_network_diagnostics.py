@@ -5,6 +5,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -30,7 +31,7 @@ class NetworkDiagnosticsTests(unittest.TestCase):
                        'model': 'fixture', 'api_key': 'fixture-private-key'}
         labels.save_settings(self.home, self.config)
 
-    def fail(self, error):
+    def connection_failure(self, error):
         with patch('skill_pilot.labels.urllib.request.OpenerDirector.open', side_effect=error):
             result = labels.test(self.home)
         self.assertFalse(result['ok'])
@@ -49,7 +50,7 @@ class NetworkDiagnosticsTests(unittest.TestCase):
         proxy = {'https': 'http://private-user:proxy-password@private-proxy.example:8123'}
         with patch('urllib.request.getproxies', return_value=proxy), \
                 patch('urllib.request.proxy_bypass', return_value=False):
-            row = self.fail(self.certificate_error())
+            row = self.connection_failure(self.certificate_error())
         detail = row['detail']
         for evidence in ('DeepSeek 官方接口', '本次请求使用程序识别到的代理',
                          '证书校验编号：19', '自签名证书不受信任', '已加载的可信证书数',
@@ -65,7 +66,7 @@ class NetworkDiagnosticsTests(unittest.TestCase):
         before = {'os': 'Example OS 1', 'python_version': '3.12.1', 'app_version': 'a' * 12,
                   'architecture': 'test-cpu', 'install_mode': '源码'}
         with patch.object(diagnostics, 'environment', return_value=before):
-            row = self.fail(self.certificate_error())
+            row = self.connection_failure(self.certificate_error())
         labels.save_settings(self.home, self.config | {'base_url': 'https://private-ai.example'})
         after = before | {'python_version': '3.15.2', 'app_version': 'b' * 12,
                           'tools': {}, 'agent_types': [], 'skill_count': 0}
@@ -82,7 +83,7 @@ class NetworkDiagnosticsTests(unittest.TestCase):
         self.assertEqual(set(payload), set(feedback.LIMITS))
 
     def test_old_records_distinguish_current_environment_and_ignore_unknown_fields(self):
-        row = self.fail(TimeoutError('wait expired'))
+        row = self.connection_failure(TimeoutError('wait expired'))
         row.pop('environment')
         log = self.home / '.skill-pilot/logs/errors.jsonl'
         log.write_text(json.dumps(row) + '\n')
@@ -96,7 +97,7 @@ class NetworkDiagnosticsTests(unittest.TestCase):
         labels.save_settings(self.home, self.config | {'base_url': 'https://private-ai.example:8443/v1'})
         with patch('urllib.request.getproxies', return_value={'https': 'http://private-proxy.example:1234'}), \
                 patch('urllib.request.proxy_bypass', return_value=True) as bypass:
-            row = self.fail(urllib.error.URLError(TimeoutError('expired')))
+            row = self.connection_failure(urllib.error.URLError(TimeoutError('expired')))
             bypass.assert_called_with('private-ai.example:8443')
         self.assertIn('自定义服务', row['detail'])
         self.assertIn('本次地址按规则绕过', row['detail'])
@@ -118,16 +119,67 @@ class NetworkDiagnosticsTests(unittest.TestCase):
         labels.save_settings(self.home, self.config | {'base_url': 'https://private-ai.example/v1'})
         error = self.certificate_error(62)
         error.reason.verify_message = "Hostname mismatch, certificate is not valid for 'private-ai.example'."
-        row = self.fail(error)
+        row = self.connection_failure(error)
         self.assertIn('证书与服务地址不匹配', row['detail'])
         self.assertNotIn('private-ai.example', json.dumps(row))
+
+    def test_request_secrets_remain_hidden_after_settings_change_in_flight(self):
+        for host in ('old-private-ai.example', '内部.公司'):
+            with self.subTest(host=host):
+                old = self.config | {'base_url': 'https://' + host + '/v1',
+                                     'api_key': 'old-private-key\r\nnever-share'}
+                labels.save_settings(self.home, old)
+                wire_host = host.encode('idna').decode('ascii').upper()
+                error = self.certificate_error(62)
+                error.reason.verify_message = 'Hostname mismatch: ' + wire_host
+                error.reason.args = (wire_host + ' ' + repr(old['api_key'].encode()),)
+                def change_settings(*args, **kwargs):
+                    labels.save_settings(self.home, self.config | {'base_url': 'https://new-private-ai.example'})
+                    raise error
+                row = self.connection_failure(change_settings)
+                report = diagnostics.bundle(self.home, row['error_id'])['report']
+                payload = feedback.envelope(report)
+                stored = (self.home / '.skill-pilot/logs/errors.jsonl').read_text()
+                for text in (stored, json.dumps(payload, ensure_ascii=False)):
+                    for secret in (host, wire_host, 'old-private-key', 'never-share', 'diagnostic_secrets'):
+                        self.assertNotIn(secret, text)
+                self.assertIn('证书校验编号：62', payload['detail'])
+                self.assertIn('证书与服务地址不匹配', payload['detail'])
+
+    def test_loaded_version_survives_installation_change_until_process_restart(self):
+        code = self.root / 'separate program'
+        shutil.copytree(diagnostics.PROJECT / 'skill_pilot', code / 'skill_pilot')
+        manifest = code / '.skill-pilot-install.json'
+        manifest.write_text(json.dumps({'revision': 'a' * 40}))
+        script = '''
+import json
+from pathlib import Path
+from skill_pilot import diagnostics, feedback
+home = Path(__import__('os').environ['SKILL_PILOT_HOME'])
+Path('.skill-pilot-install.json').write_text(json.dumps({'revision': 'b' * 40}))
+row = diagnostics.record(home, 'backend', 'fixture', RuntimeError('fixture'))
+report = diagnostics.bundle(home, row['error_id'])['report']
+print(json.dumps({'row': row, 'current': report['environment'], 'payload': feedback.envelope(report)}))
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', script], cwd=code,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['row']['environment']['app_version'], 'a' * 12)
+        self.assertEqual(data['payload']['app_version'], 'a' * 12)
+        self.assertEqual(data['current']['app_version'], 'b' * 12)
+        restarted = subprocess.run([sys.executable, '-B', '-c',
+            'from skill_pilot.diagnostics import RUNNING_BUILD; print(RUNNING_BUILD["app_version"])'],
+            cwd=code, capture_output=True, text=True, timeout=30)
+        self.assertEqual(restarted.returncode, 0, restarted.stderr)
+        self.assertEqual(restarted.stdout.strip(), 'b' * 12)
 
     def test_certificate_reasons_and_missing_local_trust_locations_are_visible(self):
         from types import SimpleNamespace
         for code, expected in ((10, '证书已过期'), (20, '找不到可信签发者'), (62, '证书与服务地址不匹配')):
             with self.subTest(code=code), patch('ssl.get_default_verify_paths',
                                               return_value=SimpleNamespace(cafile=None, capath=None)):
-                row = self.fail(self.certificate_error(code))
+                row = self.connection_failure(self.certificate_error(code))
             self.assertIn('故障分类：' + expected, row['detail'])
             self.assertIn('可发现的证书文件：未找到', row['detail'])
             self.assertIn('可发现的证书目录：未找到', row['detail'])
@@ -139,7 +191,7 @@ class NetworkDiagnosticsTests(unittest.TestCase):
                  (urllib.error.HTTPError('https://api.deepseek.com', 401, 'unauthorized', {}, None), 'API key 不对')]
         for error, message in cases:
             with self.subTest(message=message):
-                row = self.fail(error)
+                row = self.connection_failure(error)
                 self.assertIn(message, row['user_message'])
                 self.assertIn('连接服务并等待响应', row['detail'])
                 if isinstance(error, urllib.error.HTTPError):
