@@ -204,7 +204,14 @@ def check(home, project=PROJECT):
     candidate.mkdir()
     try:
         git(candidate, 'init', '-q')
-        git(candidate, 'fetch', '--no-tags', SOURCE, target, timeout=120)
+        if before['checkout']:
+            # Borrow the history already on this computer; only new commits are downloaded.
+            objects = (project / git(project, 'rev-parse', '--git-path', 'objects')).resolve()
+            (candidate / '.git/objects/info/alternates').write_text(str(objects) + '\n')
+            depth = ()
+        else:
+            depth = ('--depth', '1')
+        git(candidate, 'fetch', '--no-tags', *depth, SOURCE, target, timeout=120)
         git(candidate, 'checkout', '--detach', target)
         if before['checkout']:
             try:

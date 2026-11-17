@@ -59,6 +59,12 @@ def commit(repository, message):
         'commit', '-q', '-m', message)
 
 
+def downloaded_objects(candidate):
+    """Objects stored in the candidate itself, not borrowed from the installed copy."""
+    counts = dict(line.split(': ') for line in git(candidate, 'count-objects', '-v').splitlines())
+    return int(counts['count']) + int(counts['in-pack'])
+
+
 def publish(case):
     (case.upstream / 'skill_pilot/obsolete.py').unlink()
     (case.upstream / 'skill_pilot/added.py').write_text('new = True\n')
@@ -142,6 +148,15 @@ class SelfUpdateTests(unittest.TestCase):
             capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['home'], str(self.home))
+
+    def test_zip_check_downloads_only_the_latest_version_and_still_upgrades(self):
+        target = publish(self)
+        review = self.review()
+        # Older public versions are never downloaded for a ZIP installation.
+        self.assertEqual(git(Path(review['candidate']), 'rev-list', '--count', target), '1')
+        self_update.apply(review, self.home, self.code)
+        self.assertEqual(self_update.read_record(self.code)['revision'], target)
+        self.assertTrue((self.code / 'skill_pilot/added.py').exists())
 
     def test_changed_local_file_is_preserved_without_network_or_application(self):
         publish(self)
@@ -243,6 +258,20 @@ class CheckoutSelfUpdateTests(unittest.TestCase):
         self.assertEqual(git(self.code, 'status', '--porcelain'), '')
         self.assertFalse(self.review()['available'])
         self.assertEqual(self.personal_before, store.physical_state(self.home / '.skill-pilot'))
+
+    def test_checkout_check_downloads_only_new_commits_and_still_upgrades(self):
+        before = git(self.code, 'rev-parse', 'HEAD')
+        target = publish(self)
+        review = self.review()
+        new = len(git(self.upstream, 'rev-list', '--objects', before + '..' + target).splitlines())
+        old = len(git(self.upstream, 'rev-list', '--objects', before).splitlines())
+        downloaded = downloaded_objects(Path(review['candidate']))
+        # History already on this computer is reused; only the new commit's objects arrive.
+        self.assertLess(downloaded, old)
+        self.assertLessEqual(downloaded, new * 2)
+        self_update.apply(review, self.home, self.code)
+        self.assertEqual(git(self.code, 'rev-parse', 'HEAD'), target)
+        self.assertEqual(git(self.code, 'status', '--porcelain'), '')
 
     def test_uncommitted_or_divergent_local_versions_are_not_overwritten(self):
         publish(self)
