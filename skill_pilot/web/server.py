@@ -5,6 +5,7 @@ import copy
 from contextlib import contextmanager
 from ..platform_support import fcntl, user_home, user_id, check_directory_links
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -260,6 +261,11 @@ class Dashboard(ThreadingHTTPServer):
              'summary': '安装团队技能', 'operations': [],
              '_parameters': {'kind': 'team_install', 'key': item['key']},
              '_intent': json.dumps({'kind': 'team_install', 'key': item['key']}, sort_keys=True)} for item in items]
+
+    def deliverable_key(self, member_id, identity):
+        """Opens one demo for this dashboard session only; never the session token itself."""
+        message = ('deliverable:' + member_id + ':' + identity).encode()
+        return hmac.new(self.token.encode(), message, hashlib.sha256).hexdigest()[:32]
 
     def team_queue_status(self):
         fields = {'id', 'kind', 'key', 'name', 'title', 'repository', 'status', 'message', 'installed', 'reuse',
@@ -1046,11 +1052,61 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def serve_deliverable(self, path):
+        """Relay one demo file from the hub. The page runs sandboxed: its scripts get an opaque origin,
+        so they cannot read this dashboard, its token or other tabs, and cannot reach other sites."""
+        if self.headers.get("Host") != self.server.origin.removeprefix("http://"):
+            self.reply(403, {"error": "此页面只允许本机本次打开的浏览器访问。"})
+            return
+        match = re.fullmatch(r'/d/([0-9a-f]{32})/([0-9a-f]{32})/(' + team.team_hub.DELIVERABLE_ID + r')/(.+)', path)
+        if not match or not secrets.compare_digest(match[1], self.server.deliverable_key(match[2], match[3])):
+            self.reply(404, {"error": "没有这个页面。"})
+            return
+        failure = None
+        try:
+            response = team.open_deliverable_file(self.server.home, match[2], match[3],
+                                                  urllib.parse.unquote(match[4]), self.headers.get('Range'))
+        except team.RequestError as error:
+            failure = (error.status if error.status in {401, 404, 416} else 502, str(error))
+        except (ValueError, OSError) as error:
+            failure = (502, str(error) if isinstance(error, ValueError) else '没能读取成品文件，请稍后重试。')
+        if failure:
+            # Outside the except block: a missing asset is a page problem, not a dashboard failure to log.
+            self.reply(failure[0], {'error': failure[1]})
+            return
+        origin = self.server.origin
+        with response:
+            self.send_response(response.status)
+            for name in ('Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges'):
+                if response.headers.get(name):
+                    self.send_header(name, response.headers[name])
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            # Fonts and module scripts from the sandboxed page arrive with Origin "null"; the
+            # unguessable per-session address is what protects these files.
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Content-Security-Policy',
+                             f"sandbox allow-scripts; default-src {origin} data: blob:; "
+                             f"script-src {origin} 'unsafe-inline'; style-src {origin} 'unsafe-inline'; "
+                             f"img-src {origin} data: blob:; media-src {origin} blob:; font-src {origin} data:; "
+                             f"connect-src {origin}; frame-ancestors 'none'; form-action 'none'; base-uri {origin}")
+            self.end_headers()
+            try:
+                while chunk := response.read(1024 * 1024):
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                # Videos are cancelled when scrolled away; a viewer leaving mid-file is normal.
+                self.close_connection = True
+
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         # 浏览器会自己来要 /favicon.ico，不带本次口令。只放行这一个地址，避免控制台报错。
         if path == "/favicon.ico":
             self.reply(204, b"")
+            return
+        if path.startswith('/d/'):
+            self.serve_deliverable(path)
             return
         if not self.authorized():
             self.reply(403, {"error": "此页面只允许本机本次打开的浏览器访问。"})
@@ -1078,6 +1134,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(409, {'error': str(error)})
         elif path == '/api/team/queue':
             self.reply(200, self.server.team_queue_status())
+        elif path == '/api/team/deliverables/detail':
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            match = re.fullmatch(r'deliverable:([0-9a-f]{32}):(' + team.team_hub.DELIVERABLE_ID + ')', query.get('key', [''])[0])
+            if not match:
+                self.reply(400, {'error': '请从团队页的成品卡片打开。'})
+                return
+            try:
+                detail = team.deliverable_detail(self.server.home, match[1], match[2])
+            except (ValueError, OSError) as error:
+                self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取成品，请稍后重试。'})
+                return
+            key = self.server.deliverable_key(match[1], match[2])
+            self.reply(200, {**detail, 'base_url': f'/d/{key}/{match[1]}/{match[2]}/'})
+        elif path == '/api/tools/check':
+            # Looks a command up on PATH only; nothing is run.
+            names = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('names', [''])[0].split(',')
+            if (not 1 <= len(names) <= 30 or
+                    any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,63}', name) for name in names)):
+                self.reply(400, {'error': '工具名只能用字母、数字、点、加号、横线或下划线。'})
+                return
+            self.reply(200, {name: shutil.which(name) is not None for name in names})
         elif path == '/api/jobs':
             self.reply(200, self.server.jobs_status())
         elif path == '/api/team/github/digests':
@@ -1097,6 +1174,9 @@ class Handler(BaseHTTPRequestHandler):
                           team.listing_candidates(self.server.home))
                 if path == '/api/team/catalog':
                     result = self.server.github_digests.catalog(result)
+                    for row in result.get('deliverables', []):
+                        member, identity = row['member']['id'], row['id']
+                        row['open_url'] = f'/d/{self.server.deliverable_key(member, identity)}/{member}/{identity}/index.html'
                 self.reply(200, result)
                 if path == '/api/team/catalog':
                     self.server.github_digests.start()

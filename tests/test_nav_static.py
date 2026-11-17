@@ -28,8 +28,11 @@ class NavStaticTests(unittest.TestCase):
         nav = re.search(r'<nav class="nav"[\s\S]*?</nav>', html)
         self.assertIsNotNone(nav, '页头导航不见了')
         items = re.findall(r'data-page="([^"]+)"[\s\S]*?<span>([^<]+)</span>', nav.group(0))
-        self.assertEqual(items, [('home', '首页'), ('skills', '技能'), ('cleanup', '清理'), ('team', '团队'), ('settings', '设置')])
-        self.assertEqual(nav.group(0).count('class="nav-item"'), 5)
+        self.assertEqual(items, [('home', '首页'), ('skills', '技能'), ('cleanup', '清理'), ('team', '团队'), ('tools', '工具'),
+                                 ('settings', '设置')])
+        self.assertEqual(nav.group(0).count('class="nav-item"'), 6)
+        # 「工具」和「团队」一样，连上分享站后才出现。
+        self.assertIn('data-page="tools" hidden', nav.group(0))
         self.assertLess(nav.group(0).index('data-page="home"'), nav.group(0).index('data-page="skills"'))
         # 「团队」只在连上分享站后出现，默认藏着。
         self.assertRegex(nav.group(0), r'data-page="team" hidden')

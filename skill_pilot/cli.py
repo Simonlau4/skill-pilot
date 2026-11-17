@@ -104,9 +104,19 @@ def main():
     team_install.add_argument('name', help='技能名称或中文名')
     team_install.add_argument('--author', help='有重名时指定上架人')
     team_install.add_argument('--agent', action='append', default=[], help='装好后分配给这个 agent，可以重复指定')
-    for command in (team_publish, team_unpublish, team_install):
+    team_deliverable = team_commands.add_parser('deliverable', help='把一份成品（网页文件夹）上架到分享站，只限团队成员查看')
+    team_deliverable.add_argument('folder', help='成品文件夹，首页是 index.html')
+    team_deliverable.add_argument('--id', required=True, help='成品编号：字母、数字、点、横线或下划线')
+    team_deliverable.add_argument('--title', required=True, help='成品名字')
+    team_deliverable.add_argument('--version', default='', help='版本，例如 v1.6')
+    team_deliverable.add_argument('--summary', default='', help='一句话说明')
+    team_deliverable.add_argument('--skill', action='append', default=[], help='用到的技能，按使用顺序，可重复')
+    team_deliverable.add_argument('--recipe', help='复刻配方文件（Markdown）')
+    team_deliverable_remove = team_commands.add_parser('deliverable-remove', help='从分享站下架自己上架的成品')
+    team_deliverable_remove.add_argument('id', help='成品编号')
+    for command in (team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove):
         command.add_argument('--yes', action='store_true')
-    for command in (team_list, team_publish, team_unpublish, team_install):
+    for command in (team_list, team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove):
         command.add_argument('--json', action='store_true')
     checking = commands.add_parser('check-updates', help='只读检查技能更新')
     checking.add_argument('--json', action='store_true')
@@ -297,10 +307,22 @@ def main():
                                       args.skip_pack, args.yes)
             elif args.team_command == 'unpublish':
                 result = team.unpublish(home, args.skills, args.yes)
+            elif args.team_command == 'deliverable':
+                recipe = Path(args.recipe).expanduser().read_text(encoding='utf-8') if args.recipe else ''
+                result = team.publish_deliverable(home, args.folder, args.id, args.title, args.version,
+                                                  args.summary, args.skill, recipe, args.yes)
+            elif args.team_command == 'deliverable-remove':
+                result = team.remove_deliverable(home, args.id, args.yes)
             else:
                 result = team.install_named(home, args.name, args.author, args.agent, args.yes)
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
+            elif args.team_command in {'deliverable', 'deliverable-remove'}:
+                print(result['message'])
+                for item in result.get('blocked', []):
+                    print(f'  不上传 {item["path"]}：{item["reason"]}')
+                if result.get('external'):
+                    print('  网页里有外网地址，演示时不会加载：' + '、'.join(result['external']))
             elif args.team_command == 'list':
                 for card in result['cards']:
                     authors = '、'.join(dict.fromkeys(row['member']['name'] for row in card['listings']))

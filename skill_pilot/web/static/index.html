@@ -128,6 +128,7 @@
       <button class="nav-item" data-page="skills"><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-skills"/></svg><span>技能</span></button>
       <button class="nav-item" data-page="cleanup"><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-cleanup"/></svg><span>清理</span></button>
       <button class="nav-item" data-page="team" hidden><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>团队</span></button>
+      <button class="nav-item" data-page="tools" hidden><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-jobs"/></svg><span>工具</span></button>
       <button class="nav-item" data-page="settings"><svg class="nav-icon" aria-hidden="true" focusable="false"><use href="#sp-settings"/></svg><span>设置</span></button>
     </nav>
     <div class="topbar-end">
@@ -413,6 +414,21 @@
   </section>
 
   <!-- ========== 设置页：左边目录固定，右边七块按顺序排下来；点目录滚过去，滚动时高亮跟着走 ========== -->
+  <section id="page-tools" class="page-section" hidden>
+    <div class="tools-head">
+      <div>
+        <h1 class="tools-title">工具</h1>
+        <p class="muted">技能和成品要用到的命令行工具和服务。这里只查本机有没有，不替你安装；需要管理员密码的，复制命令到「终端」里自己运行。</p>
+      </div>
+      <button id="tools-recheck" class="btn" type="button">重新检查</button>
+    </div>
+    <div class="tools-bar">
+      <div id="tools-filter" class="segmented" role="group" aria-label="工具筛选"></div>
+      <span id="tools-note" class="muted"></span>
+    </div>
+    <div id="tools-list" class="tools-list" aria-live="polite"></div>
+  </section>
+
   <section id="page-settings" class="page-section" hidden>
     <div class="settings-split">
       <nav id="settings-nav" class="rail-list settings-nav" aria-label="设置内容">
@@ -903,6 +919,19 @@
       <button id="install-apply" type="button" class="btn btn-primary" disabled>安装</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="deliverable-dialog" class="deliverable-dialog" aria-labelledby="deliverable-dialog-title">
+  <div class="dd-head">
+    <div class="dd-titles">
+      <h2 id="deliverable-dialog-title"></h2>
+      <p id="deliverable-dialog-meta" class="muted"></p>
+    </div>
+    <div id="deliverable-tabs" class="segmented" role="group" aria-label="查看方式"></div>
+    <a id="deliverable-dialog-open" class="btn" target="_blank" rel="noopener noreferrer">打开演示</a>
+    <button id="deliverable-dialog-close" class="btn" type="button">关闭</button>
+  </div>
+  <div id="deliverable-dialog-body" class="dd-body"></div>
 </dialog>
 
 <dialog id="tag-dialog" class="dialog dialog-wide" aria-labelledby="tag-dialog-title">

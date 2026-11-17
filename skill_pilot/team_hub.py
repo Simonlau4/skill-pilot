@@ -33,6 +33,21 @@ MAX_FILES = 300
 MAX_SIZE = 5 * 1024 * 1024
 TEXT_FIELDS = ('title', 'summary', 'group', 'description', 'note')
 NAME = r'[A-Za-z0-9][A-Za-z0-9_.-]*'
+MAX_BLOB = 50 * 1024 * 1024
+MAX_DELIVERABLE_SIZE = 200 * 1024 * 1024
+MAX_DELIVERABLE_FILES = 2000
+MAX_DELIVERABLES = 50
+MAX_MANIFEST_BODY = 1024 * 1024
+MAX_RECIPE = 64 * 1024
+DELIVERABLE_TYPES = {
+    '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+    '.csv': 'text/csv; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.avif': 'image/avif', '.ico': 'image/x-icon',
+    '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf',
+    '.otf': 'font/otf', '.pdf': 'application/pdf'}
 GITHUB_SEARCH_LIMIT = 2 * 1024 * 1024
 GITHUB_TREE_LIMIT = 8 * 1024 * 1024
 GITHUB_READMES = ('readme.md', 'readme.markdown', 'readme.rst', 'readme.txt', 'readme')
@@ -370,10 +385,84 @@ def clean_packs(rows, listings=None):
     return result
 
 
+def deliverable_path(value):
+    if (not isinstance(value, str) or not 1 <= len(value) <= 300 or '\\' in value or
+            any(part in {'', '.', '..'} for part in value.split('/')) or
+            any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'} for c in value)):
+        raise ValueError('成品文件的位置不安全，请使用文件夹内的相对位置。')
+    return value
+
+
+DELIVERABLE_ID = r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}'
+
+
+def deliverable_info(row):
+    """The fields every member sees on a deliverable card."""
+    if not isinstance(row, dict):
+        raise ValueError('成品信息格式不正确。')
+    title = row.get('title')
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError('请填写成品名字。')
+    result = {'title': short_text(title.strip(), '成品名字'), 'version': short_text(row.get('version', ''), '版本'),
+              'summary': short_text(row.get('summary', ''), '一句话说明')}
+    skills = row.get('skills', [])
+    if (not isinstance(skills, list) or len(skills) > 30 or len(set(skills)) != len(skills) or
+            any(not isinstance(n, str) or len(n) > 64 or not re.fullmatch(NAME, n) for n in skills)):
+        raise ValueError('用到的技能须是不重复的技能名，最多 30 个。')
+    result['skills'] = list(skills)
+    return result
+
+
+def clean_deliverable(row):
+    """A static demo folder: card fields, its recipe and a path → content fingerprint list."""
+    result = deliverable_info(row)
+    recipe = row.get('recipe', '')
+    if (not isinstance(recipe, str) or len(recipe.encode()) > MAX_RECIPE or
+            any(unicodedata.category(c) in {'Cc', 'Cf'} and c not in '\n\t' for c in recipe)):
+        raise ValueError('复刻配方须是 64 KB 以内的文字。')
+    result['recipe'] = recipe
+    files = row.get('files')
+    if not isinstance(files, dict) or 'index.html' not in files:
+        raise ValueError('成品文件夹的首页必须是 index.html。')
+    if len(files) > MAX_DELIVERABLE_FILES:
+        raise HubError(413, f'成品最多 {MAX_DELIVERABLE_FILES} 个文件。')
+    checked, size = {}, 0
+    for path, entry in files.items():
+        deliverable_path(path)
+        if (not isinstance(entry, dict) or not isinstance(entry.get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', entry['sha256']) or
+                type(entry.get('size')) is not int or not 0 <= entry['size'] <= MAX_BLOB):
+            raise ValueError('成品文件的大小或内容编号不正确。')
+        checked[path] = {'sha256': entry['sha256'], 'size': entry['size']}
+        size += entry['size']
+    if any('/'.join(path.split('/')[:i]) in checked for path in checked for i in range(1, len(path.split('/')))):
+        raise ValueError('成品文件和文件夹的位置相互冲突。')
+    if size > MAX_DELIVERABLE_SIZE:
+        raise HubError(413, f'成品文件合计不能超过 {MAX_DELIVERABLE_SIZE // 1024 // 1024} MB。')
+    return {**result, 'files': checked, 'file_count': len(checked), 'size': size}
+
+
+def byte_range(header, size):
+    """One `bytes=` range as (start, end), None for a whole-file reply; raises for an unsatisfiable one."""
+    if not header:
+        return None
+    match = re.fullmatch(r'bytes=(\d*)-(\d*)', header.strip())
+    if not match or match[1] == match[2] == '':
+        return None  # Unsupported forms (several ranges) get the whole file.
+    if match[1] == '':
+        start, end = max(size - int(match[2]), 0), size - 1
+    else:
+        start, end = int(match[1]), min(int(match[2]) if match[2] else size - 1, size - 1)
+    if start >= size or start > end:
+        raise HubError(416, '请求的文件范围超出文件大小。')
+    return start, end
+
+
 class HubError(ValueError):
-    def __init__(self, status, message):
+    def __init__(self, status, message, extra=None):
         super().__init__(message)
         self.status = status
+        self.extra = extra or {}
 
 
 class HubStore:
@@ -493,6 +582,7 @@ class HubStore:
                             self.data / 'members.json': {'members': [m for m in members if m['id'] != member_id]}})
             self._save(changes)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
+            shutil.rmtree(self.data / 'deliverables' / member_id, ignore_errors=True)
 
     # The HTTP handler holds locked() while authenticating and accessing data.
     def _authenticate(self, authorization):
@@ -589,7 +679,8 @@ class HubStore:
         result = {'cards': sorted(cards.values(), key=lambda c: c['listings'][0]['updated_at'], reverse=True),
                 'packs': sorted([p for m in members.values() for p in self._public_packs(m)],
                                 key=lambda p: p['updated_at'], reverse=True),
-                'my_installs': sorted(set(installs.get(member_id, [])) & cards.keys())}
+                'my_installs': sorted(set(installs.get(member_id, [])) & cards.keys()),
+                'deliverables': self._public_deliverables()}
         github = self._github()
         if github is not None:
             result['github'] = github
@@ -677,6 +768,91 @@ class HubStore:
             raise HubError(409, '作者已经上架了新版，请重新预览。')
         return json.loads((self.data / 'packages' / member_id / (name + '.json')).read_text(encoding='utf-8'))
 
+    # Deliverables: deliverables/<member>/items/<id>.json lists path → sha256; bytes live once in blobs/<sha256>.
+    def _deliverable_dir(self, member_id):
+        return self.data / 'deliverables' / member_id
+
+    def _deliverables(self, member_id):
+        items = self._deliverable_dir(member_id) / 'items'
+        return {p.stem: json.loads(p.read_text(encoding='utf-8')) for p in sorted(items.glob('*.json'))}
+
+    def upload_slot(self, member_id):
+        """A private temporary file next to the blobs, so the final rename stays on one disk."""
+        folder = self._deliverable_dir(member_id) / 'uploads'
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, name = tempfile.mkstemp(prefix='.blob-', dir=folder)
+        return os.fdopen(fd, 'wb'), Path(name)
+
+    def _put_blob(self, member_id, digest, temporary):
+        blobs = self._deliverable_dir(member_id) / 'blobs'
+        blobs.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.replace(temporary, blobs / digest)
+        return {'sha256': digest, 'size': (blobs / digest).stat().st_size}
+
+    def _collect_blobs(self, member_id):
+        # A parallel upload of the same member may lose a blob here; its list then gets 409 with
+        # `missing` and the uploader sends those again, so no reservation is kept.
+        blobs = self._deliverable_dir(member_id) / 'blobs'
+        used = {f['sha256'] for row in self._deliverables(member_id).values() for f in row['files'].values()}
+        for blob in (blobs.iterdir() if blobs.is_dir() else []):
+            if blob.name not in used:
+                blob.unlink(missing_ok=True)
+
+    def _put_deliverable(self, member_id, identity, data):
+        try:
+            row = clean_deliverable(data)
+        except HubError:
+            raise
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
+        current = self._deliverables(member_id)
+        if identity not in current and len(current) >= MAX_DELIVERABLES:
+            raise HubError(413, f'每位成员最多上架 {MAX_DELIVERABLES} 个成品，请先下架不用的。')
+        blobs = self._deliverable_dir(member_id) / 'blobs'
+        missing = sorted({f['sha256'] for f in row['files'].values() if not (blobs / f['sha256']).is_file()})
+        if missing:
+            raise HubError(409, '还有文件没有上传，请先上传这些内容。', {'missing': missing})
+        if any((blobs / f['sha256']).stat().st_size != f['size'] for f in row['files'].values()):
+            raise HubError(400, '成品文件的大小和上传的内容对不上，请重新上传。')
+        row['updated_at'] = now()
+        atomic_write(self._deliverable_dir(member_id) / 'items' / (identity + '.json'), row)
+        self._collect_blobs(member_id)
+        return {'key': 'deliverable:' + member_id + ':' + identity, 'updated_at': row['updated_at']}
+
+    def _remove_deliverable(self, member_id, identity):
+        path = self._deliverable_dir(member_id) / 'items' / (identity + '.json')
+        if not path.is_file():
+            raise HubError(404, '这个成品还没有上架，或已经下架。')
+        path.unlink()
+        self._collect_blobs(member_id)
+        return {}
+
+    def _public_deliverables(self):
+        members = {m['id']: {k: m[k] for k in ('id', 'name')} for m in self._members()}
+        rows = [{'key': 'deliverable:' + member_id + ':' + identity, 'id': identity, 'member': member,
+                 **{k: row[k] for k in ('title', 'version', 'summary', 'skills', 'file_count', 'size', 'updated_at')},
+                 'has_recipe': bool(row['recipe']), 'has_teardown': '_teardown/teardown.json' in row['files']}
+                for member_id, member in members.items() for identity, row in self._deliverables(member_id).items()]
+        return sorted(rows, key=lambda r: r['updated_at'], reverse=True)
+
+    def _deliverable(self, member_id, identity):
+        row = self._deliverables(member_id).get(identity)
+        if row is None or not any(m['id'] == member_id for m in self._members()):
+            raise HubError(404, '这个成品已经下架，请刷新商店。')
+        return row
+
+    def _deliverable_file(self, member_id, identity, path):
+        try:
+            deliverable_path(path)
+        except ValueError:
+            raise HubError(404, '成品里没有这个文件。') from None
+        entry = self._deliverable(member_id, identity)['files'].get(path)
+        if entry is None:
+            raise HubError(404, '成品里没有这个文件。')
+        blob = self._deliverable_dir(member_id) / 'blobs' / entry['sha256']
+        kind = DELIVERABLE_TYPES.get(Path(path).suffix.lower(), 'application/octet-stream')
+        return blob.open('rb'), entry['size'], kind
+
     def _rate(self, member, data, remove=False):
         if not isinstance(data, dict) or not isinstance(data.get('key'), str):
             raise HubError(400, '请选择要评价的技能。')
@@ -745,7 +921,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _read_body(self, limit, too_large=None):
+    def _length(self, limit, too_large):
         lengths = self.headers.get_all('Content-Length', [])
         if self.headers.get('Transfer-Encoding') or len(lengths) > 1:
             raise HubError(400, '上传方式不支持，请直接发送完整内容。')
@@ -758,9 +934,72 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0:
             raise HubError(400, '上传文件的长度不正确。')
         if length > limit:
-            raise HubError(413, too_large or ('上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
-                           '评价内容超过 64 KB，请缩短后重试。' if limit == MAX_RATING_BODY else
-                           '加入信息超过 4096 字节，请缩短后重试。'))
+            raise HubError(413, too_large)
+        return length
+
+    def _receive_blob(self, digest):
+        length = self._length(MAX_BLOB, f'单个文件不能超过 {MAX_BLOB // 1024 // 1024} MB。')
+        store = self.server.store
+        with store.locked():
+            member = store._authenticate(self.headers.get('Authorization', ''))
+            stream, temporary = store.upload_slot(member['id'])
+        try:
+            hasher = hashlib.sha256()
+            with stream:
+                remaining = length
+                while remaining:
+                    try:
+                        chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    except TimeoutError:
+                        raise HubError(408, '上传等待太久，请重新上传。') from None
+                    if not chunk:
+                        raise HubError(400, '文件没有传完整，请重新上传。')
+                    hasher.update(chunk)
+                    stream.write(chunk)
+                    remaining -= len(chunk)
+            if hasher.hexdigest() != digest:
+                raise HubError(400, '上传的内容和编号对不上，请重新上传。')
+            with store.locked():
+                # The member may have been removed while the file was arriving.
+                store._authenticate(self.headers.get('Authorization', ''))
+                return store._put_blob(member['id'], digest, temporary)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _serve_deliverable(self, member_id, identity, path):
+        store = self.server.store
+        with store.locked():
+            store._authenticate(self.headers.get('Authorization', ''))
+            stream, size, kind = store._deliverable_file(member_id, identity, urllib.parse.unquote(path))
+        # The open file stays readable if the blob is collected meanwhile; stream outside the lock.
+        with stream:
+            span = byte_range(self.headers.get('Range'), size)
+            start, end = span or (0, size - 1)
+            self.send_response(206 if span else 200)
+            self.send_header('Content-Type', kind)
+            self.send_header('Content-Length', str(end - start + 1))
+            self.send_header('Accept-Ranges', 'bytes')
+            if span:
+                self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.end_headers()
+            stream.seek(start)
+            remaining = end - start + 1
+            try:
+                while remaining > 0:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True  # The viewer cancelled, e.g. a video scrolled away.
+
+    def _read_body(self, limit, too_large=None):
+        length = self._length(limit, too_large or ('上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
+                              '评价内容超过 64 KB，请缩短后重试。' if limit == MAX_RATING_BODY else
+                              '加入信息超过 4096 字节，请缩短后重试。'))
         try:
             body = self.rfile.read(length)
         except TimeoutError:
@@ -785,18 +1024,30 @@ class Handler(BaseHTTPRequestHandler):
             path = address.path
             listing = re.fullmatch(r'/api/listings/me/(' + NAME + ')', path)
             package = re.fullmatch(r'/api/packages/([0-9a-f]{32})/(' + NAME + ')', path)
+            blob = re.fullmatch(r'/api/blobs/me/([0-9a-f]{64})', path)
+            identity = '(' + DELIVERABLE_ID + ')'
+            mine = re.fullmatch(r'/api/deliverables/me/' + identity, path)
+            deliverable = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity, path)
+            served = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity + '/(.+)', path)
             query = urllib.parse.parse_qs(address.query, keep_blank_values=True)
-            if '?' in self.path and (not package or set(query) != {'version'} or
+            if '?' in self.path and not served and (not package or set(query) != {'version'} or
                     len(query['version']) != 1 or not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             allowed = ({'POST'} if path in {'/api/join', '/api/feedback'} else
-                       {'GET'} if path in {'/api/me', '/api/catalog'} or package else
-                       {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} else {'DELETE'} if listing else
-                       {'PUT', 'DELETE'} if path == '/api/ratings' else set())
+                       {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served else
+                       {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} or blob else
+                       {'DELETE'} if listing else
+                       {'PUT', 'DELETE'} if path == '/api/ratings' or mine else set())
             if not allowed:
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             if self.command not in allowed:
                 raise HubError(405, '这个地址不支持这项操作。')
+            if blob:
+                self._json(200, self._receive_blob(blob[1]))
+                return
+            if served:
+                self._serve_deliverable(served[1], served[2], served[3])
+                return
             if path == '/api/join':
                 if not self.server.open:
                     raise HubError(403, '这个分享站需要管理员发的口令。')
@@ -817,6 +1068,8 @@ class Handler(BaseHTTPRequestHandler):
                     if path == '/api/installs/me' else
                     self._read_body(MAX_PACK_BODY, '技能包内容超过 64 KB，请缩短后重试。')
                     if path == '/api/packs/me' else
+                    self._read_body(MAX_MANIFEST_BODY, '成品清单超过 1 MB，请减少文件数量。')
+                    if mine and self.command == 'PUT' else None if mine else
                     self._read_body(MAX_BODY if path == '/api/listings/me' else MAX_RATING_BODY)
                     if self.command == 'PUT' or path == '/api/ratings' else None)
             store = self.server.store
@@ -843,6 +1096,13 @@ class Handler(BaseHTTPRequestHandler):
                     result = store._remove_listing(member['id'], listing[1])
                 elif package:
                     result = store._package(package[1], package[2], query.get('version', [None])[0])
+                elif mine:
+                    result = (store._put_deliverable(member['id'], mine[1], data) if self.command == 'PUT' else
+                              store._remove_deliverable(member['id'], mine[1]))
+                elif deliverable:
+                    row = store._deliverable(deliverable[1], deliverable[2])
+                    result = {k: row[k] for k in ('title', 'version', 'summary', 'skills', 'recipe',
+                                                  'file_count', 'size', 'updated_at')}
                 else:
                     result = store._rate(member, data, self.command == 'DELETE')
             if path == '/api/feedback' and not duplicate:
@@ -855,7 +1115,7 @@ class Handler(BaseHTTPRequestHandler):
                 store.finish_feedback(row['id'], 'sent')
             self._json(200, result)
         except HubError as error:
-            self._json(error.status, {'error': str(error)})
+            self._json(error.status, {'error': str(error), **error.extra})
         except (ValueError, KeyError, TypeError):
             self._json(500, {'error': '分享站数据格式不正确，请联系管理员检查或还原备份。'})
         except OSError:

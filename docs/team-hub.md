@@ -145,6 +145,8 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 | `packages/<成员编号>/<技能名>.json` | 带文件上架的技能包，只保存最新一版 |
 | `ratings.json` | 每张技能卡片的成员评分、评价和更新时间 |
 | `installs.json` | 每位成员本机已有的商店卡片编号，格式为 `{"installs":{"成员编号":["卡片编号",...]}}`；文件不存在时按空记录处理，只用来算人数 |
+| `deliverables/<成员编号>/items/<成品编号>.json` | 此成员上架的成品：名字、版本、一句话说明、用到的技能、复刻配方、文件清单（相对位置 → 内容编号和大小）和更新时间 |
+| `deliverables/<成员编号>/blobs/<内容编号>` | 成品文件的内容，按 SHA-256 存一份；没有成品再用到时自动删除 |
 | `.lock` | 防止成员管理和同时上传相互覆盖的运行锁；不是账号数据 |
 
 备份时先停止分享站，复制**整个数据文件夹**到受保护的备份位置，再启动。系统服务用 `systemctl stop/start`，容器用 `docker stop/start`，手动运行用 Ctrl+C 和上面的固定命令。备份包含团队技能文件、成员评价和安装记录，应只让管理员访问。恢复时同样先停止，再还原整个文件夹并确认运行账号有读写权限，成员、上架、文件、评价和安装记录要一起备份、一起恢复，不要拼接不同时间的数据。
@@ -179,7 +181,7 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 | --- | --- |
 | `POST /api/join` | 请求体 `{"name":"显示名"}`；开放时返回 `{"service":"skill-pilot-team","api":2,"member":{"id":"成员编号","name":"显示名"},"token":"口令"}`；未开放返回 `403`，不创建成员 |
 | `GET /api/me` | `{"service":"skill-pilot-team","api":2,"member":{"id":"成员编号","name":"显示名"}}` |
-| `GET /api/catalog` | `{"cards":[{"key":"卡片编号","listings":[...],"ratings":[...],"installs":0}],"my_installs":[...],"packs":[...]}`；`installs` 为仍在成员名单中、上报装有此卡片且没有上架此卡片的人数（非负整数），`my_installs` 只含请求者本人记录中仍在目录里的卡片编号并排序；卡片和技能包各按更新时间从新到旧，不含文件内容或其他成员的安装记录 |
+| `GET /api/catalog` | `{"cards":[{"key":"卡片编号","listings":[...],"ratings":[...],"installs":0}],"my_installs":[...],"packs":[...]}`；`installs` 为仍在成员名单中、上报装有此卡片且没有上架此卡片的人数（非负整数），`my_installs` 只含请求者本人记录中仍在目录里的卡片编号并排序；卡片和技能包各按更新时间从新到旧，不含文件内容或其他成员的安装记录；新版分享站另有 `deliverables`：成品卡片列表（编号、上架人、名字、版本、说明、技能、文件数、大小、是否有配方、更新时间），不含文件和配方原文，旧看板忽略这一项 |
 | `PUT /api/installs/me` | `{"keys":["卡片编号",...]}`；必须是文字列表，去重后只保留当前目录中存在且不是本人上架的卡片，整份替换本人记录，空列表删除本人条目；返回 `{"keys":[保留的编号，排序]}`，不存在或已下架的编号静默丢弃 |
 | `PUT /api/listings/me` | `{"listings":[...],"packs":[...]}`；整批上架或替换本人的同名技能，可选的 `packs` 整体替换本人的技能包，和上架在同一次保存中生效；不带 `packs` 保留原包。返回每项的名称、卡片编号、时间及文件版本 |
 | `PUT /api/packs/me` | `{"packs":[{"id":"acme","title":"Acme 技能包","skills":["acme-one","acme-two"]}]}`；整体替换本人的技能包，空列表全部拆开，不改卡片上架时间；返回 `{"packs":[...]}`，每包含 `key`、`id`、`member`、`title`、可选 `note`、`skills`、按相同顺序生成的 `cards` 和 `updated_at`；编号为 `pack:<成员编号>:<包编号>`，未变的包保留原时间 |
@@ -187,6 +189,11 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 | `GET /api/packages/<成员编号>/<技能名>?version=<版本>` | 读取指定上架的最新文件；无文件或已下架返回 `404`，已换成其他版本返回 `409`；也可省略版本参数 |
 | `PUT /api/ratings` | `{"key":"卡片编号","stars":5,"text":"示例评价"}`；一人一条，可再次上传替换 |
 | `DELETE /api/ratings` | `{"key":"卡片编号"}`；删除自己的评价，没有评价返回 `404` |
+| `PUT /api/blobs/me/<内容编号>` | 请求体是一个成品文件的原始内容（`Content-Type: application/octet-stream`），内容编号是它的 SHA-256；编号对不上返回 `400`，超过 50 MB 返回 `413` |
+| `PUT /api/deliverables/me/<成品编号>` | `{"title":"成品名字","version":"v1","summary":"一句话说明","skills":["技能名"],"recipe":"复刻配方","files":{"index.html":{"sha256":"…","size":123}}}`；整份替换本人的同名成品。首页必须是 `index.html`；还有文件没上传时返回 `409` 和 `{"missing":["内容编号",…]}`，补传后再提交一次。每份最多 2,000 个文件、合计 200 MB，每人最多 50 份 |
+| `DELETE /api/deliverables/me/<成品编号>` | 下架本人的成品，没人再用的文件一起删除；没有这份成品返回 `404` |
+| `GET /api/deliverables/<成员编号>/<成品编号>` | 成品的名字、版本、说明、技能、复刻配方、文件数和大小 |
+| `GET /api/deliverables/<成员编号>/<成品编号>/<文件位置>` | 成品里的一个文件，按扩展名给出类型并加 `X-Content-Type-Options: nosniff`；支持单段 `Range` 请求（视频播放和拖动要用） |
 
 第一期的 `/api/shares*` 接口一律返回 `404`。
 

@@ -129,7 +129,7 @@ if (storeGithubShelfHtml() !== '') fail('名单为空时不该显示这一排');
         # 空状态、技能少、正常三处都要接在后面；搜索、选分组、看「我的上架」和读取中不显示。
         shelves = extract_function(source, 'function renderStoreShelves(')
         self.assertIn("+ (storeBrowsing() ? storeGithubShelfHtml() : '')", shelves)
-        self.assertIn('box.innerHTML = packShelf + githubShelf;', shelves)
+        self.assertIn('box.innerHTML = deliverableShelf + packShelf + githubShelf;', shelves)
         self.assertIn("}).join('') + githubShelf;", shelves)
         self.assertLess(shelves.index('if (!storeBrowsing())'), shelves.index('const githubShelf'),
                         '要先判断是不是浏览状态，再准备这一排')
