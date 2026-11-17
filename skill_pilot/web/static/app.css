@@ -1832,6 +1832,8 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
   box-shadow: inset 0 0 0 1px var(--line); font-size: var(--fs-tiny); color: var(--ink-2); }
 .tool-install { flex: 2 1 420px; min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
 .tool-install p { margin: 0; }
+.tool-install summary { cursor: pointer; color: var(--ink-2); }
+.tool-install details[open] > * + * { margin-top: var(--sp-2); }
 .tool-cmd { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
 .tool-cmd > .muted { width: 64px; font-size: var(--fs-small); }
 .tool-cmd code { flex: 1 1 240px; min-width: 0; overflow-x: auto; white-space: nowrap; background: var(--panel-soft); padding: 6px 10px; border-radius: 8px; }

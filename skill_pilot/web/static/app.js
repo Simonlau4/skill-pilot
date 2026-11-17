@@ -4270,17 +4270,24 @@ function mdHtml(source) {
 
 let dd = null;   // 正在看的成品：卡片、演示地址、配方、拆解、当前标签和位置、工具检查结果
 
+function toolStatus(tool, checked) {
+  if (!tool.check) return '需要账号或人工确认';
+  if (checked?.[tool.check] === true) return '已检测到';
+  if (checked?.[tool.check] === false) return '未检测到';
+  return '尚未检查';
+}
+
 function ddItemStatus(item) {
   if (item.kind === 'skill') {
     const listed = dd?.row.skills.find(skill => skill.name === item.id);
     const installed = listed ? listed.installed : (state.table?.skills || []).some(skill => skill.name === item.id);
     return installed ? '你的电脑：已安装' : '你的电脑：未安装';
   }
-  if (item.kind === 'tool') return !item.check ? '需要账号或人工确认' : dd?.tools[item.check] ? '本机：有' : '本机：没有';
+  if (item.kind === 'tool') return toolStatus(item, dd?.tools);
   return '原料';
 }
 
-/* 只查本机有没有这些命令；按接口上限分批，结果合在一起。 */
+/* 检查常用命令入口；按接口上限分批，结果合在一起。 */
 async function checkTools(names) {
   const found = {};
   for (let start = 0; start < names.length; start += TOOL_CHECK_BATCH)
@@ -4424,7 +4431,7 @@ function ddRecipeHtml() {
         <span class="mono">${escape(skill.name)}</span><span class="muted">${skill.installed ? '已安装' : skill.in_store ? '未安装，可在团队页安装' : '未安装，团队商店里没有，见配方'}</span></li>`).join('')}</ul>
       ${tools.length ? `<p>工具</p><ul class="dd-tool-list">${tools.map(tool => `<li><b>${escape(tool.name)}</b>：${escape(ddItemStatus(tool))}${
         tool.without ? `；没有的话：${escape(tool.without)}` : ''}</li>`).join('')}</ul>
-      <button class="link-btn" type="button" data-dd-tools>去工具页看怎么装</button>` : ''}
+      <button class="link-btn" type="button" data-dd-tools>查看工具检测和安装说明</button>` : ''}
       <h3>交给 Agent 开工</h3>
       <p class="muted">复制下面这段（含完整配方、要装的技能和工具），发给 Agent；把方括号换成你的品牌。</p>
       <pre class="dd-command">${escape(command)}</pre>
@@ -4469,15 +4476,17 @@ $('deliverable-dialog-body').addEventListener('click', async event => {
   renderDeliverable();
 });
 
-/* 工具页：汇总团队成品拆解里写到的工具；只查本机有没有，不替用户安装。 */
+/* 工具页：汇总团队成品拆解里写到的工具；检查命令入口，不替用户安装。 */
 const toolsView = {rows: null, checked: {}, checkedAt: null, missingOnly: false, loading: false, error: ''};
-const toolPresent = tool => tool.check ? toolsView.checked[tool.check] === true : null;
+const toolPresent = tool => tool.check && typeof toolsView.checked[tool.check] === 'boolean' ? toolsView.checked[tool.check] : null;
 
 async function enterTools() {
   renderTools();
   if (toolsView.loading) return;
   toolsView.loading = true;
   toolsView.error = '';
+  toolsView.checked = {};
+  toolsView.checkedAt = null;
   renderTools();
   try {
     if (!state.store) await loadStore({syncQueue: false});
@@ -4515,7 +4524,7 @@ function renderTools() {
   const rows = toolsView.rows || [];
   const missing = rows.filter(tool => toolPresent(tool) === false);
   renderButtons($('tools-filter'), `<button class="seg" type="button" data-tools-filter="all" aria-pressed="${!toolsView.missingOnly}">全部<span class="n">${number(rows.length)}</span></button>
-    <button class="seg" type="button" data-tools-filter="missing" aria-pressed="${toolsView.missingOnly}">本机缺的<span class="n">${number(missing.length)}</span></button>`, 'data-tools-filter');
+    <button class="seg" type="button" data-tools-filter="missing" aria-pressed="${toolsView.missingOnly}">未检测到<span class="n">${number(missing.length)}</span></button>`, 'data-tools-filter');
   $('tools-note').textContent = toolsView.checkedAt ? `上次检查：${toolsView.checkedAt.toLocaleTimeString('zh-CN')} · 来源：团队成品写明的工具` : '';
   $('tools-recheck').disabled = toolsView.loading;
   const list = $('tools-list');
@@ -4523,20 +4532,20 @@ function renderTools() {
   if (toolsView.error) { list.innerHTML = `<p class="row-note is-error" role="alert">${escape(toolsView.error)}</p>`; return; }
   const shown = toolsView.missingOnly ? missing : rows;
   if (!shown.length) {
-    list.innerHTML = `<div class="empty">${emptyInner('jobs', rows.length ? '本机不缺这些工具' : '团队成品里还没写明用到的工具')}</div>`;
+    list.innerHTML = `<div class="empty">${emptyInner('jobs', rows.length ? '没有未检测到的工具' : '团队成品里还没写明用到的工具')}</div>`;
     return;
   }
   list.innerHTML = shown.map(tool => {
     const have = toolPresent(tool);
+    const install = toolCommandHtml('Mac', tool.mac) + toolCommandHtml('Windows', tool.win) +
+      (tool.without ? `<p class="muted">没有的话：${escape(tool.without)}</p>` : '');
     return `<article class="tool-row">
       <div class="tool-main">
-        <div class="tool-name"><h2>${escape(tool.name)}</h2><span class="tag ${have ? 'tag-ok' : have === false ? 'tag-warn' : 'tag-quiet'}">${
-          have === null ? '需要账号或人工确认' : have ? '本机有' : '本机没有'}</span></div>
+        <div class="tool-name"><h2>${escape(tool.name)}</h2><span class="tag ${have ? 'tag-ok' : have === false ? 'tag-warn' : 'tag-quiet'}">${toolStatus(tool, toolsView.checked)}</span></div>
         ${tool.summary ? `<p>${escape(tool.summary)}</p>` : ''}
         <div class="tool-users">${tool.users.map(user => `<span class="chip">${escape(user)}</span>`).join('')}</div>
       </div>
-      <div class="tool-install">${toolCommandHtml('Mac', tool.mac)}${toolCommandHtml('Windows', tool.win)}
-        ${tool.without ? `<p class="muted">没有的话：${escape(tool.without)}</p>` : ''}</div>
+      <div class="tool-install">${install ? have === true ? `<details><summary>查看成品提供的安装说明</summary>${install}</details>` : install : ''}</div>
     </article>`;
   }).join('');
 }

@@ -28,6 +28,7 @@ from ..store import apply, backups, guard, preview, restore, target_home
 from .. import diagnostics, operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
+from ..environment import tool_environment
 from . import runtime
 
 STATIC = Path(__file__).parent / "static"
@@ -1230,13 +1231,18 @@ class Handler(BaseHTTPRequestHandler):
             key = self.server.deliverable_key(match[1], match[2])
             self.reply(200, {**detail, 'base_url': f'/d/{key}/{match[1]}/{match[2]}/f/'})
         elif path == '/api/tools/check':
-            # Looks a command up on PATH only; nothing is run.
+            # Find known command entry points, including desktop installs; never run them.
             names = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('names', [''])[0].split(',')
             if (not 1 <= len(names) <= 30 or
                     any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]{0,63}', name) for name in names)):
                 self.reply(400, {'error': '工具名只能用字母、数字、点、加号、横线或下划线。'})
                 return
-            self.reply(200, {name: shutil.which(name) is not None for name in names})
+            tool_path = tool_environment(self.server.home)['PATH']
+            found = {}
+            for name in names:
+                candidates = ('playwright', 'playwright-cli') if name == 'playwright' else (name,)
+                found[name] = any(shutil.which(candidate, path=tool_path) is not None for candidate in candidates)
+            self.reply(200, found)
         elif path == '/api/jobs':
             self.reply(200, self.server.jobs_status())
         elif path == '/api/team/github/digests':
