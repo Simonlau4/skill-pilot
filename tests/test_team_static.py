@@ -17,6 +17,71 @@ def block(source, signature):
 
 
 class TeamStaticTests(unittest.TestCase):
+    def test_one_click_publish_update_scope_progress_readonly_and_submission(self):
+        source = (STATIC / 'app.js').read_text()
+        html = (STATIC / 'index.html').read_text()
+        self.assertIn('id="store-update-all"', html)
+        script = r'''
+const assert = require('assert');
+const caption = {};
+const button = {hidden: false, disabled: false, querySelector: () => caption};
+const $ = () => button;
+const state = {storeMine: false, team: {member: {}}, jobs: []};
+let writable = true, blocked = false, storeUpdateSubmitting = false;
+let storeCandidates = [{listed: true, changed: true}, {listed: true, changed: false}, {listed: false, changed: true}];
+const teamCanWrite = () => writable;
+const jobsBlocked = () => blocked;
+const latestActiveJob = predicate => state.jobs.find(predicate);
+const number = n => String(n);
+let calls = 0, finish, readFinish, opened = 0, applied, notice, jobsReadSequence = 0;
+let api = (url, body) => {
+  if (url === '/api/jobs') return new Promise(resolve => { readFinish = resolve; });
+  assert.equal(url, '/api/team/listings/update');
+  assert.deepEqual(body, {});
+  calls++;
+  return new Promise(resolve => { finish = resolve; });
+};
+const applyJobs = result => { applied = result; };
+const toast = result => { notice = result; };
+const jobsHasActive = () => false;
+const scheduleJobsPoll = () => {};
+const stopJobsPolling = () => {};
+const openJobsPanel = () => { opened++; };
+''' + '\n'.join(block(source, signature) for signature in (
+    'function renderStoreUpdateButton()', 'async function updateStoreListings()',
+    'function readJobs({force = false} = {})')) + r'''
+(async () => {
+  renderStoreUpdateButton();
+  assert.equal(button.hidden, true);
+  state.storeMine = true;
+  renderStoreUpdateButton();
+  assert.equal(button.hidden, false);
+  assert.equal(caption.textContent, '一键更新 1');
+  writable = false; renderStoreUpdateButton(); assert.equal(button.disabled, true);
+  writable = true; blocked = true; renderStoreUpdateButton(); assert.equal(button.disabled, true);
+  blocked = false; state.jobs = [{kind: 'team_publish'}];
+  renderStoreUpdateButton(); assert.equal(button.disabled, true); assert.equal(caption.textContent, '更新中…');
+  state.jobs = []; renderStoreUpdateButton();
+  const staleRead = readJobs();
+  const pending = updateStoreListings();
+  assert.equal(button.disabled, true);
+  await updateStoreListings(); assert.equal(calls, 1);
+  finish({queued: 1, message: '已加入 1 个上架更新。', items: []});
+  await pending;
+  readFinish({queued: 0, items: []});
+  await staleRead;
+  assert.equal(applied.queued, 1); assert.equal(opened, 1);
+  assert.equal(button.disabled, false);
+  api = async () => { throw new Error('无法连接分享站'); };
+  await updateStoreListings();
+  assert.equal(notice.text, '无法连接分享站'); assert.equal(button.disabled, false);
+  storeCandidates = []; renderStoreUpdateButton();
+  assert.equal(caption.textContent, '一键更新'); assert.equal(button.disabled, false);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_store_page_parts_exist(self):
         html = (STATIC / 'index.html').read_text()
         for marker in ('id="page-team"', 'id="block-team"', 'data-block="team"', 'id="store-publish-dialog"',
