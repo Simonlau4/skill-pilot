@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,30 @@ class FeedbackTests(unittest.TestCase):
         backup = json.loads((self.data / 'feedback.json').read_text())[0]
         self.assertEqual(backup['member_id'], self.member['id'])
         self.assertEqual(backup['state'], 'sent')
+
+    def test_connection_failure_context_survives_preview_and_hub_forwarding(self):
+        labels.save_settings(self.home, {'provider': 'deepseek', 'base_url': 'https://api.deepseek.com',
+                                         'model': 'fixture', 'api_key': 'fixture-private-key'})
+        certificate = ssl.SSLCertVerificationError('certificate rejected')
+        certificate.verify_code = 19
+        certificate.verify_message = 'self-signed certificate in certificate chain'
+        with patch('skill_pilot.labels.urllib.request.OpenerDirector.open',
+                   side_effect=urllib.error.URLError(certificate)):
+            result = labels.test(self.home)
+        prepared = self.preview(error_id=result['error_id'])
+        self.assertIn('DeepSeek 官方接口', prepared['payload']['detail'])
+        self.assertEqual(prepared['payload']['user_message'], result['message'])
+        with patch.object(feedback, 'forward') as forward:
+            status, submitted = self.request('/api/diagnostics/submit', {'ticket': prepared['ticket']})
+        self.assertEqual(status, 200)
+        self.assertTrue(submitted['submitted'])
+        payload = forward.call_args.args[1]
+        self.assertIn('证书校验编号：19', payload['detail'])
+        self.assertIn('经过步骤', payload['detail'])
+        self.assertIn('已用时间', payload['detail'])
+        self.assertNotIn('fixture-private-key', json.dumps(payload))
+        self.assertEqual(payload['error_id'], result['error_id'])
+        self.assertEqual(payload['app_version'], ENVIRONMENT['app_version'])
 
     def test_hub_auth_whitelist_size_controls_and_forged_identity(self):
         data = self.preview()['payload'] | {'reporter': '伪造', 'member_id': 'fake', 'unknown': 'secret',

@@ -63,7 +63,9 @@ def git(project, *arguments, **options):
             else:
                 reason = '当前操作失败，请查看本机更新日志中的详细原因'
             retry = '，自动重试一次后仍未完成' if attempt else ''
-            raise ValueError(f'SP {step}没有完成：{reason}{retry}。') from error
+            failure = ValueError(f'SP {step}没有完成：{reason}{retry}。')
+            failure.diagnostic_detail = f'程序升级现场\n失败步骤：{step}\n原因：{reason}\n尝试次数：{attempt + 1}'
+            raise failure from error
 
 
 from .redaction import _abbreviate_home, _hide_paths_outside_home, hide_credentials
@@ -72,7 +74,8 @@ from .redaction import _abbreviate_home, _hide_paths_outside_home, hide_credenti
 def record_failure(home, action, error):
     """Keep failure diagnostics outside the reversible skill-operation history."""
     from . import diagnostics
-    captured = diagnostics.record(home, 'self_update', action, error, '程序升级没有完成，请重试。')
+    message = str(error) if isinstance(getattr(error, 'diagnostic_detail', None), str) else '程序升级没有完成，请重试。'
+    captured = diagnostics.record(home, 'self_update', action, error, message)
     home = Path(home).resolve()
     if not write_allowed(home):
         return captured
@@ -87,7 +90,8 @@ def record_failure(home, action, error):
     detail = _hide_paths_outside_home(detail)
     command = getattr(cause, 'cmd', [])
     step = command[command.index('-C') + 2] if isinstance(command, list) and '-C' in command else action
-    record = {'time': datetime.now(timezone.utc).isoformat(), 'action': action, 'step': step,
+    record = {'time': datetime.now(timezone.utc).isoformat(), 'error_id': captured.get('error_id', ''),
+              'action': action, 'step': step,
               'error_type': type(cause).__name__, 'returncode': getattr(cause, 'returncode', None),
               'timeout': getattr(cause, 'timeout', None), 'detail': detail[:4000]}
     try:

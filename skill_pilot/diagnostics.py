@@ -11,6 +11,7 @@ import threading
 import traceback
 import tomllib
 import uuid
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,7 @@ MAX_RECORDS = 200
 MAX_BYTES = 1024 * 1024
 LOCK = threading.RLock()
 SOURCES = {'startup', 'backend', 'job', 'self_update', 'frontend'}
+SNAPSHOT_FIELDS = ('os', 'architecture', 'python_version', 'install_mode', 'app_version')
 
 
 @contextmanager
@@ -55,6 +57,13 @@ def sanitize(value, home, limit=6000):
                 secrets_in(item, name)
         elif isinstance(value, str) and value and re.search(r'key|token|secret|password|url|name', key, re.I):
             hidden.add(value)
+            if re.search(r'url', key, re.I):
+                try:
+                    address = urllib.parse.urlsplit(value)
+                    if address.hostname:
+                        hidden.add(address.hostname)
+                except ValueError:
+                    pass
     for name in ('settings.json', 'team.json'):
         secrets_in(read_json(private / name))
     registry = read_json(private / 'registry.json')
@@ -135,8 +144,14 @@ def recent(home, *, sanitize_records=True):
             row = json.loads(line)
             if not isinstance(row, dict) or not re.fullmatch(r'[a-f0-9]{32}', row.get('error_id', '')):
                 continue
-            rows.append({k: (sanitize(row.get(k, ''), home) if sanitize_records else row.get(k, '')) for k in
-                         ('error_id', 'fingerprint', 'time', 'source', 'action', 'user_message', 'error_type', 'detail')})
+            clean = {k: (sanitize(row.get(k, ''), home) if sanitize_records else row.get(k, '')) for k in
+                     ('error_id', 'fingerprint', 'time', 'source', 'action', 'user_message', 'error_type', 'detail')}
+            snapshot = row.get('environment')
+            if isinstance(snapshot, dict):
+                clean['environment'] = {k: (sanitize(snapshot[k], home, 160) if sanitize_records else snapshot[k][:160])
+                                        for k in SNAPSHOT_FIELDS
+                                        if isinstance(snapshot.get(k), str)}
+            rows.append(clean)
         except (ValueError, TypeError):
             continue
     return rows[-MAX_RECORDS:][::-1]
@@ -164,7 +179,12 @@ def record(home, source, action, error, user_message='操作没有完成，请�
         # Subprocess output and traceback source lines may contain entire skill bodies.
         if isinstance(cause, subprocess.SubprocessError):
             detail = kind + ': ' + str(getattr(cause, 'returncode', '执行超时'))
-        detail = sanitize(detail, home, 4500)
+        contextual = next((e for e in chain if isinstance(getattr(e, 'diagnostic_detail', None), str)), None)
+        context = contextual.diagnostic_detail if contextual is not None else ''
+        if context and user_message == '操作没有完成，请重试。':
+            user_message = str(contextual)
+        detail = ((sanitize(context, home, 2200) + '\n\n' + sanitize(detail, home, 2500))
+                  if context else sanitize(detail, home, 4500))
         if source == 'frontend' and location != 'unknown':
             detail += '\n' + location
         row = {'error_id': uuid.uuid4().hex,
@@ -172,6 +192,13 @@ def record(home, source, action, error, user_message='操作没有完成，请�
                'time': datetime.now(timezone.utc).isoformat(), 'source': source, 'action': action,
                'user_message': sanitize(user_message, home, 400), 'error_type': kind,
                'detail': detail + ('\n' + '\n'.join(frames) if frames else '')}
+        # A late feedback submission must not replace the runtime at failure time.
+        try:
+            snapshot = environment(home, runtime_only=True)
+            row['environment'] = {k: sanitize(snapshot[k], home, 160) for k in SNAPSHOT_FIELDS
+                                  if isinstance(snapshot.get(k), str)}
+        except Exception:
+            pass  # Keep the original error even when its environment cannot be read.
         if write_allowed(home):
             path = guard(home / '.skill-pilot/logs/errors.jsonl', home)
             with LOCK, log_lock(path, home):
@@ -197,7 +224,7 @@ def failure(home, source, action, error, message='操作没有完成，请重试
     return {'error_id': row['error_id']} if row else {}
 
 
-def environment(home, project=PROJECT):
+def environment(home, project=PROJECT, *, runtime_only=False):
     from .environment import tool_environment
     from .profiles import PROFILES, ADDITIONAL_PROFILES
     home, project = Path(home), Path(project)
@@ -210,7 +237,7 @@ def environment(home, project=PROJECT):
             return result.stdout.strip() if result.returncode == 0 else ''
         except (OSError, subprocess.SubprocessError):
             return ''
-    for name in ('git', 'node', 'npm', 'lark-cli'):
+    for name in (() if runtime_only else ('git', 'node', 'npm', 'lark-cli')):
         executable = shutil.which(name, path=env['PATH'])
         text = output([executable, '--version']) if executable else ''
         version = re.search(r'(?<!\d)\d+\.\d+(?:\.\d+)?(?:[-+][a-zA-Z0-9.]+)?', text)
@@ -218,8 +245,8 @@ def environment(home, project=PROJECT):
     checkout = (project / '.git').exists()
     installation = read_json(project / '.skill-pilot-install.json')
     revision = output(['git', '-C', str(project), 'rev-parse', 'HEAD']) if checkout else installation.get('revision', '')
-    modified = bool(output(['git', '-C', str(project), 'status', '--porcelain', '--untracked-files=no'])) if checkout else None
-    if not checkout and installation.get('files'):
+    modified = bool(output(['git', '-C', str(project), 'status', '--porcelain', '--untracked-files=no'])) if checkout and not runtime_only else None
+    if not runtime_only and not checkout and installation.get('files'):
         from .self_update import bundle_files
         try:
             modified = bundle_files(project) != installation['files']
@@ -228,6 +255,13 @@ def environment(home, project=PROJECT):
     if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{7,64}', revision):
         from .web.runtime import version
         revision = version()
+    os_version = ('macOS ' + platform.mac_ver()[0] if platform.system() == 'Darwin'
+                  else platform.system() + ' ' + platform.release())
+    runtime = {'os': os_version, 'architecture': platform.machine(),
+               'python_version': platform.python_version(), 'install_mode': '源码' if checkout else '压缩包',
+               'app_version': revision[:12] if isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{7,64}', revision) else '未能读取'}
+    if runtime_only:
+        return runtime
     agents = read_json(home / '.skill-pilot/agents.json').get('onboarded', [])
     agents = agents if isinstance(agents, list) else []
     agents = [a for a in agents if isinstance(a, str)]
@@ -235,11 +269,7 @@ def environment(home, project=PROJECT):
     registry = read_json(home / '.skill-pilot/registry.json').get('skills', {})
     registry = registry if isinstance(registry, dict) else {}
     team = read_json(home / '.skill-pilot/team.json')
-    os_version = ('macOS ' + platform.mac_ver()[0] if platform.system() == 'Darwin'
-                  else platform.system() + ' ' + platform.release())
-    return {'os': os_version, 'architecture': platform.machine(),
-            'python_version': platform.python_version(), 'install_mode': '源码' if checkout else '压缩包',
-            'app_version': revision[:12] if isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{7,64}', revision) else '未能读取',
+    return {**runtime,
             'modified': modified, 'tools': tools, 'agent_count': len(agents),
             'agent_types': sorted({known.get(a, '自定义 Agent') for a in agents}),
             'skill_count': len(registry), 'read_only': not write_allowed(home),
@@ -253,5 +283,6 @@ def bundle(home=None, error_id=None, note=''):
         rows = [row for row in rows if row['error_id'] == error_id]
         if not rows:
             raise ValueError('这条错误记录已不在本机，请重新选择或导出当前诊断。')
-    report = {'environment': environment(home), 'errors': rows[:20], 'note': sanitize(note, home, 1500)}
+    report = {'environment': environment(home), 'environment_captured_at': datetime.now(timezone.utc).isoformat(),
+              'errors': rows[:20], 'note': sanitize(note, home, 1500)}
     return {'report': report, 'text': json.dumps(report, ensure_ascii=False, indent=2)}

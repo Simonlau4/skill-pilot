@@ -31,8 +31,14 @@ def clean(data):
 def envelope(report):
     env = report['environment']
     row = next(iter(report['errors']), {})
+    snapshot = row.get('environment', {})
+    runtime = {**env, **snapshot}
+    timing = ('系统、Python 和程序版本采集于出错时。' if snapshot else
+              '此记录未保存出错时的版本信息，版本取自本次反馈。') if row else '主动反馈，环境取自本次反馈。'
+    timing += ' 工具与助手摘要采集于本次反馈：' + report.get('environment_captured_at', '未记录时间')
     return clean({**row, 'occurred_at': row.get('time', ''),
-                  **{k: env.get(k, '') for k in ('app_version', 'install_mode', 'os', 'python_version')},
+                  **{k: runtime.get(k, '') for k in ('app_version', 'install_mode', 'os', 'python_version')},
+                  'detail': timing + '\n\n' + row.get('detail', '') if row else '',
                   'tools_summary': '; '.join(f"{name}: {tool['version'] if tool['available'] else '未安装'}"
                                             for name, tool in env['tools'].items()),
                   'agents_summary': ', '.join(env['agent_types']) + f"；技能数：{env['skill_count']}",
