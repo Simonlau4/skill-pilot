@@ -4200,6 +4200,7 @@ function deliverableCardHtml(row) {
 const KIND_LABEL = {skill: '技能', tool: '工具', material: '原料'};
 const KIND_TAG = {skill: 'tag-ok', tool: 'tag-warn', material: 'tag-quiet'};
 const COMMAND_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+const TOOL_CHECK_BATCH = 30;   // /api/tools/check 一次最多查这么多个名字
 const clip = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
 
 /* 拆解数据是同事上传的文件：只取认得的字段、限制长度，显示时一律转义。 */
@@ -4272,6 +4273,14 @@ function ddItemStatus(item) {
   return '原料';
 }
 
+/* 只查本机有没有这些命令；按接口上限分批，结果合在一起。 */
+async function checkTools(names) {
+  const found = {};
+  for (let start = 0; start < names.length; start += TOOL_CHECK_BATCH)
+    Object.assign(found, await api('/api/tools/check?names=' + encodeURIComponent(names.slice(start, start + TOOL_CHECK_BATCH).join(','))));
+  return found;
+}
+
 async function openDeliverable(key, tab) {
   const row = (state.store?.deliverables || []).find(item => item.key === key);
   if (!row) return;
@@ -4292,7 +4301,7 @@ async function openDeliverable(key, tab) {
       current.teardown = cleanTeardown(await response.json());
     }
     const names = [...new Set([...(current.teardown?.items.values() || [])].map(item => item.check).filter(Boolean))];
-    if (names.length) current.tools = await api('/api/tools/check?names=' + encodeURIComponent(names.join(',')));
+    current.tools = await checkTools(names);
   } catch (error) {
     current.error = error.message || '没能读取成品，请稍后重试。';
   }
@@ -4375,23 +4384,42 @@ function ddItemsHtml() {
   </div>`;
 }
 
+/* 交给 Agent 的开工指令自带配方、技能和工具：新的 Agent 不用另装什么技能，也不用回看板找。 */
+function ddCommand() {
+  const row = dd.row;
+  const tools = [...(dd.teardown?.items.values() || [])].filter(item => item.kind === 'tool');
+  const lines = [`照着团队成品「${row.title}」${row.version ? `（${row.version}）` : ''}，给 [品牌名] 做一份同样的东西。`,
+    '开工前先逐项检查下面的技能和工具，缺哪个先告诉我，补齐了再开工。', ''];
+  if (row.skills.length) {
+    lines.push('需要的技能：', ...row.skills.map(skill => `- ${skill.name}：${skill.installed ? '已安装'
+      : skill.in_store ? `还没装，先在 Skill Pilot 团队页安装，或运行 skill-pilot team install ${skill.name}`
+      : '还没装，团队商店里也没有，按下面配方里写的方式安装'}`), '');
+  }
+  if (tools.length) {
+    lines.push('需要的工具：', ...tools.map(tool => `- ${tool.name}（${ddItemStatus(tool)}）${tool.mac ? `；Mac 装法：${tool.mac}` : ''}${
+      tool.win ? `；Windows 装法：${tool.win}` : ''}${tool.without ? `；没有的话：${tool.without}` : ''}`), '');
+  }
+  lines.push(...(dd.recipe ? ['配方：', dd.recipe.trim()] : ['上架人没有附配方，照成品本身的结构和内容来做。']));
+  return lines.join('\n');
+}
+
 function ddRecipeHtml() {
   const row = dd.row;
   const have = row.skills.filter(skill => skill.installed).length;
   const tools = [...(dd.teardown?.items.values() || [])].filter(item => item.kind === 'tool');
-  const command = `用 deliverables-skill-recipes，照着「${row.title}」给 [品牌名] 做一份。开工前先检查缺什么，缺了先告诉我。`;
+  const command = ddCommand();
   return `<div class="dd-recipe">
     <article class="dd-md">${dd.recipe ? mdHtml(dd.recipe) : '<p class="muted">上架人没有附复刻配方。</p>'}</article>
     <aside class="dd-check">
       <h3>开工前检查</h3>
       <p>技能：已安装 ${number(have)} 个${row.skills.length > have ? `，缺 ${number(row.skills.length - have)} 个` : ''}</p>
       <ul class="dd-skill-list">${row.skills.map(skill => `<li>${skill.installed ? icon('check-circle') : '<span class="deliverable-dot" aria-hidden="true"></span>'}
-        <span class="mono">${escape(skill.name)}</span><span class="muted">${skill.installed ? '已安装' : '未安装，可在团队页安装'}</span></li>`).join('')}</ul>
+        <span class="mono">${escape(skill.name)}</span><span class="muted">${skill.installed ? '已安装' : skill.in_store ? '未安装，可在团队页安装' : '未安装，团队商店里没有，见配方'}</span></li>`).join('')}</ul>
       ${tools.length ? `<p>工具</p><ul class="dd-tool-list">${tools.map(tool => `<li><b>${escape(tool.name)}</b>：${escape(ddItemStatus(tool))}${
         tool.without ? `；没有的话：${escape(tool.without)}` : ''}</li>`).join('')}</ul>
       <button class="link-btn" type="button" data-dd-tools>去工具页看怎么装</button>` : ''}
       <h3>交给 Agent 开工</h3>
-      <p class="muted">复制下面这句，发给装好技能的 Agent；把方括号换成你的品牌。</p>
+      <p class="muted">复制下面这段（含完整配方、要装的技能和工具），发给 Agent；把方括号换成你的品牌。</p>
       <pre class="dd-command">${escape(command)}</pre>
       <button class="btn" type="button" data-dd-copy>复制开工指令</button>
     </aside>
@@ -4461,7 +4489,7 @@ async function enterTools() {
     }
     toolsView.rows = [...merged.values()];
     const names = [...new Set(toolsView.rows.map(tool => tool.check).filter(Boolean))];
-    toolsView.checked = names.length ? await api('/api/tools/check?names=' + encodeURIComponent(names.join(','))) : {};
+    toolsView.checked = await checkTools(names);
     toolsView.checkedAt = new Date();
   } catch (error) {
     toolsView.error = error.message || '没能读取工具，请稍后重试。';

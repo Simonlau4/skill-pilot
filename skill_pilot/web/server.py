@@ -38,6 +38,11 @@ PROGRAM_AUTO_CHECK_INTERVAL = 600
 OPEN_PAGE_TIMEOUT = 24 * 3600
 ACTIVE_JOBS = {'waiting', 'running'}
 TEAM_JOBS = {'team_install', 'github_install'}
+DEMO_PAGE = ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+             '<meta name="viewport" content="width=device-width, initial-scale=1"><title>成品演示</title>'
+             '<style>html,body{margin:0;height:100%;background:#fff}iframe{display:block;width:100%;height:100%;border:0}</style>'
+             '</head><body><iframe src="f/index.html" title="成品演示" sandbox="allow-scripts" '
+             'allow="fullscreen; autoplay" allowfullscreen></iframe></body></html>')
 
 
 class JobInputError(ValueError):
@@ -1053,14 +1058,28 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def serve_deliverable(self, path):
-        """Relay one demo file from the hub. The page runs sandboxed: its scripts get an opaque origin,
-        so they cannot read this dashboard, its token or other tabs, and cannot reach other sites."""
+        """A demo runs in a sandboxed frame inside a page of ours. The sandbox gives its scripts an opaque
+        origin, so they cannot read this dashboard, its token or other tabs; the frame page only lets the
+        frame load this demo's own files, so the demo cannot navigate itself to another site either."""
         if self.headers.get("Host") != self.server.origin.removeprefix("http://"):
             self.reply(403, {"error": "此页面只允许本机本次打开的浏览器访问。"})
             return
-        match = re.fullmatch(r'/d/([0-9a-f]{32})/([0-9a-f]{32})/(' + team.team_hub.DELIVERABLE_ID + r')/(.+)', path)
+        match = re.fullmatch(r'/d/([0-9a-f]{32})/([0-9a-f]{32})/(' + team.team_hub.DELIVERABLE_ID + r')/(?:f/(.+))?', path)
         if not match or not secrets.compare_digest(match[1], self.server.deliverable_key(match[2], match[3])):
             self.reply(404, {"error": "没有这个页面。"})
+            return
+        frame = f'/d/{match[1]}/{match[2]}/{match[3]}/'
+        files = self.server.origin + frame + 'f/'
+        if match[4] is None:
+            self.send_demo_page(files)
+            return
+        if self.headers.get('Sec-Fetch-Dest') == 'document':
+            # Opened on its own as a page, a demo file would run outside the frame: send it back in.
+            self.send_response(303)
+            self.send_header('Location', frame)
+            self.send_header('Content-Length', '0')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
             return
         failure = None
         try:
@@ -1074,7 +1093,6 @@ class Handler(BaseHTTPRequestHandler):
             # Outside the except block: a missing asset is a page problem, not a dashboard failure to log.
             self.reply(failure[0], {'error': failure[1]})
             return
-        origin = self.server.origin
         with response:
             self.send_response(response.status)
             for name in ('Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges'):
@@ -1083,14 +1101,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('X-DNS-Prefetch-Control', 'off')
             # Fonts and module scripts from the sandboxed page arrive with Origin "null"; the
             # unguessable per-session address is what protects these files.
             self.send_header('Access-Control-Allow-Origin', '*')
+            # Everything, nested frames included, stays within this demo's own files.
             self.send_header('Content-Security-Policy',
-                             f"sandbox allow-scripts; default-src {origin} data: blob:; "
-                             f"script-src {origin} 'unsafe-inline'; style-src {origin} 'unsafe-inline'; "
-                             f"img-src {origin} data: blob:; media-src {origin} blob:; font-src {origin} data:; "
-                             f"connect-src {origin}; frame-ancestors 'none'; form-action 'none'; base-uri {origin}")
+                             f"sandbox allow-scripts; default-src {files} data: blob:; "
+                             f"script-src {files} 'unsafe-inline'; style-src {files} 'unsafe-inline'; "
+                             f"img-src {files} data: blob:; media-src {files} blob:; font-src {files} data:; "
+                             f"connect-src {files}; form-action 'none'; base-uri {files}")
             self.end_headers()
             try:
                 while chunk := response.read(1024 * 1024):
@@ -1098,6 +1118,22 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 # Videos are cancelled when scrolled away; a viewer leaving mid-file is normal.
                 self.close_connection = True
+
+    def send_demo_page(self, files):
+        """The tab a demo opens in. Its frame may load only this demo's files: a script, link or refresh
+        that points the demo anywhere else is refused, and the sandbox stops popups, forms and the tab itself."""
+        body = DEMO_PAGE.encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-DNS-Prefetch-Control', 'off')
+        self.send_header('Content-Security-Policy', f"default-src 'none'; style-src 'unsafe-inline'; frame-src {files}; "
+                                                    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
@@ -1146,7 +1182,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取成品，请稍后重试。'})
                 return
             key = self.server.deliverable_key(match[1], match[2])
-            self.reply(200, {**detail, 'base_url': f'/d/{key}/{match[1]}/{match[2]}/'})
+            self.reply(200, {**detail, 'base_url': f'/d/{key}/{match[1]}/{match[2]}/f/'})
         elif path == '/api/tools/check':
             # Looks a command up on PATH only; nothing is run.
             names = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('names', [''])[0].split(',')
@@ -1176,7 +1212,7 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.server.github_digests.catalog(result)
                     for row in result.get('deliverables', []):
                         member, identity = row['member']['id'], row['id']
-                        row['open_url'] = f'/d/{self.server.deliverable_key(member, identity)}/{member}/{identity}/index.html'
+                        row['open_url'] = f'/d/{self.server.deliverable_key(member, identity)}/{member}/{identity}/'
                 self.reply(200, result)
                 if path == '/api/team/catalog':
                     self.server.github_digests.start()

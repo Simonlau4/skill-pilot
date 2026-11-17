@@ -1806,6 +1806,7 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .md-table th { color: var(--muted); font-weight: 600; }
 .md-pre, .dd-command { white-space: pre-wrap; word-break: break-word; font: var(--fs-small)/1.6 var(--font-mono); background: var(--panel-soft);
   padding: var(--sp-3); border-radius: var(--radius-sm); margin: 0; }
+.dd-command { max-height: 320px; overflow: auto; }
 .dd-check { flex: 1 1 340px; max-width: 420px; display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-5);
   background: var(--panel); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
 .dd-check h3 { margin: var(--sp-2) 0 0; font-size: var(--fs-lead); }

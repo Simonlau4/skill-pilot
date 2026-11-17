@@ -126,7 +126,8 @@ def _request(config, path, method='GET', data=None):
     except urllib.error.HTTPError as error:
         status = error.code
         try:
-            payload = json.loads(error.read(team_hub.MAX_PACK_BODY).decode('utf-8'))
+            # A deliverable's first try names every missing file: up to 2000 of them, past 64 KB.
+            payload = json.loads(error.read(team_hub.MAX_MANIFEST_BODY).decode('utf-8'))
             detail = payload.get('error')
         except (ValueError, UnicodeError, AttributeError, HTTPException):
             payload, detail = {}, None
@@ -550,8 +551,10 @@ def catalog(home):
     catalog = {'member': member, 'cards': result, 'packs': packs, 'packs_supported': 'packs' in data,
                'deliverables_supported': 'deliverables' in data}
     local_names = registry['skills'].keys() | registry.get('external_skills', {}).keys()
+    store_names = {listing['name'] for card in cards for listing in card['listings']}
     catalog['deliverables'] = [{**row, 'mine': row['member']['id'] == member['id'],
-                                'skills': [{'name': n, 'installed': n in local_names} for n in row['skills']]}
+                                'skills': [{'name': n, 'installed': n in local_names, 'in_store': n in store_names}
+                                           for n in row['skills']]}
                                for row in data.get('deliverables', [])]
     if 'github' in data:
         listed = {r['source']['repository'].lower() for c in cards for r in c['listings']

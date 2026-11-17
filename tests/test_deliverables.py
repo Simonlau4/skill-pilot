@@ -1,10 +1,13 @@
 """Deliverables: a member uploads a static demo folder; any member can read it back."""
 import hashlib
 import http.client
+import http.server
 import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import unittest
 import urllib.parse
@@ -141,6 +144,20 @@ class DeliverableHubTests(unittest.TestCase):
         self.assertEqual(self.deliverables(), [])
 
 
+def find_browser():
+    """A Chrome-family browser for the real-browser check; the test skips without one."""
+    for name in ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'chrome', 'msedge'):
+        if found := shutil.which(name):
+            return found
+    places = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+              '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+    for variable in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
+        if os.environ.get(variable):
+            places += [os.path.join(os.environ[variable], 'Google', 'Chrome', 'Application', 'chrome.exe'),
+                       os.path.join(os.environ[variable], 'Microsoft', 'Edge', 'Application', 'msedge.exe')]
+    return next((place for place in places if os.path.isfile(place)), None)
+
+
 def get(server, path, headers=None):
     """A plain browser-style request: no session token, the dashboard's own Host header."""
     connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
@@ -187,19 +204,37 @@ class DeliverableDashboardTests(unittest.TestCase):
         self.assertTrue(catalog['deliverables_supported'])
         row = catalog['deliverables'][0]
         self.assertEqual((row['title'], row['summary'], row['file_count'], row['mine']), ('示例成品', '示例说明', 3, False))
-        self.assertEqual(row['skills'], [{'name': 'acme-other', 'installed': True},
-                                         {'name': 'acme-missing', 'installed': False}])
+        self.assertEqual(row['skills'], [{'name': 'acme-other', 'installed': True, 'in_store': False},
+                                         {'name': 'acme-missing', 'installed': False, 'in_store': False}])
+        self.Team.publish(self, ('acme-other',))  # A skill on the team store is one a colleague can install from there.
+        self.assertEqual([skill['in_store'] for skill in self.ok(self.b, '/api/team/catalog')['deliverables'][0]['skills']],
+                         [True, False])
         opened = {'url': row['open_url']}
-        self.assertTrue(opened['url'].endswith('/demo-one/index.html'), opened)
+        self.assertTrue(opened['url'].endswith('/demo-one/'), opened)
         self.assertNotIn(self.b.token, opened['url'])
+        base = opened['url'] + 'f/'
+        # The tab holds a frame page of ours; the demo runs inside it and may only load its own files.
         status, headers, body = get(self.b, opened['url'])
+        self.assertEqual(status, 200, body)
+        self.assertIn(b'<iframe src="f/index.html"', body)
+        self.assertIn(b'sandbox="allow-scripts"', body)
+        frame = headers['Content-Security-Policy']
+        self.assertIn("default-src 'none'", frame)
+        self.assertIn('frame-src ' + self.b.origin + base + ';', frame)
+        self.assertIn("frame-ancestors 'none'", frame)
+        status, headers, body = get(self.b, base + 'index.html', {'Sec-Fetch-Dest': 'iframe'})
         self.assertEqual((status, body), (200, PAGE), body)
         policy = headers['Content-Security-Policy']
         self.assertIn('sandbox allow-scripts', policy)
         self.assertNotIn('allow-same-origin', policy)
-        self.assertIn("connect-src " + self.b.origin, policy)
+        self.assertIn('connect-src ' + self.b.origin + base + ';', policy)
+        self.assertNotIn(self.b.origin + ' ', policy)
         self.assertEqual(headers['Referrer-Policy'], 'no-referrer')
-        base = opened['url'].removesuffix('index.html')
+        self.assertEqual(headers['X-DNS-Prefetch-Control'], 'off')
+        # Opened on its own as a page, a demo file goes back into the frame instead of running loose.
+        status, headers, _ = get(self.b, base + 'index.html', {'Sec-Fetch-Dest': 'document'})
+        self.assertEqual((status, headers['Location']), (303, opened['url']))
+        self.assertEqual(get(self.b, opened['url'] + 'index.html')[0], 404)
         status, headers, body = get(self.b, base + 'assets/v.mp4', {'Range': 'bytes=0-9'})
         self.assertEqual((status, body, headers['Content-Range']), (206, VIDEO[:10], f'bytes 0-9/{len(VIDEO)}'))
         self.assertEqual(get(self.b, base + 'assets/none.png')[0], 404)
@@ -213,7 +248,19 @@ class DeliverableDashboardTests(unittest.TestCase):
         self.assertEqual(len(self.ok(self.b, '/api/team/catalog')['deliverables']), 1)
         team.remove_deliverable(self.home, 'demo-one', confirmed=True)
         self.assertEqual(self.ok(self.b, '/api/team/catalog')['deliverables'], [])
-        self.assertEqual(get(self.b, opened['url'])[0], 404)
+        self.assertEqual(get(self.b, base + 'index.html', {'Sec-Fetch-Dest': 'iframe'})[0], 404)
+
+    def test_a_first_upload_of_the_most_files_allowed_goes_through(self):
+        # The hub names every missing file on the first try; that list outgrows a 64 KB read past ~1000 files.
+        self.configure()
+        root = self.root / 'Many files'
+        (root / 'parts').mkdir(parents=True)
+        (root / 'index.html').write_bytes(PAGE)
+        for index in range(1, team_hub.MAX_DELIVERABLE_FILES):
+            (root / f'parts/{index:04}.txt').write_text(f'第 {index} 段\n')
+        done = self.publish(root)
+        self.assertEqual((done['uploaded'], done['file_count']), (team_hub.MAX_DELIVERABLE_FILES,) * 2)
+        self.assertEqual(self.ok(self.b, '/api/team/catalog')['deliverables'][0]['file_count'], team_hub.MAX_DELIVERABLE_FILES)
 
     def test_detail_gives_recipe_and_teardown_address_and_tool_check_only_looks(self):
         self.configure()
@@ -225,7 +272,7 @@ class DeliverableDashboardTests(unittest.TestCase):
         self.assertTrue(row['has_teardown'] and row['has_recipe'])
         detail = self.ok(self.b, '/api/team/deliverables/detail?key=' + row['key'])
         self.assertEqual(detail['recipe'], '# 示例配方\n\n- 第一步\n')
-        self.assertEqual(detail['base_url'], row['open_url'].removesuffix('index.html'))
+        self.assertEqual(detail['base_url'], row['open_url'] + 'f/')
         status, _, body = get(self.b, detail['base_url'] + '_teardown/teardown.json')
         self.assertEqual((status, json.loads(body)['version']), (200, 1))
         self.assertEqual(self.request(self.b, '/api/team/deliverables/detail?key=bad')[0], 400)
@@ -246,7 +293,7 @@ class DeliverableDashboardTests(unittest.TestCase):
         root = self.folder()
         (root / 'assets/big.mp4').write_bytes(os.urandom(8 * 1024 * 1024))
         self.publish(root)
-        base = self.ok(self.b, '/api/team/catalog')['deliverables'][0]['open_url'].removesuffix('index.html')
+        base = self.ok(self.b, '/api/team/catalog')['deliverables'][0]['open_url'] + 'f/'
         errors = []
         self.b.handle_error = self.hub.handle_error = lambda request, address: errors.append(address)
         for _ in range(3):
@@ -294,6 +341,82 @@ class DeliverableDashboardTests(unittest.TestCase):
         self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
         self.assertEqual(self.ok(self.b, '/api/team/catalog')['deliverables'], [])
 
+    def test_in_a_real_browser_a_demo_cannot_leave_for_another_site(self):
+        browser = find_browser()
+        if not browser:
+            self.skipTest('这台电脑没有 Chrome 或 Edge，跳过真实浏览器检查。')
+        hits = []
+        class Receiver(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(self.path)
+                self.send_response(204)
+                self.end_headers()
+            do_POST = do_GET
+            def log_message(self, *args):
+                pass
+        receiver = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Receiver)
+        threading.Thread(target=receiver.serve_forever, daemon=True).start()
+        self.addCleanup(receiver.server_close)
+        self.addCleanup(receiver.shutdown)
+        elsewhere = f'http://127.0.0.1:{receiver.server_port}'
+        # Each page fetches "trying.txt" (proof its script ran) right before its one way out; pages that are
+        # refused without being unloaded then fetch "after.txt".
+        attempts = {
+            'stay': f"""fetch("{elsewhere}/fetch?text=1").catch(() => {{}}); new Image().src = "{elsewhere}/image?text=1";
+                document.getElementById("top").click(); document.getElementById("blank").click();
+                window.open("{elsewhere}/open?text=1"); document.getElementById("form").submit();
+                try {{ top.location.href = "{elsewhere}/top?text=1"; }} catch (error) {{}}""",
+            'script': f'location.href = "{elsewhere}/script?text=1";',
+            'link': 'document.getElementById("plain").click();',
+            'refresh': f"""const meta = document.createElement("meta"); meta.httpEquiv = "refresh";
+                meta.content = "0;url={elsewhere}/refresh?text=1"; document.head.append(meta);""",
+        }
+        self.configure()
+        for name, attempt in attempts.items():
+            root = self.root / f'Leaving {name}'
+            root.mkdir()
+            (root / 'trying.txt').write_text('trying')
+            (root / 'after.txt').write_text('after')
+            (root / 'index.html').write_text(f"""<!doctype html><meta charset="utf-8"><title>{name}</title>
+<a id="plain" href="{elsewhere}/link?text=1">plain</a><a id="top" href="{elsewhere}/link-top?text=1" target="_top">top</a>
+<a id="blank" href="{elsewhere}/link-blank?text=1" target="_blank">blank</a>
+<form id="form" action="{elsewhere}/form"><input name="text" value="1"></form>
+<script>fetch("trying.txt").then(() => {{ {attempt}; setTimeout(() => fetch("after.txt"), 300); }});</script>""")
+            team.publish_deliverable(self.home, root, 'leave-' + name, '外跳检查 ' + name, confirmed=True)
+        rows = {row['id']: row for row in self.ok(self.b, '/api/team/catalog')['deliverables']}
+        relayed = []
+        original = team.open_deliverable_file
+        def recording(home, member, identity, path, byte_range):
+            relayed.append(identity + '/' + path)
+            return original(home, member, identity, path, byte_range)
+        expected = {f'leave-{name}/trying.txt' for name in attempts} | {'leave-stay/after.txt'}
+        urls = [elsewhere + '/control'] + [self.b.origin + rows['leave-' + name]['open_url'] for name in attempts]
+        with patch.object(team, 'open_deliverable_file', recording):
+            # Real time, not virtual time: the demo frame runs in a process of its own. Headless
+            # Chrome opens one address per run, so each page gets its own browser.
+            browsing = [subprocess.Popen([browser, '--headless=new', '--disable-gpu', '--no-first-run',
+                                          '--no-default-browser-check', '--no-proxy-server', '--disable-extensions',
+                                          '--disable-background-networking',
+                                          f'--user-data-dir={self.root / f"Browser profile {index}"}', url],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        for index, url in enumerate(urls)]
+            try:
+                deadline = time.monotonic() + 90
+                while time.monotonic() < deadline and not ('/control' in hits and expected <= set(relayed)):
+                    time.sleep(.1)
+                time.sleep(1.5)  # Long enough for any way out to reach the receiver.
+            finally:
+                for process in browsing:
+                    process.terminate()
+                for process in browsing:
+                    try:
+                        process.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+        self.assertIn('/control', hits, '浏览器要能打开接收站，这项检查才有意义')
+        self.assertLessEqual(expected, set(relayed), '演示页的脚本没有全部运行')
+        self.assertEqual([hit for hit in hits if hit != '/favicon.ico'], ['/control'], '演示页不该连到别的网站')
 
 class DeliverableStaticTests(unittest.TestCase):
     def test_team_page_shelf_opens_demos_in_a_separate_tab_and_comes_first(self):
@@ -310,11 +433,11 @@ if (storeDeliverablesShelfHtml() !== '') fail('没有成品时不该显示这一
 state.store.deliverables = [{key: 'deliverable:m:demo', id: 'demo', member: {id: 'm', name: '示例成员'},
   title: '<b>示例成品</b>', version: 'v1', summary: '示例说明', size: 2 * 1048576, updated_at: '2026-11-11T03:28:00Z',
   skills: [{name: 'acme-design', installed: true}, {name: 'acme-data', installed: false}],
-  open_url: '/d/key/m/demo/index.html'}];
+  open_url: '/d/key/m/demo/'}];
 const html = storeDeliverablesShelfHtml();
 if (!html.includes('<h2 id="shelf-deliverables">成品</h2>')) fail('缺少“成品”标题：' + html);
 if (html.includes('<b>示例成品</b>') || !html.includes('&lt;b&gt;')) fail('成品名字要转义：' + html);
-if (!/href="\/d\/key\/m\/demo\/index.html" target="_blank" rel="noopener noreferrer"/.test(html)) fail('演示要在新标签页、断开来源打开：' + html);
+if (!/href="\/d\/key\/m\/demo\/" target="_blank" rel="noopener noreferrer"/.test(html)) fail('演示要在新标签页、断开来源打开：' + html);
 if (!html.includes('已安装 1 个，缺 1 个')) fail('要写本机装了几个、缺几个：' + html);
 if (!html.includes('示例成员 上架 · v1') || !html.includes('2.0 MB')) fail('要写上架人、版本和大小：' + html);
 if (!html.includes('只限团队内部')) fail('要标明只限团队内部');
@@ -332,7 +455,7 @@ if (!html.includes('只限团队内部')) fail('要标明只限团队内部');
         source = (STATIC / 'app.js').read_text()
         functions = '\n'.join(extract_function(source, name) for name in (
             'function cleanTeardown(', 'function mdHtml(', 'function ddItemStatus(', 'function ddScreensHtml(',
-            'function ddItemsHtml(', 'function ddRecipeHtml('))
+            'function ddItemsHtml(', 'function ddCommand(', 'function ddRecipeHtml('))
         helpers = '\n'.join(line for line in source.splitlines() if line.startswith((
             'const escape =', 'const icon =', 'const number =', 'const emptyInner =', 'const KIND_LABEL =', 'const KIND_TAG =',
             'const COMMAND_NAME =', 'const clip =', 'const mdInline =')))
@@ -350,7 +473,8 @@ if ([...teardown.items.keys()].join() !== 'acme-writing,acme-tool') fail('不认
 const mark = teardown.screens[0].marks[0];
 if (teardown.screens[0].marks.length !== 1 || mark.n !== 1 || mark.x !== 100 || mark.y !== 0) fail('标注编号重排、坐标限制在 0–100：' + JSON.stringify(mark));
 if (teardown.screens[1].image !== '' || teardown.screens[1].marks[0].evidence !== '推断') fail('图片位置只认 _teardown/，没写证据算推断');
-dd = {row: {title: '示例成品', skills: [{name: 'acme-writing', installed: true}, {name: 'acme-missing', installed: false}]},
+dd = {row: {title: '示例成品', skills: [{name: 'acme-writing', installed: true}, {name: 'acme-missing', installed: false, in_store: true},
+                         {name: 'acme-elsewhere', installed: false, in_store: false}]},
       base: '/d/key/m/demo/', recipe: '# 配方\n\n| 技能 | 用途 |\n|---|---|\n| `acme` | <script>x</script> |\n\n- **第一步**\n1. 第二步',
       teardown, tab: 'screens', screen: 0, picked: 1, item: '', tools: {'acme-tool': false}};
 const screens = ddScreensHtml();
@@ -364,14 +488,70 @@ if (!ddItemsHtml().includes('本机：没有')) fail('工具要写本机有没�
 const recipe = ddRecipeHtml();
 if (recipe.includes('<script>') || !recipe.includes('&lt;script&gt;')) fail('配方要转义：' + recipe);
 for (const part of ['<h3>配方</h3>', '<th>技能</th>', '<code>acme</code>', '<strong>第一步</strong>', '<ol><li>第二步</li></ol>',
-                    '已安装 1 个，缺 1 个', '照着「示例成品」给 [品牌名] 做一份', '没有的话：手动做', 'data-dd-tools'])
+                    '已安装 1 个，缺 2 个', '照着团队成品「示例成品」', '没有的话：手动做', 'data-dd-tools',
+                    '未安装，可在团队页安装', '未安装，团队商店里没有，见配方'])
   if (!recipe.includes(part)) fail('配方页缺：' + part + '\n' + recipe);
+// The handover stands on its own: a new Agent gets the recipe, the skills and the tools, nothing it would have to find.
+const command = ddCommand();
+for (const part of ['照着团队成品「示例成品」，给 [品牌名] 做一份', '缺哪个先告诉我', '- acme-writing：已安装',
+                    '- acme-missing：还没装，先在 Skill Pilot 团队页安装，或运行 skill-pilot team install acme-missing',
+                    '- acme-elsewhere：还没装，团队商店里也没有，按下面配方里写的方式安装',
+                    '- 示例工具（本机：没有）；Mac 装法：brew install acme；没有的话：手动做', '配方：\n# 配方', '- **第一步**'])
+  if (!command.includes(part)) fail('开工指令缺：' + part + '\n' + command);
+if (command.includes('deliverables-skill-recipes')) fail('开工指令不能依赖成品没写明的技能：' + command);
+if (!recipe.includes(escape(command))) fail('页面上要显示完整的开工指令');
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         page = extract_function(source, 'function showPage(')
         self.assertIn("if (page === 'tools') enterTools();", page)
         self.assertIn('只查本机有没有，不替你安装', (STATIC / 'index.html').read_text())
+
+    def test_tool_checks_go_in_batches_the_dashboard_accepts(self):
+        from tests.test_nav_static import STATIC, extract_function
+        source = (STATIC / 'app.js').read_text()
+        functions = '\n'.join(extract_function(source, name) for name in (
+            'function cleanTeardown(', 'async function checkTools(', 'async function openDeliverable(', 'async function enterTools('))
+        for name in ('async function openDeliverable(', 'async function enterTools('):
+            self.assertNotIn('/api/tools/check', extract_function(source, name), '工具检查要走 checkTools 分批')
+        helpers = '\n'.join(line for line in source.splitlines() if line.startswith((
+            'const KIND_LABEL =', 'const COMMAND_NAME =', 'const clip =', 'const TOOL_CHECK_BATCH =', 'const toolsView =',
+            'const sizeText =')))
+        script = helpers + r'''
+const fail = message => { console.error(message); process.exit(1); };
+const tools = (prefix, count) => ({items: Array.from({length: count}, (_, i) => ({id: `${prefix}-${i}`, kind: 'tool', name: `${prefix} ${i}`, check: `${prefix}-${i}`})), screens: []});
+const teardowns = {'/one/': tools('acme', 31), '/two/': tools('beta', 20)};
+let state = {page: 'tools', store: {deliverables: [
+  {key: 'deliverable:m:one', title: '一号', has_teardown: true, member: {name: '示例'}, size: 1, skills: [], open_url: '/d/x/m/one/'},
+  {key: 'deliverable:m:two', title: '二号', has_teardown: true, member: {name: '示例'}, size: 1, skills: [], open_url: '/d/x/m/two/'}]}};
+let calls = 0, dd = null;
+async function api(path) {
+  if (path.startsWith('/api/team/deliverables/detail')) return {recipe: '', base_url: path.endsWith('one') ? '/one/' : '/two/'};
+  const names = decodeURIComponent(path.split('names=')[1]).split(',');
+  if (names.length > 30) throw new Error('工具名只能用字母、数字、点、加号、横线或下划线');
+  calls += 1;
+  return Object.fromEntries(names.map(name => [name, name.endsWith('-1')]));
+}
+async function fetch(url) { return {ok: true, json: async () => teardowns[url.replace('_teardown/teardown.json', '')]}; }
+async function loadStore() {}
+function renderTools() {}
+function renderDeliverable() {}
+const element = {textContent: '', href: '', open: true, showModal() {}};
+const $ = () => element;
+''' + functions + r'''
+(async () => {
+  await enterTools();
+  if (toolsView.error) fail('工具页报错：' + toolsView.error);
+  if (toolsView.rows.length !== 51 || Object.keys(toolsView.checked).length !== 51) fail('两份成品合计 51 个工具都要查到：' + Object.keys(toolsView.checked).length);
+  if (toolsView.checked['acme-1'] !== true || toolsView.checked['acme-2'] !== false) fail('分批查到的结果要合并');
+  calls = 0;
+  await openDeliverable('deliverable:m:one', 'recipe');
+  if (dd.error) fail('照着做一份报错：' + dd.error);
+  if (Object.keys(dd.tools).length !== 31 || calls !== 2) fail('一份成品 31 个工具要分两批查完：' + calls);
+})().catch(error => fail(error.stack));
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == '__main__':
