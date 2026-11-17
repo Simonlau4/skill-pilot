@@ -212,7 +212,8 @@ class FullPruningTests(unittest.TestCase):
                 shutil.copytree(self.home / '.skill-pilot/store' / name, incoming)
                 if 1 <= index <= 4:
                     (incoming / 'guide.md').write_text('外部新增参考资料')
-                (self.home / '.claude/skills' / name).symlink_to('../../.agents/skills/' + name, target_is_directory=True)
+                alias = self.home / '.claude/skills' / name
+                alias.symlink_to(os.path.relpath(incoming, alias.parent), target_is_directory=True)
             paths = {r for a in agents for r in catalog[a]['skill_roots']} | {'.codex/config.toml', '.skill-pilot/registry.json', '.skill-pilot/bases'}
             def fingerprint():
                 return {p: store.physical_state(self.home / p) for p in paths} | {'store': operations.content_digest(self.home / '.skill-pilot/store')}
@@ -220,6 +221,7 @@ class FullPruningTests(unittest.TestCase):
             actual_before = visibility(self.home)
             self.assertEqual(len(actual_before['codex']['available']), 27)
             self.assertEqual(len(actual_before['dsh']['available']), 28)
+            self.assertEqual(len(actual_before['claude']['available']), 28)
             review = preview_absorb(self.home)
             self.assertEqual({c['name'] for c in review['conflicts']}, set(names[1:5]))
             result = operations.absorb(True, expected=review['revision'], home=self.home,

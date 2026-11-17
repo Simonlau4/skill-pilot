@@ -39,6 +39,15 @@ class RefreshRequestTests(unittest.TestCase):
         self.thread.join()
         self.dashboard.server_close()
 
+    def test_loopback_startup_does_not_require_reverse_dns(self):
+        with patch('socket.getfqdn', side_effect=AssertionError('unexpected DNS lookup')):
+            dashboard = server.Dashboard({'home': str(self.home)})
+        try:
+            self.assertEqual(dashboard.server_name, '127.0.0.1')
+            self.assertGreater(dashboard.server_port, 0)
+        finally:
+            dashboard.server_close()
+
     def request(self, path, body=None, extra=None):
         headers = {'X-Skill-Pilot-Token': self.dashboard.token, 'Origin': self.dashboard.origin,
                    'Content-Type': 'application/json'}
