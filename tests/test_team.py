@@ -217,6 +217,156 @@ class TeamTests(unittest.TestCase):
         self.ok(self.a, '/api/team/listings/apply', {'review': preview['review']})
         return preview
 
+    def wait_publish_jobs(self):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            result = self.ok(self.a, '/api/jobs')
+            if all(item['status'] not in {'waiting', 'running'} for item in result['items']) and not self.a.jobs_busy():
+                return result['items']
+            time.sleep(.01)
+        self.fail('上架更新队列没有结束')
+
+    def edit_published(self, names):
+        for name in names:
+            path = self.home / '.skill-pilot/store' / name / 'SKILL.md'
+            path.write_text(path.read_text() + '\n新版示例正文\n')
+
+    def test_publish_updates_continue_after_failure_retry_only_failed_and_preserve_metadata(self):
+        self.configure()
+        names = ('acme-extra', 'acme-local', 'acme-other')
+        self.publish(names, {name: '保留推荐语 ' + name for name in names})
+        self.ok(self.a, '/api/team/packs', {'packs': [
+            {'id': 'example-pack', 'title': '示例技能包', 'note': '保留包说明', 'skills': list(names)}]})
+        packs = [{k: v for k, v in p.items() if k != 'cards'} for p in team._fetch(self.home, with_packs=True)[2]['packs']]
+        before = {n: r['source']['version'] for n, r in team._owned(team._fetch(self.home)[2], self.first['id']).items()}
+        empty = self.ok(self.a, '/api/team/listings/update', {})
+        self.assertEqual(empty['queued'], 0)
+        self.assertEqual(empty['items'], [])
+        self.edit_published(names)
+        library = self.library(self.home)
+        request, uploaded = team._request, []
+        def failing(config, path, method='GET', body=None):
+            if path == '/api/listings/me' and method == 'PUT':
+                name = body['listings'][0]['name']
+                uploaded.append(name)
+                if name == 'acme-local':
+                    raise team.RequestError(503, '模拟分享站暂不可用')
+            return request(config, path, method, body)
+        with patch.object(team, '_request', side_effect=failing):
+            self.assertEqual(self.ok(self.a, '/api/team/listings/update', {})['queued'], 3)
+            job = self.wait_publish_jobs()[0]
+        self.assertEqual(uploaded, list(names))
+        self.assertEqual(job['completed'], ['acme-extra', 'acme-other'])
+        self.assertEqual(job['remaining'], ['acme-local'])
+        self.assertEqual(job['status'], 'failed')
+        self.assertIn('模拟分享站暂不可用', job['failed'][0]['error'])
+        self.assertFalse(self.a.jobs_blocked)
+        rows = team._owned(team._fetch(self.home)[2], self.first['id'])
+        self.assertEqual(rows['acme-local']['source']['version'], before['acme-local'])
+        for name in ('acme-extra', 'acme-other'):
+            self.assertNotEqual(rows[name]['source']['version'], before[name])
+        with patch.object(team, '_request', wraps=request) as network:
+            self.ok(self.a, '/api/jobs/retry', {'id': job['id']})
+            retried = self.wait_publish_jobs()[0]
+        puts = [c.args[3] for c in network.call_args_list if len(c.args) > 2 and c.args[2] == 'PUT']
+        self.assertEqual([[r['name'] for r in body['listings']] for body in puts], [['acme-local']])
+        self.assertEqual(retried['status'], 'done')
+        self.assertEqual(retried['completed'], list(names))
+        self.assertEqual([{k: v for k, v in p.items() if k != 'cards'}
+                          for p in team._fetch(self.home, with_packs=True)[2]['packs']], packs)
+        rows = team._owned(team._fetch(self.home)[2], self.first['id'])
+        self.assertEqual({n: rows[n]['note'] for n in names}, {n: '保留推荐语 ' + n for n in names})
+        self.assertEqual(self.library(self.home), library)
+        self.assertEqual(self.ok(self.a, '/api/team/listings/update', {})['queued'], 0)
+
+    def test_publish_updates_deduplicate_and_skip_new_or_other_members_listings(self):
+        self.configure()
+        self.publish(('acme-local',))
+        self.raw_put([listing('acme-other')], member=self.second)
+        self.edit_published(('acme-local', 'acme-other', 'acme-extra'))
+        with self.a.write_lock:
+            first = self.ok(self.a, '/api/team/listings/update', {})
+            duplicate = self.ok(self.a, '/api/team/listings/update', {})
+            self.assertEqual(first['queued'], 1)
+            self.assertEqual(duplicate['queued'], 0)
+            self.assertEqual(len(duplicate['items']), 1)
+            self.assertEqual(first['items'][0]['skills'], ['acme-local'])
+            self.ok(self.a, '/api/table')
+        self.assertEqual(self.wait_publish_jobs()[0]['status'], 'done')
+        self.assertEqual(set(team._owned(team._fetch(self.home)[2], self.first['id'])), {'acme-local'})
+
+    def test_publish_updates_block_secrets_and_new_dependencies_but_continue(self):
+        self.configure()
+        names = ('acme-extra', 'acme-local', 'acme-other')
+        self.publish(names)
+        self.edit_published(names)
+        self.registry(self.home, lambda skills: skills['acme-extra'].update(requires=['acme-base']))
+        (self.home / '.skill-pilot/store/acme-local/.env').write_text('API_KEY=example')
+        self.ok(self.a, '/api/team/listings/update', {})
+        job = self.wait_publish_jobs()[0]
+        self.assertEqual(job['completed'], ['acme-other'])
+        self.assertEqual(job['remaining'], ['acme-extra', 'acme-local'])
+        self.assertIn('前置依赖', job['failed'][0]['error'])
+        self.assertIn('不能完整上传', job['failed'][1]['error'])
+        self.assertNotIn('acme-base', team._owned(team._fetch(self.home)[2], self.first['id']))
+
+    def test_publish_updates_recheck_connection_and_ownership_at_execution(self):
+        self.configure()
+        self.publish(('acme-local',))
+        self.edit_published(('acme-local',))
+        with self.a.write_lock:
+            self.ok(self.a, '/api/team/listings/update', {})
+            team.listings_remove(self.home, ['acme-local'])
+        job = self.wait_publish_jobs()[0]
+        self.assertEqual(job['status'], 'failed')
+        self.assertIn('已不在我的上架', job['failed'][0]['error'])
+        self.assertEqual(team._owned(team._fetch(self.home)[2], self.first['id']), {})
+        self.publish(('acme-local',))
+        self.edit_published(('acme-local',))
+        with self.a.write_lock:
+            self.ok(self.a, '/api/team/listings/update', {})
+            team.save_settings(self.home, {'url': self.url, 'key': self.second['token']})
+        job = self.wait_publish_jobs()[-1]
+        self.assertEqual(job['status'], 'failed')
+        self.assertIn('连接已经变了', job['failed'][0]['error'])
+
+    def test_publish_updates_unexpected_failure_keeps_later_skills_running(self):
+        self.configure()
+        self.publish(('acme-extra', 'acme-local'))
+        self.edit_published(('acme-extra', 'acme-local'))
+        update = team.update_listing
+        def failing(home, name, connection):
+            if name == 'acme-extra':
+                raise RuntimeError('synthetic failure')
+            return update(home, name, connection)
+        with patch.object(team, 'update_listing', side_effect=failing):
+            self.ok(self.a, '/api/team/listings/update', {})
+            job = self.wait_publish_jobs()[0]
+        self.assertEqual(job['completed'], ['acme-local'])
+        self.assertEqual(job['remaining'], ['acme-extra'])
+        self.assertTrue(job['failed'][0]['error_id'])
+
+    def test_publish_updates_readback_failure_retry_does_not_upload_twice(self):
+        self.configure()
+        self.publish(('acme-local',))
+        self.edit_published(('acme-local',))
+        request, uploaded = team._request, []
+        def fail_readback(config, path, method='GET', body=None):
+            if path == '/api/catalog' and uploaded:
+                raise team.RequestError(503, '模拟上传后读取失败')
+            result = request(config, path, method, body)
+            if path == '/api/listings/me' and method == 'PUT':
+                uploaded.append(True)
+            return result
+        with patch.object(team, '_request', side_effect=fail_readback):
+            self.ok(self.a, '/api/team/listings/update', {})
+            job = self.wait_publish_jobs()[0]
+        self.assertEqual(job['status'], 'failed')
+        with patch.object(team, '_request', wraps=request) as network:
+            self.ok(self.a, '/api/jobs/retry', {'id': job['id']})
+            self.assertEqual(self.wait_publish_jobs()[0]['status'], 'done')
+        self.assertFalse(any(len(c.args) > 2 and c.args[2] == 'PUT' for c in network.call_args_list))
+
     def without_diagnostics(self):
         ignored = {'.skill-pilot/logs/errors.jsonl', '.skill-pilot/logs/.errors.lock', '.skill-pilot/logs'}
         result = []
@@ -1504,6 +1654,7 @@ class TeamTests(unittest.TestCase):
         writes = [('/api/team/settings', {'url': self.url}),
                   ('/api/team/listings/apply', {'review': uploaded['review']}),
                   ('/api/team/listings/remove', {'names': ['acme-local']}),
+                  ('/api/team/listings/update', {}),
                   ('/api/team/queue', {'key': key}), ('/api/team/queue/clear', {}),
                   ('/api/team/ratings', {'key': 'example', 'stars': 5}), ('/api/team/ratings/remove', {'key': 'example'})]
         for readonly in (patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}),
@@ -1521,6 +1672,7 @@ class TeamTests(unittest.TestCase):
     def test_all_routes_require_dashboard_identity_and_origin_legacy_routes_disappear(self):
         gets = ['/api/team', '/api/team/catalog', '/api/team/listings/candidates', '/api/team/queue']
         posts = ['/api/team/settings', '/api/team/listings/preview', '/api/team/listings/apply', '/api/team/listings/remove',
+                 '/api/team/listings/update',
                  '/api/team/queue', '/api/team/queue/clear', '/api/team/ratings', '/api/team/ratings/remove']
         before = store.physical_state(self.home)
         with patch.object(team, '_request') as network:
