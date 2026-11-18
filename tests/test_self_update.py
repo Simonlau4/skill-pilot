@@ -108,12 +108,14 @@ class UpdateChangesTests(unittest.TestCase):
     def test_shallow_checkout_collects_all_new_titles(self):
         self.prepare(checkout=True)
         self.publish_title('旧版改进')
-        shutil.rmtree(self.code)
+        self.code = self.root / "Downloads/Shallow Skill Pilot 'edition' $(false)"
         git(self.root, 'clone', '-q', '--depth', '1', self.upstream.as_uri(), str(self.code))
+        self.assertEqual(git(self.code, 'rev-parse', '--is-shallow-repository'), 'true')
         self.publish_title('修复显示问题 (#207)')
         self.publish_title('优化更新提醒 (#208)')
         review = self.review()
         self.assertEqual(review['changes'], ['优化更新提醒', '修复显示问题'])
+        self.assertNotIn('旧版改进', review['changes'])
         self.assertEqual(review['changes_total'], 2)
         self.assertFalse(review['changes_partial'])
 
