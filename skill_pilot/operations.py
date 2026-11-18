@@ -3,7 +3,7 @@ from .platform_support import rmtree
 """M3 assignment, installation, absorption and reversible local operations."""
 import copy
 from contextvars import ContextVar
-from .platform_support import fcntl, user_home, user_id, check_directory_links
+from .platform_support import fcntl, user_home, user_id, check_directory_links, is_junction
 import hashlib
 import json
 import logging
@@ -1072,6 +1072,28 @@ def set_source(name, repository, folder, confirmed=False, home=None, branch=None
         return _run(home,registry,agents,expected,f'补登记了 {name} 的来源，并重新核对原始版本',mutate)
 
 
+def _sha(value):
+    return value if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}', value) else ''
+
+
+def _previous_source_note(old, skill, label):
+    """Keep the old repository, folder, branch and version in the note. Never copy the raw address."""
+    path = old.get('source_path', '') if isinstance(old, dict) else ''
+    note = f'由用户从有上游来源改成自制，原来源：{label}（{path}）'
+    commit = _sha(old.get('commit')) if isinstance(old, dict) else ''
+    tree = _sha(old.get('tree_sha')) if isinstance(old, dict) else ''
+    record = old.get('record') if isinstance(old, dict) and isinstance(old.get('record'), dict) else {}
+    if not tree:
+        tree = _sha(record.get('skillFolderHash'))
+    if not tree:
+        tree = _sha(skill.get('base_tree_sha'))
+    if commit:
+        note += f'，提交 {commit}'
+    if tree:
+        note += f'，目录版本 {tree}'
+    return note
+
+
 def mark_self_made(name, confirmed=False, home=None):
     """Stop following an upstream source: the skill becomes self-made, so update-local can take it over.
     Content and assignments stay as they are; the old source is kept in the evidence."""
@@ -1079,13 +1101,16 @@ def mark_self_made(name, confirmed=False, home=None):
     if name not in registry['skills']:
         raise ValueError('这个技能不在登记表里，请刷新后再选。')
     old = registry['skills'][name]['source']
-    kind = normalize(old)['kind']
-    label = normalize(old).get('label') or old.get('source', '')
-    if kind == 'skip':
+    normalized = normalize(old)
+    kind = normalized['kind']
+    label = normalized.get('label') or (old.get('source', '') if isinstance(old, dict) else '')
+    # Unsupported records are still a recorded source. Only a real local skill can stay as it is.
+    if kind == 'skip' and normalized.get('skip_reason') != 'unsupported':
         return {'name': name, 'changed': False, 'message': f'「{name}」已经是自制或来源未记录，不检查外部更新，可以直接用 update-local 更新。'}
     if kind != 'github':
-        # Team-store skills keep their author record, which the store uses to stop others listing them as their own.
-        raise ValueError(f'只有从 GitHub 装的技能能改成自制。「{name}」的来源是{label}，要保留原作者记录，不能改成自制。')
+        # Team-store and Feishu skills keep their author record. Anything else is simply not a GitHub source.
+        kept = '要保留原作者记录，不能改成自制。' if kind in {'team', 'lark'} else '不能改成自制。'
+        raise ValueError(f'只有从 GitHub 装的技能能改成自制。「{name}」的来源是{label}，{kept}')
     if not confirmed:
         return {'name': name, 'needs_confirmation': True,
                 'message': f'将把「{name}」的来源从「{label}」改成自制：以后不再检查它的外部更新，改用 update-local 从本机文件夹更新。'
@@ -1098,13 +1123,20 @@ def mark_self_made(name, confirmed=False, home=None):
             raise ValueError('这个技能的来源刚刚变了，请刷新后重新核对。')
         return current
     def mutate(current, checked):
+        source = home / '.skill-pilot/store' / name
+        # Refuse before replacing the baseline. A link copied in here cannot be undone,
+        # because restoring refuses to touch anything that points outside the home.
+        if source.is_symlink() or is_junction(source) or not source.is_dir():
+            raise ValueError('技能库里的这份文件夹不能用，请先核对。文件没有改动。')
+        guard(source, home)
+        check_links(source, home)
         base = checked(home / '.skill-pilot/bases' / name)
         if base.exists():
             rmtree(base)
-        copytree(home / '.skill-pilot/store' / name, base, symlinks=True)
+        copytree(source, base, symlinks=True)
         skill = current['skills'][name]
         skill['source'] = {'source': '自制', 'source_path': '本机维护', 'confidence': '高',
-                           'evidence': f'由用户从有上游来源改成自制，原来源：{label}（{old.get("source_path", "")}）'}
+                           'evidence': _previous_source_note(old, skill, label)}
         skill['base_digest'] = content_digest(base)
         for key in ('base_tree_sha', 'reviewed_tree_sha'):
             skill.pop(key, None)
