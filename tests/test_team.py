@@ -1431,6 +1431,25 @@ class TeamTests(unittest.TestCase):
                         self.install('acme-main')
                     download.assert_called_once()
 
+    def test_small_skill_stays_visible_to_old_dashboards_when_published_with_large_skill(self):
+        self.configure()
+        def legacy_names():
+            request = urllib.request.Request(self.url + '/api/catalog',
+                                             headers={'Authorization': 'Bearer ' + self.second['token']})
+            with urllib.request.urlopen(request, timeout=12) as response:
+                return {r['name'] for c in json.load(response)['cards'] for r in c['listings']}
+
+        self.publish(('acme-local',))
+        self.assertEqual(legacy_names(), {'acme-local'})
+        root = self.home / '.skill-pilot/store/acme-extra'
+        for i in range(3):
+            (root / f'asset-{i}.txt').write_text(f'sample {i}')
+        with patch.object(team_hub, 'INLINE_MAX_FILES', 3):
+            self.publish(('acme-local', 'acme-extra'))
+        self.assertEqual(legacy_names(), {'acme-local'})
+        self.assertEqual(set(self.cards()), {'acme-local', 'acme-extra'})
+        self.install()
+
     def test_large_skill_upload_retries_missing_files_and_installs_complete_copy(self):
         self.configure()
         root = self.home / '.skill-pilot/store/acme-local'

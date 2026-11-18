@@ -1137,33 +1137,35 @@ def listings_apply(home, review):
     if not review['listings']:
         raise ValueError('没有可以上架的技能，请先处理预览里的原因。')
     capabilities = _me(config, capabilities=True)
-    payload = {k: review[k] for k in ('listings', 'packs') if k in review}
-    by_digest, encoded_size, large = {}, 0, False
+    payload = copy.deepcopy({k: review[k] for k in ('listings', 'packs') if k in review})
+    # The manifest is larger than the inline file metadata, so this budget is conservative.
+    wire_size = len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+    by_digest = {}
     for row in payload['listings']:
-        files = row['source'].get('files', {})
+        files = row['source'].get('files')
+        if files is None:
+            continue
         root = home / '.skill-pilot/store' / row['name']
         size = sum(f['size'] for f in files.values())
-        large |= len(files) > team_hub.INLINE_MAX_FILES or size > team_hub.INLINE_MAX_SIZE
-        for relative, f in files.items():
-            by_digest[f['sha256']] = (root, relative, f['size'])
-            encoded_size += 4 * ((f['size'] + 2) // 3)
+        encoded_size = sum(4 * ((f['size'] + 2) // 3) for f in files.values())
+        if (len(files) <= team_hub.INLINE_MAX_FILES and size <= team_hub.INLINE_MAX_SIZE and
+                wire_size + encoded_size <= MAX_BODY):
+            # A small skill stays visible on older dashboards even when published with a large one.
+            row['source']['files'] = [
+                {'path': path, 'content': base64.b64encode(
+                    _read_skill_file(f['sha256'], root, path, f['size'])).decode('ascii'),
+                 'executable': f['executable']} for path, f in files.items()]
+            wire_size += encoded_size
+        else:
+            for relative, f in files.items():
+                by_digest[f['sha256']] = (root, relative, f['size'])
     route = '/api/listings/me'
-    if large or (by_digest and encoded_size + len(json.dumps(payload, ensure_ascii=False).encode('utf-8')) > MAX_BODY):
+    if by_digest:
         if not capabilities['skill_file_upload']:
             raise ValueError('这次上架的技能文件较多或较大，请联系管理员更新分享站后重试。')
         result, _ = _upload_missing(config, route, payload, by_digest, read=_read_skill_file)
     else:
-        # Keep the original format for small publications and older share stations.
-        inline = copy.deepcopy(payload)
-        for row in inline['listings']:
-            files = row['source'].get('files')
-            if files is not None:
-                root = home / '.skill-pilot/store' / row['name']
-                row['source']['files'] = [
-                    {'path': path, 'content': base64.b64encode(
-                        _read_skill_file(f['sha256'], root, path, f['size'])).decode('ascii'),
-                     'executable': f['executable']} for path, f in files.items()]
-        result = _request(config, route, 'PUT', inline)
+        result = _request(config, route, 'PUT', payload)
     return {**result, 'message': '技能已上架。'}
 
 
