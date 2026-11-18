@@ -649,12 +649,18 @@ class HubStore:
     def _packs(self, member_id):
         return self._read(self._pack_path(member_id), 'packs')
 
-    def _pack_changes(self, member_id, rows, listings):
+    def _pack_changes(self, member_id, rows, listings, skill_files=True):
+        previous = self._packs(member_id)
+        if not skill_files and isinstance(rows, list):
+            # Older lookups omit packs they cannot show; an ordinary save must keep them.
+            rows = [*rows, *(
+                {'id': identity, **pack} for identity, pack in previous.items()
+                if any(listings.get(n, {}).get('source', {}).get('file_storage') == 'blobs' for n in pack['skills']))]
         try:
             checked = clean_packs(rows, listings)
         except ValueError as error:
             raise HubError(400, str(error)) from None
-        previous, updated_at = self._packs(member_id), now()
+        updated_at = now()
         return {p['id']: {**{k: v for k, v in p.items() if k != 'id'},
                          'updated_at': previous[p['id']]['updated_at']
                          if p['id'] in previous and clean_pack({'id': p['id'], **previous[p['id']]}) == p
@@ -666,10 +672,10 @@ class HubStore:
                  **pack, 'cards': [listing_key(member['id'], listings[n]) for n in pack['skills'] if n in listings]}
                 for identity, pack in self._packs(member['id']).items()]
 
-    def _put_packs(self, member, data):
+    def _put_packs(self, member, data, skill_files=True):
         if not isinstance(data, dict) or 'packs' not in data:
             raise HubError(400, '请提供技能包列表。')
-        packs = self._pack_changes(member['id'], data['packs'], self._listings(member['id']))
+        packs = self._pack_changes(member['id'], data['packs'], self._listings(member['id']), skill_files)
         self._save({self._pack_path(member['id']): {'packs': packs}})
         return {'packs': sorted(self._public_packs(member), key=lambda p: p['updated_at'], reverse=True)}
 
@@ -732,14 +738,19 @@ class HubStore:
             result['github'] = github
         return result
 
-    def _put_installs(self, member_id, data):
+    def _put_installs(self, member_id, data, skill_files=True):
         if (not isinstance(data, dict) or not isinstance(data.get('keys'), list) or
                 any(not isinstance(key, str) for key in data['keys'])):
             raise HubError(400, '上报内容须为技能卡片编号的文字列表。')
-        allowed = {card['key'] for card in self._catalog()['cards']
-                   if all(row['member']['id'] != member_id for row in card['listings'])}
-        keys = sorted(set(data['keys']) & allowed)
+        cards = self._catalog()['cards']
+        allowed = {card['key'] for card in cards if all(row['member']['id'] != member_id for row in card['listings'])}
+        keys = set(data['keys']) & allowed
         installs = self._installs()
+        if not skill_files:
+            visible = {card['key'] for card in cards if any(
+                row['source'].get('file_storage') != 'blobs' for row in card['listings'])}
+            keys |= (set(installs.get(member_id, [])) & allowed) - visible
+        keys = sorted(keys)
         if keys:
             installs[member_id] = keys
         else:
@@ -747,7 +758,7 @@ class HubStore:
         atomic_write(self.data / 'installs.json', {'installs': installs})
         return {'keys': keys}
 
-    def _put_listings(self, member_id, data):
+    def _put_listings(self, member_id, data, skill_files=True):
         if not isinstance(data, dict) or not isinstance(data.get('listings'), list) or not data['listings']:
             raise HubError(400, '请至少选择一个要上架的技能。')
         try:
@@ -759,6 +770,8 @@ class HubStore:
         if len(set(names)) != len(names):
             raise HubError(400, '一次上架的名单里不能有同名技能。')
         for row in rows:
+            if not skill_files and current.get(row['name'], {}).get('source', {}).get('file_storage') == 'blobs':
+                raise HubError(409, '请更新 Skill Pilot 后再替换这个技能。')
             missing = set(row['requires']) - (set(current) | set(names))
             if missing:
                 raise HubError(400, row['name'] + ' 缺少本人上架的所需技能：' + '、'.join(sorted(missing)))
@@ -788,7 +801,7 @@ class HubStore:
             receipts.append(receipt)
         changes[self._listing_path(member_id)] = {'listings': current}
         if 'packs' in data:
-            changes[self._pack_path(member_id)] = {'packs': self._pack_changes(member_id, data['packs'], current)}
+            changes[self._pack_path(member_id)] = {'packs': self._pack_changes(member_id, data['packs'], current, skill_files)}
         self._save(changes)
         if collect:
             self._collect_blobs(member_id)
@@ -1171,6 +1184,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._read_body(MAX_BODY if path == '/api/listings/me' else MAX_RATING_BODY)
                     if self.command == 'PUT' or path == '/api/ratings' else None)
             store = self.server.store
+            skill_files = self.headers.get(SKILL_FILE_HEADER) == '1'
             with store.locked():
                 # A member may have been removed while the upload body was arriving.
                 member = store._authenticate(self.headers.get('Authorization', ''))
@@ -1184,13 +1198,13 @@ class Handler(BaseHTTPRequestHandler):
                     row, duplicate = store._receive_feedback(member, data)
                     result = {'submitted': True, 'duplicate': duplicate}
                 elif path == '/api/catalog':
-                    result = store._catalog(member['id'], skill_files=self.headers.get(SKILL_FILE_HEADER) == '1')
+                    result = store._catalog(member['id'], skill_files)
                 elif path == '/api/listings/me':
-                    result = store._put_listings(member['id'], data)
+                    result = store._put_listings(member['id'], data, skill_files)
                 elif path == '/api/installs/me':
-                    result = store._put_installs(member['id'], data)
+                    result = store._put_installs(member['id'], data, skill_files)
                 elif path == '/api/packs/me':
-                    result = store._put_packs(member, data)
+                    result = store._put_packs(member, data, skill_files)
                 elif listing:
                     result = store._remove_listing(member['id'], listing[1])
                 elif package:

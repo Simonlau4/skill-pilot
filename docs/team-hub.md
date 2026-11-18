@@ -204,7 +204,7 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 
 第一期的 `/api/shares*` 接口一律返回 `404`。
 
-上架清单请求带 `Content-Length`，最多 **20 MB**。旧格式的 `source.files` 是含 base64 内容的列表，仍支持最多 300 个文件、解码后合计 5 MB。逐文件上传时 `source.files` 用 `{"SKILL.md":{"sha256":"…","size":123,"executable":false}}` 格式，根目录须有 `SKILL.md`，文件位置须在技能文件夹内。若返回 `409` 和 `missing` 列表，先向 `/api/blobs/me/<内容编号>` 补传每个文件，再提交原清单。两种格式对相同的文件算出同一版本。复制备份时保留整个分享站数据文件夹，供技能和成品共用的文件内容在 `deliverables/<成员编号>/blobs/`。
+支持技能逐文件上传的客户端发送 `X-Skill-Pilot-Skill-Files: 1`。上架清单请求带 `Content-Length`，最多 **20 MB**。旧格式的 `source.files` 是含 base64 内容的列表，仍支持最多 300 个文件、解码后合计 5 MB。逐文件上传时 `source.files` 用 `{"SKILL.md":{"sha256":"…","size":123,"executable":false}}` 格式，根目录须有 `SKILL.md`，文件位置须在技能文件夹内。若返回 `409` 和 `missing` 列表，先向 `/api/blobs/me/<内容编号>` 补传每个文件，再提交原清单。两种格式对相同的文件算出同一版本。复制备份时保留整个分享站数据文件夹，供技能和成品共用的文件内容在 `deliverables/<成员编号>/blobs/`。
 
 评价请求最多 **64 KB**，评分须为 1–5 的整数，评价和推荐语最多 200 字、不含换行或看不见的字符。请求超限返回 `413`，格式不对返回 `400`。所需技能必须在同一批上架，或已经由本人上架。整批校验通过才保存。
 

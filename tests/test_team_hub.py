@@ -472,12 +472,25 @@ class TeamHubTests(unittest.TestCase):
                                          path='/api/blobs/me/' + digest)[0], 200)
         status, response = self.put([row], token=self.second['token'])
         self.assertEqual((status, response['missing']), (409, [digest]))
-        status, response = self.put([row])
-        self.assertEqual(status, 200)
-        version = response['listings'][0]['version']
-        self.assertEqual([card['listings'][0]['name'] for card in self.cards()], ['legacy'])
         headers = {team_hub.SKILL_FILE_HEADER: '1'}
-        self.assertEqual(len(self.request('/api/catalog', headers=headers)[1]['cards']), 2)
+        status, response = self.request('/api/listings/me', 'PUT', {
+            'listings': [row], 'packs': [self.pack(skills=['legacy', 'example'])]}, headers=headers)
+        self.assertEqual(status, 200)
+        published = response['listings'][0]
+        version = published['version']
+        self.assertEqual([card['listings'][0]['name'] for card in self.cards()], ['legacy'])
+        self.assertEqual(self.request('/api/catalog')[1]['packs'], [])
+        self.assertEqual(self.request('/api/listings/me', 'PUT', {
+            'listings': [listing('legacy', 'files')], 'packs': []})[0], 200)
+        self.assertEqual(self.put([listing('example', 'files')])[0], 409)
+        catalog = self.request('/api/catalog', headers=headers)[1]
+        self.assertEqual(len(catalog['cards']), 2)
+        self.assertEqual(catalog['packs'][0]['skills'], ['legacy', 'example'])
+        token = self.second['token']
+        key = published['key']
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, token, headers)[0], 200)
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': []}, token)[0], 200)
+        self.assertEqual(self.request('/api/catalog', token=token, headers=headers)[1]['my_installs'], [key])
         suffix = '/' + digest + '?version=' + version
         self.assertEqual(self.package(suffix='/' + digest + '?version=' + '0' * 64)[0], 409)
         self.assertEqual(self.package(suffix='/' + '0' * 64 + '?version=' + version)[0], 404)
