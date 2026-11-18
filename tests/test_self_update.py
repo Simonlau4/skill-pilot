@@ -77,6 +77,86 @@ def publish(case):
     return git(case.upstream, 'rev-parse', 'HEAD')
 
 
+class UpdateChangesTests(unittest.TestCase):
+    def prepare(self, checkout):
+        # Checking needs no desktop launcher and is supported on every platform.
+        with patch.object(self_update, 'run_installer'):
+            make_fixture(self, checkout=checkout)
+        self_update.record_installation(self.code)
+
+    def review(self):
+        result = self_update.check(self.home, self.code)
+        if result['temporary']:
+            self.addCleanup(shutil.rmtree, result['temporary'], True)
+        return result
+
+    def publish_title(self, title):
+        path = self.upstream / 'README.md'
+        path.write_text(path.read_text() + '\n' + title)
+        commit(self.upstream, title)
+
+    def test_checkout_collects_unique_titles_in_order_and_limits_to_ten(self):
+        self.prepare(checkout=True)
+        for index in range(12):
+            self.publish_title(f'  改进功能 {index} (#{200 + index})  ')
+        self.publish_title('改进功能 11 (#999)')
+        review = self.review()
+        self.assertEqual(review['changes'], [f'改进功能 {index}' for index in range(11, 1, -1)])
+        self.assertEqual(review['changes_total'], 12)
+        self.assertFalse(review['changes_partial'])
+
+    def test_shallow_checkout_collects_all_new_titles(self):
+        self.prepare(checkout=True)
+        self.publish_title('旧版改进')
+        self.code = self.root / "Downloads/Shallow Skill Pilot 'edition' $(false)"
+        git(self.root, 'clone', '-q', '--depth', '1', self.upstream.as_uri(), str(self.code))
+        self.assertEqual(git(self.code, 'rev-parse', '--is-shallow-repository'), 'true')
+        self.publish_title('修复显示问题 (#207)')
+        self.publish_title('优化更新提醒 (#208)')
+        review = self.review()
+        self.assertEqual(review['changes'], ['优化更新提醒', '修复显示问题'])
+        self.assertNotIn('旧版改进', review['changes'])
+        self.assertEqual(review['changes_total'], 2)
+        self.assertFalse(review['changes_partial'])
+
+    def test_zip_only_includes_latest_title_and_marks_partial(self):
+        self.prepare(checkout=False)
+        self.publish_title('修复显示问题 (#207)')
+        self.publish_title('优化更新提醒 (#208)')
+        review = self.review()
+        self.assertEqual(review['changes'], ['优化更新提醒'])
+        self.assertEqual(review['changes_total'], 1)
+        self.assertTrue(review['changes_partial'])
+
+    def test_current_checkout_and_identical_zip_have_no_changes(self):
+        for checkout in (True, False):
+            with self.subTest(checkout=checkout):
+                self.prepare(checkout)
+                review = self.review()
+                self.assertFalse(review['available'])
+                self.assertEqual(review['changes'], [])
+                self.assertEqual(review['changes_total'], 0)
+                self.assertFalse(review['changes_partial'])
+
+    def test_empty_lines_and_title_failure_do_not_block_update(self):
+        self.prepare(checkout=True)
+        self.publish_title('更新提醒')
+        original = self_update.git
+        for output in (' \n 改进显示 (#123) \n\n改进显示 (#124)\n', OSError('unreadable titles')):
+            def read_titles(project, *args, **kwargs):
+                if args[0] == 'log':
+                    if isinstance(output, Exception):
+                        raise output
+                    return output
+                return original(project, *args, **kwargs)
+            with self.subTest(output=repr(output)), patch.object(self_update, 'git', side_effect=read_titles):
+                review = self.review()
+                self.assertTrue(review['available'])
+                expected = [] if isinstance(output, Exception) else ['改进显示']
+                self.assertEqual(review['changes'], expected)
+                self.assertEqual(review['changes_total'], len(expected))
+
+
 class InstallerFailureReasonTests(unittest.TestCase):
     def make_project(self, script):
         temporary = tempfile.TemporaryDirectory(prefix='skill pilot installer ')

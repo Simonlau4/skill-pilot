@@ -97,6 +97,62 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.assertFalse(self.request('/api/runtime/refresh', {})['changed'])
         self.check.assert_called_once_with(self.home)
 
+    def assert_changes(self, progress, changes=None, total=0, partial=False):
+        self.assertEqual(progress['changes'], changes or [])
+        self.assertEqual(progress['changes_total'], total)
+        self.assertEqual(progress['changes_partial'], partial)
+
+    def test_changes_pass_through_both_endpoints_and_clear_after_upgrade_and_refresh(self):
+        self.review.update(changes=['改进更新提醒'], changes_total=3, changes_partial=True)
+        self.start()
+        self.assert_changes(self.finished(), ['改进更新提醒'], 3, True)
+        self.assert_changes(self.request('/api/program/auto-check', {}), ['改进更新提醒'], 3, True)
+        with patch.object(self_update, 'apply', return_value={'available': False, 'current': 'new'}):
+            self.request('/api/program/apply', {'confirmed': True, 'target': self.review['target']})
+            ready = self.finished()
+        self.assertEqual(ready['phase'], 'ready')
+        self.assert_changes(ready)
+        self.dashboard.program_progress.update(changes=['旧内容'], changes_total=1, changes_partial=True)
+        self.request('/api/runtime/refresh', {})
+        latest = self.finished()
+        self.assertEqual(latest['phase'], 'latest')
+        self.assert_changes(latest)
+
+    def test_changes_clear_on_latest_legacy_result_and_check_failures(self):
+        self.review.update(changes=['改进更新提醒'], changes_total=1, changes_partial=True)
+        self.start()
+        self.assert_changes(self.finished(), ['改进更新提醒'], 1, True)
+        for automatic, error, available in ((False, None, False), (False, None, True),
+                                          (False, ValueError('无法检查'), True),
+                                          (True, OSError('无法连接'), True)):
+            with self.subTest(automatic=automatic, error=error, available=available):
+                self.dashboard.program_progress.update(phase='idle', checked_at=0,
+                    changes=['旧内容'], changes_total=1, changes_partial=True)
+                self.check.return_value = {key: value for key, value in self.review.items()
+                                           if not key.startswith('changes')}
+                self.check.return_value['available'] = available
+                self.check.side_effect = error
+                self.request('/api/program/auto-check' if automatic else '/api/program/check', {})
+                progress = self.finished()
+                self.assert_changes(progress)
+                self.assertEqual(progress['phase'], ('idle' if automatic else 'error') if error
+                                 else 'available' if available else 'latest')
+                self.assert_changes(self.request('/api/program/auto-check', {}))
+
+    def test_failed_apply_clears_changes(self):
+        self.review.update(changes=['改进提醒'], changes_total=1, changes_partial=False)
+        self.start()
+        self.finished()
+        failure = ValueError('无法安装：访问权限不足')
+        failure.__cause__ = PermissionError('access denied')
+        with patch.object(self_update, 'apply', side_effect=failure):
+            self.request('/api/program/apply', {'confirmed': True, 'target': self.review['target']})
+            failed = self.finished()
+        self.assertEqual(failed['phase'], 'error')
+        self.assertEqual(failed['error'], '无法安装：访问权限不足')
+        self.assertTrue(failed['error_id'])
+        self.assert_changes(failed)
+
     def test_auto_check_waits_for_interval_then_checks_again(self):
         self.check.return_value = {**self.review, 'available': False}
         self.start()
@@ -193,7 +249,8 @@ class AutoUpdateCheckTests(unittest.TestCase):
 
     def start_resumed(self, checked_at):
         saved = {'running': False, 'phase': 'latest', 'automatic': True,
-                 'message': 'SP 已是最新版本', 'available': False, 'error': '', 'checked_at': checked_at}
+                 'message': 'SP 已是最新版本', 'available': False, 'error': '', 'checked_at': checked_at,
+                 'changes': [], 'changes_total': 0, 'changes_partial': False}
         dashboard = server.Dashboard(self.inventory)
         try:
             dashboard.program_progress = saved.copy()

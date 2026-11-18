@@ -200,7 +200,8 @@ def check(home, project=PROJECT):
         raise ValueError('没能读取 SP 的最新版本，请检查网络后重试。')
     target = remote[0]
     review = {'before': before, 'target': target, 'current': before.get('date', ''),
-              'latest': before.get('date', ''), 'available': False, 'temporary': ''}
+              'latest': before.get('date', ''), 'available': False, 'temporary': '',
+              'changes': [], 'changes_total': 0, 'changes_partial': False}
     if target == before.get('revision'):
         return review
     temporary = Path(tempfile.mkdtemp(prefix='skill-pilot-self-update-')).resolve()
@@ -231,9 +232,21 @@ def check(home, project=PROJECT):
             if name not in files:
                 raise ValueError('下载的新版不完整，当前程序保持原样，请稍后重试。')
         validate(candidate, home)
+        available = before['checkout'] or files != before['files']
+        changes = []
+        if available:
+            try:
+                titles = (git(candidate, 'log', '--format=%s', before['revision'] + '..' + target)
+                          if before['checkout'] else git(candidate, 'show', '-s', '--format=%s', target))
+                changes = list(dict.fromkeys(title for line in titles.splitlines()
+                    if (title := re.sub(r' \(#\d+\)$', '', line.strip()).strip())))
+            except Exception:
+                # Release notes are optional; a missing title must not block an upgrade.
+                pass
         return {**review, 'temporary': str(temporary), 'candidate': str(candidate), 'files': files,
                 'latest': git(candidate, 'show', '-s', '--format=%cI', target),
-                'available': before['checkout'] or files != before['files']}
+                'available': available, 'changes': changes[:10], 'changes_total': len(changes),
+                'changes_partial': bool(available and not before['checkout'])}
     except BaseException:
         rmtree(temporary, ignore_errors=True)
         raise

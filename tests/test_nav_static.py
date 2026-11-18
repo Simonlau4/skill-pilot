@@ -116,7 +116,9 @@ function $(id) {
 const tasks = new Map();
 const setTask = (key, task) => tasks.set(key, task);
 const clearTask = key => tasks.delete(key);
-const renderRailNotes = () => {};
+const renderProgramPopup = () => {};
+const programChangesHtml = () => "";
+const programText = value => value;
 const homeVisible = false, programActionRunning = false, writeBusy = false;
 let programUpdate = {phase: 'latest', message: 'SP 已是最新版本', write_allowed: true};
 renderProgram();
@@ -131,6 +133,142 @@ if ($('program-message').textContent !== programUpdate.message) throw new Error(
 programUpdate = {phase: 'idle'};
 renderProgram();
 if ($('program-message').textContent !== '从 Skill Pilot 官方项目获取新版') throw new Error('缺少默认提示');
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_program_popup_markup_and_rail_removal(self):
+        html = (STATIC / 'index.html').read_text()
+        source = (STATIC / 'app.js').read_text()
+        css = (STATIC / 'app.css').read_text()
+        self.assertRegex(html, r'<aside id="program-update-popup"[^>]+role="dialog"[^>]+aria-modal="false"[^>]+hidden>')
+        self.assertIn('aria-labelledby="program-popup-title"', html)
+        self.assertIn('id="program-changes"', html)
+        self.assertNotIn('railUpdateNote', source)
+        self.assertNotIn('data-program-rail', source)
+        rail = extract_function(source, 'function renderRailNotes(')
+        self.assertIn('发现新 Agent', rail)
+        self.assertNotIn('program', rail)
+        self.assertIn("'#program-popup-action'", source)
+        self.assertIn('#action-bar.is-open ~ .program-popup', css)
+        self.assertIn('new ResizeObserver(positionProgramPopup)', source)
+        self.assertIn('prefers-reduced-motion: reduce', css)
+
+    def test_program_popup_states_dismissal_content_and_controls(self):
+        source = (STATIC / 'app.js').read_text()
+        functions = '\n'.join(extract_function(source, signature) for signature in (
+            'function programText(', 'function programChangesHtml(', 'function programPopupPhase(',
+            'function positionProgramPopup(', 'function renderProgramPopup(', 'function dismissProgramPopup(',
+            'function renderProgram('))
+        events = source[source.index("$('program-popup-close').addEventListener"):source.index('setInterval(() => { if (programUpdate.running')]
+        script = r'''
+const assert = require('node:assert/strict');
+const nodes = new Map();
+const $ = id => {
+  if (!nodes.has(id)) {
+    const classes = new Set();
+    nodes.set(id, {hidden: true, innerHTML: '', offsetHeight: 150, events: {},
+      classList: {add: x => classes.add(x), remove: x => classes.delete(x), contains: x => classes.has(x)},
+      style: {setProperty(key, value) {this[key] = value}},
+      setAttribute(key, value) {this[key] = value}, querySelector() {return this},
+      contains(node) {return node === $('program-popup-close')},
+      addEventListener(key, fn) {this.events[key] = fn}});
+  }
+  return nodes.get(id);
+};
+const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+const feedbackButton = id => id ? `<button data-feedback="${escape(id)}">反馈问题</button>` : '';
+const programPopupDismissed = new Set();
+let programPopupHideTimer = null, writeBusy = false, programFailedAction = '', reduced = true;
+let programUpdate = {write_allowed: true, phase: 'available', available: true, target: 'one', latest: '2026-11-17',
+  changes: ['改进显示 <script>', '修复更新'], changes_total: 12, changes_partial: false};
+const prefersReducedMotion = () => reduced;
+const timers = new Map(); let timerId = 0;
+const setTimeout = fn => {timers.set(++timerId, fn); return timerId};
+const clearTimeout = id => timers.delete(id);
+const requestAnimationFrame = fn => fn();
+const ResizeObserver = class {observe() {}};
+const MutationObserver = class {observe() {}};
+let focused = false, reloaded = 0, applied = null;
+const document = {activeElement: {}, querySelector: () => ({focus() {focused = true}})};
+const location = {reload() {reloaded++}};
+const programAction = (action, button) => {applied = {action, button}};
+const homeVisible = false, programActionRunning = false;
+const setTask = () => {}, clearTask = () => {}, appendFeedback = () => {};
+''' + functions + '\n' + events + r'''
+const popup = $('program-update-popup');
+renderProgram();
+assert.equal(popup.hidden, false);
+assert.equal(focused, false, '自动打开不能抢焦点');
+assert.equal($('program-popup-title').textContent, 'Skill Pilot 发现新版本');
+assert($('program-popup-body').innerHTML.includes('2026'));
+assert($('program-popup-body').innerHTML.includes('另有更早的 10 项改进'));
+assert($('program-popup-body').innerHTML.includes('改进显示 &lt;script&gt;'));
+assert($('program-popup-body').innerHTML.includes($('program-changes').innerHTML));
+$('program-popup-action').events.click({currentTarget: $('program-popup-action')});
+assert.equal(applied.action, 'apply');
+assert.equal(applied.button, $('program-popup-action'));
+$('program-popup-later').events.click();
+assert.equal(popup.hidden, true);
+renderProgram(); renderProgramPopup();
+assert.equal(popup.hidden, true, '轮询或切页不得重新弹出');
+programUpdate.target = 'two'; renderProgram();
+assert.equal(popup.hidden, false, '新版应再提醒');
+document.activeElement = $('program-popup-close');
+$('program-popup-close').events.click();
+assert.equal(popup.hidden, true); assert(focused);
+programUpdate.target = 'three'; renderProgram();
+let stopped = false, prevented = false;
+popup.events.keydown({key: 'Escape', stopPropagation() {stopped = true}, preventDefault() {prevented = true}});
+assert(stopped && prevented); assert.equal(popup.hidden, true);
+programUpdate = {...programUpdate, target: 'four', write_allowed: false}; renderProgram();
+assert.equal(popup.hidden, true, '只读不得弹出');
+programUpdate = {...programUpdate, write_allowed: true, phase: 'apply', running: true}; renderProgram();
+assert.equal(popup.hidden, false);
+assert.equal($('program-popup-action').disabled, true);
+assert.equal($('program-apply').disabled, true);
+assert.equal($('program-popup-action').textContent, '正在升级…');
+$('program-popup-later').events.click();
+programUpdate = {...programUpdate, phase: 'ready', running: false, available: false}; renderProgram();
+assert.equal(popup.hidden, false, '关闭升级中提醒后，完成仍应提醒');
+assert.equal($('program-popup-action').textContent, '刷新生效');
+assert($('program-popup-body').innerHTML.includes('技能、分配和个人设置都会保留'));
+writeBusy = true; renderProgram();
+assert.equal($('program-popup-action').disabled, true);
+assert.equal($('program-refresh').disabled, true);
+writeBusy = false; renderProgram();
+$('program-popup-action').events.click({currentTarget: $('program-popup-action')});
+assert.equal(reloaded, 1);
+$('program-popup-later').events.click(); renderProgram();
+assert.equal(popup.hidden, true, '稍后刷新应记住关闭状态');
+programUpdate = {...programUpdate, phase: 'error', error: 'SP 无法连接更新服务器', error_id: 'failure'};
+programFailedAction = 'check'; renderProgram(); assert.equal(popup.hidden, true);
+programFailedAction = 'apply'; renderProgram(); assert.equal(popup.hidden, false);
+assert($('program-popup-body').innerHTML.includes('Skill Pilot 无法连接更新服务器'));
+assert($('program-popup-body').innerHTML.includes('data-feedback="failure"'));
+assert.equal($('program-popup-action').textContent, '重试升级');
+assert.equal($('program-changes').hidden, true);
+programUpdate.write_allowed = false; renderProgram(); assert.equal(popup.hidden, true);
+assert(programChangesHtml({}).includes('包含功能改进与问题修复'));
+assert(!programChangesHtml({changes: [], changes_partial: true}).includes('最新一项'));
+assert(programChangesHtml({changes: ['优化列表'], changes_partial: true}).includes('（显示最新一项改动）'));
+assert(!programChangesHtml({changes: ['fix: SP 修复 git diff、SHA hash、commit、symlink、TOML']}).match(/\b(SP|git|diff|SHA|hash|commit|symlink|TOML)\b/));
+assert(programChangesHtml({changes: ['Improve popup']}).includes('功能改进与问题修复'));
+$('action-bar').classList.add('is-open'); positionProgramPopup();
+assert.equal(popup.style['--program-popup-bottom'], '178px');
+$('action-bar').classList.remove('is-open'); positionProgramPopup();
+assert.equal(popup.style['--program-popup-bottom'], '24px');
+reduced = false; programUpdate = {...programUpdate, write_allowed: true, target: 'animated'};
+renderProgram(); dismissProgramPopup();
+assert.equal(popup.inert, true); assert.equal(popup.hidden, false);
+programUpdate.target = 'newer'; renderProgram();
+for (const callback of timers.values()) callback();
+assert.equal(popup.hidden, false, '收起动画不能藏掉更新的提醒');
+reduced = true; dismissProgramPopup();
+programUpdate = {...programUpdate, phase: 'available', available: true}; renderProgram();
+assert.equal(popup.hidden, true, '关闭失败提醒后重查同一版本不能再弹出');
+programUpdate = {...programUpdate, phase: 'ready', available: false}; renderProgram();
+assert.equal(popup.hidden, false, '忽略版本不能隐藏升级完成提醒');
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

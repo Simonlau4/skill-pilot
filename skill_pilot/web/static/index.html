@@ -703,6 +703,7 @@
           <p id="program-version" class="note-line" hidden></p>
           <p id="program-message" class="note-line" role="status" aria-live="polite">从 Skill Pilot 官方项目获取新版</p>
           <p id="program-error" class="program-error" role="alert" hidden></p>
+          <div id="program-changes" class="program-changes" hidden></div>
           <p class="row-wrap">
             <button id="program-check" class="btn"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-updates"/></svg><span>检查更新</span></button>
             <button id="program-apply" class="btn btn-primary" hidden>一键升级</button>
@@ -791,6 +792,18 @@
   <ul id="action-list" class="action-list" hidden></ul>
   <div id="action-extra" class="action-extra" hidden></div>
 </section>
+
+<aside id="program-update-popup" class="program-popup" role="dialog" aria-modal="false" aria-labelledby="program-popup-title" hidden>
+  <div class="program-popup-head">
+    <h2 id="program-popup-title"></h2>
+    <button id="program-popup-close" class="btn btn-quiet btn-iconic" aria-label="关闭更新提醒" title="关闭更新提醒"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-close"/></svg></button>
+  </div>
+  <div id="program-popup-body" class="program-popup-body" aria-live="polite"></div>
+  <div class="program-popup-actions">
+    <button id="program-popup-later" class="btn">稍后再说</button>
+    <button id="program-popup-action" class="btn btn-primary">立即升级</button>
+  </div>
+</aside>
 
 <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 

@@ -164,6 +164,9 @@ class Dashboard(ThreadingHTTPServer):
         self.program_progress = session.get('program_progress', {'running': False, 'phase': 'idle',
             'message': '从 GitHub 官方项目获取新版', 'error': '', 'available': False, 'current': '', 'latest': ''})
         self.program_progress.setdefault('automatic', False)
+        self.program_progress.setdefault('changes', [])
+        self.program_progress.setdefault('changes_total', 0)
+        self.program_progress.setdefault('changes_partial', False)
         try:
             operations.sync_bundled_skill(self.home)
         except Exception as error:
@@ -172,11 +175,13 @@ class Dashboard(ThreadingHTTPServer):
                 self.jobs_blocked = str(error)
             self.program_progress.update(phase='error', error='程序可继续使用，但自带技能说明没能同步，请查看诊断后重新打开看板。')
         if self.program_progress['phase'] == 'ready':
-            self.program_progress.update(phase='latest', message='SP 已升级到最新版')
+            self.program_progress.update(phase='latest', message='SP 已升级到最新版',
+                                         changes=[], changes_total=0, changes_partial=False)
         # 换进程时没有还在跑的线程。自动检查被关掉或刷新打断时，按还没查到处理，避免一直显示正在检查。
         if (resume and self.program_progress.get('automatic') and self.program_progress.get('running')
                 and self.program_progress.get('phase') == 'check'):
             self.program_progress.update(running=False, phase='idle', available=False, error='',
+                                         changes=[], changes_total=0, changes_partial=False,
                                          message='还没查到新版信息')
         self.program_thread = None
         self.last_heartbeat = time.monotonic()
@@ -906,6 +911,9 @@ class Dashboard(ThreadingHTTPServer):
                 review = self.program_review
                 self.program_progress.update(phase='available' if review['available'] else 'latest',
                     target=review['target'], available=review['available'], current=review['current'], latest=review['latest'],
+                    changes=review.get('changes', []) if review['available'] else [],
+                    changes_total=review.get('changes_total', 0) if review['available'] else 0,
+                    changes_partial=review.get('changes_partial', False) if review['available'] else False,
                     message='有新版，可以一键升级' if review['available'] else 'SP 已是最新版本')
             else:
                 while not self.closing:
@@ -923,8 +931,10 @@ class Dashboard(ThreadingHTTPServer):
                 self.program_progress['message'] = '正在安装 SP 新版…'
                 result = self_update.apply(self.program_review, self.home)
                 self.program_review['available'] = False
-                self.program_progress.update(result, phase='ready', message='新版已装好，刷新后生效')
+                self.program_progress.update(result, phase='ready', message='新版已装好，刷新后生效',
+                                             changes=[], changes_total=0, changes_partial=False)
         except Exception as error:
+            self.program_progress.update(changes=[], changes_total=0, changes_partial=False)
             captured = self_update.record_failure(self.home, action, error) or {}
             if captured:
                 self.program_progress['error_id'] = captured['error_id']
@@ -947,7 +957,8 @@ class Dashboard(ThreadingHTTPServer):
                 self.reload_error = ''
                 self.reload_error_id = ''
                 if self.program_progress['phase'] == 'ready':
-                    self.program_progress.update(phase='latest', message='SP 已升级到最新版')
+                    self.program_progress.update(phase='latest', message='SP 已升级到最新版',
+                                                 changes=[], changes_total=0, changes_partial=False)
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
                 self.reload_error = ''

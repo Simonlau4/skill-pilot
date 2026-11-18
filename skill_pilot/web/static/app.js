@@ -356,7 +356,7 @@ const WRITE_LOCK_SELECTORS = [
   '#install-url', '#install-rail button:not(.hint)',
   '#cleanup-rows input[data-cleanup]', '#cleanup-select-all', '#cleanup-filters select', '#cleanup-clear-filters', '#cleanup-tabs button',
   '#updates-check', '#updates-all',
-  '#program-check', '#program-apply', '#program-refresh', '#rail-notes button',
+  '#program-check', '#program-apply', '#program-refresh', '#program-popup-action', '#rail-notes button',
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
   '#log-list button', '#log-refresh', '#log-export', '#detail-body button:not(.hint)', '#detail-body select',
   '#new-absorb', '#new-toggle', '#install-dialog button:not(.hint)',
@@ -1548,42 +1548,7 @@ function pickAgent(id) {
   renderSkillTable();
 }
 
-/* 左栏的 SP 新版提醒：和「设置 → 版本」共用同一份 programUpdate，
-   在哪边升级两边都跟着变。已是最新、还没查到、正在检查、只读预览时都不出这张卡片。 */
-function railUpdateNote() {
-  const progress = programUpdate;
-  if (!progress.write_allowed) return '';
-  const lock = writeBusy ? ' disabled' : '';
-  const button = (action, label) => `<button class="btn btn-small btn-primary" data-program-rail="${action}"${lock}>${label}</button>`;
-  if (progress.phase === 'ready') {
-    return `<div class="rail-note">
-      <p class="rail-note-title">${icon('check-circle')}<strong>升级完成</strong></p>
-      <div class="rail-note-row"><small>刷新页面即可启用新版</small>${button('refresh', '刷新生效')}</div>
-    </div>`;
-  }
-  if (progress.running && progress.phase === 'apply') {
-    return `<div class="rail-note">
-      <p class="rail-note-title">${icon('update-up')}<strong>正在升级…</strong></p>
-      <div class="rail-note-row"><small>当前操作完成后自动继续</small><button class="btn btn-small" disabled>升级</button></div>
-    </div>`;
-  }
-  if (progress.available) {
-    const latest = progress.latest ? new Date(progress.latest).toLocaleDateString('zh-CN') : '';
-    return `<div class="rail-note">
-      <p class="rail-note-title">${icon('update-up')}<strong>Skill Pilot 发现新版本</strong></p>
-      <div class="rail-note-row">${latest ? `<small>新版 ${escape(latest)}</small>` : ''}${button('apply', '升级')}</div>
-    </div>`;
-  }
-  if (progress.phase === 'error' && programFailedAction === 'apply') {
-    return `<div class="rail-note">
-      <p class="rail-note-title">${icon('warning')}<strong>升级未完成</strong></p>
-      <div class="rail-note-row"><small>${escape(progress.error || '请稍后重试')}</small>${button('apply', '升级')}</div>
-    </div>`;
-  }
-  return '';
-}
-
-/* 左栏下面的提醒：SP 有新版在最上面，然后是可以直接接入的新 agent。 */
+/* 左栏下面只提醒可以接入的新 Agent。 */
 let railNotesHtml = null;
 
 function agentJoinButton(agent) {
@@ -1596,13 +1561,13 @@ function agentJoinButton(agent) {
 function renderRailNotes() {
   const ignored = new Set((state.agentsView?.ignored || []).map(item => (item && typeof item === 'object') ? item.id : item));
   const suggested = (state.agentsView?.suggested || []).filter(item => !ignored.has(item.id));
-  const notes = [railUpdateNote(), ...suggested.map(item => `<div class="rail-note">
+  const notes = suggested.map(item => `<div class="rail-note">
       <p class="rail-note-title">${icon('plus')}<strong>发现新 Agent：${escape(item.name)}</strong></p>
       <div class="rail-note-row">
         ${item.skill_count ? `<small>${number(item.skill_count)} 个技能</small>` : ''}${hint('接入后统一管理技能；同名技能沿用当前技能库的内容，支持撤销。')}
         ${agentJoinButton(item)}
       </div>
-    </div>`)];
+    </div>`);
   const html = notes.filter(Boolean).join('');
   // 内容没变就不重画：自动检查在跑时每 1.5 秒读一次，别把正在点的按钮换掉。
   if (html === railNotesHtml) return;
@@ -2838,7 +2803,87 @@ async function refreshAgents() {
 
 let programUpdate = {running: false, phase: 'idle', available: false, write_allowed: false};
 let programActionRunning = false;
-let programFailedAction = '';   // 本次打开页面里哪一步没成；左栏据此决定要不要留「升级」让用户再试
+let programFailedAction = '';   // 本次页面会话中失败的步骤，用于显示升级重试入口
+const programPopupDismissed = new Set();
+let programPopupHideTimer = null;
+
+function programText(value) {
+  const terms = {sp: 'Skill Pilot', git: '版本管理', commit: '版本记录', sha: '版本标识',
+    hash: '校验值', diff: '内容对比', symlink: '文件关联', toml: '配置文件'};
+  return String(value || '').replace(/\b(SP|git|commit|SHA|hash|diff|symlink|TOML)\b/gi,
+    term => terms[term.toLowerCase()]);
+}
+
+function programChangesHtml(progress) {
+  const changes = (progress.changes || []).map(title => {
+    const text = programText(title).replace(/^(?:fix|feat|chore|docs|refactor|test|build|ci|perf)(?:\([^)]*\))?:\s*/i, '').trim();
+    return /[\u4e00-\u9fff]/.test(text) ? text : '功能改进与问题修复';
+  });
+  if (!changes.length) return '<p>包含功能改进与问题修复，升级会保留你的技能、分配和个人设置。</p>';
+  const earlier = Math.max(0, (progress.changes_total || 0) - changes.length);
+  return `<div class="program-changes"><p>这次更新包含</p><ul>${changes.map(title => `<li>${escape(title)}</li>`).join('')}</ul>
+    ${earlier ? `<p class="muted">另有更早的 ${earlier} 项改进</p>` : ''}
+    ${progress.changes_partial ? '<p class="muted">（显示最新一项改动）</p>' : ''}</div>`;
+}
+
+function programPopupPhase() {
+  if (!programUpdate.write_allowed) return '';
+  if (programUpdate.phase === 'ready') return 'ready';
+  if (programUpdate.running && programUpdate.phase === 'apply') return 'apply';
+  if (programUpdate.phase === 'error' && programFailedAction === 'apply') return 'error';
+  return programUpdate.available && !programUpdate.running ? 'available' : '';
+}
+
+function positionProgramPopup() {
+  const bar = $('action-bar');
+  const bottom = bar.classList.contains('is-open') ? bar.offsetHeight + 28 : 24;
+  $('program-update-popup').style.setProperty('--program-popup-bottom', `${bottom}px`);
+}
+
+function renderProgramPopup() {
+  const popup = $('program-update-popup');
+  const progress = programUpdate;
+  const phase = programPopupPhase();
+  const show = phase && !programPopupDismissed.has(`${phase}:${progress.target || ''}`);
+  clearTimeout(programPopupHideTimer);
+  if (!show) {
+    popup.classList.remove('is-open');
+    popup.inert = true;
+    if (prefersReducedMotion()) popup.hidden = true;
+    else programPopupHideTimer = setTimeout(() => { popup.hidden = true; }, 220);
+    return;
+  }
+  const ready = phase === 'ready', applying = phase === 'apply', failed = phase === 'error';
+  $('program-popup-title').textContent = ready ? 'Skill Pilot 升级完成' : applying ? '正在升级 Skill Pilot…'
+    : failed ? '升级未完成' : 'Skill Pilot 发现新版本';
+  const latest = progress.latest ? new Date(progress.latest).toLocaleDateString('zh-CN') : '';
+  const body = ready ? '<p>刷新页面即可启用新版，技能、分配和个人设置都会保留。</p>'
+    : applying ? `<p>${escape(programText(progress.message || '正在安装新版，请稍候…'))}</p>`
+    : failed ? `<p class="program-error">${escape(programText(progress.error || '请稍后重试'))}</p>${feedbackButton(progress.error_id)}`
+    : `${latest ? `<p class="muted">新版 ${escape(latest)}</p>` : ''}${programChangesHtml(progress)}`;
+  // 轮询时保留相同内容的节点，避免打断阅读、滚动或键盘焦点。
+  if ($('program-popup-body').innerHTML !== body) $('program-popup-body').innerHTML = body;
+  $('program-popup-later').textContent = ready ? '稍后刷新' : failed || applying ? '关闭' : '稍后再说';
+  const button = $('program-popup-action');
+  button.textContent = ready ? '刷新生效' : applying ? '正在升级…' : failed ? '重试升级' : '立即升级';
+  button.disabled = applying || Boolean(writeBusy) || progress.running;
+  button.setAttribute('aria-busy', String(applying));
+  popup.inert = false;
+  if (popup.hidden) {
+    popup.hidden = false;
+    requestAnimationFrame(() => { if (!popup.inert) popup.classList.add('is-open'); });
+  } else popup.classList.add('is-open');
+  positionProgramPopup();
+}
+
+function dismissProgramPopup() {
+  programPopupDismissed.add(`available:${programUpdate.target || ''}`);
+  programPopupDismissed.add(`${programPopupPhase()}:${programUpdate.target || ''}`);
+  if ($('program-update-popup').contains(document.activeElement)) {
+    document.querySelector('.nav-item[aria-current="page"]')?.focus();
+  }
+  renderProgramPopup();
+}
 
 function renderProgram() {
   const progress = programUpdate;
@@ -2848,7 +2893,9 @@ function renderProgram() {
   $('program-version').textContent = `已安装：${date(progress.current)}`
     + (progress.available ? ` · 新版：${date(progress.latest)}` : '');
   $('program-message').textContent = message;
-  $('program-error').textContent = progress.error || '';
+  $('program-error').textContent = programText(progress.error || '');
+  $('program-changes').hidden = !progress.available;
+  $('program-changes').innerHTML = progress.available ? programChangesHtml(progress) : '';
   $('program-error').hidden = !progress.error;
   if (progress.error) appendFeedback($('program-error'), progress.error_id);
   $('program-check').disabled = progress.running || Boolean(writeBusy);
@@ -2861,11 +2908,11 @@ function renderProgram() {
   $('program-apply').textContent = progress.phase === 'apply' ? '正在升级…' : '一键升级';
   $('program-refresh').hidden = progress.phase !== 'ready';
   $('program-refresh').disabled = Boolean(writeBusy);
-  // 打开看板时的自动检查不占页头任务条（左栏照常提醒）；手动检查和升级照旧显示。
+  // 自动检查不占页头任务条；查到新版后由小弹窗提醒。
   const quiet = progress.phase === 'check' && progress.automatic && !programActionRunning;
   if (progress.running && !quiet && !(progress.phase === 'apply' && programActionRunning)) setTask('self-update', {text: message});
   else clearTask('self-update');
-  renderRailNotes();
+  renderProgramPopup();
   if (homeVisible) renderHomeTodos();
 }
 
@@ -2891,8 +2938,8 @@ async function autoCheckProgram() {
   }
 }
 
-async function programAction(action) {
-  if (programUpdate.running || writeBusy) return;
+async function programAction(action, button = $('program-apply')) {
+  if (programUpdate.running || writeBusy || (action === 'apply' && programUpdate.write_allowed === false)) return;
   programFailedAction = '';
   programUpdate = {...programUpdate, running: true, phase: action, error: '',
     message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等待当前操作完成…'};
@@ -2900,7 +2947,8 @@ async function programAction(action) {
   renderProgram();
   const fail = error => {
     programFailedAction = action;
-    programUpdate = {...programUpdate, running: false, phase: 'error', available: false, error: error.message, error_id: error.error_id};
+    programUpdate = {...programUpdate, running: false, phase: 'error', available: false, error: programText(error.message), error_id: error.error_id,
+      changes: [], changes_total: 0, changes_partial: false};
   };
   const work = async () => {
     const result = await api('/api/program/' + action,
@@ -2911,12 +2959,15 @@ async function programAction(action) {
       programUpdate = await api('/api/program/progress');
       renderProgram();
     }
-    if (programUpdate.error) throw Object.assign(new Error(programUpdate.error), {error_id: programUpdate.error_id});
+    if (programUpdate.error) throw Object.assign(new Error(programText(programUpdate.error)), {error_id: programUpdate.error_id});
     return programUpdate;
   };
   try {
     if (action === 'apply') {
-      await runWrite({button: $('program-apply'), busyText: '正在升级 Skill Pilot…', work, onError: fail});
+      await runWrite({button, busyText: '正在升级…', taskText: '正在升级 Skill Pilot…', onError: fail, work: async () => {
+        try { return await work(); }
+        catch (error) { error.message = programText(error.message); throw error; }
+      }});
     } else await work();
   } catch (error) {
     fail(error);
@@ -2929,13 +2980,21 @@ async function programAction(action) {
 $('program-check').addEventListener('click', () => programAction('check'));
 $('program-apply').addEventListener('click', () => programAction('apply'));
 $('program-refresh').addEventListener('click', () => location.reload());
-// 技能页左栏那张卡片上的按钮：升级走同一套流程，装好后刷新页面生效。
-$('rail-notes').addEventListener('click', event => {
-  const button = event.target.closest('[data-program-rail]');
-  if (!button) return;
-  if (button.dataset.programRail === 'refresh') location.reload();
-  else programAction('apply');
+$('program-popup-close').addEventListener('click', dismissProgramPopup);
+$('program-popup-later').addEventListener('click', dismissProgramPopup);
+$('program-popup-action').addEventListener('click', event => {
+  if (event.currentTarget.disabled) return;
+  if (programUpdate.phase === 'ready') location.reload();
+  else programAction('apply', event.currentTarget);
 });
+$('program-update-popup').addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  event.stopPropagation();
+  dismissProgramPopup();
+});
+new ResizeObserver(positionProgramPopup).observe($('action-bar'));
+new MutationObserver(positionProgramPopup).observe($('action-bar'), {attributes: true, attributeFilter: ['class', 'hidden']});
 setInterval(() => { if (programUpdate.running && !programActionRunning) refreshProgramUpdate(); }, 1500);
 
 const LLM_DEFAULTS = {
