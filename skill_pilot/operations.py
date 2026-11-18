@@ -1079,15 +1079,24 @@ def mark_self_made(name, confirmed=False, home=None):
     if name not in registry['skills']:
         raise ValueError('这个技能不在登记表里，请刷新后再选。')
     old = registry['skills'][name]['source']
-    if normalize(old)['kind'] == 'skip':
-        return {'name': name, 'changed': False, 'message': f'「{name}」已经是自制或来源未记录，不检查外部更新，可以直接用 update-local 更新。'}
+    kind = normalize(old)['kind']
     label = normalize(old).get('label') or old.get('source', '')
+    if kind == 'skip':
+        return {'name': name, 'changed': False, 'message': f'「{name}」已经是自制或来源未记录，不检查外部更新，可以直接用 update-local 更新。'}
+    if kind != 'github':
+        # Team-store skills keep their author record, which the store uses to stop others listing them as their own.
+        raise ValueError(f'只有从 GitHub 装的技能能改成自制。「{name}」的来源是{label}，要保留原作者记录，不能改成自制。')
     if not confirmed:
         return {'name': name, 'needs_confirmation': True,
                 'message': f'将把「{name}」的来源从「{label}」改成自制：以后不再检查它的外部更新，改用 update-local 从本机文件夹更新。'
                            '现在的内容和分配不变，可以撤销。请核对后加 --yes 执行。'}
     guard(home / '.skill-pilot', home)
-    expected = revision(home, agents)
+    def expected():
+        # Read again inside the lock, so a setting another operation saved meanwhile is not written over.
+        current = load(home)[1]
+        if name not in current['skills'] or current['skills'][name]['source'] != old:
+            raise ValueError('这个技能的来源刚刚变了，请刷新后重新核对。')
+        return current
     def mutate(current, checked):
         base = checked(home / '.skill-pilot/bases' / name)
         if base.exists():
