@@ -1405,11 +1405,11 @@ class TeamTests(unittest.TestCase):
             elif scenario == 'size':
                 for folder in (root, base):
                     (folder / '.env').unlink()
-                    (folder / 'big.bin').write_bytes(b'\x00' * team_hub.MAX_SIZE)
+                    (folder / 'big.bin').write_bytes(b'\x00' * (team_hub.MAX_BLOB + 1))
             else:
                 for folder in (root, base):
                     (folder / 'big.bin').unlink()
-                    for i in range(300):
+                    for i in range(team_hub.MAX_FILES):
                         (folder / str(i)).touch()
             with self.subTest(scenario=scenario):
                 preview = self.publish(('acme-main',))
@@ -1428,6 +1428,80 @@ class TeamTests(unittest.TestCase):
                     with self.local_github(), patch.object(github, 'inspect', wraps=github.inspect) as download:
                         self.install('acme-main')
                     download.assert_called_once()
+
+    def test_large_skill_upload_retries_missing_files_and_installs_complete_copy(self):
+        self.configure()
+        root = self.home / '.skill-pilot/store/acme-local'
+        assets = root / '示例素材'
+        assets.mkdir()
+        for i in range(430):
+            (assets / f'{i}.txt').write_bytes(f'sample {i}'.encode())
+        for i in range(2):
+            (assets / f'music-{i}.bin').write_bytes(bytes([i]) * (21 * 1024 * 1024))
+        saved, preview = team.listings_preview(self.home, [{'name': 'acme-local', 'note': '完整素材'}])
+        self.assertEqual(preview['errors'], [])
+        self.assertEqual(preview['listings'][0]['files']['count'], 433)
+        self.assertGreater(preview['listings'][0]['files']['size'], 42 * 1024 * 1024)
+        self.assertLess(len(json.dumps(saved)), 150 * 1024)
+
+        original = team._upload_blob
+        attempted = []
+        def interrupted(config, digest, data):
+            attempted.append(digest)
+            if len(attempted) == 2:
+                raise ValueError('连接断开')
+            return original(config, digest, data)
+
+        self.raw_put([listing('acme-local', 'files')])
+        config = team.settings(self.home)
+        def current():
+            return team._owned(team._catalog(config)['cards'], self.first['id'])['acme-local']
+        previous = current()['source']['version']
+        with patch.object(team, '_upload_blob', side_effect=interrupted):
+            with self.assertRaisesRegex(ValueError, '连接断开'):
+                team.listings_apply(self.home, saved)
+        self.assertEqual(current()['source']['version'], previous)
+        with patch.object(team, '_upload_blob', wraps=original) as upload:
+            team.listings_apply(self.home, saved)
+        self.assertEqual(upload.call_count, 432)
+        self.assertNotIn(attempted[0], [call.args[1] for call in upload.call_args_list])
+
+        # Even a same-size damaged file must abort before changing the recipient's library.
+        listing_row = current()
+        version = listing_row['source']['version']
+        self.assertEqual(version, preview['listings'][0]['version'])
+        self.assertEqual(listing_row['note'], '完整素材')
+        manifest = saved['listings'][0]['source']['files']
+        digest = manifest['示例素材/0.txt']['sha256']
+        blob = self.hub.store._blob_dir(self.first['id']) / digest
+        blob.write_bytes(b'SAMPLE 0')
+        before = self.library(self.other)
+        with self.assertRaisesRegex(ValueError, '完整性'):
+            team.install(self.other, self.cards()['acme-local']['key'])
+        self.assertEqual(self.library(self.other), before)
+        blob.write_bytes(b'sample 0')
+
+        self.install()
+        installed = self.other / '.skill-pilot/store/acme-local'
+        self.assertEqual(team._files(installed)[0], manifest)
+
+        # Replacing one file only sends that file and the recipient can update.
+        (assets / '0.txt').write_bytes(b'sample version 2')
+        with patch.object(team, '_upload_blob', wraps=original) as upload:
+            team.update_listing(self.home, 'acme-local', team._connection_version(config))
+        self.assertEqual(upload.call_count, 1)
+        installed_source = normalize(operations.load(self.other)[1]['skills']['acme-local']['source'])
+        self.assertEqual(installed_source['version'], version)
+        new = current()
+        self.assertNotEqual(new['source']['version'], version)
+        self.assertEqual(new['note'], '完整素材')
+        self.assertEqual(team._local(new, operations.load(self.other)[1])[0], 'update')
+        self.enable()
+        review = updates.check(self.other)
+        self.addCleanup(lambda: shutil.rmtree(review['temporary'], ignore_errors=True))
+        self.assertTrue(updates.apply(review, ['acme-local'], confirmed=True)['complete'])
+        self.assertEqual((installed / '示例素材/0.txt').read_bytes(), b'sample version 2')
+        self.assertEqual(team._local(new, operations.load(self.other)[1])[0], 'installed')
 
     def test_candidates_kind_changed_in_use_and_foreign_team_skill(self):
         self.configure()
@@ -1501,10 +1575,10 @@ class TeamTests(unittest.TestCase):
         for scenario in ('secret', 'size', 'count'):
             if scenario == 'size':
                 manifest.write_text(original)
-                (root / 'big.bin').write_bytes(b'\x00' * team_hub.MAX_SIZE)
+                (root / 'big.bin').write_bytes(b'\x00' * (team_hub.MAX_BLOB + 1))
             if scenario == 'count':
                 (root / 'big.bin').unlink()
-                for i in range(300):
+                for i in range(team_hub.MAX_FILES):
                     (root / str(i)).touch()
             preview = self.ok(self.a, '/api/team/listings/preview', {'skills': [{'name': 'acme-main'}]})
             self.assertEqual({r['name'] for r in preview['errors']}, {'acme-main', 'acme-local'}, scenario)

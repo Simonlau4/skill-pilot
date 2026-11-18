@@ -227,7 +227,7 @@ class TeamHubTests(unittest.TestCase):
         if os.name != 'nt':
             self.assertEqual(stat.S_IMODE((self.data / 'members.json').stat().st_mode), 0o600)
         self.assertEqual(self.request(), (200, {'service': 'skill-pilot-team', 'api': 2,
-            'feedback_supported': True, 'feedback_configured': False,
+            'feedback_supported': True, 'feedback_configured': False, 'skill_file_upload': True,
             'member': {k: self.first[k] for k in ('id', 'name')}}))
         for name in ('', '  ', 'Acme\nexample', 'Acme\x00example'):
             with self.assertRaises(ValueError):
@@ -418,7 +418,7 @@ class TeamHubTests(unittest.TestCase):
         before = self.state()
         for files in ([], [file('other.txt')], [file('SKILL.md'), file('../outside')],
                       [file('SKILL.md')] + [file(str(i)) for i in range(300)],
-                      [file('SKILL.md', b'x' * (team_hub.MAX_SIZE + 1))]):
+                      [file('SKILL.md', b'x' * (team_hub.INLINE_MAX_SIZE + 1))]):
             row = listing()
             row['source']['files'] = files
             self.assertEqual(self.put([row])[0], 400)
@@ -428,7 +428,7 @@ class TeamHubTests(unittest.TestCase):
             row['source']['tree_sha'] = value
             self.assertEqual(self.put([row])[0], 400)
             self.assertEqual(self.state(), before)
-        for field, value in (('version', '../invalid'), ('file_count', True), ('file_count', 301),
+        for field, value in (('version', '../invalid'), ('file_count', True), ('file_count', team_hub.MAX_FILES + 1),
                              ('size', -1), ('size', team_hub.MAX_SIZE + 1)):
             row = listing()
             row['source'].update(version='a' * 64, file_count=1, size=0)
@@ -439,6 +439,67 @@ class TeamHubTests(unittest.TestCase):
         row['source']['file_count'] = 1
         with self.assertRaises(ValueError):
             team_hub.clean_listing(row, packaged=True)
+
+    def test_skill_manifest_limits_and_version_match_inline_packages(self):
+        raw = b'example'
+        digest = hashlib.sha256(raw).hexdigest()
+        entry = {'sha256': digest, 'size': len(raw), 'executable': False}
+        self.assertEqual(team_hub.package_version({'SKILL.md': entry}),
+                         team_hub.package_version([file('SKILL.md', raw)]))
+        for bad_path in ('../outside', 'C:/outside', 'assets/AUX', 'skill.md', 'skill.md/nested'):
+            with self.subTest(path=bad_path), self.assertRaises(ValueError):
+                team_hub.clean_skill_manifest({'SKILL.md': entry, bad_path: entry})
+        with self.assertRaisesRegex(ValueError, '最多'):
+            team_hub.clean_skill_manifest({'SKILL.md': entry, **{str(i): entry for i in range(team_hub.MAX_FILES)}})
+        big = {**entry, 'sha256': 'b' * 64, 'size': team_hub.MAX_BLOB}
+        self.assertEqual(len(team_hub.clean_skill_manifest({'SKILL.md': big, 'image.png': big})), 2)
+        with self.assertRaisesRegex(ValueError, '合计'):
+            team_hub.clean_skill_manifest({'SKILL.md': entry, 'a.bin': big, 'b.bin': {**big, 'sha256': 'a' * 64}})
+        with self.assertRaisesRegex(ValueError, '单个文件'):
+            team_hub.clean_skill_manifest({'SKILL.md': {**big, 'size': team_hub.MAX_BLOB + 1}})
+
+    def test_skill_files_require_a_current_listing_and_are_shared_with_deliverables(self):
+        raw = b'example page'
+        digest = hashlib.sha256(raw).hexdigest()
+        entry = {'sha256': digest, 'size': len(raw)}
+        row = listing(kind='files')
+        row['source']['files'] = {'SKILL.md': {**entry, 'executable': False}}
+        self.assertEqual(self.put([listing('legacy', 'files')])[0], 200)
+        status, response = self.put([row])
+        self.assertEqual((status, response['missing']), (409, [digest]))
+        self.assertEqual(self.package()[0], 404)
+        self.assertEqual(self.raw_upload([('Content-Length', str(len(raw)))], raw,
+                                         path='/api/blobs/me/' + digest)[0], 200)
+        status, response = self.put([row], token=self.second['token'])
+        self.assertEqual((status, response['missing']), (409, [digest]))
+        status, response = self.put([row])
+        self.assertEqual(status, 200)
+        version = response['listings'][0]['version']
+        self.assertEqual([card['listings'][0]['name'] for card in self.cards()], ['legacy'])
+        headers = {team_hub.SKILL_FILE_HEADER: '1'}
+        self.assertEqual(len(self.request('/api/catalog', headers=headers)[1]['cards']), 2)
+        suffix = '/' + digest + '?version=' + version
+        self.assertEqual(self.package(suffix='/' + digest + '?version=' + '0' * 64)[0], 409)
+        self.assertEqual(self.package(suffix='/' + '0' * 64 + '?version=' + version)[0], 404)
+        self.assertEqual(self.package(suffix='/' + digest)[0], 404)
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=5)
+        try:
+            connection.request('GET', '/api/packages/' + self.first['id'] + '/example' + suffix,
+                               headers={'Authorization': 'Bearer ' + self.second['token']})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader('Content-Disposition'), 'attachment')
+            self.assertEqual(response.read(), raw)
+        finally:
+            connection.close()
+        self.assertEqual(self.request('/api/deliverables/me/demo', 'PUT', {
+            'title': '示例', 'files': {'index.html': entry}})[0], 200)
+        blob = self.store._blob_dir(self.first['id']) / digest
+        self.assertEqual(self.request('/api/listings/me/example', 'DELETE')[0], 200)
+        self.assertEqual(self.package(suffix=suffix)[0], 404)
+        self.assertTrue(blob.is_file())
+        self.assertEqual(self.request('/api/deliverables/me/demo', 'DELETE')[0], 200)
+        self.assertFalse(blob.exists())
 
     def test_invalid_batches_preserve_every_previous_listing_and_package(self):
         self.put([listing(kind='files')])
@@ -459,7 +520,7 @@ class TeamHubTests(unittest.TestCase):
                       [{'path': 'SKILL.md', 'content': 'AB==', 'executable': False}],
                       [{'path': 'SKILL.md', 'content': '', 'executable': 1}],
                       [file('SKILL.md')] + [file(str(i)) for i in range(300)],
-                      [file('SKILL.md', b'x' * (team_hub.MAX_SIZE + 1))]):
+                      [file('SKILL.md', b'x' * (team_hub.INLINE_MAX_SIZE + 1))]):
             invalid.append(listing(kind='files', source={'kind': 'files', 'files': files}))
         for row in invalid:
             with self.subTest(row=str(row)[:120]):

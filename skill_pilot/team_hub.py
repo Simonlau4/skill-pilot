@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from . import feedback, sharing, tags
 
@@ -29,8 +29,11 @@ MAX_RATING_BODY = 64 * 1024
 MAX_INSTALL_BODY = 64 * 1024
 MAX_PACK_BODY = 64 * 1024
 MAX_JOIN_BODY = 4096
-MAX_FILES = 300
-MAX_SIZE = 5 * 1024 * 1024
+INLINE_MAX_FILES = 300
+INLINE_MAX_SIZE = 5 * 1024 * 1024
+MAX_FILES = 1000
+SKILL_FILE_HEADER = 'X-Skill-Pilot-Skill-Files'
+MAX_SIZE = 100 * 1024 * 1024
 TEXT_FIELDS = ('title', 'summary', 'group', 'description', 'note')
 NAME = r'[A-Za-z0-9][A-Za-z0-9_.-]*'
 MAX_BLOB = 50 * 1024 * 1024
@@ -260,7 +263,7 @@ def short_text(value, label):
 
 
 def clean_files(files):
-    if not isinstance(files, list) or not files or len(files) > MAX_FILES:
+    if not isinstance(files, list) or not files or len(files) > INLINE_MAX_FILES:
         raise ValueError('每个技能须有文件，且最多 300 个文件。')
     result, seen, size = [], set(), 0
     for row in files:
@@ -280,7 +283,7 @@ def clean_files(files):
         except (ValueError, binascii.Error):
             raise ValueError('技能文件内容编码不正确，请重新上架。') from None
         size += len(raw)
-        if size > MAX_SIZE:
+        if size > INLINE_MAX_SIZE:
             raise ValueError('单个技能的文件合计不能超过 5 MB。')
         seen.add(path)
         result.append({'path': path, 'content': content, 'executable': executable})
@@ -291,9 +294,45 @@ def clean_files(files):
     return result
 
 
+def clean_skill_manifest(files):
+    if not isinstance(files, dict) or 'SKILL.md' not in files or len(files) > MAX_FILES:
+        raise ValueError(f'每个技能根目录须有 SKILL.md，且最多 {MAX_FILES} 个文件。')
+    checked, paths, directories, sizes, size = {}, set(), {}, {}, 0
+    for path, row in files.items():
+        parts = path.split('/') if isinstance(path, str) else []
+        if (not parts or len(path) > 300 or any(p in {'', '.', '..'} or p.endswith((' ', '.')) or
+                PureWindowsPath(p).is_reserved() for p in parts) or re.search(r'[<>:"\\|?*]', path) or
+                any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'} for c in path)):
+            raise ValueError('技能文件的位置不安全，请使用文件夹内的相对位置。')
+        folded = unicodedata.normalize('NFC', path).casefold()
+        if folded in paths:
+            raise ValueError('技能有位置重复的文件。')
+        paths.add(folded)
+        for i in range(1, len(parts)):
+            directory = '/'.join(parts[:i])
+            key = unicodedata.normalize('NFC', directory).casefold()
+            if directories.setdefault(key, directory) != directory:
+                raise ValueError('技能有位置重复的文件夹。')
+        if (not isinstance(row, dict) or not isinstance(row.get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', row['sha256']) or type(row.get('size')) is not int or
+                not 0 <= row['size'] <= MAX_BLOB or type(row.get('executable')) is not bool or
+                sizes.setdefault(row['sha256'], row['size']) != row['size']):
+            raise ValueError(f'技能文件的内容编号、执行权限或大小不正确，单个文件最多 {MAX_BLOB // 1024 // 1024} MB。')
+        size += row['size']
+        checked[path] = {k: row[k] for k in ('sha256', 'size', 'executable')}
+    if paths.intersection(directories):
+        raise ValueError('技能文件和文件夹的位置相互冲突。')
+    if size > MAX_SIZE:
+        raise ValueError(f'单个技能的文件合计不能超过 {MAX_SIZE // 1024 // 1024} MB。')
+    return checked
+
+
 def package_version(files):
-    rows = [[row['path'], row['executable'], hashlib.sha256(base64.b64decode(row['content'])).hexdigest()]
-            for row in files]
+    if isinstance(files, dict):
+        rows = [[path, row['executable'], row['sha256']] for path, row in files.items()]
+    else:
+        rows = [[row['path'], row['executable'], hashlib.sha256(base64.b64decode(row['content'])).hexdigest()]
+                for row in files]
     encoded = json.dumps(sorted(rows, key=lambda r: r[0]), ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
 
@@ -337,7 +376,8 @@ def clean_listing(row, packaged=False):
                 raise ValueError('技能文件的版本或大小记录不正确。')
             result['source'].update({k: source[k] for k in ('version', 'file_count', 'size')})
         else:
-            result['source']['files'] = clean_files(source.get('files'))
+            files = source.get('files')
+            result['source']['files'] = clean_skill_manifest(files) if isinstance(files, dict) else clean_files(files)
     return result
 
 
@@ -658,12 +698,14 @@ class HubStore:
                     atomic_write(path, previous[path])
             raise
 
-    def _catalog(self, member_id=None):
+    def _catalog(self, member_id=None, skill_files=True):
         cards = {}
         members = {m['id']: {k: m[k] for k in ('id', 'name')} for m in self._members()}
         installs = self._installs()
         for author_id, member in members.items():
             for row in self._listings(author_id).values():
+                if not skill_files and row['source'].get('file_storage') == 'blobs':
+                    continue
                 key = listing_key(author_id, row)
                 cards.setdefault(key, {'key': key, 'listings': [], 'ratings': []})['listings'].append(
                     {**row, 'member': member})
@@ -681,6 +723,10 @@ class HubStore:
                                 key=lambda p: p['updated_at'], reverse=True),
                 'my_installs': sorted(set(installs.get(member_id, [])) & cards.keys()),
                 'deliverables': self._public_deliverables()}
+        if not skill_files:
+            result['packs'] = [p for p in result['packs'] if all(
+                key in cards and any(row['member']['id'] == p['member']['id'] for row in cards[key]['listings'])
+                for key in p['cards'])]
         github = self._github()
         if github is not None:
             result['github'] = github
@@ -716,18 +762,25 @@ class HubStore:
             missing = set(row['requires']) - (set(current) | set(names))
             if missing:
                 raise HubError(400, row['name'] + ' 缺少本人上架的所需技能：' + '、'.join(sorted(missing)))
+        manifests = [r['source']['files'] for r in rows if isinstance(r['source'].get('files'), dict)]
+        self._check_blobs(member_id, (f for manifest in manifests for f in manifest.values()))
         changes, receipts = {}, []
+        collect = bool(manifests)
         updated_at = now()
         for row in rows:
             name, source = row['name'], row['source']
             path = self.data / 'packages' / member_id / (name + '.json')
+            collect |= current.get(name, {}).get('source', {}).get('file_storage') == 'blobs'
             receipt = {'name': name, 'key': listing_key(member_id, row), 'updated_at': updated_at}
             if 'files' in source:
                 files = source.pop('files')
                 version = package_version(files)
                 changes[path] = {'name': name, 'version': version, 'files': files}
-                source.update(version=version, file_count=len(files),
-                              size=sum(len(base64.b64decode(f['content'])) for f in files))
+                if isinstance(files, dict):
+                    source.update(size=sum(f['size'] for f in files.values()), file_storage='blobs')
+                else:
+                    source['size'] = sum(len(base64.b64decode(f['content'])) for f in files)
+                source.update(version=version, file_count=len(files))
                 receipt['version'] = version
             else:
                 changes[path] = None
@@ -737,6 +790,8 @@ class HubStore:
         if 'packs' in data:
             changes[self._pack_path(member_id)] = {'packs': self._pack_changes(member_id, data['packs'], current)}
         self._save(changes)
+        if collect:
+            self._collect_blobs(member_id)
         return {'listings': receipts}
 
     def _remove_listing(self, member_id, name):
@@ -746,7 +801,7 @@ class HubStore:
         parents = [n for n, row in current.items() if n != name and name in row['requires']]
         if parents:
             raise HubError(409, '这些上架的技能仍需要它：' + '、'.join(sorted(parents)))
-        del current[name]
+        removed = current.pop(name)
         packs = self._packs(member_id)
         for identity, pack in list(packs.items()):
             if name in pack['skills']:
@@ -758,6 +813,8 @@ class HubStore:
         self._save({self.data / 'packages' / member_id / (name + '.json'): None,
                     self._pack_path(member_id): {'packs': packs},
                     self._listing_path(member_id): {'listings': current}})
+        if removed['source'].get('file_storage') == 'blobs':
+            self._collect_blobs(member_id)
         return {}
 
     def _package(self, member_id, name, version=None):
@@ -767,6 +824,13 @@ class HubStore:
         if version is not None and version != row['source']['version']:
             raise HubError(409, '作者已经上架了新版，请重新预览。')
         return json.loads((self.data / 'packages' / member_id / (name + '.json')).read_text(encoding='utf-8'))
+
+    def _package_file(self, member_id, name, version, digest):
+        files = self._package(member_id, name, version)['files']
+        entry = next((row for row in files.values() if row['sha256'] == digest), None) if isinstance(files, dict) else None
+        if entry is None:
+            raise HubError(404, '技能里没有这个文件。')
+        return (self._blob_dir(member_id) / digest).open('rb'), entry['size']
 
     # Deliverables: deliverables/<member>/items/<id>.json lists path → sha256; bytes live once in blobs/<sha256>.
     def _deliverable_dir(self, member_id):
@@ -783,8 +847,11 @@ class HubStore:
         fd, name = tempfile.mkstemp(prefix='.blob-', dir=folder)
         return os.fdopen(fd, 'wb'), Path(name)
 
+    def _blob_dir(self, member_id):
+        return self._deliverable_dir(member_id) / 'blobs'
+
     def _put_blob(self, member_id, digest, temporary):
-        blobs = self._deliverable_dir(member_id) / 'blobs'
+        blobs = self._blob_dir(member_id)
         blobs.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.replace(temporary, blobs / digest)
         return {'sha256': digest, 'size': (blobs / digest).stat().st_size}
@@ -792,11 +859,30 @@ class HubStore:
     def _collect_blobs(self, member_id):
         # A parallel upload of the same member may lose a blob here; its list then gets 409 with
         # `missing` and the uploader sends those again, so no reservation is kept.
-        blobs = self._deliverable_dir(member_id) / 'blobs'
+        blobs = self._blob_dir(member_id)
         used = {f['sha256'] for row in self._deliverables(member_id).values() for f in row['files'].values()}
+        for name, row in self._listings(member_id).items():
+            if row['source'].get('file_storage') == 'blobs':
+                used.update(f['sha256'] for f in self._package(member_id, name)['files'].values())
         for blob in (blobs.iterdir() if blobs.is_dir() else []):
             if blob.name not in used:
-                blob.unlink(missing_ok=True)
+                try:
+                    blob.unlink(missing_ok=True)
+                except PermissionError:
+                    pass  # Windows may still be serving the file. Revisit on the next write.
+
+    def _check_blobs(self, member_id, entries):
+        blobs = self._blob_dir(member_id)
+        sizes = {}
+        for entry in entries:
+            digest, size = entry['sha256'], entry['size']
+            if sizes.setdefault(digest, size) != size:
+                raise HubError(400, '文件的大小和上传的内容对不上，请重新上传。')
+        missing = sorted(d for d in sizes if not (blobs / d).is_file())
+        if missing:
+            raise HubError(409, '还有文件没有上传，请先上传这些内容。', {'missing': missing})
+        if any((blobs / digest).stat().st_size != size for digest, size in sizes.items()):
+            raise HubError(400, '文件的大小和上传的内容对不上，请重新上传。')
 
     def _put_deliverable(self, member_id, identity, data):
         try:
@@ -808,12 +894,7 @@ class HubStore:
         current = self._deliverables(member_id)
         if identity not in current and len(current) >= MAX_DELIVERABLES:
             raise HubError(413, f'每位成员最多上架 {MAX_DELIVERABLES} 个成品，请先下架不用的。')
-        blobs = self._deliverable_dir(member_id) / 'blobs'
-        missing = sorted({f['sha256'] for f in row['files'].values() if not (blobs / f['sha256']).is_file()})
-        if missing:
-            raise HubError(409, '还有文件没有上传，请先上传这些内容。', {'missing': missing})
-        if any((blobs / f['sha256']).stat().st_size != f['size'] for f in row['files'].values()):
-            raise HubError(400, '成品文件的大小和上传的内容对不上，请重新上传。')
+        self._check_blobs(member_id, row['files'].values())
         row['updated_at'] = now()
         atomic_write(self._deliverable_dir(member_id) / 'items' / (identity + '.json'), row)
         self._collect_blobs(member_id)
@@ -849,7 +930,7 @@ class HubStore:
         entry = self._deliverable(member_id, identity)['files'].get(path)
         if entry is None:
             raise HubError(404, '成品里没有这个文件。')
-        blob = self._deliverable_dir(member_id) / 'blobs' / entry['sha256']
+        blob = self._blob_dir(member_id) / entry['sha256']
         kind = DELIVERABLE_TYPES.get(Path(path).suffix.lower(), 'application/octet-stream')
         return blob.open('rb'), entry['size'], kind
 
@@ -971,14 +1052,27 @@ class Handler(BaseHTTPRequestHandler):
         with store.locked():
             store._authenticate(self.headers.get('Authorization', ''))
             stream, size, kind = store._deliverable_file(member_id, identity, urllib.parse.unquote(path))
-        # The open file stays readable if the blob is collected meanwhile; stream outside the lock.
+        self._send_file(stream, size, kind, self.headers.get('Range'))
+
+    def _serve_package_file(self, member_id, name, version, digest):
+        store = self.server.store
+        with store.locked():
+            store._authenticate(self.headers.get('Authorization', ''))
+            stream, size = store._package_file(member_id, name, version, digest)
+        self._send_file(stream, size, 'application/octet-stream', attachment=True)
+
+    def _send_file(self, stream, size, kind, range_header=None, attachment=False):
+        # Stream outside the data lock; the version was checked when opening the file.
         with stream:
-            span = byte_range(self.headers.get('Range'), size)
+            span = byte_range(range_header, size)
             start, end = span or (0, size - 1)
             self.send_response(206 if span else 200)
             self.send_header('Content-Type', kind)
             self.send_header('Content-Length', str(end - start + 1))
-            self.send_header('Accept-Ranges', 'bytes')
+            if attachment:
+                self.send_header('Content-Disposition', 'attachment')
+            else:
+                self.send_header('Accept-Ranges', 'bytes')
             if span:
                 self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
             self.send_header('Cache-Control', 'no-store')
@@ -1023,15 +1117,16 @@ class Handler(BaseHTTPRequestHandler):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             path = address.path
             listing = re.fullmatch(r'/api/listings/me/(' + NAME + ')', path)
-            package = re.fullmatch(r'/api/packages/([0-9a-f]{32})/(' + NAME + ')', path)
+            package = re.fullmatch(r'/api/packages/([0-9a-f]{32})/(' + NAME + r')(?:/([0-9a-f]{64}))?', path)
             blob = re.fullmatch(r'/api/blobs/me/([0-9a-f]{64})', path)
             identity = '(' + DELIVERABLE_ID + ')'
             mine = re.fullmatch(r'/api/deliverables/me/' + identity, path)
             deliverable = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity, path)
             served = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity + '/(.+)', path)
             query = urllib.parse.parse_qs(address.query, keep_blank_values=True)
-            if '?' in self.path and not served and (not package or set(query) != {'version'} or
-                    len(query['version']) != 1 or not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
+            if not served and ('?' in self.path or (package and package[3])) and (
+                    not package or set(query) != {'version'} or len(query['version']) != 1 or
+                    not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             allowed = ({'POST'} if path in {'/api/join', '/api/feedback'} else
                        {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served else
@@ -1044,6 +1139,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise HubError(405, '这个地址不支持这项操作。')
             if blob:
                 self._json(200, self._receive_blob(blob[1]))
+                return
+            if package and package[3]:
+                self._serve_package_file(package[1], package[2], query['version'][0], package[3])
                 return
             if served:
                 self._serve_deliverable(served[1], served[2], served[3])
@@ -1078,14 +1176,15 @@ class Handler(BaseHTTPRequestHandler):
                 member = store._authenticate(self.headers.get('Authorization', ''))
                 if path == '/api/me':
                     result = {'service': 'skill-pilot-team', 'api': 2, 'member': member,
-                              'feedback_supported': True, 'feedback_configured': bool(self.server.feedback_webhook)}
+                              'feedback_supported': True, 'feedback_configured': bool(self.server.feedback_webhook),
+                              'skill_file_upload': True}
                 elif path == '/api/feedback':
                     if not self.server.feedback_webhook:
                         raise HubError(503, '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。')
                     row, duplicate = store._receive_feedback(member, data)
                     result = {'submitted': True, 'duplicate': duplicate}
                 elif path == '/api/catalog':
-                    result = store._catalog(member['id'])
+                    result = store._catalog(member['id'], skill_files=self.headers.get(SKILL_FILE_HEADER) == '1')
                 elif path == '/api/listings/me':
                     result = store._put_listings(member['id'], data)
                 elif path == '/api/installs/me':

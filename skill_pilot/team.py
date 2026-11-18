@@ -13,6 +13,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import nullcontext
 from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 
@@ -105,7 +106,7 @@ def _request(config, path, method='GET', data=None):
                          '评价内容超过 64 KB。' if limit == team_hub.MAX_RATING_BODY else
                          '加入信息超过 4096 字节，请缩短后重试。')
     key = config.get('key', '')
-    headers = {'Content-Type': 'application/json'}
+    headers = {'Content-Type': 'application/json', team_hub.SKILL_FILE_HEADER: '1'}
     if key:
         headers['Authorization'] = 'Bearer ' + key
     try:
@@ -126,8 +127,9 @@ def _request(config, path, method='GET', data=None):
     except urllib.error.HTTPError as error:
         status = error.code
         try:
-            # A deliverable's first try names every missing file: up to 2000 of them, past 64 KB.
-            payload = json.loads(error.read(team_hub.MAX_MANIFEST_BODY).decode('utf-8'))
+            # A batch can list more missing files than a single deliverable.
+            limit = MAX_BODY if path == '/api/listings/me' else team_hub.MAX_MANIFEST_BODY
+            payload = json.loads(error.read(limit).decode('utf-8'))
             detail = payload.get('error')
         except (ValueError, UnicodeError, AttributeError, HTTPException):
             payload, detail = {}, None
@@ -174,7 +176,8 @@ def _me(config, capabilities=False):
         raise ValueError('这个地址不是 Skill Pilot 分享站，请核对地址。')
     member = _member(result.get('member'))
     return ({'member': member, 'feedback_supported': result.get('feedback_supported') is True,
-             'feedback_configured': result.get('feedback_configured') is True} if capabilities else member)
+             'feedback_configured': result.get('feedback_configured') is True,
+             'skill_file_upload': result.get('skill_file_upload') is True} if capabilities else member)
 
 
 def status(home, config=None, strict=True):
@@ -184,7 +187,8 @@ def status(home, config=None, strict=True):
         public_url = config.get('url', '').replace(config['key'], '[已隐藏]') if config else ''
         result.update(url=public_url, has_key=bool(config.get('key')), configured=bool(config))
         if config:
-            result.update(_me(config, capabilities=True))
+            info = _me(config, capabilities=True)
+            result.update({k: info[k] for k in ('member', 'feedback_supported', 'feedback_configured')})
     except (ValueError, OSError) as error:
         if strict:
             raise
@@ -637,32 +641,39 @@ def publish_deliverable(home, folder, identity, title, version='', summary='', s
     config = _connection(home)
     _me(config)
     by_digest = {d: path for d, _, path in files.values()}
-    uploaded = 0
-    for _ in range(3):
-        try:
-            saved = _request(config, '/api/deliverables/me/' + identity, 'PUT', manifest)
-            break
-        except RequestError as error:
-            missing = error.body.get('missing') if error.status == 409 else None
-            if not isinstance(missing, list) or not set(missing) <= by_digest.keys():
-                if error.status == 404 and not missing:
-                    raise ValueError('分享站版本较旧，暂不能上架成品，请联系管理员更新分享站。') from None
-                raise
-            for digest in missing:
-                _upload_blob(config, digest, by_digest[digest])
-                uploaded += 1
-    else:
-        raise ValueError('上传时文件一直在变，请稍后重新上架。')
+    saved, uploaded = _upload_missing(config, '/api/deliverables/me/' + identity, manifest, by_digest)
     return {**result, 'key': saved['key'], 'uploaded': uploaded,
             'message': f'已上架成品「{checked["title"]}」，同事在团队页「成品」里能打开。'}
 
 
-def _upload_blob(config, digest, path):
-    size = path.stat().st_size
+def _upload_missing(config, route, payload, by_digest, read=None):
+    uploaded = 0
+    for attempt in range(3):
+        try:
+            return _request(config, route, 'PUT', payload), uploaded
+        except RequestError as error:
+            missing = error.body.get('missing') if error.status == 409 else None
+            if error.status == 404 and route.startswith('/api/deliverables/'):
+                raise ValueError('分享站版本较旧，暂不能上架成品，请联系管理员更新分享站。') from None
+            if not isinstance(missing, list) or not missing or any(
+                    not isinstance(d, str) or d not in by_digest for d in missing):
+                raise
+            if attempt == 2:
+                break
+            for digest in dict.fromkeys(missing):
+                value = by_digest[digest]
+                _upload_blob(config, digest, read(digest, *value) if read else value)
+                uploaded += 1
+    raise ValueError('上传时有文件未能保存，请稍后重新上架。')
+
+
+def _upload_blob(config, digest, data):
+    from_file = isinstance(data, Path)
+    size = data.stat().st_size if from_file else len(data)
     headers = {'Authorization': 'Bearer ' + config['key'], 'Content-Type': 'application/octet-stream',
                'Content-Length': str(size)}
     try:
-        with path.open('rb') as stream:
+        with (data.open('rb') if from_file else nullcontext(data)) as stream:
             request = urllib.request.Request(config['url'] + '/api/blobs/me/' + digest, data=stream,
                                              method='PUT', headers=headers)
             with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=max(TIMEOUT, 120)) as response:
@@ -674,9 +685,9 @@ def _upload_blob(config, digest, path):
             except (ValueError, UnicodeError, AttributeError, HTTPException):
                 detail = None
         raise RequestError(error.code, _redact(detail, config['key']) if isinstance(detail, str) and detail else
-                           '成品文件没能上传，请稍后重试。') from None
+                           '文件没能上传，请稍后重试。') from None
     except (OSError, HTTPException):
-        raise ValueError('上传成品文件时连不上分享站，请检查网络后重试。') from None
+        raise ValueError('上传文件时连不上分享站，请检查网络后重试。') from None
 
 
 def deliverable_detail(home, member_id, identity):
@@ -735,20 +746,64 @@ def tag_pack(home, names, title):
     return '没能加上标签：' + '；'.join(warnings) if warnings else ''
 
 
-def package(config, member, name, version, destination):
-    data = _request(config, '/api/packages/' + member + '/' + name + '?version=' + version)
+def _download_skill_file(config, route, version, row, path):
+    url = config['url'] + route + '/' + row['sha256'] + '?version=' + version
+    headers = {'Authorization': 'Bearer ' + config['key']}
+    request = urllib.request.Request(url, headers=headers)
+    hasher = hashlib.sha256()
+    remaining = row['size']
     try:
-        files = team_hub.clean_files(data.get('files'))
+        with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=max(TIMEOUT, 120)) as response:
+            if response.headers.get_all('Content-Length') != [str(remaining)]:
+                raise RequestError(502, FORMAT_ERROR)
+            with path.open('wb') as output:
+                while remaining:
+                    part = response.read(min(remaining, 1024 * 1024))
+                    if not part:
+                        raise RequestError(502, FORMAT_ERROR)
+                    hasher.update(part)
+                    output.write(part)
+                    remaining -= len(part)
+        if hasher.hexdigest() != row['sha256']:
+            raise RequestError(502, '技能有文件没有通过完整性核对，请重新安装。')
+    except urllib.error.HTTPError as error:
+        with error:
+            if error.code in {404, 409}:
+                raise ValueError('技能已下架或作者发布了新版，请刷新商店后再试。') from None
+            if error.code == 401:
+                raise ValueError('分享站没认出你，请到设置里重新连接。') from None
+            raise ValueError('分享站没能提供这个技能文件，请稍后重试。') from None
+    except (OSError, HTTPException):
+        raise ValueError('技能文件没能完整下载，请检查网络后重试。') from None
+
+
+def package(config, member, name, version, destination):
+    route = '/api/packages/' + member + '/' + name
+    data = _request(config, route + '?version=' + version)
+    try:
+        files = data.get('files')
+        manifest = isinstance(files, dict)
+        files = team_hub.clean_skill_manifest(files) if manifest else team_hub.clean_files(files)
         if data.get('name') != name or data.get('version') != version or team_hub.package_version(files) != version:
             raise ValueError
     except (ValueError, TypeError):
         raise RequestError(502, FORMAT_ERROR) from None
     destination = Path(destination)
     destination.mkdir(parents=True)
-    for row in files:
-        path = destination / row['path']
+    paths = files.items() if manifest else ((row['path'], row) for row in files)
+    downloaded = {}
+    for relative, row in paths:
+        path = destination / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(base64.b64decode(row['content']))
+        if manifest:
+            digest = row['sha256']
+            if digest in downloaded:
+                shutil.copyfile(downloaded[digest], path)
+            else:
+                _download_skill_file(config, route, version, row, path)
+                downloaded[digest] = path
+        else:
+            path.write_bytes(base64.b64decode(row['content']))
         path.chmod(0o755 if row['executable'] else 0o644)
     github.safe_skill(destination)
     if metadata((destination / 'SKILL.md').read_text(encoding='utf-8')).get('name') != name:
@@ -846,7 +901,7 @@ def install(home, key):
 def _files(root):
     root = Path(root)
     github.safe_skill(root)
-    files, blocked, size = [], [], 0
+    files, blocked, size = {}, [], 0
     def walk(folder, ancestors):
         nonlocal size
         resolved = folder.resolve()
@@ -869,21 +924,23 @@ def _files(root):
             if not path.is_file():
                 raise ValueError('技能里有不能读取的文件，不能上架。')
             with path.open('rb') as stream:
-                raw = stream.read(team_hub.MAX_SIZE + 1)
+                raw = stream.read(team_hub.MAX_BLOB + 1)
+            if len(raw) > team_hub.MAX_BLOB:
+                raise ValueError(f'「{relative}」超过单文件 {team_hub.MAX_BLOB // 1024 // 1024} MB 的上限。')
             if SECRET_CONTENT.search(raw.decode('utf-8', errors='replace')):
                 blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
                 continue
             size += len(raw)
             if size > team_hub.MAX_SIZE:
-                raise ValueError('单个技能的文件合计不能超过 5 MB。')
-            files.append({'path': relative, 'content': base64.b64encode(raw).decode('ascii'),
-                          'executable': bool(path.stat().st_mode & 0o111)})
+                raise ValueError(f'单个技能的文件合计不能超过 {team_hub.MAX_SIZE // 1024 // 1024} MB。')
+            files[relative] = {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw),
+                               'executable': bool(path.stat().st_mode & 0o111)}
             if len(files) > team_hub.MAX_FILES:
-                raise ValueError('单个技能不能超过 300 个文件。')
+                raise ValueError(f'单个技能不能超过 {team_hub.MAX_FILES} 个文件。')
     walk(root, set())
-    if not any(f['path'] == 'SKILL.md' for f in files):
+    if 'SKILL.md' not in files:
         raise ValueError('SKILL.md 缺失或疑似含有密钥，整个技能不能上架。')
-    return team_hub.clean_files(files), {'count': len(files), 'size': size, 'blocked': blocked}
+    return team_hub.clean_skill_manifest(files), {'count': len(files), 'size': size, 'blocked': blocked}
 
 
 def _candidates(home, registry, member, cards):
@@ -1055,6 +1112,19 @@ def listings_preview(home, skills, rejected=None, packs=None):
     return saved, result
 
 
+def _read_skill_file(digest, root, relative, size):
+    try:
+        path = (root / relative).resolve()
+        if path.is_relative_to(root.resolve()) and path.is_file():
+            with path.open('rb') as stream:
+                raw = stream.read(size + 1)
+            if len(raw) == size and hashlib.sha256(raw).hexdigest() == digest:
+                return raw
+    except (OSError, RuntimeError):
+        pass
+    raise ValueError('本机技能文件已经变了或没能读取，请重新预览后再上架。')
+
+
 def listings_apply(home, review):
     home, _, agents = operations.load(home)
     guard(home / '.skill-pilot', home)
@@ -1065,8 +1135,34 @@ def listings_apply(home, review):
         raise ValueError('分享站设置已经变了，请重新预览。')
     if not review['listings']:
         raise ValueError('没有可以上架的技能，请先处理预览里的原因。')
-    _me(config)
-    result = _request(config, '/api/listings/me', 'PUT', {k: review[k] for k in ('listings', 'packs') if k in review})
+    capabilities = _me(config, capabilities=True)
+    payload = {k: review[k] for k in ('listings', 'packs') if k in review}
+    by_digest, encoded_size, large = {}, 0, False
+    for row in payload['listings']:
+        files = row['source'].get('files', {})
+        root = home / '.skill-pilot/store' / row['name']
+        size = sum(f['size'] for f in files.values())
+        large |= len(files) > team_hub.INLINE_MAX_FILES or size > team_hub.INLINE_MAX_SIZE
+        for relative, f in files.items():
+            by_digest[f['sha256']] = (root, relative, f['size'])
+            encoded_size += 4 * ((f['size'] + 2) // 3)
+    route = '/api/listings/me'
+    if large or (by_digest and encoded_size + len(json.dumps(payload, ensure_ascii=False).encode('utf-8')) > MAX_BODY):
+        if not capabilities['skill_file_upload']:
+            raise ValueError('这次上架的技能文件较多或较大，请联系管理员更新分享站后重试。')
+        result, _ = _upload_missing(config, route, payload, by_digest, read=_read_skill_file)
+    else:
+        # Keep the original format for small publications and older share stations.
+        inline = copy.deepcopy(payload)
+        for row in inline['listings']:
+            files = row['source'].get('files')
+            if files is not None:
+                root = home / '.skill-pilot/store' / row['name']
+                row['source']['files'] = [
+                    {'path': path, 'content': base64.b64encode(
+                        _read_skill_file(f['sha256'], root, path, f['size'])).decode('ascii'),
+                     'executable': f['executable']} for path, f in files.items()]
+        result = _request(config, route, 'PUT', inline)
     return {**result, 'message': '技能已上架。'}
 
 
