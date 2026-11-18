@@ -1072,6 +1072,37 @@ def set_source(name, repository, folder, confirmed=False, home=None, branch=None
         return _run(home,registry,agents,expected,f'补登记了 {name} 的来源，并重新核对原始版本',mutate)
 
 
+def mark_self_made(name, confirmed=False, home=None):
+    """Stop following an upstream source: the skill becomes self-made, so update-local can take it over.
+    Content and assignments stay as they are; the old source is kept in the evidence."""
+    home, registry, agents = load(home)
+    if name not in registry['skills']:
+        raise ValueError('这个技能不在登记表里，请刷新后再选。')
+    old = registry['skills'][name]['source']
+    if normalize(old)['kind'] == 'skip':
+        return {'name': name, 'changed': False, 'message': f'「{name}」已经是自制或来源未记录，不检查外部更新，可以直接用 update-local 更新。'}
+    label = normalize(old).get('label') or old.get('source', '')
+    if not confirmed:
+        return {'name': name, 'needs_confirmation': True,
+                'message': f'将把「{name}」的来源从「{label}」改成自制：以后不再检查它的外部更新，改用 update-local 从本机文件夹更新。'
+                           '现在的内容和分配不变，可以撤销。请核对后加 --yes 执行。'}
+    guard(home / '.skill-pilot', home)
+    expected = revision(home, agents)
+    def mutate(current, checked):
+        base = checked(home / '.skill-pilot/bases' / name)
+        if base.exists():
+            rmtree(base)
+        copytree(home / '.skill-pilot/store' / name, base, symlinks=True)
+        skill = current['skills'][name]
+        skill['source'] = {'source': '自制', 'source_path': '本机维护', 'confidence': '高',
+                           'evidence': f'由用户从有上游来源改成自制，原来源：{label}（{old.get("source_path", "")}）'}
+        skill['base_digest'] = content_digest(base)
+        for key in ('base_tree_sha', 'reviewed_tree_sha'):
+            skill.pop(key, None)
+        return [name], [], {'source': skill['source']}
+    return _run(home, registry, agents, expected, f'把 {name} 改成了自制，原来源是 {label}', mutate)
+
+
 def undo(operation_id, expected=None, home=None):
     home, registry, agents = load(home)
     guard(home / '.skill-pilot', home)

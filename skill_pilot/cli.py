@@ -53,8 +53,9 @@ def main():
     withdrawn_command.add_argument('--json', action='store_true')
     source_command = commands.add_parser('set-source', help='补登记来源并重新校准原始版本')
     source_command.add_argument('skill')
-    source_command.add_argument('--repo', required=True)
-    source_command.add_argument('--path', required=True)
+    source_command.add_argument('--repo')
+    source_command.add_argument('--path')
+    source_command.add_argument('--self-made', action='store_true', help='不再跟上游，改成自制，之后用 update-local 更新')
     source_command.add_argument('--branch', help='跟着这个分支检查更新，默认跟仓库的默认分支')
     source_command.add_argument('--yes', action='store_true')
     source_command.add_argument('--json', action='store_true')
@@ -248,7 +249,13 @@ def main():
                           cleanup.apply(args.skills, confirmed=True) if args.yes else cleanup.preview(args.skills))
             elif args.command == 'restore-withdrawn':
                 result = cleanup.restore(args.skills)
+            elif args.self_made:
+                if args.repo or args.path or args.branch:
+                    raise ValueError('改成自制时不用填 --repo、--path 或 --branch。')
+                result = operations.mark_self_made(args.skill, args.yes)
             else:
+                if not (args.repo and args.path):
+                    raise ValueError('请填写 --repo 和 --path；不再跟上游的话，改用 --self-made。')
                 result = operations.set_source(args.skill,args.repo,args.path,args.yes,branch=args.branch)
             if args.json:
                 print(json.dumps(result,ensure_ascii=False,indent=2))

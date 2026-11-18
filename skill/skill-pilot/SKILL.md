@@ -33,6 +33,7 @@ description: 管理本机各 agent 的技能，查看和导出技能清单、打
 - 更新 `skill-pilot update <技能...> --yes`，默认用上游版本，先备份，可撤销；保留本机改动时加 `--choice keep`。默认不调用 AI；只有用户明确要求合并才用 `--choice merge`，核对合并预览后再确认安装。
 - 清理 `skill-pilot cleanup <技能...> --yes`，只撤下用户点名的技能：从全部 agent 撤下，文件留在仓库，可撤销。先不带 `--yes` 预览，把依赖和受影响文件的提示告诉用户。
 - 改来源 `skill-pilot set-source <技能> --repo <作者/仓库> --path <目录> --yes`；要跟某个非默认分支检查更新时加 `--branch <分支>`，不写就跟仓库默认分支。
+- 不再跟上游、改成自己维护（比如在原版基础上改过或合成过）：`skill-pilot set-source <技能> --self-made`，不带 `--yes` 只预览。改成自制后不再检查外部更新，内容和分配不变，原来源记在说明里，可以撤销；之后用 `skill-pilot update-local <技能> <文件夹>` 换成本机那份。
 - 撤销先看 `skill-pilot log`，再运行 `skill-pilot undo <记录编号>`；整理后要还原，用 `skill-pilot restore <备份编号>`。恢复已撤下技能用 `skill-pilot restore-withdrawn <技能...>`。
 
 收编和安装同样先展示具体对象，经用户同意后带 `--yes` 执行。飞书技能更新会同时升级工具，须单独说明并取得明确同意，再带 `--confirm-lark-cli`。
