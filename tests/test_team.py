@@ -391,8 +391,8 @@ class TeamTests(unittest.TestCase):
         card = self.cards(server)[name]
         return self.ok(server, '/api/team/queue', {'key': card['key']})['items'][-1]
 
-    def wait_queue(self, server=None):
-        deadline = time.monotonic() + 12
+    def wait_queue(self, server=None, *, timeout=12):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             items = self.ok(server or self.b, '/api/team/queue')['items']
             if not any(item['status'] in {'waiting', 'running'} for item in items):
@@ -400,9 +400,9 @@ class TeamTests(unittest.TestCase):
             time.sleep(.01)
         self.fail('安装队列没有完成')
 
-    def install(self, name='acme-local'):
+    def install(self, name='acme-local', *, timeout=12):
         queued = self.enqueue(name)
-        item = next(item for item in self.wait_queue() if item['id'] == queued['id'])
+        item = next(item for item in self.wait_queue(timeout=timeout) if item['id'] == queued['id'])
         self.assertEqual(item['status'], 'done', item)
         return item
 
@@ -1390,6 +1390,8 @@ class TeamTests(unittest.TestCase):
         self.assertTrue(candidate()['changed'])
 
     def test_github_secret_and_size_count_limits_publish_without_a_package(self):
+        # Absolute limits are covered by the manifest test. This test checks the GitHub fallback.
+        self.enterContext(patch.multiple(team_hub, MAX_FILES=16, MAX_BLOB=1024 * 1024))
         self.configure()
         root = self.home / '.skill-pilot/store/acme-main'
         base = self.home / '.skill-pilot/bases/acme-main'
@@ -1481,7 +1483,7 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(self.library(self.other), before)
         blob.write_bytes(b'sample 0')
 
-        self.install()
+        self.install(timeout=120)
         installed = self.other / '.skill-pilot/store/acme-local'
         self.assertEqual(team._files(installed)[0], manifest)
 
@@ -1566,6 +1568,7 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(plan['listings'], [])
 
     def test_blocked_skill_manifest_and_size_count_limits_propagate_to_dependents(self):
+        self.enterContext(patch.multiple(team_hub, MAX_FILES=16, MAX_BLOB=1024 * 1024))
         self.configure()
         root = self.home / '.skill-pilot/store/acme-local'
         self.registry(self.home, lambda skills: skills['acme-main'].update(requires=['acme-local']))

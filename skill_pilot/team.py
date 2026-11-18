@@ -900,19 +900,20 @@ def install(home, key):
 
 def _files(root):
     root = Path(root)
+    resolved_root = root.resolve()
     github.safe_skill(root)
     files, blocked, size = {}, [], 0
     def walk(folder, ancestors):
         nonlocal size
         resolved = folder.resolve()
-        if not resolved.is_relative_to(root.resolve()):
+        if not resolved.is_relative_to(resolved_root):
             raise ValueError('这个技能引用了技能文件夹外的文件，不能上架。')
         if resolved in ancestors:
             raise ValueError('这个技能的文件夹相互引用，无法完整读取。')
         for path in sorted(folder.iterdir()):
             if path.name in SKIP_CONTENT:
                 continue
-            if not path.resolve().is_relative_to(root.resolve()):
+            if not path.resolve().is_relative_to(resolved_root):
                 raise ValueError('这个技能引用了技能文件夹外的文件，不能上架。')
             relative = path.relative_to(root).as_posix()
             if path.is_dir():
