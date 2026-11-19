@@ -1159,8 +1159,35 @@ def undo(operation_id, expected=None, home=None):
         with tarfile.open(before_file) as source:
             members = [member for member in source.getmembers()
                        if member.name == relative or member.name.startswith(relative + '/')]
+            # The data filter rejects every absolute link, including one whose
+            # target stays inside this home. Check those targets first, then
+            # recreate only the links that resolve inside the home.
             for member in members:
-                source.extract(member, home, filter='data')
+                if Path(member.name).is_absolute() or '..' in Path(member.name).parts:
+                    raise ValueError('备份里有不安全的位置，已经停止还原。')
+                destination = guard(home / member.name, home)
+                if member.islnk() or member.isdev() or member.isfifo():
+                    raise ValueError('备份里有不支持的文件，已经停止还原。')
+                if member.issym():
+                    target = Path(member.linkname)
+                    guard(target if target.is_absolute() else destination.parent / target, home)
+            for member in members:
+                destination = home / member.name
+                if member.issym() and Path(member.linkname).is_absolute():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if destination.is_symlink() or destination.exists():
+                        destination.unlink()
+                    target = Path(member.linkname)
+                    absolute_target = target if target.is_absolute() else destination.parent / target
+                    if os.name == 'nt' and member.pax_headers.get('skill-pilot.junction') == 'True':
+                        import _winapi
+                        _winapi.CreateJunction(str(absolute_target), str(destination))
+                    else:
+                        directory_link = member.pax_headers.get('skill-pilot.directory-link')
+                        destination.symlink_to(target, target_is_directory=(
+                            directory_link == 'True' if directory_link is not None else absolute_target.is_dir()))
+                else:
+                    source.extract(member, home, filter='data')
             # The data filter adjusts permissions; restore the user's original
             # modes after writing children so private directories remain usable.
             for member in reversed(members):

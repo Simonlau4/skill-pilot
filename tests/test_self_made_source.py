@@ -225,6 +225,29 @@ class SelfMadeSourceTests(unittest.TestCase):
         self.assertEqual(self.state(), before)
         self.assertFalse(copied.exists())
 
+    def test_absolute_link_inside_home_can_be_marked_and_undone(self):
+        other = self.home / 'other'
+        other.mkdir()
+        target = other / 'file.txt'
+        target.write_text('家里的备忘')
+        store = self.home / '.skill-pilot/store/design'
+        (store / 'note').symlink_to(target)
+        before = self.state()
+        original = self._baseline_text()
+        source = operations.load(self.home)[1]['skills']['design']['source']
+        done = operations.mark_self_made('design', True, self.home)
+        copied = self.home / '.skill-pilot/bases/design/note'
+        self.assertTrue(copied.is_symlink())
+        self.assertEqual(Path(os.readlink(copied)).resolve(), target.resolve())
+        operations.undo(done['id'], home=self.home)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self._baseline_text(), original)
+        self.assertFalse(copied.exists())
+        self.assertTrue((store / 'SKILL.md').is_file())
+        self.assertTrue((store / 'note').is_symlink())
+        self.assertEqual(Path(os.readlink(store / 'note')).resolve(), target.resolve())
+        self.assertEqual(operations.load(self.home)[1]['skills']['design']['source'], source)
+
 
 if __name__ == '__main__':
     unittest.main()
