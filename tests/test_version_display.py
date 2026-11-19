@@ -379,8 +379,40 @@ class VersionFormatAndReadTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(legacy_preview['payload']['app_version'], 'abcdef012345')
 
-            # Static-only hot refresh updates BOTH dashboard and diagnostics running version; old errors stay intact.
-            with patch.object(runtime, 'version', return_value=dashboard.code_version):
+            # Static-only hot refresh while 'ready' MUST verify disk build first:
+            # unreadable or mismatched disk keeps old running version and invalidates stale conclusions.
+            for label, patch_kwargs in (
+                ('ready-refresh-read-error', {'side_effect': OSError('disk unreadable')}),
+                ('ready-refresh-mismatch', {'return_value': {
+                    'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                    'manifest_valid': True, 'version': 'v1.0.0-4444444'}}),
+            ):
+                with self.subTest(hot_refresh=label):
+                    dashboard.program_progress.update(
+                        phase='ready', message='新版已安装，刷新后生效',
+                        latest='2026-11-19T00:00:00Z', checked_at=12345.0, target='t' * 40,
+                        current_version=running, latest_version=pending, pending_version=pending)
+                    with patch.object(runtime, 'version', return_value=dashboard.code_version), \
+                            patch.object(app_version, 'read_build', **patch_kwargs):
+                        dashboard.request_reload()
+                    self.assertEqual(dashboard.running_version, running)
+                    self.assertEqual(diagnostics.RUNNING_BUILD['app_version'], running)
+                    self.assertEqual(dashboard.program_progress['phase'], 'idle')
+                    self.assertEqual(dashboard.program_progress['current_version'], running)
+                    self.assertEqual(dashboard.program_progress['latest'], '')
+                    self.assertEqual(dashboard.program_progress['latest_version'], '')
+                    self.assertEqual(dashboard.program_progress['pending_version'], '')
+                    self.assertNotIn('checked_at', dashboard.program_progress)
+                    self.assertNotIn('target', dashboard.program_progress)
+
+            # Static-only hot refresh when disk matches pending_version updates BOTH dashboard and diagnostics; old errors stay intact.
+            dashboard.program_progress.update(
+                phase='ready', message='新版已安装，刷新后生效',
+                current_version=running, latest_version=pending, pending_version=pending)
+            with patch.object(runtime, 'version', return_value=dashboard.code_version), \
+                    patch.object(app_version, 'read_build', return_value={
+                        'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                        'manifest_valid': True, 'version': pending}):
                 refreshed = dashboard.request_reload()
             self.assertFalse(refreshed['changed'])
             self.assertEqual(dashboard.program_progress['phase'], 'latest')
@@ -657,7 +689,9 @@ const api = async (path) => {
         self.assertEqual(app_version.read_build(self.code)['version'], official_version)
         self.assertFalse(self_update.check(self.home, self.code)['available'])
 
-        # Simulate a legacy manifest that had accidentally recorded both private notes.
+        # New client upgrading from a legacy manifest that had accidentally recorded private notes
+        # (including when those private paths were later replaced with a directory or symlink):
+        # private entries are skipped during manifest reading, version calculation, check, and upgrade deletion.
         legacy_files = {
             **complete_files,
             'docs/My private note.md': self_update.stamp(self.code / 'docs/My private note.md'),
@@ -668,7 +702,26 @@ const api = async (path) => {
         legacy_build = app_version.read_build(self.code)
         self.assertTrue(legacy_build['manifest_valid'])
         self.assertEqual(legacy_build['version'], official_version)
-        # Publish a new official release and upgrade: both private notes survive untouched and drop from manifest.
+        # Path traversal entries in a manifest must still be rejected even though private notes are skipped.
+        bad_manifest = self.code / '.skill-pilot-install.json'
+        bad_manifest.write_text(json.dumps({
+            'files': {**complete_files, '../escape.md': ['0' * 64, 0]}, 'revision': head}), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '重新运行一次安装程序'):
+            self_update.read_record(self.code)
+        bad_manifest.write_text(json.dumps({
+            'files': legacy_files, 'revision': head, 'date': '2026-11-19T00:00:00Z'}), encoding='utf-8')
+
+        # Replace recorded private notes with a directory and a symlink: check & upgrade by new client still succeed!
+        (self.code / 'docs/My private note.md').unlink()
+        (self.code / 'docs/My private note.md').mkdir()
+        (self.code / 'docs/My private note.md/inner.txt').write_text('keep dir', encoding='utf-8')
+        outside_target = self.root / 'outside-private-note.md'
+        outside_target.write_text('outside target', encoding='utf-8')
+        (self.code / 'My private note.md').unlink()
+        (self.code / 'My private note.md').symlink_to(outside_target)
+        self.assertEqual(app_version.read_build(self.code)['version'], official_version)
+        self.assertTrue(app_version.read_build(self.code)['manifest_valid'])
+        # Publish a new official release and upgrade: private directory & symlink survive untouched and drop from manifest.
         readme = self.upstream / 'README.md'
         readme.write_text(readme.read_text(encoding='utf-8') + '\nnext official release\n', encoding='utf-8')
         commit(self.upstream, 'Next official release')
@@ -678,8 +731,10 @@ const api = async (path) => {
         self.assertTrue(upgrade_review['available'])
         with patch.object(self_update, 'run_installer'):
             self_update.apply(upgrade_review, self.home, self.code)
-        self.assertEqual((self.code / 'docs/My private note.md').read_text(encoding='utf-8'), 'personal doc')
-        self.assertEqual((self.code / 'My private note.md').read_text(encoding='utf-8'), 'personal root note')
+        self.assertTrue((self.code / 'docs/My private note.md').is_dir())
+        self.assertEqual((self.code / 'docs/My private note.md/inner.txt').read_text(encoding='utf-8'), 'keep dir')
+        self.assertTrue((self.code / 'My private note.md').is_symlink())
+        self.assertEqual(outside_target.read_text(encoding='utf-8'), 'outside target')
         upgraded_record = self_update.read_record(self.code)
         self.assertNotIn('docs/My private note.md', upgraded_record['files'])
         self.assertNotIn('My private note.md', upgraded_record['files'])
@@ -771,6 +826,7 @@ const api = async (path) => {
                     with dashboard.program_lock:
                         dashboard._set_program_progress({
                             'running': False, 'phase': 'latest', 'available': False,
+                            'latest': '2026-11-19T00:00:00Z',
                             'current_version': running, 'latest_version': running,
                             'checked_at': 12345.0, 'target': 'old-target', 'message': 'SP 已是最新版本',
                         })
@@ -780,6 +836,7 @@ const api = async (path) => {
                     self.assertEqual(dashboard.running_version, running)
                     self.assertEqual(dashboard.program_progress['current_version'], running)
                     self.assertEqual(dashboard.program_progress['phase'], 'idle')
+                    self.assertEqual(dashboard.program_progress['latest'], '')
                     self.assertEqual(dashboard.program_progress['latest_version'], '')
                     self.assertNotIn('checked_at', dashboard.program_progress)
                     self.assertNotIn('target', dashboard.program_progress)
@@ -851,11 +908,13 @@ const api = async (path) => {
         self.assertNotIn('checked_at', resumed.program_progress)
         self.assertNotIn('target', resumed.program_progress)
 
-        # 3. Resuming a 'ready' session only confirms 'latest' when running_version is non-empty and matches pending_version.
-        for label, actual_version, expect_phase, expect_current in (
-            ('ready-unknown-version', '', 'idle', ''),
-            ('ready-mismatched-version', 'v1.0.0-3333333', 'idle', 'v1.0.0-3333333'),
-            ('ready-matched-version', 'v1.0.0-2222222', 'latest', 'v1.0.0-2222222'),
+        # 3. Resuming a 'ready' session only confirms 'latest' when BOTH running_version and pending_version
+        #    are non-empty and equal; missing pending_version, empty running_version, or mismatch withdraws stale state.
+        for label, actual_version, saved_pending, expect_phase, expect_current in (
+            ('ready-unknown-version', '', 'v1.0.0-2222222', 'idle', ''),
+            ('ready-missing-pending-version', 'v1.0.0-2222222', '', 'idle', 'v1.0.0-2222222'),
+            ('ready-mismatched-version', 'v1.0.0-3333333', 'v1.0.0-2222222', 'idle', 'v1.0.0-3333333'),
+            ('ready-matched-version', 'v1.0.0-2222222', 'v1.0.0-2222222', 'latest', 'v1.0.0-2222222'),
         ):
             with self.subTest(ready_resume=label):
                 listener = socket.socket()
@@ -870,9 +929,10 @@ const api = async (path) => {
                         'socket_fd': listener.dup().detach(),
                         'program_progress': {
                             'running': False, 'phase': 'ready', 'available': False, 'error': '',
+                            'latest': '2026-11-19T00:00:00Z',
                             'current_version': 'v1.0.0-1111111',
-                            'latest_version': 'v1.0.0-2222222',
-                            'pending_version': 'v1.0.0-2222222',
+                            'latest_version': saved_pending,
+                            'pending_version': saved_pending,
                             'checked_at': 12345.0, 'target': 'target-sha',
                             'message': '新版已安装，刷新后生效',
                         },
@@ -882,6 +942,7 @@ const api = async (path) => {
                 self.assertEqual(resumed_ready.program_progress['current_version'], expect_current)
                 self.assertEqual(resumed_ready.program_progress['pending_version'], '')
                 if expect_phase == 'idle':
+                    self.assertEqual(resumed_ready.program_progress['latest'], '')
                     self.assertEqual(resumed_ready.program_progress['latest_version'], '')
                     self.assertNotIn('checked_at', resumed_ready.program_progress)
                     self.assertNotIn('target', resumed_ready.program_progress)

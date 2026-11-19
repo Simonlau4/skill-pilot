@@ -190,7 +190,7 @@ class Dashboard(ThreadingHTTPServer):
             self.program_review = None
             self.program_progress.update(
                 running=False, phase='idle', available=False, error='', error_id='', failed_action='',
-                current_version=self.running_version, latest_version='', pending_version='',
+                latest='', current_version=self.running_version, latest_version='', pending_version='',
                 changes=[], changes_total=0, changes_partial=False,
                 message='还没查到新版信息' if interrupted_auto_check else '从 GitHub 官方项目获取新版',
             )
@@ -198,7 +198,7 @@ class Dashboard(ThreadingHTTPServer):
             self.program_progress.pop('target', None)
         if self.program_progress['phase'] == 'ready':
             expected_pending = self.program_progress.get('pending_version', '')
-            if self.running_version and (not expected_pending or self.running_version == expected_pending):
+            if self.running_version and expected_pending and self.running_version == expected_pending:
                 self._set_program_progress({
                     'phase': 'latest', 'message': 'SP 已升级到最新版',
                     'current_version': self.running_version,
@@ -974,7 +974,7 @@ class Dashboard(ThreadingHTTPServer):
         self._set_program_progress(
             {
                 'running': False, 'phase': 'idle', 'available': False, 'error': '', 'error_id': '',
-                'failed_action': '', 'current_version': self.running_version,
+                'failed_action': '', 'latest': '', 'current_version': self.running_version,
                 'latest_version': '', 'pending_version': '',
                 'changes': [], 'changes_total': 0, 'changes_partial': False,
                 'message': '从 GitHub 官方项目获取新版',
@@ -1145,19 +1145,25 @@ class Dashboard(ThreadingHTTPServer):
                 self.reload_error_id = ''
                 with self.program_lock:
                     if self.program_progress['phase'] == 'ready':
-                        applied = (self.program_progress.get('pending_version')
-                                   or app_version.read_build().get('version', '')
-                                   or self.running_version)
-                        self.running_version = applied
-                        app_version.set_running_version(applied, date=self.program_progress.get('latest', ''))
-                        diagnostics.sync_running_build()
-                        self._set_program_progress({
-                            'phase': 'latest', 'message': 'SP 已升级到最新版',
-                            'current_version': applied,
-                            'latest_version': applied or self.program_progress.get('latest_version', ''),
-                            'pending_version': '', 'failed_action': '',
-                            'changes': [], 'changes_total': 0, 'changes_partial': False,
-                        })
+                        expected_pending = self.program_progress.get('pending_version', '')
+                        try:
+                            refreshed = app_version.read_build()
+                        except Exception:
+                            refreshed = None
+                        applied = refreshed.get('version', '') if refreshed else ''
+                        if applied and expected_pending and applied == expected_pending:
+                            self.running_version = applied
+                            app_version.set_running_version(applied, date=self.program_progress.get('latest', ''))
+                            diagnostics.sync_running_build()
+                            self._set_program_progress({
+                                'phase': 'latest', 'message': 'SP 已升级到最新版',
+                                'current_version': applied,
+                                'latest_version': applied,
+                                'pending_version': '', 'failed_action': '',
+                                'changes': [], 'changes_total': 0, 'changes_partial': False,
+                            })
+                        else:
+                            self._invalidate_stale_program_check()
                     elif self.program_progress['running'] and (self.program_action == 'check' or self.program_progress['phase'] == 'check'):
                         self.static_refresh_seq += 1
                     elif not self.program_progress['running'] and self.program_action != 'apply' and self.program_progress['phase'] != 'apply':

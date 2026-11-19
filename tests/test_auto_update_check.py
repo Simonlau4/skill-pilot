@@ -103,17 +103,27 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.assertEqual(progress['changes_partial'], partial)
 
     def test_changes_pass_through_both_endpoints_and_clear_after_upgrade_and_refresh(self):
+        saved_running = server.app_version.running_build()
+        def restore_running():
+            server.app_version.set_running_version(saved_running['version'], date=saved_running['date'])
+            server.diagnostics.sync_running_build()
+        self.addCleanup(restore_running)
         self.review.update(changes=['改进更新提醒'], changes_total=3, changes_partial=True)
         self.start()
         self.assert_changes(self.finished(), ['改进更新提醒'], 3, True)
         self.assert_changes(self.request('/api/program/auto-check', {}), ['改进更新提醒'], 3, True)
-        with patch.object(self_update, 'apply', return_value={'available': False, 'current': 'new'}):
+        with patch.object(self_update, 'apply', return_value={
+                'available': False, 'current': 'new', 'pending_version': 'v1.0.0-1234567',
+                'latest_version': 'v1.0.0-1234567'}):
             self.request('/api/program/apply', {'confirmed': True, 'target': self.review['target']})
             ready = self.finished()
         self.assertEqual(ready['phase'], 'ready')
         self.assert_changes(ready)
         self.dashboard.program_progress.update(changes=['旧内容'], changes_total=1, changes_partial=True)
-        self.request('/api/runtime/refresh', {})
+        with patch.object(server.app_version, 'read_build', return_value={
+                'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                'manifest_valid': True, 'version': 'v1.0.0-1234567'}):
+            self.request('/api/runtime/refresh', {})
         latest = self.finished()
         self.assertEqual(latest['phase'], 'latest')
         self.assert_changes(latest)

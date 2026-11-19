@@ -150,12 +150,16 @@ def bundle_files(project):
 
 def read_record(project):
     try:
-        data = json.loads(safe_path(project, RECORD).read_text())
+        data = json.loads(safe_path(project, RECORD).read_text(encoding='utf-8'))
         if not isinstance(data['files'], dict) or not data['files']:
             raise ValueError()
         if not all(name in data['files'] for name in REQUIRED_FILES):
             raise ValueError()
         for name in data['files']:
+            if not isinstance(name, str) or not name or Path(name).is_absolute() or '..' in Path(name).parts:
+                raise ValueError()
+            if not is_official_path(name):
+                continue
             safe_path(project, name)
         return data
     except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:

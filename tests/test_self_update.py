@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import self_update, store
+from skill_pilot import diagnostics, self_update, store, version as app_version
 from skill_pilot.sources.github import git
 from skill_pilot.web.server import Dashboard
 from tests import set_up_home
@@ -423,6 +423,16 @@ class SelfUpdateWebTests(unittest.TestCase):
             patcher = patch.object(self_update, name, side_effect=wrapped)
             patcher.start()
             self.addCleanup(patcher.stop)
+        original_read_build = app_version.read_build
+        read_patcher = patch.object(app_version, 'read_build',
+                                    side_effect=lambda project=self.code, **kw: original_read_build(project, **kw))
+        read_patcher.start()
+        self.addCleanup(read_patcher.stop)
+        saved_running = app_version.running_build()
+        def restore_running():
+            app_version.set_running_version(saved_running['version'], date=saved_running['date'])
+            diagnostics.sync_running_build()
+        self.addCleanup(restore_running)
         self.server = Dashboard({'home': str(self.home)})
         thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .01})
         thread.start()
