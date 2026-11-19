@@ -20,7 +20,16 @@ APP_VERSION = '1.0.0'
 RECORD = '.skill-pilot-install.json'
 BUNDLE_DIRS = ('skill_pilot', 'scripts', 'assets', 'docs', 'skill', 'tests', '.github')
 ROOT_FILES = ('.gitignore', '.gitattributes', '.claude/launch.json', 'skill-pilot')
-REQUIRED_FILES = ('skill_pilot/cli.py', 'skill_pilot/web/server.py', 'skill_pilot/web/static/app.js')
+REQUIRED_FILES = (
+    'skill_pilot/cli.py',
+    'skill_pilot/web/server.py',
+    'skill_pilot/web/static/app.js',
+    'scripts/install.py',
+    'assets/SkillPilot.icns',
+    'README.md',
+    'docs/STATUS.md',
+    'skill-pilot',
+)
 HEX_RE = re.compile(r'^[0-9a-fA-F]{7,64}$')
 SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
@@ -103,9 +112,18 @@ def _verify_manifest_files(project, manifest):
         return 'invalid'
     if not all(name in files for name in REQUIRED_FILES):
         return 'invalid'
-    expected_on_disk = {rel for rel, _ in _scan_bundle_paths(project)}
-    if not expected_on_disk or not expected_on_disk.issubset(files):
-        return 'invalid'
+    for directory in ('skill_pilot', 'scripts', 'assets', 'skill'):
+        root = project / directory
+        if root.is_dir() and not root.is_symlink():
+            try:
+                for path in root.rglob('*'):
+                    if ('__pycache__' in path.parts or path.name == '.DS_Store'
+                            or path.suffix == '.pyc' or not path.is_file()):
+                        continue
+                    if path.relative_to(project).as_posix() not in files:
+                        return 'invalid'
+            except OSError:
+                return 'invalid'
     for name, expected in files.items():
         if (not isinstance(expected, list) or len(expected) != 2
                 or not isinstance(expected[0], str) or not SHA256_RE.fullmatch(expected[0])

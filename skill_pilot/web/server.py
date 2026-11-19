@@ -162,11 +162,15 @@ class Dashboard(ThreadingHTTPServer):
         self.labels_progress = session.get('labels_progress', {'running': False, 'done': 0, 'total': 0, 'message': '', 'error': ''})
         running = app_version.running_build()
         self.running_version = running['version']
+        self.program_lock = threading.Lock()
+        self.program_action = ''
         self.program_review = session.get('program_review')
-        self.program_progress = session.get('program_progress', {'running': False, 'phase': 'idle',
+        raw_progress = session.get('program_progress')
+        saved_version = raw_progress.get('current_version') if isinstance(raw_progress, dict) else self.running_version
+        self.program_progress = raw_progress if isinstance(raw_progress, dict) else {'running': False, 'phase': 'idle',
             'message': '从 GitHub 官方项目获取新版', 'error': '', 'available': False,
             'current': running['date'], 'latest': '',
-            'current_version': self.running_version, 'latest_version': '', 'pending_version': ''})
+            'current_version': self.running_version, 'latest_version': '', 'pending_version': ''}
         self.program_progress.setdefault('automatic', False)
         self.program_progress.setdefault('changes', [])
         self.program_progress.setdefault('changes_total', 0)
@@ -182,6 +186,19 @@ class Dashboard(ThreadingHTTPServer):
             if isinstance(error, operations.RollbackError):
                 self.jobs_blocked = str(error)
             self.program_progress.update(phase='error', error='程序可继续使用，但自带技能说明没能同步，请查看诊断后重新打开看板。')
+        # 换进程/重载时没有还在跑的后台更新线程，先清理任何被中断的运行中状态。
+        interrupted_auto_check = False
+        if resume and self.program_progress.get('running'):
+            interrupted_auto_check = bool(
+                self.program_progress.get('automatic') and self.program_progress.get('phase') == 'check')
+            self.program_progress.update(
+                running=False, phase='idle', available=False, error='', failed_action='',
+                current_version=self.running_version, latest_version='', pending_version='',
+                changes=[], changes_total=0, changes_partial=False,
+                message='还没查到新版信息' if interrupted_auto_check else '从 GitHub 官方项目获取新版',
+            )
+            self.program_progress.pop('checked_at', None)
+            self.program_progress.pop('target', None)
         if self.program_progress['phase'] == 'ready':
             new_version = self.running_version or self.program_progress.get('pending_version', '')
             self.program_progress.update(phase='latest', message='SP 已升级到最新版',
@@ -189,18 +206,11 @@ class Dashboard(ThreadingHTTPServer):
                                          latest_version=new_version or self.program_progress.get('latest_version', ''),
                                          pending_version='', failed_action='',
                                          changes=[], changes_total=0, changes_partial=False)
-        elif resume and self.running_version:
-            previous_version = self.program_progress.get('current_version', '')
-            if previous_version and previous_version != self.running_version:
+        elif resume and self.running_version and not interrupted_auto_check:
+            if not isinstance(saved_version, str) or not saved_version or saved_version != self.running_version:
                 self._reset_stale_program_check(running)
             else:
                 self.program_progress['current_version'] = self.running_version
-        # 换进程时没有还在跑的线程。自动检查被关掉或刷新打断时，按还没查到处理，避免一直显示正在检查。
-        if (resume and self.program_progress.get('automatic') and self.program_progress.get('running')
-                and self.program_progress.get('phase') == 'check'):
-            self.program_progress.update(running=False, phase='idle', available=False, error='',
-                                         changes=[], changes_total=0, changes_partial=False,
-                                         message='还没查到新版信息')
         self.program_thread = None
         self.last_heartbeat = time.monotonic()
         self.pages = set(session.get('pages', []))
@@ -898,7 +908,7 @@ class Dashboard(ThreadingHTTPServer):
         return {'message': result['message'], 'operations': [result['id']] if 'id' in result else []}
 
     def auto_check_program(self):
-        with self.runtime_lock:
+        with self.program_lock:
             progress = self.program_progress.copy()
             checked_at = progress.get('checked_at')
             elapsed = time.time() - checked_at if checked_at is not None else PROGRAM_AUTO_CHECK_INTERVAL
@@ -908,7 +918,7 @@ class Dashboard(ThreadingHTTPServer):
         return self.start_program('check', automatic=True)
 
     def start_program(self, action, target=None, automatic=False):
-        with self.runtime_lock:
+        with self.program_lock:
             if self.program_progress['running']:
                 return self.program_progress.copy()
             if self.program_progress['phase'] == 'ready':
@@ -918,6 +928,8 @@ class Dashboard(ThreadingHTTPServer):
             if action == 'apply' and (not self.program_review or target != self.program_review['target'] or
                                       not self.program_review['available']):
                 raise ValueError('请先检查 SP 更新，再升级。')
+            self.program_action = action
+            self.static_refresh_deferred = False
             self.program_progress.update(running=True, phase=action, error='', error_id='', automatic=automatic,
                 failed_action='',
                 message='正在下载并检查新版…' if action == 'check' else '正在升级，等当前操作完成…')
@@ -933,7 +945,7 @@ class Dashboard(ThreadingHTTPServer):
             rmtree(self.program_review['temporary'], ignore_errors=True)
         self.program_review = None
         self.program_progress.update(
-            phase='idle', available=False, error='', error_id='', failed_action='',
+            running=False, phase='idle', available=False, error='', error_id='', failed_action='',
             current=build.get('date', ''), latest='',
             current_version=build['version'], latest_version='', pending_version='',
             changes=[], changes_total=0, changes_partial=False,
@@ -943,6 +955,7 @@ class Dashboard(ThreadingHTTPServer):
         self.program_progress.pop('target', None)
 
     def program_work(self, action, automatic=False):
+        update_payload = {}
         try:
             if action == 'check':
                 if self.program_review:
@@ -955,14 +968,17 @@ class Dashboard(ThreadingHTTPServer):
                                                                  review.get('before', {}).get('revision', '')))
                 latest_version = (review.get('latest_version')
                                   or app_version.format_version(review.get('latest', ''), review.get('target', '')))
-                self.program_progress.update(phase='available' if review['available'] else 'latest',
-                    target=review['target'], available=review['available'], current=review['current'], latest=review['latest'],
+                update_payload = dict(
+                    phase='available' if review['available'] else 'latest',
+                    target=review['target'], available=review['available'],
+                    current=review['current'], latest=review['latest'],
                     current_version=current_version, latest_version=latest_version, pending_version='',
                     failed_action='',
                     changes=review.get('changes', []) if review['available'] else [],
                     changes_total=review.get('changes_total', 0) if review['available'] else 0,
                     changes_partial=review.get('changes_partial', False) if review['available'] else False,
-                    message='有新版，可以一键升级' if review['available'] else 'SP 已是最新版本')
+                    message='有新版，可以一键升级' if review['available'] else 'SP 已是最新版本',
+                )
             else:
                 while not self.closing:
                     with self.runtime_lock:
@@ -976,7 +992,8 @@ class Dashboard(ThreadingHTTPServer):
                     time.sleep(.05)
                 if self.closing:
                     return
-                self.program_progress['message'] = '正在安装 SP 新版…'
+                with self.program_lock:
+                    self.program_progress['message'] = '正在安装 SP 新版…'
                 result = self_update.apply(self.program_review, self.home)
                 self.program_review['available'] = False
                 pending_version = (result.get('pending_version')
@@ -985,35 +1002,59 @@ class Dashboard(ThreadingHTTPServer):
                                    or self.program_progress.get('latest_version')
                                    or app_version.format_version(result.get('latest', self.program_review.get('latest', '')),
                                                                  self.program_review.get('target', '')))
-                self.program_progress.update(result, phase='ready', message='新版已安装，刷新后生效',
-                                             current_version=self.running_version,
-                                             latest_version=pending_version,
-                                             pending_version=pending_version,
-                                             failed_action='',
-                                             changes=[], changes_total=0, changes_partial=False)
+                update_payload = {
+                    **result,
+                    'phase': 'ready', 'message': '新版已安装，刷新后生效',
+                    'current_version': self.running_version,
+                    'latest_version': pending_version,
+                    'pending_version': pending_version,
+                    'failed_action': '',
+                    'changes': [], 'changes_total': 0, 'changes_partial': False,
+                }
         except Exception as error:
-            self.program_progress.update(changes=[], changes_total=0, changes_partial=False, pending_version='')
-            if action == 'check':
-                self.program_progress['latest_version'] = ''
             captured = self_update.record_failure(self.home, action, error) or {}
+            update_payload = {'changes': [], 'changes_total': 0, 'changes_partial': False, 'pending_version': ''}
+            if action == 'check':
+                update_payload['latest_version'] = ''
             if captured:
-                self.program_progress['error_id'] = captured['error_id']
+                update_payload['error_id'] = captured['error_id']
             if automatic:
-                self.program_progress.update(phase='idle', available=False, error='', failed_action='', message='还没查到新版信息')
+                update_payload.update(phase='idle', available=False, error='', failed_action='', message='还没查到新版信息')
             else:
-                self.program_progress.update(phase='error', available=False, failed_action=action,
+                update_payload.update(
+                    phase='error', available=False, failed_action=action,
                     error=str(error) if isinstance(error, ValueError) else 'Skill Pilot 更新没有完成，原因未知。请稍后重试，或点击「反馈问题」查看诊断。',
-                    message='SP 更新没有完成')
+                    message='SP 更新没有完成',
+                )
         finally:
-            with self.runtime_lock:
-                if action == 'check':
-                    self.program_progress['checked_at'] = time.time()
-                    if self.static_refresh_deferred:
+            deferred = False
+            try:
+                with self.program_lock:
+                    if update_payload:
+                        self.program_progress.update(update_payload)
+                    if action == 'check':
+                        self.program_progress['checked_at'] = time.time()
+                    if action == 'check' and self.static_refresh_deferred:
                         self.static_refresh_deferred = False
+                        deferred = True
+                    else:
+                        self.program_action = ''
+                        self.program_progress['running'] = False
+                if deferred:
+                    try:
                         refreshed = app_version.read_build()
-                        if refreshed['version'] and refreshed['version'] != self.running_version:
+                    except Exception:
+                        refreshed = None
+                    with self.program_lock:
+                        if refreshed and refreshed.get('version') and refreshed['version'] != self.running_version:
                             self._reset_stale_program_check(refreshed)
-                self.program_progress['running'] = False
+                        self.program_action = ''
+                        self.program_progress['running'] = False
+            finally:
+                with self.program_lock:
+                    self.static_refresh_deferred = False
+                    self.program_action = ''
+                    self.program_progress['running'] = False
 
     def request_reload(self):
         changed = runtime.version() != self.code_version
@@ -1022,24 +1063,25 @@ class Dashboard(ThreadingHTTPServer):
                 self.reload_pending = False
                 self.reload_error = ''
                 self.reload_error_id = ''
-                if self.program_progress['phase'] == 'ready':
-                    applied = (self.program_progress.get('pending_version')
-                               or app_version.read_build().get('version', '')
-                               or self.running_version)
-                    self.running_version = applied
-                    app_version.set_running_version(applied, date=self.program_progress.get('latest', ''))
-                    diagnostics.sync_running_build()
-                    self.program_progress.update(phase='latest', message='SP 已升级到最新版',
-                                                 current_version=applied,
-                                                 latest_version=applied or self.program_progress.get('latest_version', ''),
-                                                 pending_version='', failed_action='',
-                                                 changes=[], changes_total=0, changes_partial=False)
-                elif self.program_progress['running'] and self.program_progress['phase'] == 'check':
-                    self.static_refresh_deferred = True
-                elif not self.program_progress['running'] and self.program_progress['phase'] != 'apply':
-                    refreshed = app_version.read_build()
-                    if refreshed['version'] and refreshed['version'] != self.running_version:
-                        self._reset_stale_program_check(refreshed)
+                with self.program_lock:
+                    if self.program_progress['phase'] == 'ready':
+                        applied = (self.program_progress.get('pending_version')
+                                   or app_version.read_build().get('version', '')
+                                   or self.running_version)
+                        self.running_version = applied
+                        app_version.set_running_version(applied, date=self.program_progress.get('latest', ''))
+                        diagnostics.sync_running_build()
+                        self.program_progress.update(phase='latest', message='SP 已升级到最新版',
+                                                     current_version=applied,
+                                                     latest_version=applied or self.program_progress.get('latest_version', ''),
+                                                     pending_version='', failed_action='',
+                                                     changes=[], changes_total=0, changes_partial=False)
+                    elif self.program_progress['running'] and (self.program_action == 'check' or self.program_progress['phase'] == 'check'):
+                        self.static_refresh_deferred = True
+                    elif not self.program_progress['running'] and self.program_action != 'apply' and self.program_progress['phase'] != 'apply':
+                        refreshed = app_version.read_build()
+                        if refreshed['version'] and refreshed['version'] != self.running_version:
+                            self._reset_stale_program_check(refreshed)
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
                 self.reload_error = ''
@@ -1573,7 +1615,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(403, {'error': '当前处于只读模式，程序没有改动。' if path.endswith('apply')
                                               else '当前处于只读模式，不能检查或下载新版程序。'})
                     return
-                with self.server.runtime_lock:
+                with self.server.program_lock:
                     if self.server.program_progress['phase'] == 'ready':
                         self.reply(409, {'error': '新版已安装，请先刷新页面使新版生效，再检查更新。',
                                          'program': {**self.server.program_progress, 'write_allowed': True}})
