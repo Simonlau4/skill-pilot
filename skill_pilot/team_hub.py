@@ -612,13 +612,14 @@ class HubStore:
                 ratings[key].pop(member_id, None)
                 if key.startswith('team:' + member_id + ':') or not ratings[key]:
                     del ratings[key]
-            installs = self._installs()
+            installs, with_mine = self._installs_state()
             installs.pop(member_id, None)
+            with_mine.discard(member_id)
             changes = {p: None for p in (self.data / 'packages' / member_id).glob('*.json')}
             changes.update({self._listing_path(member_id): None,
                             self._pack_path(member_id): None,
                             self.data / 'ratings.json': {'ratings': ratings},
-                            self.data / 'installs.json': {'installs': installs},
+                            self.data / 'installs.json': self._installs_payload(installs, with_mine),
                             self.data / 'members.json': {'members': [m for m in members if m['id'] != member_id]}})
             self._save(changes)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
@@ -682,8 +683,25 @@ class HubStore:
     def _ratings(self):
         return self._read(self.data / 'ratings.json', 'ratings')
 
+    def _installs_state(self):
+        path = self.data / 'installs.json'
+        if not path.exists():
+            return {}, set()
+        raw = json.loads(path.read_text(encoding='utf-8'))
+        installs = raw['installs']
+        with_mine = raw.get('with_mine', [])
+        if not isinstance(installs, dict) or not isinstance(with_mine, list):
+            raise ValueError
+        return installs, set(with_mine)
+
     def _installs(self):
-        return self._read(self.data / 'installs.json', 'installs')
+        return self._installs_state()[0]
+
+    def _installs_payload(self, installs, with_mine):
+        payload = {'installs': installs}
+        if with_mine:
+            payload['with_mine'] = sorted(with_mine)
+        return payload
 
     def _save(self, changes):
         # Readers hold the same lock. Roll back completed writes if any later write fails.
@@ -707,7 +725,7 @@ class HubStore:
     def _catalog(self, member_id=None, skill_files=True):
         cards = {}
         members = {m['id']: {k: m[k] for k in ('id', 'name')} for m in self._members()}
-        installs = self._installs()
+        installs, with_mine = self._installs_state()
         for author_id, member in members.items():
             for row in self._listings(author_id).values():
                 if not skill_files and row['source'].get('file_storage') == 'blobs':
@@ -718,16 +736,23 @@ class HubStore:
         for key, ratings in self._ratings().items():
             if key in cards:
                 cards[key]['ratings'] = [{**r, 'member': members[m]} for m, r in ratings.items() if m in members]
+        own_cards = set()
         for card in cards.values():
             card['listings'].sort(key=lambda r: r['updated_at'], reverse=True)
             card['ratings'].sort(key=lambda r: r['updated_at'], reverse=True)
             authors = {row['member']['id'] for row in card['listings']}
-            card['installs'] = sum(card['key'] in keys for member, keys in installs.items()
-                                   if member in members and member not in authors)
+            if member_id in authors:
+                own_cards.add(card['key'])
+            card['installs'] = sum(
+                (card['key'] in installs.get(mid, ())) or (mid in authors and mid not in with_mine)
+                for mid in members)
+        stored = set(installs.get(member_id, [])) & cards.keys()
+        counted_for_me = stored if member_id in with_mine else (stored | own_cards)
         result = {'cards': sorted(cards.values(), key=lambda c: c['listings'][0]['updated_at'], reverse=True),
                 'packs': sorted([p for m in members.values() for p in self._public_packs(m)],
                                 key=lambda p: p['updated_at'], reverse=True),
-                'my_installs': sorted(set(installs.get(member_id, [])) & cards.keys()),
+                'my_installs': sorted(stored - own_cards),
+                'my_all_installs': sorted(counted_for_me),
                 'deliverables': self._public_deliverables()}
         if not skill_files:
             result['packs'] = [p for p in result['packs'] if all(
@@ -740,12 +765,15 @@ class HubStore:
 
     def _put_installs(self, member_id, data, skill_files=True):
         if (not isinstance(data, dict) or not isinstance(data.get('keys'), list) or
-                any(not isinstance(key, str) for key in data['keys'])):
+                any(not isinstance(key, str) for key in data['keys']) or
+                ('include_mine' in data and type(data['include_mine']) is not bool)):
             raise HubError(400, '上报内容须为技能卡片编号的文字列表。')
+        include_mine = data.get('include_mine', False)
         cards = self._catalog()['cards']
-        allowed = {card['key'] for card in cards if all(row['member']['id'] != member_id for row in card['listings'])}
+        allowed = ({card['key'] for card in cards} if include_mine else
+                   {card['key'] for card in cards if all(row['member']['id'] != member_id for row in card['listings'])})
         keys = set(data['keys']) & allowed
-        installs = self._installs()
+        installs, with_mine = self._installs_state()
         if not skill_files:
             visible = {card['key'] for card in cards if any(
                 row['source'].get('file_storage') != 'blobs' for row in card['listings'])}
@@ -755,7 +783,11 @@ class HubStore:
             installs[member_id] = keys
         else:
             installs.pop(member_id, None)
-        atomic_write(self.data / 'installs.json', {'installs': installs})
+        if include_mine:
+            with_mine.add(member_id)
+        else:
+            with_mine.discard(member_id)
+        atomic_write(self.data / 'installs.json', self._installs_payload(installs, with_mine))
         return {'keys': keys}
 
     def _put_listings(self, member_id, data, skill_files=True):
@@ -802,6 +834,12 @@ class HubStore:
         changes[self._listing_path(member_id)] = {'listings': current}
         if 'packs' in data:
             changes[self._pack_path(member_id)] = {'packs': self._pack_changes(member_id, data['packs'], current, skill_files)}
+        installs, with_mine = self._installs_state()
+        if member_id in with_mine:
+            merged = sorted(set(installs.get(member_id, [])) | {r['key'] for r in receipts})
+            if merged != installs.get(member_id):
+                installs[member_id] = merged
+                changes[self.data / 'installs.json'] = self._installs_payload(installs, with_mine)
         self._save(changes)
         if collect:
             self._collect_blobs(member_id)

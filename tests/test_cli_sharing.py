@@ -61,6 +61,7 @@ class TeamCommandTests(unittest.TestCase):
         row = self.shared()['team-notes']
         self.assertEqual(row['note'], '示例推荐')
         self.assertEqual(row['source']['version'], result['listings'][0]['version'])
+        self.assertEqual(team._catalog({'url': self.url, 'key': self.first['token']})['cards'][0]['installs'], 1)
 
         listed = run(self.other, 'team', 'list')
         self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
@@ -79,6 +80,7 @@ class TeamCommandTests(unittest.TestCase):
         self.assertEqual(normalize(skill['source'])['kind'], 'team')
         self.assertTrue((self.other / '.claude/skills/team-notes/guide.md').is_file())
         self.assertFalse((self.other / '.claude/skills/team-notes/.env').exists())
+        self.assertEqual(team._catalog({'url': self.url, 'key': self.first['token']})['cards'][0]['installs'], 2)
         again = run(self.other, 'team', 'install', 'team-notes', '--json')
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
         self.assertEqual(json.loads(again.stdout)['installed'], [])

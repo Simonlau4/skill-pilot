@@ -521,7 +521,9 @@ if (!updated.includes('detail:acme/b')) fail('打开着的详情要跟着重新�
             extract_function(source, 'function storeCardHtml('),
             line(source, 'const storeTime = '),
             line(source, 'const storeScore = '),
+            line(source, 'const storeInstalls = '),
             extract_function(source, 'const STORE_SORTS = {') + ';',
+            re.search(r'const STORE_SHELVES = \[[\s\S]*?\];', source).group(0),
             block(source, 'function storeFilter('),
             extract_function(source, 'function storeGroups('),
         ]
@@ -531,11 +533,11 @@ const state = {queue: null};
 const member = name => ({id: name, name});
 const cards = [
   {key: 'a', name: 'acme-a', title: '<b>示例</b>', summary: '周报', group: '写作', updated_at: '2026-10-01T00:00:00Z',
-   listings: [{member: member('Acme 甲'), note: '<img src=x onerror=alert(1)> 好用'}], rating: {average: 4.5, count: 2}, local: {status: 'installable'}},
+   listings: [{member: member('Acme 甲'), note: '<img src=x onerror=alert(1)> 好用'}], rating: {average: 4.5, count: 2}, installs: 8, local: {status: 'installable'}},
   {key: 'b', name: 'acme-b', summary: '小工具', description: 'internal <script>', updated_at: '2026-10-03T00:00:00Z',
-   listings: [{member: member('Acme 乙')}, {member: member('Acme 丙')}, {member: member('Acme 丁')}], rating: {average: null, count: 0}, local: {status: 'mine'}},
+   listings: [{member: member('Acme 乙')}, {member: member('Acme 丙')}, {member: member('Acme 丁')}], rating: {average: null, count: 0}, installs: 1, local: {status: 'mine'}},
   {key: 'c', name: 'acme-c', title: '整理', group: '写作', updated_at: '2026-10-02T00:00:00Z',
-   listings: [{member: member('Acme 乙')}, {member: member('Acme 甲')}], rating: {average: 4.9, count: 1}, local: {status: 'installed'}},
+   listings: [{member: member('Acme 乙')}, {member: member('Acme 甲')}], rating: {average: 4.9, count: 1}, installs: 3, local: {status: 'installed'}},
 ];
 
 const html = storeCardHtml(cards[0]);
@@ -556,11 +558,26 @@ if (names(storeFilter(cards, {mine: true})) !== 'acme-b') fail('“我上架的�
 const sorted = sort => names([...cards].sort(STORE_SORTS[sort]));
 if (sorted('latest') !== 'acme-b,acme-c,acme-a') fail('最新上架排序不对：' + sorted('latest'));
 if (sorted('rating') !== 'acme-c,acme-a,acme-b') fail('最受好评排序不对，没评价的应排最后：' + sorted('rating'));
-if (sorted('popular') !== 'acme-b,acme-c,acme-a') fail('推荐最多排序不对：' + sorted('popular'));
+if (sorted('installs') !== 'acme-a,acme-c,acme-b') fail('安装最多排序不对：' + sorted('installs'));
+const tied = [
+  {key: 'x', name: 'x', updated_at: '2026-10-01T00:00:00Z', listings: [{}], rating: {average: 5, count: 1}},
+  {key: 'y', name: 'y', updated_at: '2026-10-02T00:00:00Z', listings: [{}, {}], rating: {average: null, count: 0}, installs: 0},
+  {key: 'z', name: 'z', updated_at: '2026-10-03T00:00:00Z', listings: [{}], rating: {average: 4, count: 1}, installs: 2},
+];
+if (names([...tied].sort(STORE_SORTS.installs)) !== 'z,y,x') fail('安装最多缺少字段或同人数兜底排序不对');
+if (STORE_SHELVES.map(s => s.sort + ':' + s.title).join(',') !== 'installs:安装最多,rating:最受好评,latest:最新上架') {
+  fail('推荐排应改为安装最多、最受好评、最新上架');
+}
+if (names(STORE_SHELVES[0].pick(cards)) !== 'acme-a,acme-c') fail('安装最多推荐排只收 2 人及以上已安装的技能');
 if (JSON.stringify(storeGroups(cards)) !== JSON.stringify([['写作', 2], ['-', 1]])) fail('分组计数不对，没分组的排最后');
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        index_html = (STATIC / 'index.html').read_text()
+        self.assertIn('data-store-sort="installs"', index_html)
+        self.assertIn('>安装最多</button>', index_html)
+        self.assertNotIn('推荐最多', index_html)
+        self.assertNotIn('推荐最多', source)
 
     def test_store_install_counts_only_show_above_zero(self):
         source = (STATIC / 'app.js').read_text()
