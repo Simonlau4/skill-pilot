@@ -595,36 +595,48 @@ class TeamHubTests(unittest.TestCase):
         self.assertEqual(self.request('/api/ratings', 'DELETE', {'key': key}, self.second['token'])[0], 404)
         self.assertEqual(self.cards()[0]['ratings'], [])
 
-    def test_installs_count_people_replace_records_and_exclude_publishers(self):
+    def test_installs_count_people_replace_records_and_include_publishers(self):
         third = self.store.add_member('Acme 示例成员三')
         self.put([listing(), listing('another')])
         keys = sorted(card['key'] for card in self.cards())
-        key = keys[0]
+        key, other_key = keys
         self.assertEqual(self.request('/api/catalog')[1]['my_installs'], [])
-        self.assertTrue(all(card['installs'] == 0 for card in self.cards()))
+        self.assertEqual(self.request('/api/catalog')[1]['my_all_installs'], keys)
+        self.assertTrue(all(card['installs'] == 1 for card in self.cards()))
+        # Old clients omit own cards; hub strips them from installs.json without dropping author counts.
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': keys}), (200, {'keys': []}))
-        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [*keys, key]}, self.second['token']),
-                         (200, {'keys': keys}))
+        self.assertTrue(all(card['installs'] == 1 for card in self.cards()))
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [*keys, key], 'include_mine': True},
+                                      self.second['token']), (200, {'keys': keys}))
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, third['token']),
                          (200, {'keys': [key]}))
-        for member, expected in ((self.first, []), (self.second, keys), (third, [key])):
+        for member, expected_legacy, expected_all in (
+                (self.first, [], keys), (self.second, keys, keys), (third, [key], [key])):
             catalog = self.request('/api/catalog', token=member['token'])[1]
-            self.assertEqual(catalog['my_installs'], expected)
+            self.assertEqual(catalog['my_installs'], expected_legacy)
+            self.assertEqual(catalog['my_all_installs'], expected_all)
             card = next(card for card in catalog['cards'] if card['key'] == key)
-            self.assertEqual(card['installs'], 2)
+            self.assertEqual(card['installs'], 3)
             self.assertEqual(set(card), {'key', 'listings', 'ratings', 'installs'})
             self.assertNotIn(self.second['id'], json.dumps(catalog))
             self.assertNotIn(third['id'], json.dumps(catalog))
+        # A publisher with the new client can drop a locally removed own card, then regain it on republish.
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [other_key], 'include_mine': True}),
+                         (200, {'keys': [other_key]}))
+        self.assertEqual({card['key']: card['installs'] for card in self.cards()}, {key: 2, other_key: 2})
+        self.put([listing(), listing('another')])
+        self.assertEqual({card['key']: card['installs'] for card in self.cards()}, {key: 3, other_key: 2})
         for _ in range(2):
             self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
                              (200, {'keys': [key]}))
             counts = {card['key']: card['installs'] for card in self.cards()}
-            self.assertEqual(counts, {keys[0]: 2, keys[1]: 0})
+            self.assertEqual(counts, {key: 3, other_key: 1})
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': []}, self.second['token']),
                          (200, {'keys': []}))
-        self.assertEqual(next(card for card in self.cards() if card['key'] == key)['installs'], 1)
+        self.assertEqual(next(card for card in self.cards() if card['key'] == key)['installs'], 2)
         saved = json.loads((self.data / 'installs.json').read_text())
-        self.assertEqual(saved, {'installs': {third['id']: [key]}})
+        self.assertEqual(saved, {'installs': {self.first['id']: keys, third['id']: [key]},
+                                 'with_mine': [self.first['id']]})
 
     def test_installs_filter_missing_removed_and_coalesced_own_cards(self):
         self.put()
@@ -633,18 +645,30 @@ class TeamHubTests(unittest.TestCase):
                          (200, {'keys': [key]}))
         self.assertEqual(self.request('/api/listings/me/example', 'DELETE')[0], 200)
         self.assertEqual(self.request('/api/catalog', token=self.second['token'])[1],
-                         {'cards': [], 'my_installs': [], 'packs': [], 'deliverables': []})
+                         {'cards': [], 'my_installs': [], 'my_all_installs': [], 'packs': [], 'deliverables': []})
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
                          (200, {'keys': []}))
         self.put()
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token'])[0], 200)
         self.put(token=self.second['token'])
-        self.assertEqual(self.cards()[0]['installs'], 0)
+        self.assertEqual(self.cards()[0]['installs'], 2)
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
                          (200, {'keys': []}))
+        self.assertEqual(self.cards()[0]['installs'], 2)
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key], 'include_mine': True},
+                                      self.second['token']), (200, {'keys': [key]}))
+        self.assertEqual(self.cards()[0]['installs'], 2)
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [], 'include_mine': True},
+                                      self.second['token']), (200, {'keys': []}))
+        self.assertEqual(self.cards()[0]['installs'], 1)
         team_hub.atomic_write(self.data / 'installs.json', {'installs': {
             self.first['id']: [key], '0' * 32: [key]}})
-        self.assertEqual(self.cards()[0]['installs'], 0)
+        self.assertEqual(self.cards()[0]['installs'], 2)
+        # Switching back to an old client (without include_mine) restores author fallback cleanly.
+        self.request('/api/installs/me', 'PUT', {'keys': [], 'include_mine': True}, self.second['token'])
+        self.assertEqual(self.cards()[0]['installs'], 1)
+        self.request('/api/installs/me', 'PUT', {'keys': []}, self.second['token'])
+        self.assertEqual(self.cards()[0]['installs'], 2)
 
     def test_installs_validate_string_list_without_changing_previous_record(self):
         self.put()
@@ -652,7 +676,8 @@ class TeamHubTests(unittest.TestCase):
         self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token'])
         before = self.state()
         for data in ({}, {'keys': None}, {'keys': key}, {'keys': {}}, {'keys': 1},
-                     *({'keys': [key, value]} for value in (None, 1, True, [], {}))):
+                     *({'keys': [key, value]} for value in (None, 1, True, [], {})),
+                     *({'keys': [key], 'include_mine': value} for value in (None, 1, 'true', [], {}))):
             with self.subTest(data=data):
                 self.assertEqual(self.request('/api/installs/me', 'PUT', data, self.second['token'])[0], 400)
                 self.assertEqual(self.state(), before)
@@ -684,15 +709,15 @@ class TeamHubTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = list(executor.map(report, (self.second, third)))
         self.assertEqual(results, [(200, {'keys': [key]})] * 2)
-        self.assertEqual(self.cards()[0]['installs'], 2)
+        self.assertEqual(self.cards()[0]['installs'], 3)
 
     def test_remove_member_cleans_listings_packages_ratings_and_installs(self):
         self.put([listing(kind='files')])
         self.put([listing('second')], self.second['token'])
         key = 'github:acme/skills:skills/second'
         self.request('/api/ratings', 'PUT', {'key': key, 'stars': 5})
-        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]})[0], 200)
-        self.assertEqual(next(card for card in self.cards() if card['key'] == key)['installs'], 1)
+        self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key], 'include_mine': True})[0], 200)
+        self.assertEqual(next(card for card in self.cards() if card['key'] == key)['installs'], 2)
         self.store.remove_member(self.first['id'])
         self.assertEqual(self.request()[0], 401)
         self.assertFalse((self.data / 'listings' / (self.first['id'] + '.json')).exists())
@@ -702,7 +727,7 @@ class TeamHubTests(unittest.TestCase):
         cards = self.request('/api/catalog', token=self.second['token'])[1]['cards']
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]['ratings'], [])
-        self.assertEqual(cards[0]['installs'], 0)
+        self.assertEqual(cards[0]['installs'], 1)
 
     def test_remove_member_restores_installs_if_save_fails(self):
         self.put([listing(kind='files')])
@@ -718,7 +743,7 @@ class TeamHubTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.store.remove_member(self.second['id'])
         self.assertEqual(self.state(), before)
-        self.assertEqual(self.cards()[0]['installs'], 1)
+        self.assertEqual(self.cards()[0]['installs'], 2)
 
     def test_simultaneous_upserts_keep_both_and_complete_packages(self):
         barrier = threading.Barrier(2)
