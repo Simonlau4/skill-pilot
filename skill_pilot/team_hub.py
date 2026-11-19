@@ -509,6 +509,7 @@ class HubError(ValueError):
 class HubStore:
     def __init__(self, data):
         self.data = Path(data).expanduser().resolve()
+        self._in_flight_feedback = set()
 
     @contextmanager
     def locked(self):
@@ -568,6 +569,18 @@ class HubStore:
             rows = self._feedback()
         except (HubError, OSError, ValueError):
             return
+        # Mark any leftover 'pending' rows from a previously crashed hub process as interrupted ('failed')
+        # so they never permanently lock up the in-flight protection quota after restart.
+        changed = False
+        for row in rows:
+            if isinstance(row, dict) and row.get('state') == 'pending' and row.get('id') not in self._in_flight_feedback:
+                row['state'] = 'failed'
+                changed = True
+        if changed:
+            try:
+                atomic_write(self.data / 'feedback.json', rows)
+            except OSError:
+                return
         self._collect_feedback_attachments(rows)
 
     def _write_feedback_attachments(self, attachments):
@@ -605,13 +618,18 @@ class HubStore:
             raise HubError(500, '反馈备份没能读懂，请联系管理员检查。')
         return rows
 
-    def _trim_feedback_rows(self, rows):
+    def _trim_feedback_rows(self, rows, protected=(), reject_if_full=False):
         rows = list(rows)
-        while len(rows) > feedback.MAX_RECORDS:
-            idx = next((i for i, item in enumerate(rows) if item.get('state') != 'pending'), 0)
-            rows.pop(idx)
-        while rows and len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').replace('\n', os.linesep).encode()) > feedback.MAX_BYTES:
-            idx = next((i for i, item in enumerate(rows) if item.get('state') != 'pending'), 0)
+        protected_ids = set(self._in_flight_feedback) | set(protected)
+        def over_limit():
+            return (len(rows) > feedback.MAX_RECORDS or
+                    len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').replace('\n', os.linesep).encode()) > feedback.MAX_BYTES)
+        while rows and over_limit():
+            idx = next((i for i, item in enumerate(rows) if item.get('id') not in protected_ids), None)
+            if idx is None:
+                if reject_if_full:
+                    raise HubError(507, '当前有其他反馈正在转发且反馈留底空间已满，请稍后重试，或复制、导出纯文本诊断信息。')
+                break
             rows.pop(idx)
         return rows
 
@@ -628,10 +646,10 @@ class HubStore:
         # First clean up only files already unreferenced by the committed feedback.json.
         self._collect_feedback_attachments(committed_rows)
         new_files = {f"{item['sha256']}.{item['ext']}": item['size'] for item in attachments}
-        pending_files = {
+        in_flight_files = {
             att['file']
             for item in committed_rows
-            if item.get('state') == 'pending'
+            if item.get('id') in self._in_flight_feedback
             for att in item.get('attachments', ())
             if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str)
         }
@@ -642,14 +660,14 @@ class HubStore:
                 return committed_rows
             target = next((
                 item for item in committed_rows
-                if item.get('state') != 'pending' and any(
+                if item.get('id') not in self._in_flight_feedback and any(
                     isinstance(att, dict) and not att.get('evicted') and
-                    isinstance(att.get('file'), str) and att['file'] not in pending_files
+                    isinstance(att.get('file'), str) and att['file'] not in in_flight_files
                     for att in item.get('attachments', ())
                 )
             ), None)
             if target is None:
-                if pending_files:
+                if in_flight_files:
                     raise HubError(507, '当前有其他带图反馈正在转发，截图存储空间紧张。请稍后重试，或复制、导出纯文本诊断信息。')
                 raise HubError(507, '分享站截图留底空间已满，无法保存新截图。请联系管理员清理磁盘后重试，或复制、导出纯文本诊断信息。')
             for att in target.get('attachments', ()):
@@ -695,7 +713,6 @@ class HubStore:
                     row['payload']['fingerprint'] == payload['fingerprint'] and
                     (current - datetime.fromisoformat(row['payload']['submitted_at'])).total_seconds() < feedback.COOLDOWN):
                 raise HubError(429, '刚刚提交过同类反馈，本次未再次提交。请五分钟后再试，或复制、导出诊断信息发给维护者。')
-        rows = self._evict_attachments_for_budget(rows, attachments)
         row_id = secrets.token_hex(16)
         stored_meta = [
             {'id': item['sha256'], 'sha256': item['sha256'],
@@ -711,14 +728,18 @@ class HubStore:
                'payload': payload, 'state': 'pending'}
         if stored_meta:
             row['attachments'] = stored_meta
+        # Check text backup capacity BEFORE evicting screenshots or writing files, protecting in-flight rows.
+        self._trim_feedback_rows([*rows, row], protected=(row_id,), reject_if_full=True)
+        rows = self._evict_attachments_for_budget(rows, attachments)
+        next_rows = self._trim_feedback_rows([*rows, row], protected=(row_id,), reject_if_full=True)
         created = self._write_feedback_attachments(attachments)
-        next_rows = self._trim_feedback_rows([*rows, row])
         try:
             atomic_write(self.data / 'feedback.json', next_rows)
         except OSError:
             for path in created:
                 path.unlink(missing_ok=True)
             raise
+        self._in_flight_feedback.add(row_id)
         # Commit succeeded; cleanup of obsolete files is best-effort and never rolls back new files.
         self._collect_feedback_attachments(next_rows)
         return row, False
@@ -736,7 +757,7 @@ class HubStore:
             raise HubError(404, '没有找到这张反馈截图，或已被清理。')
         ext = att.get('ext', '')
         kind = att.get('content_type', '')
-        if ext not in {'png', 'jpg', 'webp'} or kind not in feedback.IMAGE_TYPES or feedback.IMAGE_TYPES[kind]['ext'] != ext:
+        if ext not in {'png', 'jpg'} or kind not in feedback.IMAGE_TYPES or feedback.IMAGE_TYPES[kind]['ext'] != ext:
             raise HubError(404, '没有找到这张反馈截图，或已被清理。')
         path = self._feedback_attachment_dir() / f'{digest}.{ext}'
         if not path.is_file():
@@ -745,6 +766,7 @@ class HubStore:
 
     def finish_feedback(self, row_id, state):
         with self.locked():
+            self._in_flight_feedback.discard(row_id)
             rows = self._feedback()
             for row in rows:
                 if row['id'] == row_id:

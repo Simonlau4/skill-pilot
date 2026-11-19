@@ -9573,15 +9573,19 @@ function decodeFeedbackImage(previewUrl, contentType) {
           resolve({ok: false});
           return;
         }
-        // Drawing onto canvas applies EXIF orientation and strips hidden camera/file metadata.
+        // Drawing onto canvas applies EXIF orientation, strips hidden metadata, and converts WebP to PNG/JPEG.
         ctx.drawImage(img, 0, 0, width, height);
-        const qualities = contentType === 'image/png' ? [undefined] : [0.92, 0.85];
+        const candidates = contentType === 'image/png'
+          ? [['image/png', undefined]]
+          : contentType === 'image/jpeg'
+            ? [['image/jpeg', 0.92], ['image/jpeg', 0.85]]
+            : [['image/png', undefined], ['image/jpeg', 0.92], ['image/jpeg', 0.85]];
         let chosen = null;
-        for (const quality of qualities) {
+        for (const [targetType, quality] of candidates) {
           const encodedUrl = quality === undefined
-            ? canvas.toDataURL(contentType)
-            : canvas.toDataURL(contentType, quality);
-          const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(encodedUrl);
+            ? canvas.toDataURL(targetType)
+            : canvas.toDataURL(targetType, quality);
+          const match = /^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=]+)$/.exec(encodedUrl);
           if (!match) continue;
           const outType = match[1];
           const outBase64 = match[2];

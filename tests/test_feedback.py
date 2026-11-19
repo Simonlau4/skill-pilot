@@ -458,15 +458,15 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
 
     def test_screenshots_end_to_end_real_receiver_metadata_strip_and_safe_download(self):
         # Verify real HTTP forwarding, exact detail parity between preview and receiver (no post-confirm truncation),
-        # metadata stripping across PNG/JPEG/WebP, and owner-only safe downloads.
+        # metadata stripping across PNG and baseline/progressive JPEG, and owner-only safe downloads.
         png = make_png((10, 20, 30), meta_text='/Users/secret/private-png-note')
         jpeg = make_jpeg(comment='secret-jpeg-comment-path')
-        webp = make_webp(exif_text='secret-webp-exif', xmp_text='secret-webp-xmp')
+        prog_jpeg = REAL_PROGRESSIVE_JPEG_128X128[:2] + b'\xff\xfe' + struct.pack('>H', 18) + b'secret-prog-note' + REAL_PROGRESSIVE_JPEG_128X128[2:]
         long_fault = diagnostics.record(self.home, 'backend', '长诊断测试', OSError('详情上下文 ' + 'D' * 4000))
         shots = [
             encode_shot(png, 'image/png') | {'filename': '/private/path/secret.png'},
             encode_shot(jpeg, 'image/jpeg') | {'path': 'C:\\Users\\alice\\Desktop\\token.jpg'},
-            encode_shot(webp, 'image/webp'),
+            encode_shot(prog_jpeg, 'image/jpeg'),
         ]
         received = []
         class Receiver(BaseHTTPRequestHandler):
@@ -493,7 +493,7 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         self.assertEqual(prepared['payload']['attachment_count'], '3')
         self.assertIn('已附 3 张截图', prepared['payload']['attachments_summary'])
         self.assertGreater(len(prepared['payload']['detail']), 4000)
-        for secret in ('secret.png', 'token.jpg', 'alice', 'private-png-note', 'secret-jpeg-comment', 'secret-webp-exif'):
+        for secret in ('secret.png', 'token.jpg', 'alice', 'private-png-note', 'secret-jpeg-comment', 'secret-prog-note'):
             self.assertNotIn(secret, json.dumps(prepared, ensure_ascii=False))
         with patch.object(urllib.request.OpenerDirector, 'open', local_open):
             code, result = self.request('/api/diagnostics/submit', {'ticket': prepared['ticket']})
@@ -506,7 +506,7 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         self.assertIn('feedback-attachments/', payload['attachments_summary'])
         self.assertEqual(set(payload), set(feedback.LIMITS) | {'reporter', 'status', 'submitted_at'})
         self.assertTrue(all(isinstance(v, str) for v in payload.values()))
-        for secret in ('secret.png', 'token.jpg', 'private-png-note', 'secret-jpeg-comment', 'secret-webp-exif', 'secret-webp-xmp'):
+        for secret in ('secret.png', 'token.jpg', 'private-png-note', 'secret-jpeg-comment', 'secret-prog-note'):
             self.assertNotIn(secret, json.dumps(payload, ensure_ascii=False))
         backup = json.loads((self.data / 'feedback.json').read_text(encoding='utf-8'))[0]
         self.assertEqual(backup['state'], 'sent')
@@ -515,7 +515,7 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         expected_clean = [
             (feedback.sanitize_image(png, 'image/png'), backup['attachments'][0], 'image/png', b'private-png-note'),
             (feedback.sanitize_image(jpeg, 'image/jpeg'), backup['attachments'][1], 'image/jpeg', b'secret-jpeg-comment'),
-            (feedback.sanitize_image(webp, 'image/webp'), backup['attachments'][2], 'image/webp', b'secret-webp-exif'),
+            (feedback.sanitize_image(prog_jpeg, 'image/jpeg'), backup['attachments'][2], 'image/jpeg', b'secret-prog-note'),
         ]
         for clean_raw, att, expected_mime, stripped_marker in expected_clean:
             digest = hashlib.sha256(clean_raw).hexdigest()
@@ -525,7 +525,6 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             self.assertNotIn(stripped_marker, stored_bytes)
             self.assertNotIn(b'Exif', stored_bytes)
             self.assertNotIn(b'Photoshop', stored_bytes)
-            self.assertNotIn(b'secret-webp-xmp', stored_bytes)
             status, headers, body = self.raw_hub_get(f"/api/feedback/{backup['id']}/attachments/{digest}")
             self.assertEqual(status, 200)
             self.assertEqual(body, clean_raw)
@@ -589,6 +588,7 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             ('trailing_jpeg', encode_shot(trailing_jpeg, 'image/jpeg')),
             ('no_dqt_jpeg', encode_shot(no_dqt_jpeg, 'image/jpeg')),
             ('fake_webp_bad_sync', encode_shot(fake_webp_vp8, 'image/webp')),
+            ('raw_unconverted_webp', encode_shot(make_webp(), 'image/webp')),
             ('vp8_header_only', encode_shot(vp8_header_only, 'image/webp')),
             ('vp8_no_token', encode_shot(vp8_no_token, 'image/webp')),
             ('vp8l_header_only', encode_shot(vp8l_header_only, 'image/webp')),
@@ -1053,19 +1053,121 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
                 submit_release.set()
             self.assertEqual(fut.result(), (200, {'submitted': True}))
             self.assertNotIn(slow_preview['ticket'], self.dashboard.feedback_previews)
+        # 5. Text backup full (MAX_RECORDS=1) while an in-flight feedback is forwarding MUST reject new submission
+        #    with 507 instead of dropping the in-flight row and its screenshot.
+        started_t, release_t = threading.Event(), threading.Event()
+        def paused_text_forward(url, payload):
+            if payload.get('error_id') == 'err-text-full-1':
+                started_t.set()
+                self.assertTrue(release_t.wait(5))
+        with patch.object(feedback, 'MAX_RECORDS', 1), \
+                patch.object(feedback, 'forward', side_effect=paused_text_forward), ThreadPoolExecutor() as pool:
+            first_t = pool.submit(self.request, '/api/feedback/with-attachments', base | {
+                'error_id': 'err-text-full-1', 'fingerprint': 'fp-text-full-1', 'attachments': [shot_c]}, True)
+            self.assertTrue(started_t.wait(3))
+            try:
+                code_t2, err_t2 = self.request('/api/feedback/with-attachments', base | {
+                    'error_id': 'err-text-full-2', 'fingerprint': 'fp-text-full-2', 'attachments': [shot_d]}, hub=True)
+                self.assertEqual(code_t2, 507, err_t2)
+                self.assertIn('正在转发', err_t2['error'])
+                self.assertTrue((att_dir / f'{sha_c}.png').is_file())
+                rows_mid = json.loads(fb_path.read_text(encoding='utf-8'))
+                self.assertEqual([r['payload']['error_id'] for r in rows_mid], ['err-text-full-1'])
+            finally:
+                release_t.set()
+            self.assertEqual(first_t.result()[0], 200)
+        # 6. Crash recovery: a leftover 'pending' row from a crashed prior hub process is marked 'failed' on HubServer
+        #    startup so it does NOT permanently deadlock quota eviction.
+        crashed_rows = json.loads(fb_path.read_text(encoding='utf-8'))
+        crashed_rows[-1]['state'] = 'pending'
+        fb_path.write_text(json.dumps(crashed_rows, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        recovered_hub = team_hub.HubServer(self.data, '127.0.0.1', 0, feedback_webhook=WEBHOOK)
+        try:
+            after_recover = json.loads(fb_path.read_text(encoding='utf-8'))
+            self.assertEqual(after_recover[-1]['state'], 'failed')
+            with patch.object(feedback, 'MAX_ATTACHMENT_STORE_BYTES', tight_limit), \
+                    patch.object(feedback, 'MAX_RECORDS', 1):
+                with recovered_hub.store.locked():
+                    row_new, dup_new = recovered_hub.store._receive_feedback(
+                        self.member, base | {'error_id': 'err-after-crash', 'fingerprint': 'fp-after-crash',
+                                             'attachments': [shot_d]})
+                    self.assertFalse(dup_new)
+                    self.assertEqual(row_new['payload']['error_id'], 'err-after-crash')
+                recovered_hub.store.finish_feedback(row_new['id'], 'sent')
+        finally:
+            recovered_hub.server_close()
+        # 7. Concurrent dashboard submits for two distinct errors keep BOTH receipts in local feedback.json.
+        fault_1 = diagnostics.record(self.home, 'backend', '并发回执一', OSError('fault-1'))
+        fault_2 = diagnostics.record(self.home, 'backend', '并发回执二', OSError('fault-2'))
+        prev_1 = self.preview(error_id=fault_1['error_id'])
+        prev_2 = self.preview(error_id=fault_2['error_id'])
+        barrier = threading.Barrier(2)
+        def synced_forward(url, payload):
+            if payload.get('error_id') in {fault_1['error_id'], fault_2['error_id']}:
+                barrier.wait(5)
+        with patch.object(feedback, 'forward', side_effect=synced_forward), ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': prev_1['ticket']})
+            f2 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': prev_2['ticket']})
+            self.assertEqual(f1.result(), (200, {'submitted': True}))
+            self.assertEqual(f2.result(), (200, {'submitted': True}))
+        local_saved = diagnostics.read_json(self.home / '.skill-pilot/feedback.json').get('submitted', [])
+        self.assertTrue(any(entry.endswith(':' + fault_1['error_id']) for entry in local_saved), local_saved)
+        self.assertTrue(any(entry.endswith(':' + fault_2['error_id']) for entry in local_saved), local_saved)
+        # 8. Preview cache cap (20 MB) rejects new screenshot preview with 503 when all cached entries are in-flight,
+        #    while plain-text preview still succeeds so copy/export remains available.
+        clean_a_size = len(feedback.sanitize_image(img_a, 'image/png'))
+        orig_cap = self.dashboard.feedback_preview_max_bytes
+        self.dashboard.feedback_preview_max_bytes = clean_a_size * 2 + 10
+        try:
+            self.dashboard.feedback_previews.clear()
+            p_cap1 = self.preview(attachments=[shot_a])
+            p_cap2 = self.preview(attachments=[shot_a])
+            cap_barrier = threading.Barrier(3)
+            cap_release = threading.Event()
+            def hold_submit(home, prepared):
+                cap_barrier.wait(5)
+                self.assertTrue(cap_release.wait(5))
+                return {'submitted': True}
+            with patch.object(team, 'submit_feedback', side_effect=hold_submit), ThreadPoolExecutor(max_workers=2) as pool:
+                s1 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': p_cap1['ticket']})
+                s2 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': p_cap2['ticket']})
+                cap_barrier.wait(5)
+                try:
+                    # 3rd screenshot preview would exceed feedback_preview_max_bytes while both existing are sending -> 503.
+                    over_code, over_res = self.request('/api/diagnostics/preview', {
+                        'error_id': self.row['error_id'], 'attachments': [shot_a]})
+                    self.assertEqual(over_code, 503, over_res)
+                    self.assertIn('正在发送', over_res['error'])
+                    cached_total = sum(
+                        sum(a['size'] for a in entry['prepared'].get('_attachments', ()))
+                        for entry in self.dashboard.feedback_previews.values()
+                    )
+                    self.assertLessEqual(cached_total, self.dashboard.feedback_preview_max_bytes)
+                    # Plain-text preview still succeeds so user can copy/export diagnostics.
+                    text_code, text_res = self.request('/api/diagnostics/preview', {'error_id': self.row['error_id']})
+                    self.assertEqual(text_code, 200, text_res)
+                    self.assertEqual(text_res['payload']['error_id'], self.row['error_id'])
+                finally:
+                    cap_release.set()
+                self.assertEqual(s1.result(), (200, {'submitted': True}))
+                self.assertEqual(s2.result(), (200, {'submitted': True}))
+        finally:
+            self.dashboard.feedback_preview_max_bytes = orig_cap
 
     def test_frontend_screenshot_validators_and_interactions(self):
         source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text(encoding='utf-8')
         functions = '\n'.join(extract_function(source, signature) for signature in (
             'function formatFeedbackBytes(', 'function detectFeedbackImage(',
             'function bytesToBase64(', 'function validateFeedbackFileBytes(',
-            'function discardFeedbackTicket(', 'function setFeedbackShotError(',
-            'function announceFeedbackShots(', 'function setFeedbackViewerActualSize(',
-            'function focusFeedbackFallback(', 'function renderFeedbackShots(',
-            'function openFeedbackShotViewer(', 'function handleFeedbackViewerClose(',
-            'function removeFeedbackShot(', 'async function addFeedbackFiles(',
-            'async function updateFeedbackPreview(', 'function handleFeedbackClose(',
-            'async function sendFeedback('))
+            'function base64ByteLength(', 'function discardFeedbackTicket(',
+            'function setFeedbackShotError(', 'function announceFeedbackShots(',
+            'function setFeedbackViewerActualSize(', 'function focusFeedbackFallback(',
+            'function renderFeedbackShots(', 'function openFeedbackShotViewer(',
+            'function handleFeedbackViewerClose(', 'function removeFeedbackShot(',
+            'async function addFeedbackFiles(', 'async function updateFeedbackPreview(',
+            'function handleFeedbackClose(', 'async function sendFeedback('))
+        real_decode_fn = extract_function(source, 'function decodeFeedbackImage(').replace(
+            'function decodeFeedbackImage(', 'function realDecodeFeedbackImage(', 1)
         png_b64 = base64.b64encode(make_png()).decode('ascii')
         jpeg_b64 = base64.b64encode(make_jpeg()).decode('ascii')
         webp_b64 = base64.b64encode(make_webp()).decode('ascii')
@@ -1076,6 +1178,7 @@ const FEEDBACK_MAX_SHOT_BYTES = 2 * 1024 * 1024;
 const FEEDBACK_MAX_SHOTS_TOTAL = 5 * 1024 * 1024;
 const FEEDBACK_MAX_IMAGE_DIM = 8192;
 const FEEDBACK_MAX_IMAGE_PIXELS = 16000000;
+const FEEDBACK_TYPE_LABELS = {{'image/png': 'PNG', 'image/jpeg': 'JPEG', 'image/webp': 'WebP'}};
 let feedbackSequence = 0, feedbackDialogEpoch = 1, feedbackErrorId = 'err1', feedbackTicket = 't0';
 let feedbackSending = false, feedbackReadingFiles = 0, feedbackAttachments = [], feedbackAttachmentSeq = 0;
 let feedbackCanAttach = true, feedbackAttachReason = '', feedbackSubmitted = false, feedbackViewerTrigger = null;
@@ -1153,6 +1256,7 @@ const api = async (path, body) => {{
   return {{discarded: true}};
 }};
 {functions}
+{real_decode_fn}
 const toBytes = b64 => new Uint8Array(Buffer.from(b64, 'base64'));
 const png = toBytes('{png_b64}');
 const jpeg = toBytes('{jpeg_b64}');
@@ -1297,7 +1401,38 @@ assert.equal(validateFeedbackFileBytes(png, 2, FEEDBACK_MAX_SHOTS_TOTAL - png.le
   await sendFeedback();
   submitEvicted = false;
   assert.match(nodes['feedback-message'].textContent, /原留底截图已超过保留上限被清理/);
-  // 11. Closing dialog discards active ticket and clears screenshots.
+  // 11. Real decodeFeedbackImage converts WebP to PNG (and falls back to JPEG if PNG exceeds 2 MB).
+  let fakeCanvasPngBig = false;
+  global.Image = class FakeImage {{
+    set src(url) {{
+      this.naturalWidth = 64;
+      this.naturalHeight = 64;
+      setImmediate(() => this.onload && this.onload());
+    }}
+  }};
+  document.createElement = tag => {{
+    assert.equal(tag, 'canvas');
+    return {{
+      width: 0, height: 0,
+      getContext: () => ({{ drawImage() {{}} }}),
+      toDataURL(mime) {{
+        if (mime === 'image/png' && fakeCanvasPngBig) return 'data:image/png;base64,' + 'A'.repeat(3000000);
+        if (mime === 'image/png') return 'data:image/png;base64,{png_b64}';
+        if (mime === 'image/jpeg') return 'data:image/jpeg;base64,{jpeg_b64}';
+        throw new Error('unexpected mime ' + mime);
+      }},
+    }};
+  }};
+  const webpAsPng = await realDecodeFeedbackImage('data:image/webp;base64,{webp_b64}', 'image/webp');
+  assert.equal(webpAsPng.ok, true);
+  assert.equal(webpAsPng.content_type, 'image/png');
+  assert.equal(webpAsPng.label, 'PNG');
+  fakeCanvasPngBig = true;
+  const webpAsJpeg = await realDecodeFeedbackImage('data:image/webp;base64,{webp_b64}', 'image/webp');
+  assert.equal(webpAsJpeg.ok, true);
+  assert.equal(webpAsJpeg.content_type, 'image/jpeg');
+  assert.equal(webpAsJpeg.label, 'JPEG');
+  // 12. Closing dialog discards active ticket and clears screenshots.
   feedbackSubmitted = false;
   feedbackCanAttach = true;
   await addFeedbackFiles([makeFile(png, 'image/png')]);

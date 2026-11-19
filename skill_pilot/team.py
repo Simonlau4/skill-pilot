@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +25,7 @@ from .store import git_tree, guard
 
 MAX_BODY = team_hub.MAX_BODY
 TIMEOUT = 10
+_FEEDBACK_RECEIPT_LOCK = threading.Lock()
 FORMAT_ERROR = '分享站的技能格式不对，请联系管理员检查。'
 PACKS_UNSUPPORTED = '分享站版本较旧，暂不能整理技能包，请联系管理员更新分享站。'
 LOCAL_LABELS = {'mine': '我上架的', 'installed': '已装', 'update': '有新版', 'installable': '可以装',
@@ -323,10 +325,11 @@ def submit_feedback(home, prepared):
             raise ValueError('分享站未能确认收下本次截图，请核对分享站版本后重试，或复制、导出诊断信息发给维护者。')
         attachments_evicted = any(bool(item.get('evicted')) for item in returned if isinstance(item, dict))
     path = Path(home) / '.skill-pilot/feedback.json'
-    saved = diagnostics.read_json(path).get('submitted', [])
-    saved = saved if isinstance(saved, list) else []
     key = prepared['_connection'] + ':' + prepared['payload']['error_id']
-    labels.atomic_write(home, 'feedback.json', json.dumps({'submitted': [*saved, key][-200:]}) + '\n', 0o600)
+    with _FEEDBACK_RECEIPT_LOCK:
+        saved = diagnostics.read_json(path).get('submitted', [])
+        saved = saved if isinstance(saved, list) else []
+        labels.atomic_write(home, 'feedback.json', json.dumps({'submitted': [*saved, key][-200:]}) + '\n', 0o600)
     outcome = {'submitted': True}
     if attachments_evicted:
         outcome['attachments_evicted'] = True

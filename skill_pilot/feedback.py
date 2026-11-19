@@ -27,7 +27,6 @@ COOLDOWN = 300
 IMAGE_TYPES = {
     'image/png': {'ext': 'png', 'label': 'PNG'},
     'image/jpeg': {'ext': 'jpg', 'label': 'JPEG'},
-    'image/webp': {'ext': 'webp', 'label': 'WebP'},
 }
 PNG_KEEP_CHUNKS = {b'IHDR', b'PLTE', b'tRNS', b'IDAT', b'IEND', b'sRGB'}
 PNG_DEPTHS = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 3: {1, 2, 4, 8}, 4: {8, 16}, 6: {8, 16}}
@@ -70,9 +69,6 @@ def detect_image(raw):
         return 'image/png'
     if len(raw) >= 16 and raw[:3] == b'\xff\xd8\xff':
         return 'image/jpeg'
-    if (len(raw) >= 16 and raw[:4] == b'RIFF' and raw[8:12] == b'WEBP' and
-            raw[12:16] in {b'VP8 ', b'VP8L', b'VP8X'}):
-        return 'image/webp'
     return None
 
 
@@ -316,137 +312,12 @@ def _sanitize_jpeg(raw):
     return b''.join(out)
 
 
-def _check_vp8_chunk(data):
-    if len(data) < 13 or data[3:6] != b'\x9d\x01\x2a':
-        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-    tag = data[0] | (data[1] << 8) | (data[2] << 16)
-    keyframe = (tag & 1) == 0
-    version = (tag >> 1) & 7
-    show_frame = (tag >> 4) & 1
-    first_part_size = tag >> 5
-    if not keyframe or version > 3 or show_frame != 1 or first_part_size < 3 or 10 + first_part_size >= len(data):
-        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-    if not any(data[10:10 + first_part_size]):
-        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-    width = struct.unpack('<H', data[6:8])[0] & 0x3fff
-    height = struct.unpack('<H', data[8:10])[0] & 0x3fff
-    _check_dimensions(width, height)
-    return width, height
-
-
-def _check_vp8l_chunk(data):
-    if len(data) < 8 or data[0] != 0x2f:
-        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-    bits = struct.unpack('<I', data[1:5])[0]
-    if ((bits >> 29) & 7) != 0:
-        raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
-    width = (bits & 0x3fff) + 1
-    height = ((bits >> 14) & 0x3fff) + 1
-    _check_dimensions(width, height)
-    stream = data[5:]
-    if not any(stream):
-        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-    # Validate leading lossless bitstream flags (transform / color cache).
-    has_transform = stream[0] & 1
-    if not has_transform:
-        use_color_cache = (stream[0] >> 1) & 1
-        if use_color_cache:
-            cache_bits = (stream[0] >> 2) & 0x0f
-            if not 1 <= cache_bits <= 11:
-                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-    elif len(stream) < 5:
-        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-    return width, height
-
-
-def _sanitize_webp(raw):
-    if len(raw) < 20 or raw[:4] != b'RIFF' or raw[8:12] != b'WEBP':
-        raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
-    riff_size = struct.unpack('<I', raw[4:8])[0]
-    if riff_size < 12 or 8 + riff_size != len(raw):
-        raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
-    limit = len(raw)
-    pos = 12
-    chunks = []
-    while pos < limit:
-        if pos + 8 > limit:
-            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
-        fourcc = raw[pos:pos + 4]
-        size = struct.unpack('<I', raw[pos + 4:pos + 8])[0]
-        data_end = pos + 8 + size
-        next_pos = data_end + (size & 1)
-        if data_end > limit or next_pos > limit:
-            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
-        chunks.append((fourcc, raw[pos + 8:data_end]))
-        pos = next_pos
-    if not chunks:
-        raise AttachmentError('图片内容为空，请重新截图或选择有效图片。')
-    first_kind, first_data = chunks[0]
-    kept = []
-    if first_kind == b'VP8 ':
-        if len(chunks) != 1:
-            raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
-        _check_vp8_chunk(first_data)
-        kept.append((first_kind, first_data))
-    elif first_kind == b'VP8L':
-        if len(chunks) != 1:
-            raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
-        _check_vp8l_chunk(first_data)
-        kept.append((first_kind, first_data))
-    elif first_kind == b'VP8X':
-        if len(first_data) != 10:
-            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-        flags = first_data[0]
-        if flags & 0x02:
-            raise AttachmentError('暂不支持动态图片，请使用静态 PNG、JPEG 或 WebP 截图。')
-        width = 1 + int.from_bytes(first_data[4:7], 'little')
-        height = 1 + int.from_bytes(first_data[7:10], 'little')
-        _check_dimensions(width, height)
-        alph_chunk = None
-        image_chunk = None
-        for fourcc, data in chunks[1:]:
-            if fourcc in {b'EXIF', b'XMP ', b'ICCP'}:
-                continue
-            if fourcc in {b'ANIM', b'ANMF'}:
-                raise AttachmentError('暂不支持动态图片，请使用静态 PNG、JPEG 或 WebP 截图。')
-            if fourcc == b'ALPH':
-                if alph_chunk is not None or image_chunk is not None or len(data) < 2:
-                    raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
-                alph_chunk = (fourcc, data)
-            elif fourcc == b'VP8 ':
-                if image_chunk is not None or _check_vp8_chunk(data) != (width, height):
-                    raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
-                image_chunk = (fourcc, data)
-            elif fourcc == b'VP8L':
-                if image_chunk is not None or alph_chunk is not None or _check_vp8l_chunk(data) != (width, height):
-                    raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
-                image_chunk = (fourcc, data)
-            else:
-                raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
-        if image_chunk is None:
-            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
-        if alph_chunk is not None:
-            clean_vp8x = bytes([(flags & ~0x2c) | 0x10]) + first_data[1:]
-            kept.extend([(b'VP8X', clean_vp8x), alph_chunk, image_chunk])
-        else:
-            kept.append(image_chunk)
-    else:
-        raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
-    body = b'WEBP' + b''.join(
-        fourcc + struct.pack('<I', len(data)) + data + (b'\x00' if len(data) & 1 else b'')
-        for fourcc, data in kept
-    )
-    return b'RIFF' + struct.pack('<I', len(body)) + body
-
-
 def sanitize_image(raw, content_type):
     if content_type == 'image/png':
         return _sanitize_png(raw)
     if content_type == 'image/jpeg':
         return _sanitize_jpeg(raw)
-    if content_type == 'image/webp':
-        return _sanitize_webp(raw)
-    raise AttachmentError('仅支持 PNG、JPEG、WebP 格式的图片截图。')
+    raise AttachmentError('仅支持 PNG、JPEG 格式的截图图片。')
 
 
 def parse_attachments(items):
@@ -478,11 +349,13 @@ def parse_attachments(items):
             raise AttachmentError('截图文件为空，请重新选择有效图片。')
         if len(raw) > MAX_ATTACHMENT_BYTES:
             raise AttachmentTooLargeError(f'单张截图不能超过 {format_size(MAX_ATTACHMENT_BYTES)}，请压缩或裁剪后再试。')
+        if (len(raw) >= 12 and raw[:4] == b'RIFF' and raw[8:12] == b'WEBP') or declared == 'image/webp':
+            raise AttachmentError('暂不直接接收未转换的 WebP 图片，请通过看板选择或粘贴自动转换，或先转为 PNG、JPEG 后再试。')
         detected = detect_image(raw)
         if not detected:
-            raise AttachmentError('仅支持 PNG、JPEG、WebP 格式的图片截图。')
+            raise AttachmentError('仅支持 PNG、JPEG 格式的截图上传；如需附带 WebP 图片，请通过看板选择或粘贴。')
         if declared and declared != detected:
-            raise AttachmentError('截图格式与文件内容不一致，仅支持 PNG、JPEG、WebP 图片。')
+            raise AttachmentError('截图格式与文件内容不一致，仅支持 PNG、JPEG 图片。')
         clean_raw = sanitize_image(raw, detected)
         if len(clean_raw) > MAX_ATTACHMENT_BYTES:
             raise AttachmentTooLargeError(f'单张截图不能超过 {format_size(MAX_ATTACHMENT_BYTES)}，请压缩或裁剪后再试。')

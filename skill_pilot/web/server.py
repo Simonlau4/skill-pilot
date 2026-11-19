@@ -146,6 +146,7 @@ class Dashboard(ThreadingHTTPServer):
         self.feedback_lock = threading.Lock()
         self.feedback_prune_timer = None
         self.feedback_preview_ttl = 600
+        self.feedback_preview_max_bytes = 20 * 1024 * 1024
         self.jobs = []
         self.jobs_version = 0
         self.jobs_blocked = session.get('jobs_blocked', '')
@@ -1431,12 +1432,17 @@ class Handler(BaseHTTPRequestHandler):
                                        for entry in self.server.feedback_previews.values())
                         while self.server.feedback_previews and (
                                 len(self.server.feedback_previews) >= 100 or
-                                cached_bytes() + new_bytes > 20 * 1024 * 1024):
+                                cached_bytes() + new_bytes > self.server.feedback_preview_max_bytes):
                             evict_key = next((k for k, v in self.server.feedback_previews.items()
                                               if not v.get('sending')), None)
                             if evict_key is None:
                                 break
                             self.server.feedback_previews.pop(evict_key, None)
+                        if len(self.server.feedback_previews) >= 100 or (
+                                new_bytes > 0 and cached_bytes() + new_bytes > self.server.feedback_preview_max_bytes):
+                            self.server._schedule_feedback_prune_locked()
+                            self.reply(503, {'error': '当前有其他带图反馈正在发送，暂无法缓存新截图预览。请稍后重试，或移除截图后复制、导出纯文本诊断信息。'})
+                            return
                         self.server.feedback_previews[ticket] = {
                             'expires': now_mono + self.server.feedback_preview_ttl,
                             'prepared': prepared,
