@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from skill_pilot import operations, store, updates
+from skill_pilot.platform_support import readlink as read_link
 from skill_pilot.sources import normalize
 
 
@@ -238,14 +239,14 @@ class SelfMadeSourceTests(unittest.TestCase):
         done = operations.mark_self_made('design', True, self.home)
         copied = self.home / '.skill-pilot/bases/design/note'
         self.assertTrue(copied.is_symlink())
-        self.assertEqual(Path(os.readlink(copied)).resolve(), target.resolve())
+        self.assertEqual(Path(read_link(copied)).resolve(), target.resolve())
         operations.undo(done['id'], home=self.home)
         self.assertEqual(self.state(), before)
         self.assertEqual(self._baseline_text(), original)
         self.assertFalse(copied.exists())
         self.assertTrue((store / 'SKILL.md').is_file())
         self.assertTrue((store / 'note').is_symlink())
-        self.assertEqual(Path(os.readlink(store / 'note')).resolve(), target.resolve())
+        self.assertEqual(Path(read_link(store / 'note')).resolve(), target.resolve())
         self.assertEqual(operations.load(self.home)[1]['skills']['design']['source'], source)
 
 
