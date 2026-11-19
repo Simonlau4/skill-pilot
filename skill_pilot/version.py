@@ -19,7 +19,19 @@ from .store import PROJECT
 APP_VERSION = '1.0.0'
 RECORD = '.skill-pilot-install.json'
 BUNDLE_DIRS = ('skill_pilot', 'scripts', 'assets', 'docs', 'skill', 'tests', '.github')
-ROOT_FILES = ('.gitignore', '.gitattributes', '.claude/launch.json', 'skill-pilot')
+ROOT_FILES = (
+    '.gitignore',
+    '.gitattributes',
+    '.claude/launch.json',
+    'AGENTS.md',
+    'CLAUDE.md',
+    'DESIGN.md',
+    'PLAN.md',
+    'PRODUCT.md',
+    'README.md',
+    'WINDOWS.md',
+    'skill-pilot',
+)
 REQUIRED_FILES = (
     'skill_pilot/cli.py',
     'skill_pilot/web/server.py',
@@ -112,7 +124,9 @@ def _verify_manifest_files(project, manifest):
         return 'invalid'
     if not all(name in files for name in REQUIRED_FILES):
         return 'invalid'
-    for directory in ('skill_pilot', 'scripts', 'assets', 'skill'):
+    for directory in BUNDLE_DIRS:
+        if directory == 'docs':
+            continue
         root = project / directory
         if root.is_dir() and not root.is_symlink():
             try:
@@ -124,6 +138,9 @@ def _verify_manifest_files(project, manifest):
                         return 'invalid'
             except OSError:
                 return 'invalid'
+    for name in ROOT_FILES:
+        if _safe_project_file(project, name) is not None and name not in files:
+            return 'invalid'
     for name, expected in files.items():
         if (not isinstance(expected, list) or len(expected) != 2
                 or not isinstance(expected[0], str) or not SHA256_RE.fullmatch(expected[0])
@@ -180,7 +197,6 @@ def _scan_bundle_paths(project):
                 for path in root.rglob('*'):
                     if '__pycache__' not in path.parts:
                         candidates.append(path)
-        candidates.extend(project.glob('*.md'))
         for name in ROOT_FILES:
             candidates.append(project / name)
         for path in candidates:

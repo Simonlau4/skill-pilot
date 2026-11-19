@@ -209,7 +209,7 @@ def check(home, project=PROJECT):
               'latest': before.get('date', ''), 'current_version': current_version,
               'latest_version': current_version, 'available': False, 'temporary': '',
               'changes': [], 'changes_total': 0, 'changes_partial': False}
-    if target == before.get('revision') and (before['checkout'] or build['manifest_valid']):
+    if before['checkout'] and target == before.get('revision'):
         return review
     temporary = Path(tempfile.mkdtemp(prefix='skill-pilot-self-update-')).resolve()
     candidate = temporary / 'candidate'
@@ -252,6 +252,11 @@ def check(home, project=PROJECT):
                 pass
         latest_date = git(candidate, 'show', '-s', '--format=%cI', target)
         latest_version = read_build(candidate)['version'] or format_version(latest_date, target)
+        if not available:
+            rmtree(temporary, ignore_errors=True)
+            return {**review, 'temporary': '', 'files': files,
+                    'latest': latest_date, 'latest_version': latest_version,
+                    'available': False, 'changes': [], 'changes_total': 0, 'changes_partial': False}
         return {**review, 'temporary': str(temporary), 'candidate': str(candidate), 'files': files,
                 'latest': latest_date, 'latest_version': latest_version,
                 'available': available, 'changes': changes[:10], 'changes_total': len(changes),

@@ -429,23 +429,38 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertEqual(feedback.envelope(diagnostics.bundle(self.home, after_row['error_id'])['report'])['app_version'], pending)
             self.assertEqual(feedback.envelope(diagnostics.bundle(self.home, after_static_row['error_id'])['report'])['app_version'], static_next)
 
-            # Path 1: Static refresh arriving during an in-flight check defers version recheck until check completes,
-            # then invalidates the stale check conclusion if disk version changed.
+            # Path 1: Static refresh arriving during an in-flight check increments static_refresh_seq
+            # and defers version recheck until check completes, looping if a second refresh arrives mid-read.
+            deferred_mid = 'v1.0.0-5555554'
             deferred_next = 'v1.0.0-5555555'
+            seq_before = dashboard.static_refresh_seq
             dashboard.program_progress.update(running=True, phase='check', available=False,
                                               current_version=static_next, latest_version='')
+            dashboard.program_action = 'check'
             with patch.object(runtime, 'version', return_value=dashboard.code_version):
                 dashboard.request_reload()
-            self.assertTrue(dashboard.static_refresh_deferred)
+            self.assertEqual(dashboard.static_refresh_seq, seq_before + 1)
             self.assertEqual(dashboard.running_version, static_next)
+            read_calls = []
+
+            def two_stage_read():
+                read_calls.append(dashboard.static_refresh_seq)
+                if len(read_calls) == 1:
+                    # A second static refresh arrives while read_build() runs outside program_lock!
+                    with patch.object(runtime, 'version', return_value=dashboard.code_version):
+                        dashboard.request_reload()
+                    return {'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                            'manifest_valid': True, 'version': deferred_mid}
+                return {'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                        'manifest_valid': True, 'version': deferred_next}
+
             with patch.object(self_update, 'check', return_value={
                     'temporary': '', 'target': 't' * 40, 'current': '', 'latest': '',
                     'current_version': static_next, 'latest_version': static_next, 'available': False}), \
-                    patch.object(app_version, 'read_build', return_value={
-                        'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
-                        'manifest_valid': True, 'version': deferred_next}):
-                dashboard.program_work('check', automatic=False)
-            self.assertFalse(dashboard.static_refresh_deferred)
+                    patch.object(app_version, 'read_build', side_effect=two_stage_read):
+                dashboard.program_work('check', automatic=False, start_refresh_seq=seq_before)
+            self.assertEqual(len(read_calls), 2)
+            self.assertEqual(dashboard.static_refresh_seq, seq_before + 2)
             self.assertEqual(dashboard.running_version, deferred_next)
             self.assertEqual(dashboard.program_progress['current_version'], deferred_next)
             self.assertEqual(dashboard.program_progress['phase'], 'idle')
@@ -453,19 +468,26 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertNotIn('checked_at', dashboard.program_progress)
             self.assertEqual(diagnostics.RUNNING_BUILD['app_version'], deferred_next)
 
-            # Path 1b: Exception during deferred read_build must NEVER leave running=True stuck.
-            dashboard.program_progress.update(running=True, phase='check', available=False,
-                                              current_version=deferred_next, latest_version='')
+            # Path 1b: Exception during deferred read_build clears stale 'latest'/checked_at AND running=False.
+            seq_before_err = dashboard.static_refresh_seq
+            dashboard.program_progress.update(
+                running=True, phase='latest', available=False,
+                current_version=deferred_next, latest_version=deferred_next,
+                checked_at=12345.0, target='old-target')
             dashboard.program_action = 'check'
-            dashboard.static_refresh_deferred = True
+            with patch.object(runtime, 'version', return_value=dashboard.code_version):
+                dashboard.request_reload()
             with patch.object(self_update, 'check', return_value={
                     'temporary': '', 'target': 't' * 40, 'current': '', 'latest': '',
                     'current_version': deferred_next, 'latest_version': deferred_next, 'available': False}), \
                     patch.object(app_version, 'read_build', side_effect=OSError('transient disk error')):
-                dashboard.program_work('check', automatic=False)
+                dashboard.program_work('check', automatic=False, start_refresh_seq=seq_before_err)
             self.assertFalse(dashboard.program_progress['running'])
-            self.assertFalse(dashboard.static_refresh_deferred)
             self.assertEqual(dashboard.program_action, '')
+            self.assertEqual(dashboard.program_progress['phase'], 'idle')
+            self.assertEqual(dashboard.program_progress['latest_version'], '')
+            self.assertNotIn('checked_at', dashboard.program_progress)
+            self.assertNotIn('target', dashboard.program_progress)
 
             # Path 2: Resuming a session on a new running version (or legacy session without current_version,
             # or interrupted auto-check with version change) clears running=True and invalidates stale results.
@@ -566,5 +588,170 @@ const api = async (path) => {
   assert.equal(programFailedAction, '');
 })().catch(e => { console.error(e); process.exitCode = 1; });
 '''
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=15)
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_zip_official_file_verification_and_private_files(self):
+        with patch.object(self_update, 'run_installer'):
+            make_fixture(self, checkout=False)
+        # Include WINDOWS.md in official upstream release as well so we can verify root official file checks.
+        shutil.copy2(store.PROJECT / 'WINDOWS.md', self.upstream / 'WINDOWS.md')
+        commit(self.upstream, 'Include WINDOWS.md in official release')
+        shutil.copy2(store.PROJECT / 'WINDOWS.md', self.code / 'WINDOWS.md')
+        head = git(self.upstream, 'rev-parse', 'HEAD')
+        self_update.record_installation(self.code, head, '2026-11-19T00:00:00Z')
+        complete_files = self_update.read_record(self.code)['files']
+        official_version = app_version.read_build(self.code)['version']
+        self.assertTrue(app_version.read_build(self.code)['manifest_valid'])
+
+        # 1. User private files (in docs/ or root) must NOT invalidate manifest, pollute version, or trigger update.
+        (self.code / 'docs/My private note.md').write_text('personal doc', encoding='utf-8')
+        (self.code / 'My private note.md').write_text('personal root note', encoding='utf-8')
+        with_private = app_version.read_build(self.code)
+        self.assertTrue(with_private['manifest_valid'])
+        self.assertEqual(with_private['version'], official_version)
+        clean_check = self_update.check(self.home, self.code)
+        self.assertFalse(clean_check['available'])
+        self.assertEqual(clean_check['temporary'], '')
+        self.assertEqual(clean_check['current_version'], official_version)
+        self.assertEqual(clean_check['latest_version'], official_version)
+
+        # 2. Official root file (WINDOWS.md) present on disk but omitted from manifest invalidates manifest
+        #    and self_update.check() must NOT falsely report "已是最新".
+        without_windows_md = {k: v for k, v in complete_files.items() if k != 'WINDOWS.md'}
+        (self.code / '.skill-pilot-install.json').write_text(json.dumps({
+            'files': without_windows_md, 'revision': head, 'date': '2026-11-19T00:00:00Z'}), encoding='utf-8')
+        self.assertFalse(app_version.read_build(self.code)['manifest_valid'])
+        missing_win_md = self_update.check(self.home, self.code)
+        if missing_win_md['temporary']:
+            self.addCleanup(shutil.rmtree, missing_win_md['temporary'], True)
+        self.assertTrue(missing_win_md['available'])
+
+        # 3. Deleting an official file (index.html or install-windows.ps1) from BOTH disk and manifest
+        #    while revision == HEAD must NOT shortcut to "已是最新".
+        for vanished in ('skill_pilot/web/static/index.html', 'scripts/install-windows.ps1'):
+            with self.subTest(vanished=vanished):
+                path = self.code / vanished
+                saved = path.read_bytes()
+                try:
+                    path.unlink()
+                    trimmed = {k: v for k, v in complete_files.items() if k != vanished}
+                    (self.code / '.skill-pilot-install.json').write_text(json.dumps({
+                        'files': trimmed, 'revision': head, 'date': '2026-11-19T00:00:00Z'}), encoding='utf-8')
+                    checked = self_update.check(self.home, self.code)
+                    if checked['temporary']:
+                        self.addCleanup(shutil.rmtree, checked['temporary'], True)
+                    self.assertTrue(checked['available'])
+                    self.assertNotEqual(checked['current_version'], checked['latest_version'])
+                finally:
+                    path.write_bytes(saved)
+
+    def test_program_work_run_id_prevents_old_thread_clobbering_new_task(self):
+        with patch.dict(os.environ, {'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '0'}):
+            dashboard = server.Dashboard({'home': str(self.home)})
+            self.addCleanup(dashboard.server_close)
+            old_started = threading.Event()
+            release_old = threading.Event()
+
+            def old_check(home):
+                old_started.set()
+                release_old.wait(2)
+                return {'temporary': '', 'target': 'a' * 40, 'current': '', 'latest': '',
+                        'current_version': dashboard.running_version,
+                        'latest_version': dashboard.running_version, 'available': False}
+
+            # Simulate an older thread (run_id=1) finishing after a newer task (run_id=2) has started.
+            dashboard.program_run_id = 1
+            old_thread = threading.Thread(
+                target=lambda: self._run_with_check(dashboard, old_check, run_id=1), daemon=True)
+            old_thread.start()
+            self.assertTrue(old_started.wait(2))
+            with dashboard.program_lock:
+                dashboard.program_run_id = 2
+                dashboard.program_action = 'apply'
+                dashboard.program_progress.update(running=True, phase='apply', message='正在安装 SP 新版…')
+            release_old.set()
+            old_thread.join(3)
+            self.assertFalse(old_thread.is_alive())
+            self.assertTrue(dashboard.program_progress['running'])
+            self.assertEqual(dashboard.program_action, 'apply')
+            self.assertEqual(dashboard.program_progress['phase'], 'apply')
+
+            # Even if an old thread exits abnormally (BaseException) via finally, it must not clear run_id=2.
+            class _Abort(BaseException):
+                pass
+            with patch.object(self_update, 'check', side_effect=_Abort()):
+                with self.assertRaises(_Abort):
+                    dashboard.program_work('check', automatic=False, run_id=1, start_refresh_seq=0)
+            self.assertTrue(dashboard.program_progress['running'])
+            self.assertEqual(dashboard.program_action, 'apply')
+            with dashboard.program_lock:
+                dashboard.program_action = ''
+                dashboard.program_progress['running'] = False
+
+    def _run_with_check(self, dashboard, check_fn, run_id):
+        with patch.object(self_update, 'check', side_effect=check_fn):
+            dashboard.program_work('check', automatic=False, run_id=run_id, start_refresh_seq=0)
+
+    def test_resume_cleans_stale_state_before_bundled_skill_sync_and_invalidates_unknown_version(self):
+        import socket
+        from skill_pilot import operations
+
+        # 1. Resume cleanup runs BEFORE sync_bundled_skill so a fresh startup sync error is never overwritten.
+        for label, saved_prog in (
+            ('version-changed', {
+                'running': False, 'phase': 'latest', 'available': False, 'error': '',
+                'current_version': 'v1.0.0-0000000', 'latest_version': 'v1.0.0-0000000',
+                'pending_version': '', 'checked_at': 12345.0, 'target': 'old-target',
+                'message': 'SP 已是最新版本',
+            }),
+            ('interrupted-running', {
+                'running': True, 'phase': 'check', 'automatic': False, 'available': False, 'error': '',
+                'current_version': 'v1.0.0-0000000', 'checked_at': 12345.0, 'target': 'old-target',
+                'message': '正在下载并检查新版…',
+            }),
+        ):
+            with self.subTest(sync_error_case=label):
+                listener = socket.socket()
+                listener.bind(('127.0.0.1', 0))
+                listener.listen()
+                self.addCleanup(listener.close)
+                with patch.object(operations, 'sync_bundled_skill', side_effect=RuntimeError('sync boom')):
+                    resumed = server.Dashboard({'home': str(self.home)}, resume={
+                        'inventory': {'home': str(self.home)},
+                        'socket_fd': listener.dup().detach(),
+                        'program_progress': dict(saved_prog),
+                    })
+                self.addCleanup(resumed.server_close)
+                self.assertFalse(resumed.program_progress['running'])
+                self.assertEqual(resumed.program_progress['phase'], 'error')
+                self.assertIn('自带技能说明没能同步', resumed.program_progress['error'])
+                self.assertEqual(resumed.program_progress['latest_version'], '')
+                self.assertNotIn('checked_at', resumed.program_progress)
+                self.assertNotIn('target', resumed.program_progress)
+
+        # 2. When new process running_version is empty/unreadable on resume, old 'latest' must be withdrawn.
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        with patch.object(app_version, 'running_build', return_value={
+                'install_mode': '压缩包', 'checkout': False, 'revision': '', 'date': '',
+                'manifest_valid': False, 'version': ''}):
+            resumed = server.Dashboard({'home': str(self.home)}, resume={
+                'inventory': {'home': str(self.home)},
+                'socket_fd': listener.dup().detach(),
+                'program_progress': {
+                    'running': False, 'phase': 'latest', 'available': False, 'error': '',
+                    'current_version': 'v1.0.0-1111111', 'latest_version': 'v1.0.0-1111111',
+                    'pending_version': '', 'checked_at': 12345.0, 'target': 'old-target',
+                    'message': 'SP 已是最新版本',
+                },
+            })
+        self.addCleanup(resumed.server_close)
+        self.assertEqual(resumed.running_version, '')
+        self.assertEqual(resumed.program_progress['phase'], 'idle')
+        self.assertEqual(resumed.program_progress['current_version'], '')
+        self.assertEqual(resumed.program_progress['latest_version'], '')
+        self.assertNotIn('checked_at', resumed.program_progress)
+        self.assertNotIn('target', resumed.program_progress)
