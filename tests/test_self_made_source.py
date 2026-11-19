@@ -1,0 +1,254 @@
+"""A skill with an upstream source can be turned into a self-made one, so update-local can take it over."""
+from tests import set_up_home
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from skill_pilot import operations, store, updates
+from skill_pilot.platform_support import readlink as read_link
+from skill_pilot.sources import normalize
+
+
+class SelfMadeSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='skill pilot self made ')
+        self.addCleanup(self.tmp.cleanup)
+        set_up_home(self, Path(self.tmp.name) / 'Example Home')
+        for name, body in (('design', '上游内容'), ('other', '别的技能')):
+            skill = self.home / '.codex/skills' / name
+            skill.mkdir(parents=True)
+            (skill / 'SKILL.md').write_text(f'---\nname: {name}\ndescription: 示例\n---\n{body}\n')
+        store.apply(store.preview(self.home)['plan_id'], self.home)
+        path = self.home / '.skill-pilot/registry.json'
+        data = json.loads(path.read_text())
+        data['skills']['design']['source'] = {'source': 'https://github.com/acme/skills', 'repository': 'acme/skills',
+                                              'source_path': 'design'}
+        path.write_text(json.dumps(data))
+        self.newer = Path(self.tmp.name) / 'Merged copy' / 'design'
+        self.newer.mkdir(parents=True)
+        (self.newer / 'SKILL.md').write_text('---\nname: design\ndescription: 示例\n---\n合成后的新版\n')
+
+    def state(self):
+        return operations.revision(self.home, operations.load(self.home)[2])
+
+    def test_mark_self_made_lets_update_local_take_over_and_both_undo(self):
+        with self.assertRaisesRegex(ValueError, '上游来源'):
+            operations.update_local('design', self.newer, home=self.home)
+        before = self.state()
+        assigned = operations.load(self.home)[1]['skills']['design']['assigned_agents']
+
+        preview = operations.mark_self_made('design', home=self.home)
+        self.assertTrue(preview['needs_confirmation'])
+        self.assertIn('acme/skills', preview['message'])
+        self.assertEqual(self.state(), before, '预览不该改动任何东西')
+
+        done = operations.mark_self_made('design', True, self.home)
+        skill = operations.load(self.home)[1]['skills']['design']
+        self.assertEqual(normalize(skill['source'])['kind'], 'skip')
+        self.assertIn('acme/skills', skill['source']['evidence'], '要留下原来的来源，方便以后核对')
+        self.assertEqual(skill['assigned_agents'], assigned)
+        self.assertEqual((self.home / '.skill-pilot/store/design/SKILL.md').read_text().split('---\n')[-1], '上游内容\n')
+        again = operations.mark_self_made('design', home=self.home)
+        self.assertFalse(again.get('needs_confirmation'))
+        self.assertIn('已经是自制', again['message'])
+
+        updated = operations.update_local('design', self.newer, home=self.home, confirmed=True)
+        self.assertIn('合成后的新版', (self.home / '.skill-pilot/store/design/SKILL.md').read_text())
+        operations.undo(updated['id'], home=self.home)
+        operations.undo(done['id'], home=self.home)
+        self.assertEqual(self.state(), before)
+
+    def test_only_github_sources_can_become_self_made(self):
+        # A team-store skill keeps its author record, or a member could list a colleague's skill as their own.
+        path = self.home / '.skill-pilot/registry.json'
+        data = json.loads(path.read_text())
+        member, version = 'a' * 32, 'b' * 64
+        sources = {
+            '团队商店': {'source': '团队商店', 'team': {'member': member, 'member_name': '示例同事', 'name': 'design',
+                                                  'version': version, 'key': f'team:{member}:design'}},
+            '飞书官方': {'source': {'sourceType': 'well-known', 'sourceUrl': 'https://open.feishu.cn/lark-cli/skills/design'},
+                     'record': {'sourceType': 'well-known', 'sourceUrl': 'https://open.feishu.cn/lark-cli/skills/design'}},
+        }
+        for label, source in sources.items():
+            with self.subTest(source=label):
+                data['skills']['design']['source'] = source
+                path.write_text(json.dumps(data))
+                before = self.state()
+                for confirmed in (False, True):
+                    with self.assertRaisesRegex(ValueError, 'GitHub'):
+                        operations.mark_self_made('design', confirmed, self.home)
+                self.assertEqual(self.state(), before)
+
+    def test_a_setting_saved_meanwhile_is_kept(self):
+        # Another operation saves while this one has read the registry but not yet taken the lock.
+        load = operations.load
+        saved = []
+        def load_then_save_elsewhere(home=None):
+            result = load(home)
+            if not saved:
+                saved.append(True)  # The other operation reads the registry too; trigger it only once.
+                updates.set_watch('other', 'off', home=self.home, confirmed=True)
+            return result
+        with patch.object(operations, 'load', load_then_save_elsewhere):
+            operations.mark_self_made('design', True, self.home)
+        skills = operations.load(self.home)[1]['skills']
+        self.assertEqual(normalize(skills['design']['source'])['kind'], 'skip')
+        self.assertEqual(skills['other'].get('update_watch'), 'off', '同时保存的设置被覆盖了')
+
+    def test_command_line_previews_first_and_keeps_the_two_ways_apart(self):
+        env = {**os.environ, 'SKILL_PILOT_HOME': str(self.home), 'PYTHONDONTWRITEBYTECODE': '1'}
+        def run(*args):
+            return subprocess.run([sys.executable, '-m', 'skill_pilot', 'set-source', 'design', *args], cwd=store.PROJECT,
+                                  env=env, capture_output=True, text=True, timeout=60)
+        before = self.state()
+        shown = run('--self-made')
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn('自制', shown.stdout)
+        self.assertIn('--yes', shown.stdout)
+        self.assertEqual(self.state(), before)
+        mixed = run('--self-made', '--repo', 'acme/skills', '--path', 'design', '--yes')
+        self.assertNotEqual(mixed.returncode, 0)
+        self.assertEqual(self.state(), before)
+        missing = run('--repo', 'acme/skills', '--yes')
+        self.assertNotEqual(missing.returncode, 0)
+        done = run('--self-made', '--yes')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(normalize(operations.load(self.home)[1]['skills']['design']['source'])['kind'], 'skip')
+
+    def test_previous_version_stays_in_the_note_without_the_raw_address(self):
+        path = self.home / '.skill-pilot/registry.json'
+        data = json.loads(path.read_text())
+        data['skills']['design']['source'] = {
+            'source': 'https://github.com/acme/skills?token=SOURCE_SECRET', 'repository': 'acme/skills',
+            'source_path': 'skills/design', 'branch': 'team', 'commit': 'a' * 40, 'tree_sha': 'b' * 40,
+            'record': {'skillFolderHash': 'c' * 40}}
+        data['skills']['design']['base_tree_sha'] = 'd' * 40
+        path.write_text(json.dumps(data))
+        before = self.state()
+        done = operations.mark_self_made('design', True, self.home)
+        evidence = operations.load(self.home)[1]['skills']['design']['source']['evidence']
+        self.assertIn('acme/skills', evidence)
+        self.assertIn('team', evidence)
+        self.assertIn('skills/design', evidence)
+        self.assertIn('a' * 40, evidence)
+        self.assertIn('b' * 40, evidence)
+        self.assertNotIn('SOURCE_SECRET', evidence)
+        operations.undo(done['id'], home=self.home)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(operations.load(self.home)[1]['skills']['design']['source']['commit'], 'a' * 40)
+        data = json.loads(path.read_text())
+        data['skills']['design']['source'].pop('tree_sha')
+        data['skills']['design']['source'].pop('commit')
+        path.write_text(json.dumps(data))
+        fallback = operations.mark_self_made('design', True, self.home)
+        self.assertIn('c' * 40, operations.load(self.home)[1]['skills']['design']['source']['evidence'])
+        operations.undo(fallback['id'], home=self.home)
+
+    def test_unsupported_sources_are_refused_and_local_ones_stay_unchanged(self):
+        path = self.home / '.skill-pilot/registry.json'
+        data = json.loads(path.read_text())
+        refused = {'暂不支持': {'source': 'https://gitlab.com/acme/skills', 'source_path': 'design'}}
+        unchanged = {
+            '来源未记录': {'source': '来源不明'},
+            '本机维护': {'source': '本机源码', 'source_path': 'notes/design'},
+        }
+        for label, source in refused.items():
+            with self.subTest(source=label):
+                data['skills']['design']['source'] = source
+                path.write_text(json.dumps(data))
+                before = self.state()
+                for confirmed in (False, True):
+                    with self.assertRaisesRegex(ValueError, 'GitHub'):
+                        operations.mark_self_made('design', confirmed, self.home)
+                self.assertEqual(self.state(), before)
+                self.assertEqual(operations.load(self.home)[1]['skills']['design']['source'], source)
+        for label, source in unchanged.items():
+            with self.subTest(source=label):
+                data['skills']['design']['source'] = source
+                path.write_text(json.dumps(data))
+                before = self.state()
+                again = operations.mark_self_made('design', True, self.home)
+                self.assertFalse(again.get('needs_confirmation'))
+                self.assertIn('已经是自制', again['message'])
+                self.assertEqual(self.state(), before)
+
+    def _baseline_text(self):
+        return (self.home / '.skill-pilot/bases/design/SKILL.md').read_text()
+
+    def test_outside_links_do_not_replace_the_baseline(self):
+        outside = Path(self.tmp.name) / 'outside'
+        outside.mkdir()
+        (outside / 'secret.txt').write_text('outside-secret')
+        (outside / 'SKILL.md').write_text('---\nname: design\ndescription: 示例\n---\n外部正文\n')
+        store = self.home / '.skill-pilot/store/design'
+        (store / 'SKILL.md').write_text('---\nname: design\ndescription: 示例\n---\n合成后\n')
+        original = self._baseline_text()
+        source = operations.load(self.home)[1]['skills']['design']['source']
+
+        (store / 'extra').symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, '主目录之外'):
+            operations.mark_self_made('design', True, self.home)
+        self.assertEqual(self._baseline_text(), original)
+        self.assertFalse((self.home / '.skill-pilot/bases/design/extra').exists())
+        self.assertFalse((self.home / '.skill-pilot/bases/design/secret.txt').exists())
+        self.assertEqual(operations.load(self.home)[1]['skills']['design']['source'], source)
+        (store / 'extra').unlink()
+        recovered = self.state()
+        done = operations.mark_self_made('design', True, self.home)
+        self.assertIn('合成后', self._baseline_text())
+        operations.undo(done['id'], home=self.home)
+        self.assertEqual(self.state(), recovered)
+        self.assertEqual(self._baseline_text(), original)
+
+        shutil.rmtree(store)
+        store.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, '不能用'):
+            operations.mark_self_made('design', True, self.home)
+        self.assertEqual(self._baseline_text(), original)
+        self.assertFalse((self.home / '.skill-pilot/bases/design/secret.txt').exists())
+        self.assertEqual(operations.load(self.home)[1]['skills']['design']['source'], source)
+
+    def test_an_inside_link_can_still_be_marked_and_undone(self):
+        store = self.home / '.skill-pilot/store/design'
+        (store / 'note').symlink_to('SKILL.md')
+        before = self.state()
+        done = operations.mark_self_made('design', True, self.home)
+        copied = self.home / '.skill-pilot/bases/design/note'
+        self.assertTrue(copied.is_symlink())
+        self.assertEqual(os.readlink(copied), 'SKILL.md')
+        operations.undo(done['id'], home=self.home)
+        self.assertEqual(self.state(), before)
+        self.assertFalse(copied.exists())
+
+    def test_absolute_link_inside_home_can_be_marked_and_undone(self):
+        other = self.home / 'other'
+        other.mkdir()
+        target = other / 'file.txt'
+        target.write_text('家里的备忘')
+        store = self.home / '.skill-pilot/store/design'
+        (store / 'note').symlink_to(target)
+        before = self.state()
+        original = self._baseline_text()
+        source = operations.load(self.home)[1]['skills']['design']['source']
+        done = operations.mark_self_made('design', True, self.home)
+        copied = self.home / '.skill-pilot/bases/design/note'
+        self.assertTrue(copied.is_symlink())
+        self.assertEqual(Path(read_link(copied)).resolve(), target.resolve())
+        operations.undo(done['id'], home=self.home)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self._baseline_text(), original)
+        self.assertFalse(copied.exists())
+        self.assertTrue((store / 'SKILL.md').is_file())
+        self.assertTrue((store / 'note').is_symlink())
+        self.assertEqual(Path(read_link(store / 'note')).resolve(), target.resolve())
+        self.assertEqual(operations.load(self.home)[1]['skills']['design']['source'], source)
+
+
+if __name__ == '__main__':
+    unittest.main()
