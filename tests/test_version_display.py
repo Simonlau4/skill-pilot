@@ -163,21 +163,31 @@ class VersionFormatAndReadTests(unittest.TestCase):
                 self.assertEqual(parsed['v'], expected_local)
                 self.assertEqual(parsed['d'], expected_local)
 
-        # Deeply nested JSON manifest is still cleanly rejected before self-update with cross-platform guidance.
+        # Deeply nested JSON manifest must also not crash `doctor --json`, while self_update still rejects it.
         manifest.write_text(deep_nested, encoding='utf-8')
+        doctor = subprocess.run(
+            [sys.executable, '-B', '-m', 'skill_pilot', 'doctor', '--json'],
+            cwd=code, env={**os.environ, 'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '1'},
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        self.assertEqual(json.loads(doctor.stdout)['environment']['app_version'], expected_local)
         with self.assertRaises(ValueError) as caught:
             self_update.read_record(code)
         self.assertNotIn('build-app.sh', str(caught.exception))
         self.assertIn('重新运行一次安装程序', str(caught.exception))
 
-        # Legacy revision/date-only manifest and incomplete manifest (e.g. README.md only)
-        # still compute full release bundle version and detect app.js edits.
+        # Legacy revision/date-only manifest, incomplete manifest (README.md only), and manifest missing root
+        # `skill-pilot` launcher are all invalid for trusted manifest scoping and still compute full bundle version.
+        self_update.record_installation(code, 'a' * 40, '2026-11-17T00:00:00Z')
+        full_files = self_update.read_record(code)['files']
+        without_launcher = {k: v for k, v in full_files.items() if k != 'skill-pilot'}
         readme_stamp = self_update.stamp(code / 'README.md')
         for stale in (
             {'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'},
             {'files': {'README.md': readme_stamp}, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'},
+            {'files': without_launcher, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'},
         ):
-            with self.subTest(stale=sorted(stale)):
+            with self.subTest(stale=len(stale.get('files', {}))):
                 manifest.write_text(json.dumps(stale), encoding='utf-8')
                 before = app_version.read_build(code)
                 self.assertFalse(before['manifest_valid'])
@@ -190,6 +200,18 @@ class VersionFormatAndReadTests(unittest.TestCase):
                     self.assertNotEqual(after['version'], before['version'])
                 finally:
                     app_js.write_text(original_js, encoding='utf-8')
+
+        # self_update.check() shares the exact same full-bundle calculation even with a single-file manifest.
+        with patch.object(self_update, 'run_installer'):
+            make_fixture(self, checkout=False)
+        (self.code / '.skill-pilot-install.json').write_text(json.dumps({
+            'files': {'README.md': self_update.stamp(self.code / 'README.md')},
+            'revision': '', 'date': ''}), encoding='utf-8')
+        partial_check = self_update.check(self.home, self.code)
+        if partial_check['temporary']:
+            self.addCleanup(shutil.rmtree, partial_check['temporary'], True)
+        self.assertEqual(partial_check['current_version'], app_version.read_build(self.code)['version'])
+        self.assertEqual(partial_check['current_version'], partial_check['latest_version'])
 
         # Manifest file mismatch: tampered file invalidates manifest and recomputes local version.
         self_update.record_installation(code, 'f' * 40, '2026-11-19T00:00:00Z')
@@ -348,14 +370,34 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertEqual(old_feedback['app_version'], running)
             self.assertEqual(new_feedback['app_version'], pending)
 
-            # Ordinary (non-ready) static-only refresh (e.g. app.js changed on disk) also syncs running version.
+            # Mid-upgrade refresh (phase=='apply' / running==True) must NOT prematurely adopt partial disk version.
+            mid_upgrade_version = 'v1.0.0-6666666'
+            dashboard.program_progress.update(running=True, phase='apply', current_version=pending)
+            with patch.object(runtime, 'version', return_value=dashboard.code_version), \
+                    patch.object(app_version, 'read_build', return_value={
+                        'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                        'manifest_valid': True, 'version': mid_upgrade_version}):
+                dashboard.request_reload()
+            self.assertEqual(dashboard.running_version, pending)
+            self.assertEqual(dashboard.program_progress['current_version'], pending)
+            self.assertEqual(diagnostics.RUNNING_BUILD['app_version'], pending)
+
+            # Ordinary (non-ready) static-only refresh (e.g. app.js changed on disk) syncs running version
+            # AND invalidates the stale 'latest' check conclusion so outdated latest_version does not linger.
             static_next = 'v1.0.0-7777777'
+            dashboard.program_progress.update(
+                running=False, phase='latest', available=False,
+                current_version=pending, latest_version=pending, checked_at=12345.0, target='old-target')
             with patch.object(runtime, 'version', return_value=dashboard.code_version), \
                     patch.object(app_version, 'read_build', return_value={
                         'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
                         'manifest_valid': True, 'version': static_next}):
                 dashboard.request_reload()
             self.assertEqual(dashboard.program_progress['current_version'], static_next)
+            self.assertEqual(dashboard.program_progress['phase'], 'idle')
+            self.assertEqual(dashboard.program_progress['latest_version'], '')
+            self.assertNotIn('checked_at', dashboard.program_progress)
+            self.assertNotIn('target', dashboard.program_progress)
             self.assertEqual(diagnostics.RUNNING_BUILD['app_version'], static_next)
             after_static_row = diagnostics.record(self.home, 'backend', '普通静态刷新后', RuntimeError('static'))
             self.assertEqual(after_static_row['environment']['app_version'], static_next)

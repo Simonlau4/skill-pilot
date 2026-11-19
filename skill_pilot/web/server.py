@@ -1006,13 +1006,24 @@ class Dashboard(ThreadingHTTPServer):
                                                  latest_version=applied or self.program_progress.get('latest_version', ''),
                                                  pending_version='', failed_action='',
                                                  changes=[], changes_total=0, changes_partial=False)
-                else:
+                elif not self.program_progress['running'] and self.program_progress['phase'] != 'apply':
                     refreshed = app_version.read_build()
                     if refreshed['version'] and refreshed['version'] != self.running_version:
                         self.running_version = refreshed['version']
                         app_version.set_running_version(refreshed['version'], date=refreshed['date'])
                         diagnostics.sync_running_build()
-                        self.program_progress['current_version'] = refreshed['version']
+                        if self.program_review:
+                            rmtree(self.program_review['temporary'], ignore_errors=True)
+                        self.program_review = None
+                        self.program_progress.update(
+                            phase='idle', available=False, error='', error_id='', failed_action='',
+                            current=refreshed['date'], latest='',
+                            current_version=refreshed['version'], latest_version='', pending_version='',
+                            changes=[], changes_total=0, changes_partial=False,
+                            message='从 GitHub 官方项目获取新版',
+                        )
+                        self.program_progress.pop('checked_at', None)
+                        self.program_progress.pop('target', None)
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
                 self.reload_error = ''
