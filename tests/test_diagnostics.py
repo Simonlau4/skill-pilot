@@ -55,11 +55,12 @@ class DiagnosticsTests(unittest.TestCase):
         with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
             self.assertTrue(self.record()['error_id'])
         self.assertFalse(self.log.exists())
-        with patch('skill_pilot.diagnostics.os.replace', side_effect=OSError('磁盘已满')):
+        with patch('skill_pilot.diagnostics.os.write', side_effect=OSError('磁盘已满')):
             self.assertEqual(self.record(), {})
         self.assertEqual([p for p in (self.private / 'logs').iterdir() if p.name != '.errors.lock'], [])
 
     def test_a_brief_file_lock_is_retried_and_the_record_is_kept(self):
+        first = self.record()
         real = os.replace
         calls = {'n': 0}
 
@@ -69,9 +70,10 @@ class DiagnosticsTests(unittest.TestCase):
                 raise PermissionError('文件正被占用')
             return real(source, destination)
 
-        with patch('skill_pilot.diagnostics.os.replace', occupied):
+        with patch.object(diagnostics, 'MAX_RECORDS', 1), patch('skill_pilot.diagnostics.os.replace', occupied):
             row = self.record()
         self.assertTrue(row.get('error_id'))
+        self.assertNotEqual(row['error_id'], first['error_id'])
         self.assertEqual([item['error_id'] for item in diagnostics.recent(self.home)], [row['error_id']])
         self.assertGreater(calls['n'], 1)
         self.assertEqual([p.name for p in (self.private / 'logs').iterdir() if p.name.startswith('.errors-')], [])
@@ -237,13 +239,11 @@ vm.runInNewContext(fs.readFileSync('skill_pilot/web/static/diagnostics.js', 'utf
 
     def test_overlapping_rewrites_drop_a_record_when_the_lock_does_not_exclude(self):
         barrier = threading.Barrier(2)
-        original = diagnostics.recent
 
-        def read_then_wait(home, sanitize_records=True):
-            rows = original(home, sanitize_records=sanitize_records)
-            if not sanitize_records:
-                barrier.wait(3)
-            return rows
+        def rewrite_stale_snapshot(path, line):
+            current = path.read_bytes() if path.is_file() else b''
+            barrier.wait(3)
+            diagnostics._rewrite_log(path, self.home, current + line)
 
         @contextmanager
         def no_lock(path, home):
@@ -257,7 +257,7 @@ vm.runInNewContext(fs.readFileSync('skill_pilot/web/static/diagnostics.js', 'utf
             def __exit__(self, *args):
                 return False
 
-        with patch.object(diagnostics, 'recent', read_then_wait), patch.object(
+        with patch.object(diagnostics, '_append_line', rewrite_stale_snapshot), patch.object(
                 diagnostics, 'log_lock', no_lock), patch.object(diagnostics, 'LOCK', NoThreadLock()):
             threads = [threading.Thread(target=self.record) for _ in range(2)]
             for thread in threads:
