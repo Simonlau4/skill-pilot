@@ -984,7 +984,7 @@
         <button id="feedback-shot-pick" class="btn btn-small" type="button">选择截图</button>
         <span class="muted">支持 PNG、JPEG、WebP，可按 Ctrl+V / Cmd+V 直接粘贴，合计不超过 5 MB。</span>
       </div>
-      <p id="feedback-shots-privacy" class="muted feedback-shots-privacy">仅上传图片内容，上传前会自动去除元数据、不含本机路径；点击缩略图可查看完整原图，发送前请确认画面不含密码、密钥或私人信息。</p>
+      <p id="feedback-shots-privacy" class="muted feedback-shots-privacy">仅上传图片内容，上传前会自动清除隐藏的拍摄和文件信息、不含本机路径；点击缩略图可查看完整原图，发送前请确认画面不含密码、密钥或私人信息。</p>
       <span id="feedback-shots-status" class="sr-only" role="status" aria-live="polite"></span>
       <p id="feedback-shots-error" class="row-note is-error" role="alert" hidden></p>
       <ul id="feedback-shots-list" class="feedback-shots-list" aria-label="已选截图预览" hidden></ul>
@@ -1008,10 +1008,11 @@
   <div class="dialog-form">
     <h2 id="feedback-shot-viewer-title">查看截图原图</h2>
     <p id="feedback-shot-viewer-meta" class="muted"></p>
-    <div class="feedback-shot-viewer-stage">
+    <div id="feedback-shot-viewer-stage" class="feedback-shot-viewer-stage">
       <img id="feedback-shot-viewer-img" alt="">
     </div>
     <div class="dialog-actions">
+      <button id="feedback-shot-viewer-zoom" class="btn" type="button">查看实际大小</button>
       <button id="feedback-shot-viewer-close" class="btn btn-primary" type="button">关闭预览</button>
     </div>
   </div>

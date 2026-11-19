@@ -97,9 +97,9 @@ def _request(config, path, method='GET', data=None):
              team_hub.MAX_INSTALL_BODY if path == '/api/installs/me' else MAX_BODY)
     if path == '/api/packs/me':
         limit = team_hub.MAX_PACK_BODY
-    if path == '/api/feedback':
+    if path in {'/api/feedback', '/api/feedback/with-attachments'}:
         has_attachments = isinstance(data, dict) and bool(data.get('attachments'))
-        if has_attachments:
+        if has_attachments or path == '/api/feedback/with-attachments':
             text_only = {k: v for k, v in data.items() if k != 'attachments'}
             if len(json.dumps(text_only, ensure_ascii=False).encode('utf-8')) > feedback.MAX_BODY:
                 raise ValueError('反馈文字内容超过 64 KB，请缩短后重试。')
@@ -108,7 +108,7 @@ def _request(config, path, method='GET', data=None):
             limit = feedback.MAX_BODY
     if body is not None and len(body) > limit:
         raise ValueError('反馈内容及截图超过上传上限，请减少截图数量或缩小图片后重试。'
-                         if path == '/api/feedback' and limit == feedback.MAX_UPLOAD_BODY else
+                         if path in {'/api/feedback', '/api/feedback/with-attachments'} and limit == feedback.MAX_UPLOAD_BODY else
                          '反馈内容超过 64 KB，请缩短后重试。' if path == '/api/feedback' else
                          '技能包内容超过 64 KB，请缩短后重试。' if path == '/api/packs/me' else
                          '上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
@@ -121,7 +121,7 @@ def _request(config, path, method='GET', data=None):
         headers['Authorization'] = 'Bearer ' + key
     try:
         request = urllib.request.Request(config['url'] + path, data=body, method=method, headers=headers)
-        request_timeout = max(TIMEOUT, 30) if path == '/api/feedback' else TIMEOUT
+        request_timeout = max(TIMEOUT, 30) if path in {'/api/feedback', '/api/feedback/with-attachments'} else TIMEOUT
         with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=request_timeout) as response:
             raw = response.read(MAX_BODY + 1)
         if len(raw) > MAX_BODY:
@@ -303,7 +303,12 @@ def submit_feedback(home, prepared):
             ],
         }
     try:
-        result = _request(config, '/api/feedback', 'POST', body)
+        route = '/api/feedback/with-attachments' if attachments else '/api/feedback'
+        result = _request(config, route, 'POST', body)
+    except RequestError as error:
+        if attachments and error.status == 404:
+            raise ValueError('当前分享站版本较旧，暂不支持随反馈上传截图，本次未提交。请移除截图后重发，或复制、导出诊断信息。') from None
+        raise ValueError(diagnostics.sanitize(str(error), home, 400)) from None
     except (ValueError, OSError) as error:
         raise ValueError(diagnostics.sanitize(str(error), home, 400)) from None
     if result.get('submitted') is not True:

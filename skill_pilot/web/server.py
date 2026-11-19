@@ -144,6 +144,8 @@ class Dashboard(ThreadingHTTPServer):
         self.team_upload_reviews = session.get('team_upload_reviews', {})
         self.feedback_previews = {}
         self.feedback_lock = threading.Lock()
+        self.feedback_prune_timer = None
+        self.feedback_preview_ttl = 600
         self.jobs = []
         self.jobs_version = 0
         self.jobs_blocked = session.get('jobs_blocked', '')
@@ -233,6 +235,32 @@ class Dashboard(ThreadingHTTPServer):
         if self.reload_thread: self.reload_thread.join()
         if self.program_review:
             rmtree(self.program_review['temporary'], ignore_errors=True)
+        with self.feedback_lock:
+            if self.feedback_prune_timer:
+                self.feedback_prune_timer.cancel()
+                self.feedback_prune_timer = None
+            self.feedback_previews.clear()
+
+    def _schedule_feedback_prune_locked(self):
+        if self.feedback_prune_timer:
+            self.feedback_prune_timer.cancel()
+            self.feedback_prune_timer = None
+        if self.closing or not self.feedback_previews:
+            return
+        soonest = min(entry['expires'] for entry in self.feedback_previews.values())
+        delay = max(0.01, soonest - time.monotonic() + 0.01)
+        timer = threading.Timer(delay, self.prune_feedback_previews)
+        timer.daemon = True
+        self.feedback_prune_timer = timer
+        timer.start()
+
+    def prune_feedback_previews(self):
+        with self.feedback_lock:
+            now_mono = time.monotonic()
+            self.feedback_previews = {
+                k: v for k, v in self.feedback_previews.items() if v['expires'] > now_mono
+            }
+            self._schedule_feedback_prune_locked()
 
     def _program_thread_blocks_exit(self):
         # 打开看板时的自动检查不挡住关看板和刷新应用新版；手动检查和升级仍要等。
@@ -1373,6 +1401,7 @@ class Handler(BaseHTTPRequestHandler):
                     ticket = body.get('ticket', '')
                     with self.server.feedback_lock:
                         self.server.feedback_previews.pop(ticket, None)
+                        self.server._schedule_feedback_prune_locked()
                     self.reply(200, {'discarded': True})
                 elif path.endswith('/preview'):
                     previous = body.get('previous_ticket', '')
@@ -1383,8 +1412,9 @@ class Handler(BaseHTTPRequestHandler):
                         self.server.home, body.get('error_id', ''), body.get('note', ''), body.get('attachments'))
                     ticket = secrets.token_urlsafe(24)
                     with self.server.feedback_lock:
+                        now_mono = time.monotonic()
                         self.server.feedback_previews = {k: v for k, v in self.server.feedback_previews.items()
-                                                        if v['expires'] > time.monotonic()}
+                                                        if v['expires'] > now_mono}
                         new_bytes = sum(a['size'] for a in prepared.get('_attachments', ()))
                         def cached_bytes():
                             return sum(sum(a['size'] for a in entry['prepared'].get('_attachments', ()))
@@ -1393,15 +1423,21 @@ class Handler(BaseHTTPRequestHandler):
                                 len(self.server.feedback_previews) >= 100 or
                                 cached_bytes() + new_bytes > 20 * 1024 * 1024):
                             self.server.feedback_previews.pop(next(iter(self.server.feedback_previews)))
-                        self.server.feedback_previews[ticket] = {'expires': time.monotonic() + 600, 'prepared': prepared}
+                        self.server.feedback_previews[ticket] = {
+                            'expires': now_mono + self.server.feedback_preview_ttl, 'prepared': prepared}
+                        self.server._schedule_feedback_prune_locked()
                     self.reply(200, {k: v for k, v in prepared.items() if not k.startswith('_')} | {'ticket': ticket})
                 elif path.endswith('/submit'):
                     with self.server.feedback_lock:
-                        entry = self.server.feedback_previews.get(body.get('ticket'))
+                        ticket_key = body.get('ticket')
+                        entry = self.server.feedback_previews.get(ticket_key)
                         if not entry or entry['expires'] <= time.monotonic():
+                            self.server.feedback_previews.pop(ticket_key, None)
+                            self.server._schedule_feedback_prune_locked()
                             raise ValueError('预览已过期，请重新打开反馈窗口。')
                         result = team.submit_feedback(self.server.home, entry['prepared'])
-                        del self.server.feedback_previews[body['ticket']]
+                        del self.server.feedback_previews[ticket_key]
+                        self.server._schedule_feedback_prune_locked()
                     self.reply(200, result)
                 elif not preview_allowed(self.server.home):
                     self.reply(403, {'error': '当前处于只读模式，错误记录未写入。'})

@@ -9536,10 +9536,16 @@ function validateFeedbackFileBytes(bytes, currentCount, currentTotal, declaredTy
   return {ok: true, content_type: detected.content_type, label: detected.label, size: bytes.length};
 }
 
-const FEEDBACK_MAX_IMAGE_DIM = 16384;
-const FEEDBACK_MAX_IMAGE_PIXELS = 64000000;
+const FEEDBACK_MAX_IMAGE_DIM = 8192;
+const FEEDBACK_MAX_IMAGE_PIXELS = 16000000;
+const FEEDBACK_TYPE_LABELS = {'image/png': 'PNG', 'image/jpeg': 'JPEG', 'image/webp': 'WebP'};
 
-function decodeFeedbackImage(previewUrl) {
+function base64ByteLength(b64) {
+  const padding = b64.endsWith('==') ? 2 : (b64.endsWith('=') ? 1 : 0);
+  return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
+}
+
+function decodeFeedbackImage(previewUrl, contentType) {
   return new Promise(resolve => {
     if (typeof Image !== 'function') {
       resolve({ok: false});
@@ -9549,10 +9555,52 @@ function decodeFeedbackImage(previewUrl) {
     img.onload = () => {
       const width = img.naturalWidth || 0;
       const height = img.naturalHeight || 0;
-      if (width > 0 && height > 0 && width <= FEEDBACK_MAX_IMAGE_DIM &&
-          height <= FEEDBACK_MAX_IMAGE_DIM && width * height <= FEEDBACK_MAX_IMAGE_PIXELS) {
+      if (!(width > 0 && height > 0 && width <= FEEDBACK_MAX_IMAGE_DIM &&
+            height <= FEEDBACK_MAX_IMAGE_DIM && width * height <= FEEDBACK_MAX_IMAGE_PIXELS)) {
+        resolve({ok: false, reason: '图片分辨率超出支持范围，请裁剪或缩小后再试。'});
+        return;
+      }
+      if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
         resolve({ok: true, width, height});
-      } else {
+        return;
+      }
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({ok: false});
+          return;
+        }
+        // Drawing onto canvas applies EXIF orientation and strips hidden camera/file metadata.
+        ctx.drawImage(img, 0, 0, width, height);
+        const qualities = contentType === 'image/png' ? [undefined] : [0.92, 0.85];
+        let chosen = null;
+        for (const quality of qualities) {
+          const encodedUrl = quality === undefined
+            ? canvas.toDataURL(contentType)
+            : canvas.toDataURL(contentType, quality);
+          const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(encodedUrl);
+          if (!match) continue;
+          const outType = match[1];
+          const outBase64 = match[2];
+          const outSize = base64ByteLength(outBase64);
+          chosen = {
+            ok: true, width, height, content_type: outType,
+            label: FEEDBACK_TYPE_LABELS[outType] || 'PNG',
+            size: outSize, data: outBase64, previewUrl: encodedUrl,
+          };
+          if (outSize <= FEEDBACK_MAX_SHOT_BYTES) break;
+        }
+        if (!chosen) {
+          resolve({ok: false});
+        } else if (chosen.size > FEEDBACK_MAX_SHOT_BYTES) {
+          resolve({ok: false, reason: `单张截图不能超过 ${formatFeedbackBytes(FEEDBACK_MAX_SHOT_BYTES)}，请压缩或裁剪后再添加。`});
+        } else {
+          resolve(chosen);
+        }
+      } catch {
         resolve({ok: false});
       }
     };
@@ -9578,6 +9626,8 @@ let feedbackCanAttach = false;
 let feedbackAttachReason = '';
 let feedbackSubmitted = false;
 let feedbackViewerTrigger = null;
+let feedbackViewerActualSize = false;
+let feedbackPendingFocus = null;
 
 function setFeedbackShotError(message) {
   const node = $('feedback-shots-error');
@@ -9592,7 +9642,23 @@ function announceFeedbackShots(message) {
   if (message) status.textContent = message;
 }
 
+function setFeedbackViewerActualSize(actual) {
+  feedbackViewerActualSize = Boolean(actual);
+  const stage = $('feedback-shot-viewer-stage');
+  if (stage && stage.classList) stage.classList.toggle('is-actual-size', feedbackViewerActualSize);
+  const zoom = $('feedback-shot-viewer-zoom');
+  if (zoom) zoom.textContent = feedbackViewerActualSize ? '适应窗口' : '查看实际大小';
+}
+
 function renderFeedbackShots() {
+  const list = $('feedback-shots-list');
+  let restoreFocus = feedbackPendingFocus;
+  if (!restoreFocus && typeof document !== 'undefined' && document.activeElement &&
+      typeof list.contains === 'function' && list.contains(document.activeElement)) {
+    const active = document.activeElement;
+    if (active.dataset && active.dataset.removeShot) restoreFocus = {kind: 'remove', id: Number(active.dataset.removeShot)};
+    else if (active.dataset && active.dataset.viewShot) restoreFocus = {kind: 'view', id: Number(active.dataset.viewShot)};
+  }
   const total = feedbackAttachments.reduce((sum, item) => sum + item.size, 0);
   $('feedback-shots-count').textContent = feedbackAttachments.length
     ? `已选 ${feedbackAttachments.length} / ${FEEDBACK_MAX_SHOTS} 张（${formatFeedbackBytes(total)} / ${formatFeedbackBytes(FEEDBACK_MAX_SHOTS_TOTAL)}）`
@@ -9602,10 +9668,14 @@ function renderFeedbackShots() {
   notice.hidden = feedbackCanAttach || !feedbackAttachReason;
   $('feedback-shots-controls').hidden = !feedbackCanAttach;
   $('feedback-shot-pick').disabled = feedbackSending || feedbackSubmitted || feedbackReadingFiles > 0 || !feedbackCanAttach || feedbackAttachments.length >= FEEDBACK_MAX_SHOTS;
-  const list = $('feedback-shots-list');
   if (!feedbackAttachments.length) {
     list.innerHTML = '';
     list.hidden = true;
+    if (restoreFocus && restoreFocus.kind === 'pick') {
+      feedbackPendingFocus = null;
+      if (!$('feedback-shot-pick').disabled && !$('feedback-shots-controls').hidden) $('feedback-shot-pick').focus();
+      else $('feedback-note').focus();
+    }
     return;
   }
   list.hidden = false;
@@ -9620,6 +9690,23 @@ function renderFeedbackShots() {
       </div>
     </li>
   `).join('');
+  if (restoreFocus) {
+    feedbackPendingFocus = null;
+    if (restoreFocus.kind === 'remove') {
+      const target = typeof list.querySelector === 'function'
+        ? list.querySelector(`[data-remove-shot="${restoreFocus.id}"]`)
+        : null;
+      if (target && !target.disabled) {
+        target.focus();
+      } else {
+        const buttons = list.querySelectorAll('.feedback-shot-remove');
+        if (buttons.length) buttons[Math.min(restoreFocus.index || 0, buttons.length - 1)].focus();
+      }
+    } else if (restoreFocus.kind === 'view' && typeof list.querySelector === 'function') {
+      const target = list.querySelector(`[data-view-shot="${restoreFocus.id}"]`);
+      if (target) target.focus();
+    }
+  }
 }
 
 function openFeedbackShotViewer(shotId, trigger) {
@@ -9629,10 +9716,11 @@ function openFeedbackShotViewer(shotId, trigger) {
   feedbackViewerTrigger = trigger || null;
   const dims = item.width && item.height ? ` · ${item.width} × ${item.height}` : '';
   $('feedback-shot-viewer-title').textContent = `查看截图 ${index + 1} 原图`;
-  $('feedback-shot-viewer-meta').textContent = `${item.label} · ${formatFeedbackBytes(item.size)}${dims}（发送前请确认画面不含密码、密钥或私人信息）`;
+  $('feedback-shot-viewer-meta').textContent = `${item.label} · ${formatFeedbackBytes(item.size)}${dims}（已清除隐藏的拍摄和文件信息，发送前请确认画面不含密码、密钥或私人信息）`;
   const img = $('feedback-shot-viewer-img');
   img.src = item.previewUrl;
   img.alt = `截图 ${index + 1} 完整原图`;
+  setFeedbackViewerActualSize(false);
   const viewer = $('feedback-shot-viewer');
   if (!viewer.open) viewer.showModal();
 }
@@ -9646,16 +9734,15 @@ function removeFeedbackShot(shotId) {
   feedbackTicket = '';
   discardFeedbackTicket(oldTicket);
   setFeedbackShotError('');
-  renderFeedbackShots();
-  const remaining = $('feedback-shots-list').querySelectorAll('.feedback-shot-remove');
-  if (remaining.length) {
-    remaining[Math.min(removedIndex, remaining.length - 1)].focus();
-    announceFeedbackShots(`已移除截图，剩余 ${remaining.length} 张。`);
+  if (feedbackAttachments.length) {
+    const nextIdx = Math.min(removedIndex, feedbackAttachments.length - 1);
+    feedbackPendingFocus = {kind: 'remove', id: feedbackAttachments[nextIdx].id, index: nextIdx};
+    announceFeedbackShots(`已移除截图，剩余 ${feedbackAttachments.length} 张。`);
   } else {
-    if (!$('feedback-shot-pick').disabled && !$('feedback-shots-controls').hidden) $('feedback-shot-pick').focus();
-    else $('feedback-note').focus();
+    feedbackPendingFocus = {kind: 'pick'};
     announceFeedbackShots('已移除全部截图。');
   }
+  renderFeedbackShots();
   updateFeedbackPreview();
   return true;
 }
@@ -9716,42 +9803,50 @@ async function addFeedbackFiles(files) {
         continue;
       }
       const base64 = bytesToBase64(bytes);
-      const previewUrl = `data:${checked.content_type};base64,${base64}`;
-      const decoded = await decodeFeedbackImage(previewUrl);
+      const rawPreviewUrl = `data:${checked.content_type};base64,${base64}`;
+      const decoded = await decodeFeedbackImage(rawPreviewUrl, checked.content_type);
       if (epoch !== feedbackDialogEpoch || !$('feedback-dialog').open || feedbackSending || feedbackSubmitted) return;
       if (!decoded.ok) {
-        noteError('图片内容已损坏，无法显示，请重新截图或选择有效图片。');
+        noteError(decoded.reason || '图片内容已损坏，无法显示，请重新截图或选择有效图片。');
         continue;
       }
+      const finalType = decoded.content_type || checked.content_type;
+      const finalLabel = decoded.label || checked.label;
+      const finalSize = typeof decoded.size === 'number' ? decoded.size : checked.size;
+      const finalData = decoded.data || base64;
+      const finalPreviewUrl = decoded.previewUrl || rawPreviewUrl;
       const liveTotal = feedbackAttachments.reduce((sum, item) => sum + item.size, 0);
       if (feedbackAttachments.length >= FEEDBACK_MAX_SHOTS) {
         noteError(`最多只能附带 ${FEEDBACK_MAX_SHOTS} 张截图，请先移除已有截图。`);
         continue;
       }
-      if (liveTotal + checked.size > FEEDBACK_MAX_SHOTS_TOTAL) {
+      if (liveTotal + finalSize > FEEDBACK_MAX_SHOTS_TOTAL) {
         noteError(`截图总大小不能超过 ${formatFeedbackBytes(FEEDBACK_MAX_SHOTS_TOTAL)}，请减少截图数量或缩小图片。`);
         continue;
       }
       feedbackAttachments.push({
         id: ++feedbackAttachmentSeq,
-        content_type: checked.content_type,
-        label: checked.label,
-        size: checked.size,
+        content_type: finalType,
+        label: finalLabel,
+        size: finalSize,
         width: decoded.width,
         height: decoded.height,
-        data: base64,
-        previewUrl,
+        data: finalData,
+        previewUrl: finalPreviewUrl,
       });
       added += 1;
     }
   } finally {
-    feedbackReadingFiles = Math.max(0, feedbackReadingFiles - 1);
-    if (epoch === feedbackDialogEpoch && $('feedback-dialog').open) {
-      setFeedbackShotError(errors.join(' '));
-      renderFeedbackShots();
-      if (added > 0) announceFeedbackShots(`已添加 ${added} 张截图，当前共 ${feedbackAttachments.length} 张。`);
-      if (feedbackReadingFiles === 0 && !feedbackSending && !feedbackSubmitted) {
-        updateFeedbackPreview({keepShotError: errors.length > 0});
+    // Only touch reading counter for the same dialog session so a closed dialog cannot affect a reopened one.
+    if (epoch === feedbackDialogEpoch) {
+      feedbackReadingFiles = Math.max(0, feedbackReadingFiles - 1);
+      if ($('feedback-dialog').open) {
+        setFeedbackShotError(errors.join(' '));
+        renderFeedbackShots();
+        if (added > 0) announceFeedbackShots(`已添加 ${added} 张截图，当前共 ${feedbackAttachments.length} 张。`);
+        if (feedbackReadingFiles === 0 && !feedbackSending && !feedbackSubmitted) {
+          updateFeedbackPreview({keepShotError: errors.length > 0});
+        }
       }
     }
   }
@@ -9767,6 +9862,7 @@ document.addEventListener('click', event => {
   feedbackAttachReason = '';
   feedbackSubmitted = false;
   feedbackReadingFiles = 0;
+  feedbackPendingFocus = null;
   $('feedback-note').value = '';
   $('feedback-shot-input').value = '';
   setFeedbackShotError('');
@@ -9818,6 +9914,8 @@ async function updateFeedbackPreview(options) {
     $('feedback-send').hidden = !result.can_send;
     $('feedback-send').disabled = feedbackReadingFiles > 0;
     $('feedback-send').textContent = '发送到飞书表格';
+    // Keep「更新预览」visible when temporarily offline or unable to send so users can re-check without losing their draft.
+    $('feedback-preview').hidden = Boolean(result.can_send || result.submitted);
     $('feedback-copy').disabled = $('feedback-export').disabled = false;
   } catch (error) {
     if (sequence !== feedbackSequence) return;
@@ -9846,8 +9944,10 @@ $('feedback-shots-list').addEventListener('click', event => {
   const removeBtn = event.target.closest('[data-remove-shot]');
   if (removeBtn) removeFeedbackShot(Number(removeBtn.dataset.removeShot));
 });
+$('feedback-shot-viewer-zoom').addEventListener('click', () => setFeedbackViewerActualSize(!feedbackViewerActualSize));
 $('feedback-shot-viewer-close').addEventListener('click', () => $('feedback-shot-viewer').close());
 $('feedback-shot-viewer').addEventListener('close', () => {
+  setFeedbackViewerActualSize(false);
   $('feedback-shot-viewer-img').removeAttribute('src');
   if (feedbackViewerTrigger && feedbackViewerTrigger.isConnected) feedbackViewerTrigger.focus();
   feedbackViewerTrigger = null;
@@ -9897,6 +9997,7 @@ function handleFeedbackClose() {
   feedbackAttachReason = '';
   feedbackSubmitted = false;
   feedbackReadingFiles = 0;
+  feedbackPendingFocus = null;
   $('feedback-shot-input').value = '';
   setFeedbackShotError('');
   renderFeedbackShots();

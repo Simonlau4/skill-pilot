@@ -2635,6 +2635,15 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
   height: auto;
   object-fit: contain;
 }
+.feedback-shot-viewer-stage.is-actual-size {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+.feedback-shot-viewer-stage.is-actual-size img {
+  max-width: none;
+  max-height: none;
+  object-fit: none;
+}
 .feedback-shot-meta {
   display: flex;
   align-items: center;
