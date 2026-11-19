@@ -600,11 +600,12 @@ class ActivationReminderJobTests(unittest.TestCase):
         self.assertEqual(same_merge_job['status'], 'done', same_merge_job)
         self.assertEqual(same_merge_job.get('new_session_agents', []), [])
 
-        # 2. Config import that genuinely enables acme-c on Claude (immediate) + Antigravity (new_session).
+        # 2. Config import via dashboard HTTP /api/config/apply genuinely enables acme-c on Claude + Antigravity.
         config = sharing.export_config(self.home)
         row_c = next(s for s in config['skills'] if s['name'] == 'acme-c')
         row_c['assigned_agents'] = ['codex', 'claude', 'antigravity']
-        imported = sharing.import_config(config, home=self.home)
+        preview = self.ok('/api/config/preview', {'config': config})
+        imported = self.ok('/api/config/apply', {'config': config, 'revision': preview['revision'], 'confirmed': True})
         self.assertEqual([a['id'] for a in imported.get('new_session_agents', [])], ['antigravity'])
 
         # 3. Pure cleanup_delete job removing acme-c (enabled on Codex + Antigravity) must NOT remind.
@@ -658,8 +659,21 @@ class ActivationReminderJobTests(unittest.TestCase):
             upd_failed = self.wait_jobs()[-1]
         self.assertEqual(upd_failed['status'], 'failed', upd_failed)
         self.assertEqual(upd_failed['updated'], ['acme-a'])
+        self.assertEqual(upd_failed.get('remaining'), ['acme-c'])
+        self.assertEqual([r['name'] for r in upd_failed.get('failed', [])], ['acme-c'])
         self.assertEqual(len(upd_failed['operations']), 1)
         self.assertEqual([a['id'] for a in upd_failed.get('new_session_agents', [])], ['codex', 'antigravity'])
+
+        # Retrying the failed batch update re-runs ONLY unexecuted acme-c, succeeds, and both ops can be undone!
+        retry_review = self.update_review('acme-c')
+        self.ok('/api/jobs/retry', {'id': upd_failed['id'], 'review_id': retry_review['id']})
+        upd_retried = self.wait_jobs()[-1]
+        self.assertEqual(upd_retried['status'], 'done', upd_retried)
+        self.assertEqual(sorted(upd_retried['updated']), ['acme-a', 'acme-c'])
+        self.assertEqual(len(upd_retried['operations']), 2)
+        for op_id in reversed(upd_retried['operations']):
+            table = self.ok('/api/table')
+            self.ok('/api/undo', {'id': op_id, 'revision': table['revision'], 'confirmed': True})
 
         # 3. RollbackError on group 2 when operations.history() raises OSError -> in-memory reminder still preserved!
         operations.apply_assign([{'skill': 'acme-a', 'agent': 'antigravity', 'enabled': False}], confirmed=True, home=self.home)
@@ -732,6 +746,56 @@ class ActivationReminderJobTests(unittest.TestCase):
         self.assertEqual([a['id'] for a in polled.get('new_session_agents', [])], ['antigravity'])
         self.assertNotIn(op_new_id, polled.get('operation_new_session_agents', {}))
         self.assertEqual(polled.get('undone_operations'), [op_new_id])
+
+        # Even if logs later become unreadable, persisted undone_operations prevents reverting to old agent list!
+        with patch.object(operations, 'history', side_effect=OSError('logs vanished')):
+            polled_again = self.ok('/api/jobs')['items'][-1]
+        self.assertEqual([a['id'] for a in polled_again.get('new_session_agents', [])], ['antigravity'])
+        self.assertEqual(polled_again.get('undone_operations'), [op_new_id])
+
+        # 5. Malformed log files (missing 'time' or non-dict JSON) must never crash jobs_work or stall the queue!
+        logs_dir = self.home / '.skill-pilot/logs'
+        bad_missing_time = logs_dir / 'malformed-missing-time.json'
+        bad_non_dict = logs_dir / 'malformed-list.json'
+        bad_missing_time.write_text(json.dumps({'id': 'no-time-record', 'skills': ['acme-a']}))
+        bad_non_dict.write_text('[1, 2, 3]')
+        try:
+            self.submit('assignment', **self.assignment_params([{'skill': 'acme-b', 'agent': 'antigravity', 'enabled': True}]))
+            malformed_job = self.wait_jobs()[-1]
+            self.assertEqual(malformed_job['status'], 'done', malformed_job)
+            self.assertEqual([a['id'] for a in malformed_job.get('new_session_agents', [])], ['antigravity'])
+        finally:
+            bad_missing_time.unlink(missing_ok=True)
+            bad_non_dict.unlink(missing_ok=True)
+
+        # 6. RollbackError blocks queue atomically under the same lock so concurrent retry cannot slip in.
+        self.server.jobs_blocked = ''
+        rb_entered = threading.Event()
+        real_stop_locked = self.server._stop_jobs_locked
+
+        def spy_stop_locked():
+            # Verify jobs_lock is ALREADY held by this worker thread (a second thread cannot acquire it!).
+            other_acquired = []
+            def probe():
+                got = self.server.jobs_lock.acquire(blocking=False)
+                other_acquired.append(got)
+                if got:
+                    self.server.jobs_lock.release()
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join(2)
+            if other_acquired != [False]:
+                raise AssertionError('_stop_jobs_locked called without holding jobs_lock')
+            rb_entered.set()
+            return real_stop_locked()
+
+        with patch.object(self.server, '_stop_jobs_locked', side_effect=spy_stop_locked), \
+             patch.object(self.server, 'execute_job', side_effect=operations.RollbackError('rollback failed')):
+            self.submit('assignment', **self.assignment_params([{'skill': 'acme-a', 'agent': 'claude', 'enabled': True}]))
+            self.assertTrue(rb_entered.wait(5))
+            self.wait_jobs()
+        self.assertTrue(self.server.jobs_blocked)
+        self.server.jobs_blocked = ''
 
 
 class ActivationReminderStaticTests(unittest.TestCase):
@@ -946,6 +1010,12 @@ toast({
   reminderSource: {jobId: 'j6', job: jobAheadOfLog},
   undo: () => true,
 });
+syncToastReminders();
+assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
+
+// Clearing ended jobs AFTER the toast narrowed must NOT revert the toast back to the stale pre-undo list!
+state.jobs = [];
 syncToastReminders();
 assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
 assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);

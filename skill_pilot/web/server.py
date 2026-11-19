@@ -274,6 +274,7 @@ class Dashboard(ThreadingHTTPServer):
             version, blocked = self.jobs_version, self.jobs_blocked
         if any(item.get('operations') for item in items):
             records, catalog, order = self._history_and_catalog()
+            updates_by_id = {}
             for item in items:
                 ops = item.get('operations') or []
                 if not ops:
@@ -282,7 +283,8 @@ class Dashboard(ThreadingHTTPServer):
                 item['operations'] = ordered_ops
                 merged, active_map, undone_ops = self._resolve_job_reminders(
                     ordered_ops, item.get('operation_new_session_agents'),
-                    item.get('new_session_agents'), records, catalog, order)
+                    item.get('new_session_agents'), records, catalog, order,
+                    known_undone=item.get('undone_operations'))
                 item['new_session_agents'] = merged
                 if active_map:
                     item['operation_new_session_agents'] = active_map
@@ -290,8 +292,25 @@ class Dashboard(ThreadingHTTPServer):
                     item.pop('operation_new_session_agents', None)
                 if undone_ops:
                     item['undone_operations'] = undone_ops
+                    updates_by_id[item['id']] = (undone_ops, merged, active_map)
                 else:
                     item.pop('undone_operations', None)
+            if updates_by_id:
+                with self.jobs_lock:
+                    for raw in self.jobs:
+                        change = updates_by_id.get(raw.get('id'))
+                        if not change:
+                            continue
+                        undone_ops, merged, active_map = change
+                        persisted = list(dict.fromkeys(list(raw.get('undone_operations') or []) + undone_ops))
+                        raw['undone_operations'] = persisted
+                        raw['new_session_agents'] = merged
+                        if active_map:
+                            raw['operation_new_session_agents'] = {
+                                op: val for op, val in active_map.items() if op not in persisted
+                            }
+                        else:
+                            raw.pop('operation_new_session_agents', None)
         return {'items': items, 'version': version, 'blocked': blocked}
 
     @staticmethod
@@ -355,10 +374,15 @@ class Dashboard(ThreadingHTTPServer):
             }
             target['_operation_new_session_agents'] = copy.deepcopy(combined)
             target['operation_new_session_agents'] = copy.deepcopy(combined)
+        if previous.get('undone_operations'):
+            target['undone_operations'] = list(dict.fromkeys(
+                list(previous['undone_operations']) + list(target.get('undone_operations') or [])))
         if kind == 'github_install' and (previous.get('remaining') or previous.get('_retry_skills')):
             target['_retry_skills'] = list(previous.get('remaining') or previous['_retry_skills'])
         if kind == 'update':
             target['_updated'] = sorted(set(target.get('_updated', [])) | set(previous.get('updated', [])))
+            if target['_updated']:
+                target['updated'] = list(target['_updated'])
 
     def _add_job(self, parameters, previous=None, team_info=None):
         kind = parameters['kind']
@@ -536,13 +560,16 @@ class Dashboard(ThreadingHTTPServer):
     def clear_team_queue(self):
         return self.clear_jobs(team_only=True)
 
+    def _stop_jobs_locked(self):
+        self.jobs_blocked = '这项操作没能完全恢复，后续任务已停止，请先用备份还原。'
+        for item in self.jobs:
+            if item['status'] in ACTIVE_JOBS:
+                item.update(status='failed', message=self.jobs_blocked)
+                self.jobs_version += 1
+
     def stop_jobs(self):
         with self.jobs_lock:
-            self.jobs_blocked = '这项操作没能完全恢复，后续任务已停止，请先用备份还原。'
-            for item in self.jobs:
-                if item['status'] in ACTIVE_JOBS:
-                    item.update(status='failed', message=self.jobs_blocked)
-                    self.jobs_version += 1
+            self._stop_jobs_locked()
 
     @contextmanager
     def local_write(self, restoring=False):
@@ -599,14 +626,33 @@ class Dashboard(ThreadingHTTPServer):
             self.prune_update_reviews()
 
     def _history_and_catalog(self):
+        records = {}
         try:
-            records = {r['id']: r for r in operations.history(self.home)}
-        except (OSError, ValueError):
-            records = {}
+            raw = operations.history(self.home)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            raw = []
+            directory = self.home / '.skill-pilot/logs'
+            try:
+                entries = list(directory.glob('*.json')) if directory.is_dir() else []
+            except OSError:
+                entries = []
+            parsed = []
+            for path in entries:
+                try:
+                    entry = json.loads(path.read_text())
+                    if isinstance(entry, dict) and isinstance(entry.get('id'), str):
+                        parsed.append(entry)
+                except (OSError, ValueError, TypeError):
+                    continue
+            undone = {r.get('undo_of') for r in parsed if isinstance(r.get('undo_of'), str)}
+            raw = [{**r, 'undone': r['id'] in undone} for r in parsed]
+        for r in raw:
+            if isinstance(r, dict) and isinstance(r.get('id'), str):
+                records[r['id']] = r
         try:
             catalog = profiles.by_id(self.home)
             order = [p['id'] for p in profiles.managed(self.home)]
-        except (OSError, ValueError):
+        except (OSError, ValueError, KeyError, TypeError):
             catalog, order = None, None
         return records, catalog, order
 
@@ -616,11 +662,12 @@ class Dashboard(ThreadingHTTPServer):
         if len(unique) < 2 or not records:
             return unique
         indexed = list(enumerate(unique))
-        if any(op in records and records[op].get('time') for op in unique):
+        has_time = lambda op: isinstance(records.get(op, {}).get('time'), str)
+        if any(has_time(op) for op in unique):
             # Sort known records chronologically (oldest first) while preserving relative order for unknowns.
-            timed = sorted(((records[op]['time'], idx, op) for idx, op in indexed if op in records and records[op].get('time')))
+            timed = sorted(((records[op]['time'], idx, op) for idx, op in indexed if has_time(op)))
             timed_iter = iter(op for _, _, op in timed)
-            return [next(timed_iter) if op in records and records[op].get('time') else op for _, op in indexed]
+            return [next(timed_iter) if has_time(op) else op for _, op in indexed]
         return unique
 
     def merge_new_session_agents(self, *groups, catalog=None, order=None):
@@ -653,13 +700,14 @@ class Dashboard(ThreadingHTTPServer):
                         merged.append(copy.deepcopy(entry))
             return merged
 
-    def _resolve_job_reminders(self, operation_ids, existing_map, fallback, records, catalog, order):
+    def _resolve_job_reminders(self, operation_ids, existing_map, fallback, records, catalog, order, known_undone=()):
         by_op = copy.deepcopy(existing_map or {})
         for op in operation_ids:
-            if op in records and 'new_session_agents' in records[op]:
-                by_op[op] = list(records[op].get('new_session_agents') or [])
-        undone_ops = [op for op in operation_ids if records.get(op, {}).get('undone')]
-        active_ops = [op for op in operation_ids if not records.get(op, {}).get('undone')]
+            if op in records and isinstance(records[op].get('new_session_agents'), list):
+                by_op[op] = list(records[op]['new_session_agents'])
+        undone_set = set(known_undone or ()) | {op for op in operation_ids if records.get(op, {}).get('undone')}
+        undone_ops = [op for op in operation_ids if op in undone_set]
+        active_ops = [op for op in operation_ids if op not in undone_set]
         if operation_ids and by_op:
             active_map = {op: by_op[op] for op in active_ops if op in by_op}
             merged = self.merge_new_session_agents(*active_map.values(), catalog=catalog, order=order)
@@ -699,6 +747,16 @@ class Dashboard(ThreadingHTTPServer):
                         result['operations'] = [r['id'] for r in error.operations if isinstance(r, dict) and r.get('id')]
                     if getattr(error, 'updated', None):
                         result['updated'] = list(error.updated)
+                    if getattr(error, 'failed', None):
+                        result['failed'] = [
+                            {'name': r['name'], 'error': self.job_message(self.skill_message(r['error'])),
+                             **({'error_id': result['error_id']} if result.get('error_id') else {})}
+                            for r in error.failed
+                        ]
+                    if getattr(error, 'remaining', None):
+                        result['remaining'] = list(error.remaining)
+                    if getattr(error, 'remaining_changes', None):
+                        result['remaining_changes'] = copy.deepcopy(error.remaining_changes)
                     if getattr(error, 'new_session_agents', None):
                         result['new_session_agents'] = list(error.new_session_agents)
                     if getattr(error, 'operation_new_session_agents', None):
@@ -735,7 +793,8 @@ class Dashboard(ThreadingHTTPServer):
                             progress['new_session'], getattr(rollback_error, 'new_session_agents', None),
                             catalog=catalog, order=order)
                         merged_new_session, active_map, undone_ops = self._resolve_job_reminders(
-                            op_ids, combined_by_op, fallback, records, catalog, order)
+                            op_ids, combined_by_op, fallback, records, catalog, order,
+                            known_undone=item.get('undone_operations'))
                         item['operations'] = op_ids
                         item['completed'] = sorted(set(item.get('_completed', [])) | set(item.get('completed', [])) |
                                                    set(progress['completed']) | set(getattr(rollback_error, 'completed', [])))
@@ -748,7 +807,8 @@ class Dashboard(ThreadingHTTPServer):
                         if undone_ops:
                             item['undone_operations'] = undone_ops
                         item.update(failure_info)
-                    self.stop_jobs()
+                        # Stop the queue atomically under the same lock so no concurrent retry can slip in.
+                        self._stop_jobs_locked()
                 elif result is not None:
                     with self.jobs_lock:
                         item.pop('_progress', None)
@@ -771,8 +831,8 @@ class Dashboard(ThreadingHTTPServer):
                         matched = [records[op] for op in op_ids if op in records]
                         if matched:
                             result.update(
-                                skills=sorted(set(item['skills']) | {n for r in matched for n in r['skills']}),
-                                agents=sorted(set(item['agents']) | {a for r in matched for a in r['agents']}),
+                                skills=sorted(set(item['skills']) | {n for r in matched for n in (r.get('skills') or ()) if isinstance(n, str)}),
+                                agents=sorted(set(item['agents']) | {a for r in matched for a in (r.get('agents') or ()) if isinstance(a, str)}),
                             )
                         combined_by_op = {
                             **item.get('_operation_new_session_agents', {}),
@@ -783,7 +843,8 @@ class Dashboard(ThreadingHTTPServer):
                             item.get('_new_session_agents'), progress['new_session'],
                             result.get('new_session_agents'), catalog=catalog, order=order)
                         merged_new_session, active_map, undone_ops = self._resolve_job_reminders(
-                            op_ids, combined_by_op, fallback, records, catalog, order)
+                            op_ids, combined_by_op, fallback, records, catalog, order,
+                            known_undone=item.get('undone_operations'))
                         if merged_new_session:
                             result['new_session_agents'] = merged_new_session
                         elif 'new_session_agents' in result or 'new_session_agents' in item:
@@ -861,7 +922,7 @@ class Dashboard(ThreadingHTTPServer):
             completed, failed, ids, conflicts, impacts, new_session, by_op = [], [], [], [], [], [], {}
             progress = item.get('_progress')
             preview = copy.deepcopy(parameters.get('seen', {}))
-            for group in groups:
+            for index, group in enumerate(groups):
                 child_parameters = copy.deepcopy(parameters)
                 if kind == 'assignment':
                     child_parameters['changes'] = [c for c in parameters['changes'] if c['skill'] in group]
@@ -879,6 +940,13 @@ class Dashboard(ThreadingHTTPServer):
                     result = {'status': 'failed', 'message': str(error) if isinstance(error, ValueError)
                               else '文件没能读写，请核对后重试。'}
                     result.update(diagnostics.failure(self.home, 'job', kind, error))
+                except Exception as error:
+                    unexecuted = [name for pending_group in groups[index:] for name in pending_group]
+                    error.failed = failed + [{'name': name, 'error': '任务没能完成，请重新核对后重试。'} for name in unexecuted]
+                    error.remaining = [row['name'] for row in error.failed]
+                    if kind == 'assignment':
+                        error.remaining_changes = [c for c in parameters['changes'] if c['skill'] in error.remaining]
+                    raise
                 op_ids = result.get('operations', [])
                 ids.extend(op_ids)
                 if result.get('status', 'done') == 'done':

@@ -213,7 +213,12 @@ function syncToastReminders() {
     let nextReminder = '';
     let allUndone = false;
     if (source.jobId) {
-      const job = (state.jobs || []).find(entry => entry.id === source.jobId) || source.job;
+      const liveJob = (state.jobs || []).find(entry => entry.id === source.jobId);
+      if (liveJob) {
+        const mergedUndone = [...new Set([...(source.job?.undone_operations || []), ...(liveJob.undone_operations || [])])];
+        source.job = mergedUndone.length ? {...liveJob, undone_operations: mergedUndone} : liveJob;
+      }
+      const job = source.job;
       nextReminder = job ? jobReminderText(job) : '';
       allUndone = Boolean(job?.operations?.length) && !jobUndoAvailable(job);
     } else if (source.operationIds?.length) {

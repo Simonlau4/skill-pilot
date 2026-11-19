@@ -401,7 +401,7 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
         groups.append(sorted(lark_names))
     completed, failed, updated, normalization_results = [], [], [], {}
     batch = uuid.uuid4().hex
-    for group in groups:
+    for index, group in enumerate(groups):
         try:
             result = _apply_group(review, group, choices, merge_ids, batch)
         except operations.RollbackError as error:
@@ -422,9 +422,12 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
                 if name in by_name:
                     by_name[name].update(update_error=reason, status='没更新')
         except Exception as error:
-            if completed:
+            unexecuted = [name for pending_group in groups[index:] for name in pending_group]
+            if completed or unexecuted:
                 error.operations = completed
                 error.updated = updated
+                error.failed = failed + [{'name': name, 'error': '更新没能完成，请稍后重试。'} for name in unexecuted]
+                error.remaining = [row['name'] for row in error.failed]
                 error.new_session_agents = [a for item in completed for a in item.get('new_session_agents', [])]
                 error.operation_new_session_agents = {
                     item['id']: list(item.get('new_session_agents') or []) for item in completed if item.get('id')
