@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -525,15 +526,20 @@ class HubStore:
         folder = self._feedback_attachment_dir()
         sizes = {}
         try:
-            if folder.is_dir():
-                for entry in folder.iterdir():
-                    try:
-                        if entry.is_file():
-                            sizes[entry.name] = entry.stat().st_size
-                    except OSError:
-                        pass
+            entries = list(folder.iterdir())
+        except FileNotFoundError:
+            return sizes
         except OSError:
-            pass
+            raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
+        for entry in entries:
+            try:
+                st = entry.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
+            if stat.S_ISREG(st.st_mode):
+                sizes[entry.name] = st.st_size
         return sizes
 
     def _collect_feedback_attachments(self, rows):
@@ -600,9 +606,13 @@ class HubStore:
         return rows
 
     def _trim_feedback_rows(self, rows):
-        rows = rows[-feedback.MAX_RECORDS:]
+        rows = list(rows)
+        while len(rows) > feedback.MAX_RECORDS:
+            idx = next((i for i, item in enumerate(rows) if item.get('state') != 'pending'), 0)
+            rows.pop(idx)
         while rows and len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').replace('\n', os.linesep).encode()) > feedback.MAX_BYTES:
-            rows.pop(0)
+            idx = next((i for i, item in enumerate(rows) if item.get('state') != 'pending'), 0)
+            rows.pop(idx)
         return rows
 
     def _save_feedback(self, rows):
@@ -618,15 +628,29 @@ class HubStore:
         # First clean up only files already unreferenced by the committed feedback.json.
         self._collect_feedback_attachments(committed_rows)
         new_files = {f"{item['sha256']}.{item['ext']}": item['size'] for item in attachments}
+        pending_files = {
+            att['file']
+            for item in committed_rows
+            if item.get('state') == 'pending'
+            for att in item.get('attachments', ())
+            if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str)
+        }
         while True:
             disk_sizes = self._attachment_disk_sizes()
             added_bytes = sum(size for name, size in new_files.items() if name not in disk_sizes)
             if sum(disk_sizes.values()) + added_bytes <= feedback.MAX_ATTACHMENT_STORE_BYTES:
                 return committed_rows
-            target = next((item for item in committed_rows if any(
-                isinstance(att, dict) and not att.get('evicted')
-                for att in item.get('attachments', ()))), None)
+            target = next((
+                item for item in committed_rows
+                if item.get('state') != 'pending' and any(
+                    isinstance(att, dict) and not att.get('evicted') and
+                    isinstance(att.get('file'), str) and att['file'] not in pending_files
+                    for att in item.get('attachments', ())
+                )
+            ), None)
             if target is None:
+                if pending_files:
+                    raise HubError(507, '当前有其他带图反馈正在转发，截图存储空间紧张。请稍后重试，或复制、导出纯文本诊断信息。')
                 raise HubError(507, '分享站截图留底空间已满，无法保存新截图。请联系管理员清理磁盘后重试，或复制、导出纯文本诊断信息。')
             for att in target.get('attachments', ()):
                 if isinstance(att, dict):
@@ -650,20 +674,26 @@ class HubStore:
         rows = self._feedback()
         current = datetime.now(timezone.utc)
         incoming_ids = [item['sha256'] for item in attachments]
+        # Exact error_id idempotency/conflict holds for as long as the row remains in feedback.json.
+        for row in reversed(rows):
+            if row['member_id'] != member['id'] or row['payload']['error_id'] != payload['error_id']:
+                continue
+            if row['state'] == 'sent':
+                # Compare against the original submitted attachment digests even if files were later evicted.
+                existing_ids = [
+                    att['sha256'] for att in row.get('attachments', ())
+                    if isinstance(att, dict) and isinstance(att.get('sha256'), str)
+                ]
+                if existing_ids == incoming_ids:
+                    return row, True
+                raise HubError(409, '这条错误编号之前已提交，且截图内容与本次不同，本次未保存新截图。请改用主动反馈补充截图，或复制、导出诊断信息发给维护者。')
+            if (current - datetime.fromisoformat(row['payload']['submitted_at'])).total_seconds() < feedback.COOLDOWN:
+                raise HubError(429, '刚刚提交过同类反馈，本次未再次提交。请五分钟后再试，或复制、导出诊断信息发给维护者。')
+        # Same-fingerprint rate limit (different error_id) applies within COOLDOWN.
         for row in reversed(rows):
             if (row['member_id'] == member['id'] and
-                    (row['payload']['error_id'] == payload['error_id'] or
-                     row['payload']['fingerprint'] == payload['fingerprint']) and
+                    row['payload']['fingerprint'] == payload['fingerprint'] and
                     (current - datetime.fromisoformat(row['payload']['submitted_at'])).total_seconds() < feedback.COOLDOWN):
-                if row['state'] == 'sent' and row['payload']['error_id'] == payload['error_id']:
-                    # Compare against the original submitted attachment digests even if files were later evicted.
-                    existing_ids = [
-                        att['sha256'] for att in row.get('attachments', ())
-                        if isinstance(att, dict) and isinstance(att.get('sha256'), str)
-                    ]
-                    if existing_ids == incoming_ids:
-                        return row, True
-                    raise HubError(409, '这条错误编号之前已提交，且截图内容与本次不同，本次未保存新截图。请改用主动反馈补充截图，或复制、导出诊断信息发给维护者。')
                 raise HubError(429, '刚刚提交过同类反馈，本次未再次提交。请五分钟后再试，或复制、导出诊断信息发给维护者。')
         rows = self._evict_attachments_for_budget(rows, attachments)
         row_id = secrets.token_hex(16)
@@ -1484,6 +1514,9 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as error:
                     store.finish_feedback(row['id'], 'failed')
                     raise HubError(502, str(error)) from None
+                except BaseException:
+                    store.finish_feedback(row['id'], 'failed')
+                    raise
                 store.finish_feedback(row['id'], 'sent')
             self._json(200, result)
         except HubError as error:

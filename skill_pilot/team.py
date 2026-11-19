@@ -313,6 +313,7 @@ def submit_feedback(home, prepared):
         raise ValueError(diagnostics.sanitize(str(error), home, 400)) from None
     if result.get('submitted') is not True:
         raise ValueError('分享站没有确认提交成功，请复制或导出诊断信息。')
+    attachments_evicted = False
     if attachments:
         expected_ids = [item['sha256'] for item in attachments]
         returned = result.get('attachments')
@@ -320,12 +321,16 @@ def submit_feedback(home, prepared):
                       if isinstance(returned, list) else [])
         if len(actual_ids) != len(expected_ids) or actual_ids != expected_ids:
             raise ValueError('分享站未能确认收下本次截图，请核对分享站版本后重试，或复制、导出诊断信息发给维护者。')
+        attachments_evicted = any(bool(item.get('evicted')) for item in returned if isinstance(item, dict))
     path = Path(home) / '.skill-pilot/feedback.json'
     saved = diagnostics.read_json(path).get('submitted', [])
     saved = saved if isinstance(saved, list) else []
     key = prepared['_connection'] + ':' + prepared['payload']['error_id']
     labels.atomic_write(home, 'feedback.json', json.dumps({'submitted': [*saved, key][-200:]}) + '\n', 0o600)
-    return {'submitted': True}
+    outcome = {'submitted': True}
+    if attachments_evicted:
+        outcome['attachments_evicted'] = True
+    return outcome
 
 
 def save_settings(home, body, write_lock=None):

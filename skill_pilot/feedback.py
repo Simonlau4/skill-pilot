@@ -78,7 +78,7 @@ def detect_image(raw):
 
 def _sanitize_png(raw):
     if len(raw) < 33 or raw[:8] != b'\x89PNG\r\n\x1a\n':
-        raise AttachmentError('PNG 图片结构不完整，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
     pos, kept, idat_parts = 8, [], []
     ihdr = None
     plte_entries = 0
@@ -89,123 +89,129 @@ def _sanitize_png(raw):
     has_iend = False
     while pos < len(raw):
         if pos + 12 > len(raw):
-            raise AttachmentError('PNG 图片结构不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         length = struct.unpack('>I', raw[pos:pos + 4])[0]
         kind = raw[pos + 4:pos + 8]
         if not all(65 <= b <= 90 or 97 <= b <= 122 for b in kind):
-            raise AttachmentError('PNG 图片结构损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         end = pos + 12 + length
         if end > len(raw):
-            raise AttachmentError('PNG 图片结构不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         data = raw[pos + 8:pos + 8 + length]
         crc = struct.unpack('>I', raw[pos + 8 + length:end])[0]
         if (zlib.crc32(kind + data) & 0xffffffff) != crc:
-            raise AttachmentError('PNG 图片内容已损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         if ihdr is None:
             if kind != b'IHDR' or length != 13:
-                raise AttachmentError('PNG 图片头部损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             width, height, depth, color, comp, filt, interlace = struct.unpack('>IIBBBBB', data)
             _check_dimensions(width, height)
             if color not in PNG_DEPTHS or depth not in PNG_DEPTHS[color] or comp != 0 or filt != 0 or interlace not in (0, 1):
-                raise AttachmentError('PNG 图片格式不受支持或已损坏，请重新截图后再试。')
+                raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
             ihdr = (width, height, depth, color, interlace)
         elif kind == b'IHDR':
-            raise AttachmentError('PNG 图片结构损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         if kind != b'IDAT' and seen_idat:
             ended_idat = True
         if kind == b'PLTE':
             if seen_idat or plte_entries or ihdr[3] in {0, 4} or length == 0 or length % 3 != 0 or length > 768:
-                raise AttachmentError('PNG 图片调色板损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             plte_entries = length // 3
         elif kind == b'tRNS':
             if seen_idat or has_trns or ihdr[3] in {4, 6}:
-                raise AttachmentError('PNG 图片透明通道结构损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             if (ihdr[3] == 0 and length != 2) or (ihdr[3] == 2 and length != 6) or (
                     ihdr[3] == 3 and (not plte_entries or not 1 <= length <= plte_entries)):
-                raise AttachmentError('PNG 图片透明通道结构损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             has_trns = True
         elif kind == b'sRGB':
             if seen_idat or plte_entries or has_srgb or length != 1 or data[0] > 3:
-                raise AttachmentError('PNG 图片色彩配置损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             has_srgb = True
         elif kind == b'IDAT':
             if ended_idat:
-                raise AttachmentError('PNG 图片数据块顺序异常，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             seen_idat = True
             idat_parts.append(data)
         elif kind == b'IEND':
             if length != 0 or end != len(raw):
-                raise AttachmentError('PNG 图片结尾异常，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
             kept.append(raw[pos:end])
             has_iend = True
             break
         elif kind != b'IHDR' and (kind[0] & 0x20) == 0:
-            # Unknown critical chunk cannot be safely verified or dropped.
-            raise AttachmentError('PNG 图片包含不支持的数据块，请重新截图后再试。')
+            raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
         if kind in PNG_KEEP_CHUNKS:
             kept.append(raw[pos:end])
         pos = end
     if ihdr is None or not has_iend or not idat_parts or (ihdr[3] == 3 and not plte_entries):
-        raise AttachmentError('PNG 图片内容不完整，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
     width, height, depth, color, interlace = ihdr
     bpp = PNG_CHANNELS[color] * depth
+    passes = []
     if interlace == 0:
-        expected = height * (1 + (width * bpp + 7) // 8)
+        stride = 1 + (width * bpp + 7) // 8
+        passes.append((height, stride))
     else:
-        expected = 0
         for x0, y0, dx, dy in ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)):
             pw = (width - x0 + dx - 1) // dx if width > x0 else 0
             ph = (height - y0 + dy - 1) // dy if height > y0 else 0
             if pw and ph:
-                expected += ph * (1 + (pw * bpp + 7) // 8)
+                passes.append((ph, 1 + (pw * bpp + 7) // 8))
+    expected = sum(ph * stride for ph, stride in passes)
     if expected <= 0 or expected > MAX_PNG_DECOMPRESSED_BYTES:
-        raise AttachmentError('PNG 图片分辨率或数据量超出支持范围，请裁剪或缩小后再试。')
+        raise AttachmentError('图片分辨率或内容超出支持范围，请裁剪或缩小后再试。')
     try:
         decompressor = zlib.decompressobj()
         # Strict upper bound: never call unbounded flush() on untrusted IDAT streams.
         unpacked = decompressor.decompress(b''.join(idat_parts), expected + 1)
     except zlib.error:
-        raise AttachmentError('PNG 图片内容已损坏，请重新截图或选择有效图片。') from None
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。') from None
     if len(unpacked) != expected or not decompressor.eof or decompressor.unconsumed_tail or decompressor.unused_data:
-        raise AttachmentError('PNG 图片内容已损坏，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+    offset = 0
+    for ph, stride in passes:
+        if any(b > 4 for b in unpacked[offset:offset + ph * stride:stride]):
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+        offset += ph * stride
     return b'\x89PNG\r\n\x1a\n' + b''.join(kept)
 
 
 def _check_jpeg_dqt(seg_data):
     pos = 0
     if not seg_data:
-        raise AttachmentError('JPEG 量化表损坏，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
     while pos < len(seg_data):
         info = seg_data[pos]
         pq, tq = info >> 4, info & 0x0f
         if pq not in (0, 1) or tq > 3:
-            raise AttachmentError('JPEG 量化表损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         size = 1 + (64 if pq == 0 else 128)
         if pos + size > len(seg_data):
-            raise AttachmentError('JPEG 量化表不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         pos += size
 
 
 def _check_jpeg_dht(seg_data):
     pos = 0
     if not seg_data:
-        raise AttachmentError('JPEG 编码表损坏，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
     while pos < len(seg_data):
         if pos + 17 > len(seg_data):
-            raise AttachmentError('JPEG 编码表不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         info = seg_data[pos]
         tc, th = info >> 4, info & 0x0f
         if tc not in (0, 1) or th > 3:
-            raise AttachmentError('JPEG 编码表损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         count = sum(seg_data[pos + 1:pos + 17])
         if count > 256 or pos + 17 + count > len(seg_data):
-            raise AttachmentError('JPEG 编码表损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         pos += 17 + count
 
 
 def _sanitize_jpeg(raw):
     if len(raw) < 16 or raw[:2] != b'\xff\xd8':
-        raise AttachmentError('JPEG 图片结构不完整，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
     out = [b'\xff\xd8']
     pos = 2
     sof = None
@@ -215,18 +221,18 @@ def _sanitize_jpeg(raw):
     has_eoi = False
     while pos < len(raw):
         if raw[pos] != 0xff:
-            raise AttachmentError('JPEG 图片结构损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         while pos < len(raw) and raw[pos] == 0xff:
             pos += 1
         if pos >= len(raw):
-            raise AttachmentError('JPEG 图片结构不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         marker = raw[pos]
         pos += 1
         if marker == 0x00:
-            raise AttachmentError('JPEG 图片结构损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         if marker == 0xd9:
             if pos != len(raw):
-                raise AttachmentError('JPEG 图片结尾存在多余数据，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
             out.append(b'\xff\xd9')
             has_eoi = True
             break
@@ -234,20 +240,20 @@ def _sanitize_jpeg(raw):
             out.append(bytes([0xff, marker]))
             continue
         if pos + 2 > len(raw):
-            raise AttachmentError('JPEG 图片结构不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         seg_len = struct.unpack('>H', raw[pos:pos + 2])[0]
         if seg_len < 2 or pos + seg_len > len(raw):
-            raise AttachmentError('JPEG 图片结构不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         seg_data = raw[pos + 2:pos + seg_len]
         segment = bytes([0xff, marker]) + raw[pos:pos + seg_len]
         pos += seg_len
         if marker in JPEG_SOF_MARKERS:
             if sof is not None or len(seg_data) < 6:
-                raise AttachmentError('JPEG 图片头部损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             precision, height, width, components = struct.unpack('>BHHB', seg_data[:6])
             _check_dimensions(width, height)
             if precision != 8 or components not in {1, 3, 4} or len(seg_data) != 6 + 3 * components:
-                raise AttachmentError('JPEG 图片格式不受支持或已损坏，请重新截图后再试。')
+                raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
             sof = (width, height, components)
             out.append(segment)
         elif marker == 0xdb:
@@ -260,7 +266,7 @@ def _sanitize_jpeg(raw):
             out.append(segment)
         elif marker == 0xdd:
             if len(seg_data) != 2:
-                raise AttachmentError('JPEG 重启间隔段损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             out.append(segment)
         elif marker == 0xe0:
             # Keep only a clean 14-byte JFIF header without embedded thumbnails.
@@ -274,10 +280,10 @@ def _sanitize_jpeg(raw):
             continue
         elif marker == 0xda:
             if sof is None or not has_dqt or not has_dht or len(seg_data) < 4:
-                raise AttachmentError('JPEG 图片扫描头损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             ns = seg_data[0]
             if not 1 <= ns <= sof[2] or len(seg_data) != 1 + 2 * ns + 3:
-                raise AttachmentError('JPEG 图片扫描头损坏，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             has_sos = True
             out.append(segment)
             scan_start = pos
@@ -285,34 +291,43 @@ def _sanitize_jpeg(raw):
             while pos < len(raw):
                 ff = raw.find(b'\xff', pos)
                 if ff == -1:
-                    raise AttachmentError('JPEG 图片数据不完整，请重新截图或选择有效图片。')
+                    raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
                 next_pos = ff + 1
                 while next_pos < len(raw) and raw[next_pos] == 0xff:
                     next_pos += 1
                 if next_pos >= len(raw):
-                    raise AttachmentError('JPEG 图片数据不完整，请重新截图或选择有效图片。')
+                    raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
                 nxt = raw[next_pos]
                 if nxt == 0x00 or 0xd0 <= nxt <= 0xd7:
                     pos = next_pos + 1
                     continue
-                if ff - scan_start < 2:
-                    raise AttachmentError('JPEG 图片内容不完整，请重新截图或选择有效图片。')
+                if ff <= scan_start:
+                    raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
                 out.append(raw[scan_start:ff])
                 pos = ff
                 found_next = True
                 break
             if not found_next:
-                raise AttachmentError('JPEG 图片数据不完整，请重新截图或选择有效图片。')
+                raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         else:
-            raise AttachmentError('JPEG 图片包含不支持的结构，请重新截图或转为 PNG 后再试。')
+            raise AttachmentError('图片格式不受支持或已损坏，请重新截图或转为 PNG 后再试。')
     if sof is None or not has_dqt or not has_dht or not has_sos or not has_eoi:
-        raise AttachmentError('JPEG 图片内容不完整，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
     return b''.join(out)
 
 
 def _check_vp8_chunk(data):
-    if len(data) < 10 or (data[0] & 1) != 0 or data[3:6] != b'\x9d\x01\x2a':
-        raise AttachmentError('WebP 图片内容已损坏，请重新截图或选择有效图片。')
+    if len(data) < 13 or data[3:6] != b'\x9d\x01\x2a':
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+    tag = data[0] | (data[1] << 8) | (data[2] << 16)
+    keyframe = (tag & 1) == 0
+    version = (tag >> 1) & 7
+    show_frame = (tag >> 4) & 1
+    first_part_size = tag >> 5
+    if not keyframe or version > 3 or show_frame != 1 or first_part_size < 3 or 10 + first_part_size >= len(data):
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+    if not any(data[10:10 + first_part_size]):
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
     width = struct.unpack('<H', data[6:8])[0] & 0x3fff
     height = struct.unpack('<H', data[8:10])[0] & 0x3fff
     _check_dimensions(width, height)
@@ -320,55 +335,70 @@ def _check_vp8_chunk(data):
 
 
 def _check_vp8l_chunk(data):
-    if len(data) < 5 or data[0] != 0x2f:
-        raise AttachmentError('WebP 图片内容已损坏，请重新截图或选择有效图片。')
+    if len(data) < 8 or data[0] != 0x2f:
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
     bits = struct.unpack('<I', data[1:5])[0]
+    if ((bits >> 29) & 7) != 0:
+        raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
     width = (bits & 0x3fff) + 1
     height = ((bits >> 14) & 0x3fff) + 1
     _check_dimensions(width, height)
+    stream = data[5:]
+    if not any(stream):
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+    # Validate leading lossless bitstream flags (transform / color cache).
+    has_transform = stream[0] & 1
+    if not has_transform:
+        use_color_cache = (stream[0] >> 1) & 1
+        if use_color_cache:
+            cache_bits = (stream[0] >> 2) & 0x0f
+            if not 1 <= cache_bits <= 11:
+                raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+    elif len(stream) < 5:
+        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
     return width, height
 
 
 def _sanitize_webp(raw):
     if len(raw) < 20 or raw[:4] != b'RIFF' or raw[8:12] != b'WEBP':
-        raise AttachmentError('WebP 图片结构不完整，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
     riff_size = struct.unpack('<I', raw[4:8])[0]
     if riff_size < 12 or 8 + riff_size != len(raw):
-        raise AttachmentError('WebP 图片结构异常或末尾有多余数据，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
     limit = len(raw)
     pos = 12
     chunks = []
     while pos < limit:
         if pos + 8 > limit:
-            raise AttachmentError('WebP 图片结构不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         fourcc = raw[pos:pos + 4]
         size = struct.unpack('<I', raw[pos + 4:pos + 8])[0]
         data_end = pos + 8 + size
         next_pos = data_end + (size & 1)
         if data_end > limit or next_pos > limit:
-            raise AttachmentError('WebP 图片结构不完整，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         chunks.append((fourcc, raw[pos + 8:data_end]))
         pos = next_pos
     if not chunks:
-        raise AttachmentError('WebP 图片内容为空，请重新截图或选择有效图片。')
+        raise AttachmentError('图片内容为空，请重新截图或选择有效图片。')
     first_kind, first_data = chunks[0]
     kept = []
     if first_kind == b'VP8 ':
         if len(chunks) != 1:
-            raise AttachmentError('WebP 图片结构异常，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
         _check_vp8_chunk(first_data)
         kept.append((first_kind, first_data))
     elif first_kind == b'VP8L':
         if len(chunks) != 1:
-            raise AttachmentError('WebP 图片结构异常，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
         _check_vp8l_chunk(first_data)
         kept.append((first_kind, first_data))
     elif first_kind == b'VP8X':
         if len(first_data) != 10:
-            raise AttachmentError('WebP 图片头部损坏，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         flags = first_data[0]
         if flags & 0x02:
-            raise AttachmentError('暂不支持动态 WebP 动图，请使用静态 PNG、JPEG 或 WebP 截图。')
+            raise AttachmentError('暂不支持动态图片，请使用静态 PNG、JPEG 或 WebP 截图。')
         width = 1 + int.from_bytes(first_data[4:7], 'little')
         height = 1 + int.from_bytes(first_data[7:10], 'little')
         _check_dimensions(width, height)
@@ -378,32 +408,30 @@ def _sanitize_webp(raw):
             if fourcc in {b'EXIF', b'XMP ', b'ICCP'}:
                 continue
             if fourcc in {b'ANIM', b'ANMF'}:
-                raise AttachmentError('暂不支持动态 WebP 动图，请使用静态 PNG、JPEG 或 WebP 截图。')
+                raise AttachmentError('暂不支持动态图片，请使用静态 PNG、JPEG 或 WebP 截图。')
             if fourcc == b'ALPH':
-                if alph_chunk is not None or image_chunk is not None or len(data) < 1:
-                    raise AttachmentError('WebP 透明通道结构损坏，请重新截图或选择有效图片。')
+                if alph_chunk is not None or image_chunk is not None or len(data) < 2:
+                    raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
                 alph_chunk = (fourcc, data)
             elif fourcc == b'VP8 ':
                 if image_chunk is not None or _check_vp8_chunk(data) != (width, height):
-                    raise AttachmentError('WebP 图片尺寸或结构异常，请重新截图或选择有效图片。')
+                    raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
                 image_chunk = (fourcc, data)
             elif fourcc == b'VP8L':
                 if image_chunk is not None or alph_chunk is not None or _check_vp8l_chunk(data) != (width, height):
-                    raise AttachmentError('WebP 图片尺寸或结构异常，请重新截图或选择有效图片。')
+                    raise AttachmentError('图片内容异常，请重新截图或选择有效图片。')
                 image_chunk = (fourcc, data)
             else:
-                raise AttachmentError('WebP 图片包含不支持的数据块，请重新截图后再试。')
+                raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
         if image_chunk is None:
-            raise AttachmentError('WebP 图片缺少有效图像数据，请重新截图或选择有效图片。')
+            raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         if alph_chunk is not None:
-            # Clear ICCP (0x20), EXIF (0x08), XMP (0x04) metadata flags; keep alpha flag (0x10).
             clean_vp8x = bytes([(flags & ~0x2c) | 0x10]) + first_data[1:]
             kept.extend([(b'VP8X', clean_vp8x), alph_chunk, image_chunk])
         else:
-            # Unwrap static non-alpha VP8X directly into a clean minimal simple WebP.
             kept.append(image_chunk)
     else:
-        raise AttachmentError('WebP 图片格式不受支持或已损坏，请重新截图后再试。')
+        raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
     body = b'WEBP' + b''.join(
         fourcc + struct.pack('<I', len(data)) + data + (b'\x00' if len(data) & 1 else b'')
         for fourcc, data in kept

@@ -9626,8 +9626,28 @@ let feedbackCanAttach = false;
 let feedbackAttachReason = '';
 let feedbackSubmitted = false;
 let feedbackViewerTrigger = null;
+let feedbackViewerShotId = 0;
 let feedbackViewerActualSize = false;
 let feedbackPendingFocus = null;
+let feedbackLastPayloadText = '';
+
+function focusFeedbackFallback() {
+  const dialog = $('feedback-dialog');
+  if (dialog && !dialog.open) return;
+  const pick = $('feedback-shot-pick');
+  const controls = $('feedback-shots-controls');
+  if (pick && controls && !controls.hidden && !pick.disabled) {
+    pick.focus();
+    return;
+  }
+  const note = $('feedback-note');
+  if (note && !note.disabled) {
+    note.focus();
+    return;
+  }
+  const closeBtn = $('feedback-close');
+  if (closeBtn && !closeBtn.disabled) closeBtn.focus();
+}
 
 function setFeedbackShotError(message) {
   const node = $('feedback-shots-error');
@@ -9652,6 +9672,9 @@ function setFeedbackViewerActualSize(actual) {
 
 function renderFeedbackShots() {
   const list = $('feedback-shots-list');
+  const pickBtn = $('feedback-shot-pick');
+  const controls = $('feedback-shots-controls');
+  const focusOnPick = typeof document !== 'undefined' && document.activeElement === pickBtn;
   let restoreFocus = feedbackPendingFocus;
   if (!restoreFocus && typeof document !== 'undefined' && document.activeElement &&
       typeof list.contains === 'function' && list.contains(document.activeElement)) {
@@ -9666,15 +9689,15 @@ function renderFeedbackShots() {
   const notice = $('feedback-shots-notice');
   notice.textContent = !feedbackCanAttach ? feedbackAttachReason : '';
   notice.hidden = feedbackCanAttach || !feedbackAttachReason;
-  $('feedback-shots-controls').hidden = !feedbackCanAttach;
-  $('feedback-shot-pick').disabled = feedbackSending || feedbackSubmitted || feedbackReadingFiles > 0 || !feedbackCanAttach || feedbackAttachments.length >= FEEDBACK_MAX_SHOTS;
+  controls.hidden = !feedbackCanAttach;
+  pickBtn.disabled = feedbackSending || feedbackSubmitted || feedbackReadingFiles > 0 || !feedbackCanAttach || feedbackAttachments.length >= FEEDBACK_MAX_SHOTS;
   if (!feedbackAttachments.length) {
     list.innerHTML = '';
     list.hidden = true;
-    if (restoreFocus && restoreFocus.kind === 'pick') {
+    if ((restoreFocus && restoreFocus.kind === 'pick') ||
+        (focusOnPick && (controls.hidden || (pickBtn.disabled && !feedbackSending && feedbackReadingFiles === 0)))) {
       feedbackPendingFocus = null;
-      if (!$('feedback-shot-pick').disabled && !$('feedback-shots-controls').hidden) $('feedback-shot-pick').focus();
-      else $('feedback-note').focus();
+      focusFeedbackFallback();
     }
     return;
   }
@@ -9699,13 +9722,19 @@ function renderFeedbackShots() {
       if (target && !target.disabled) {
         target.focus();
       } else {
-        const buttons = list.querySelectorAll('.feedback-shot-remove');
+        const buttons = Array.from(list.querySelectorAll('.feedback-shot-remove')).filter(btn => !btn.disabled);
         if (buttons.length) buttons[Math.min(restoreFocus.index || 0, buttons.length - 1)].focus();
+        else focusFeedbackFallback();
       }
     } else if (restoreFocus.kind === 'view' && typeof list.querySelector === 'function') {
       const target = list.querySelector(`[data-view-shot="${restoreFocus.id}"]`);
-      if (target) target.focus();
+      if (target && !target.disabled) target.focus();
+      else focusFeedbackFallback();
+    } else if (restoreFocus.kind === 'pick') {
+      focusFeedbackFallback();
     }
+  } else if (focusOnPick && (controls.hidden || (pickBtn.disabled && !feedbackSending && feedbackReadingFiles === 0))) {
+    focusFeedbackFallback();
   }
 }
 
@@ -9714,6 +9743,7 @@ function openFeedbackShotViewer(shotId, trigger) {
   if (index < 0) return;
   const item = feedbackAttachments[index];
   feedbackViewerTrigger = trigger || null;
+  feedbackViewerShotId = shotId;
   const dims = item.width && item.height ? ` · ${item.width} × ${item.height}` : '';
   $('feedback-shot-viewer-title').textContent = `查看截图 ${index + 1} 原图`;
   $('feedback-shot-viewer-meta').textContent = `${item.label} · ${formatFeedbackBytes(item.size)}${dims}（已清除隐藏的拍摄和文件信息，发送前请确认画面不含密码、密钥或私人信息）`;
@@ -9763,7 +9793,7 @@ async function addFeedbackFiles(files) {
   $('feedback-send').hidden = true;
   $('feedback-send').disabled = true;
   $('feedback-preview').hidden = true;
-  $('feedback-copy').disabled = $('feedback-export').disabled = true;
+  if (!feedbackLastPayloadText) $('feedback-copy').disabled = $('feedback-export').disabled = true;
   $('feedback-message').textContent = '正在读取并核对截图…';
   renderFeedbackShots();
   const errors = [];
@@ -9863,7 +9893,12 @@ document.addEventListener('click', event => {
   feedbackSubmitted = false;
   feedbackReadingFiles = 0;
   feedbackPendingFocus = null;
+  feedbackViewerTrigger = null;
+  feedbackViewerShotId = 0;
+  feedbackLastPayloadText = '';
   $('feedback-note').value = '';
+  $('feedback-text').value = '';
+  $('feedback-summary').textContent = '';
   $('feedback-shot-input').value = '';
   setFeedbackShotError('');
   renderFeedbackShots();
@@ -9883,10 +9918,12 @@ async function updateFeedbackPreview(options) {
   $('feedback-send').hidden = true;
   $('feedback-send').disabled = true;
   $('feedback-preview').hidden = true;
-  $('feedback-copy').disabled = $('feedback-export').disabled = true;
-  $('feedback-text').value = '';
+  if (!feedbackLastPayloadText) {
+    $('feedback-copy').disabled = $('feedback-export').disabled = true;
+    $('feedback-text').value = '';
+    $('feedback-summary').textContent = '';
+  }
   $('feedback-identity').textContent = '正在核对署名与诊断信息…';
-  $('feedback-summary').textContent = '';
   $('feedback-message').textContent = '';
   const note = $('feedback-note').value;
   const attachments = feedbackAttachments.map(({content_type, data}) => ({content_type, data}));
@@ -9904,12 +9941,14 @@ async function updateFeedbackPreview(options) {
     feedbackSubmitted = Boolean(result.submitted);
     renderFeedbackShots();
     const payload = result.payload;
+    const payloadText = JSON.stringify(payload, null, 2);
+    feedbackLastPayloadText = payloadText;
     $('feedback-identity').textContent = result.member
       ? `将以 ${result.member.name} 的名义提交，方便维护者联系你。` : '暂时无法确认署名，可把诊断信息发给维护者。';
     $('feedback-summary').innerHTML = `<p>${escape(payload.user_message || '主动反馈使用中的问题')}</p>
       <p class="muted">错误编号：${escape(payload.error_id)}<br>错误特征编号：${escape(payload.fingerprint)}</p>
       <p class="muted">${escape([payload.os, payload.install_mode, 'Python ' + payload.python_version, payload.app_version].join(' · '))}</p>`;
-    $('feedback-text').value = JSON.stringify(payload, null, 2);
+    $('feedback-text').value = payloadText;
     $('feedback-message').textContent = result.reason || '核对内容后再发送。';
     $('feedback-send').hidden = !result.can_send;
     $('feedback-send').disabled = feedbackReadingFiles > 0;
@@ -9920,8 +9959,17 @@ async function updateFeedbackPreview(options) {
   } catch (error) {
     if (sequence !== feedbackSequence) return;
     renderFeedbackShots();
-    $('feedback-identity').textContent = '没能生成诊断预览。';
-    $('feedback-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+    if (feedbackLastPayloadText) {
+      $('feedback-text').value = feedbackLastPayloadText;
+      $('feedback-copy').disabled = $('feedback-export').disabled = false;
+      $('feedback-identity').textContent = '没能刷新诊断预览，下方仍保留上一次预览内容，可直接复制或导出。';
+      $('feedback-message').innerHTML = escape(error.message) + ' 当前显示为上一次预览内容，仍可复制或导出，也可稍后重按「更新预览」。' + feedbackButton(error.error_id);
+    } else {
+      $('feedback-text').value = '';
+      $('feedback-copy').disabled = $('feedback-export').disabled = true;
+      $('feedback-identity').textContent = '没能生成诊断预览。';
+      $('feedback-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+    }
     $('feedback-preview').hidden = false;
   }
 }
@@ -9944,14 +9992,33 @@ $('feedback-shots-list').addEventListener('click', event => {
   const removeBtn = event.target.closest('[data-remove-shot]');
   if (removeBtn) removeFeedbackShot(Number(removeBtn.dataset.removeShot));
 });
-$('feedback-shot-viewer-zoom').addEventListener('click', () => setFeedbackViewerActualSize(!feedbackViewerActualSize));
-$('feedback-shot-viewer-close').addEventListener('click', () => $('feedback-shot-viewer').close());
-$('feedback-shot-viewer').addEventListener('close', () => {
+function handleFeedbackViewerClose() {
   setFeedbackViewerActualSize(false);
   $('feedback-shot-viewer-img').removeAttribute('src');
-  if (feedbackViewerTrigger && feedbackViewerTrigger.isConnected) feedbackViewerTrigger.focus();
+  const trigger = feedbackViewerTrigger;
+  const shotId = feedbackViewerShotId;
   feedbackViewerTrigger = null;
-});
+  feedbackViewerShotId = 0;
+  const dialog = $('feedback-dialog');
+  if (dialog && !dialog.open) return;
+  if (trigger && trigger.isConnected && !trigger.disabled) {
+    trigger.focus();
+    return;
+  }
+  const list = $('feedback-shots-list');
+  if (shotId && list && typeof list.querySelector === 'function') {
+    const replacement = list.querySelector(`[data-view-shot="${shotId}"]`);
+    if (replacement && !replacement.disabled) {
+      replacement.focus();
+      return;
+    }
+  }
+  focusFeedbackFallback();
+}
+
+$('feedback-shot-viewer-zoom').addEventListener('click', () => setFeedbackViewerActualSize(!feedbackViewerActualSize));
+$('feedback-shot-viewer-close').addEventListener('click', () => $('feedback-shot-viewer').close());
+$('feedback-shot-viewer').addEventListener('close', handleFeedbackViewerClose);
 document.addEventListener('paste', event => {
   if (!$('feedback-dialog').open || $('feedback-shot-viewer').open || feedbackSending || feedbackSubmitted) return;
   const clipboard = event.clipboardData;
@@ -9998,6 +10065,10 @@ function handleFeedbackClose() {
   feedbackSubmitted = false;
   feedbackReadingFiles = 0;
   feedbackPendingFocus = null;
+  feedbackViewerTrigger = null;
+  feedbackViewerShotId = 0;
+  feedbackLastPayloadText = '';
+  $('feedback-text').value = '';
   $('feedback-shot-input').value = '';
   setFeedbackShotError('');
   renderFeedbackShots();
@@ -10013,12 +10084,14 @@ async function sendFeedback() {
   $('feedback-note').disabled = true;
   renderFeedbackShots();
   try {
-    await api('/api/diagnostics/submit', {ticket});
+    const result = await api('/api/diagnostics/submit', {ticket});
     if (sequence === feedbackSequence) {
       feedbackSubmitted = true;
       feedbackCanAttach = false;
       feedbackAttachReason = '';
-      $('feedback-message').textContent = '已提交到飞书表格，谢谢你的反馈。';
+      $('feedback-message').textContent = result && result.attachments_evicted
+        ? '这条反馈此前已提交，但原留底截图已超过保留上限被清理；如需补充截图，请改用主动反馈重新发送。'
+        : '已提交到飞书表格，谢谢你的反馈。';
       $('feedback-send').textContent = '已提交';
       feedbackTicket = '';
     }

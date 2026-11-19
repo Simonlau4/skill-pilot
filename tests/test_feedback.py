@@ -42,6 +42,16 @@ REAL_JPEG_1X1 = base64.b64decode(
     'AQACEQMRAD8A+b6KKK/0MP5/P//Z'
 )
 REAL_WEBP_1X1 = base64.b64decode('UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==')
+REAL_PROGRESSIVE_JPEG_128X128 = base64.b64decode(
+    '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PT'
+    'gyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wgARCACA'
+    'AIADASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAVAQEBAAAAAAAAAAAAAAAAAAAAA//aAAwDAQACEAMQAAABjRWYAAAAAAAAAA'
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH/xAAUEAEAAAAAAAAAAAAAAAAAAACA/9oACAEBAAEFAgB//8QAFBEBAAAA'
+    'AAAAAAAAAAAAAAAAYP/aAAgBAwEBPwEB/8QAFBEBAAAAAAAAAAAAAAAAAAAAYP/aAAgBAgEBPwEB/8QAFBABAAAAAAAAAAAAAAAAAAAAgP/aAA'
+    'gBAQAGPwIAf//EABQQAQAAAAAAAAAAAAAAAAAAAID/2gAIAQEAAT8hAH//2gAMAwEAAgADAAAAEPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP'
+    'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPP/EABQRAQAAAAAAAAAAAAAAAAAAAGD/2gAIAQMBAT8QAf/EABQRAQAAAAAAAAAAAAAAAAAAAGD/2gAIAQ'
+    'IBAT8QAf/EABQQAQAAAAAAAAAAAAAAAAAAAID/2gAIAQEAAT8QAH//2Q=='
+)
 
 
 def _png_chunk(kind, data):
@@ -544,11 +554,19 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         trailing_iend_png = valid_png + b'hidden-after-iend'
         bad_srgb_png = (b'\x89PNG\r\n\x1a\n' + _png_chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)) +
                         _png_chunk(b'sRGB', b'\x00\x01\x02') + _png_chunk(b'IDAT', zlib.compress(b'\x00\x01\x02\x03')) + _png_chunk(b'IEND', b''))
+        bad_filter_png = (b'\x89PNG\r\n\x1a\n' + _png_chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)) +
+                          _png_chunk(b'IDAT', zlib.compress(b'\x09\x01\x02\x03')) + _png_chunk(b'IEND', b''))
         fake_jpeg = b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9'
         trailing_jpeg = valid_jpeg + b'hidden-after-eoi'
         no_dqt_jpeg = (b'\xff\xd8\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00'
                        b'\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\xaa\xbb\xff\xd9')
         fake_webp_vp8 = b'RIFF' + struct.pack('<I', 20) + b'WEBP' + b'VP8 ' + struct.pack('<I', 8) + b'\x00' * 8
+        vp8_header_only_data = b'\x10\x00\x00\x9d\x01\x2a\x01\x00\x01\x00'
+        vp8_header_only = b'RIFF' + struct.pack('<I', 12 + len(vp8_header_only_data)) + b'WEBP' + b'VP8 ' + struct.pack('<I', len(vp8_header_only_data)) + vp8_header_only_data
+        vp8_no_token_data = bytes([(5 << 5) | 0x10, 0, 0]) + b'\x9d\x01\x2a\x01\x00\x01\x00' + b'\xaa' * 5
+        vp8_no_token = b'RIFF' + struct.pack('<I', 12 + len(vp8_no_token_data) + 1) + b'WEBP' + b'VP8 ' + struct.pack('<I', len(vp8_no_token_data)) + vp8_no_token_data + b'\x00'
+        vp8l_header_only = b'RIFF' + struct.pack('<I', 18) + b'WEBP' + b'VP8L' + struct.pack('<I', 5) + b'\x2f\x00\x00\x00\x00\x00'
+        vp8l_zero_payload = b'RIFF' + struct.pack('<I', 26) + b'WEBP' + b'VP8L' + struct.pack('<I', 13) + b'\x2f\x00\x00\x00\x00' + b'\x00' * 8 + b'\x00'
         truncated_webp = b'RIFF' + struct.pack('<I', 200) + b'WEBP' + b'VP8L' + struct.pack('<I', 5) + b'\x2f\x00\x00\x00\x00'
         trailing_webp = make_webp() + b'hidden-after-riff'
         vp8x_anim = bytes([0x02, 0, 0, 0]) + (0).to_bytes(3, 'little') + (0).to_bytes(3, 'little')
@@ -566,10 +584,15 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             ('trailing_idat_png', encode_shot(trailing_idat_png, 'image/png')),
             ('trailing_iend_png', encode_shot(trailing_iend_png, 'image/png')),
             ('bad_srgb_png', encode_shot(bad_srgb_png, 'image/png')),
+            ('bad_filter_png', encode_shot(bad_filter_png, 'image/png')),
             ('fake_jpeg_no_sof', encode_shot(fake_jpeg, 'image/jpeg')),
             ('trailing_jpeg', encode_shot(trailing_jpeg, 'image/jpeg')),
             ('no_dqt_jpeg', encode_shot(no_dqt_jpeg, 'image/jpeg')),
             ('fake_webp_bad_sync', encode_shot(fake_webp_vp8, 'image/webp')),
+            ('vp8_header_only', encode_shot(vp8_header_only, 'image/webp')),
+            ('vp8_no_token', encode_shot(vp8_no_token, 'image/webp')),
+            ('vp8l_header_only', encode_shot(vp8l_header_only, 'image/webp')),
+            ('vp8l_zero_payload', encode_shot(vp8l_zero_payload, 'image/webp')),
             ('truncated_webp', encode_shot(truncated_webp, 'image/webp')),
             ('trailing_webp', encode_shot(trailing_webp, 'image/webp')),
             ('animated_webp', encode_shot(animated_webp, 'image/webp')),
@@ -577,12 +600,22 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             ('bad_base64', {'content_type': 'image/png', 'data': '!!!not-base64!!!'}),
             ('mime_mismatch', encode_shot(valid_jpeg, 'image/png')),
         ]
+        jargon = ('量化表', '编码表', '重启间隔段', '扫描头', '调色板', '数据块', '色彩配置')
         for name, bad in bad_cases:
             with self.subTest(case=name):
                 code, res = self.request('/api/diagnostics/preview', {'error_id': self.row['error_id'], 'attachments': [bad]})
                 self.assertEqual(code, 400, res)
-                hub_code, _ = self.request('/api/feedback/with-attachments', self.preview()['payload'] | {'attachments': [bad]}, hub=True)
+                for word in jargon:
+                    self.assertNotIn(word, res.get('error', ''))
+                hub_code, hub_res = self.request('/api/feedback/with-attachments', self.preview()['payload'] | {'attachments': [bad]}, hub=True)
                 self.assertEqual(hub_code, 400)
+                for word in jargon:
+                    self.assertNotIn(word, hub_res.get('error', ''))
+        # Valid 128x128 progressive JPEG (including short scans) must be accepted cleanly.
+        prog_shot = encode_shot(REAL_PROGRESSIVE_JPEG_128X128, 'image/jpeg')
+        prog_preview = self.preview(attachments=[prog_shot])
+        self.assertEqual(len(prog_preview['attachments']), 1)
+        self.assertEqual(prog_preview['attachments'][0]['label'], 'JPEG')
         # Verify hub parses and validates screenshots BEFORE acquiring the store write lock.
         unlocked_payload = self.preview()['payload'] | {
             'error_id': 'unlocked-parse', 'fingerprint': 'unlocked-fp',
@@ -892,6 +925,135 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             self.assertIn('未能确认收下本次截图', err['error'])
         self.assertFalse(self.preview()['submitted'])
 
+    def test_stat_errors_post_cooldown_idempotency_pending_protection_and_nonblocking_submit(self):
+        # 1. Directory stat() / iterdir() OSError must NOT be treated as 0 bytes to bypass MAX_ATTACHMENT_STORE_BYTES.
+        base = self.preview()['payload']
+        img_a = make_png(width=12, height=12, seed=41)
+        img_b = make_png(width=12, height=12, seed=42)
+        shot_a = encode_shot(img_a, 'image/png')
+        shot_b = encode_shot(img_b, 'image/png')
+        with patch.object(feedback, 'forward'):
+            code, res_a = self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-stat-a', 'fingerprint': 'fp-stat-a', 'attachments': [shot_a]}, hub=True)
+            self.assertEqual(code, 200, res_a)
+        att_dir = self.data / 'feedback-attachments'
+        sha_a = hashlib.sha256(img_a).hexdigest()
+        sha_b = hashlib.sha256(img_b).hexdigest()
+        real_stat = Path.stat
+        def fail_stat_a(path_self, *args, **kwargs):
+            if path_self.name == f'{sha_a}.png':
+                raise PermissionError('无权读取大小')
+            return real_stat(path_self, *args, **kwargs)
+        with patch.object(Path, 'stat', fail_stat_a), patch.object(feedback, 'forward') as send:
+            code, err = self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-stat-b', 'fingerprint': 'fp-stat-b', 'attachments': [shot_b]}, hub=True)
+            self.assertEqual(code, 507, err)
+            send.assert_not_called()
+        self.assertFalse((att_dir / f'{sha_b}.png').exists())
+        real_iterdir = Path.iterdir
+        def fail_iterdir(path_self):
+            if path_self.name == 'feedback-attachments':
+                raise PermissionError('无权读取目录')
+            return real_iterdir(path_self)
+        with patch.object(Path, 'iterdir', fail_iterdir), patch.object(feedback, 'forward') as send:
+            code, err = self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-iter-b', 'fingerprint': 'fp-iter-b', 'attachments': [shot_b]}, hub=True)
+            self.assertEqual(code, 507, err)
+            send.assert_not_called()
+        self.assertFalse((att_dir / f'{sha_b}.png').exists())
+        # 2. Same error_id retried AFTER 300s (e.g. 301s) still preserves idempotency and conflict checks while in feedback.json.
+        fb_path = self.data / 'feedback.json'
+        rows = json.loads(fb_path.read_text(encoding='utf-8'))
+        rows[0]['payload']['submitted_at'] = '2020-01-01T00:00:00+00:00'
+        fb_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        with patch.object(feedback, 'forward') as send:
+            dup_code, dup_res = self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-stat-a', 'fingerprint': 'fp-stat-a', 'attachments': [shot_a]}, hub=True)
+            self.assertEqual(dup_code, 200, dup_res)
+            self.assertTrue(dup_res['duplicate'])
+            self.assertEqual(self.request('/api/feedback', base | {
+                'error_id': 'err-stat-a', 'fingerprint': 'fp-stat-a'}, hub=True)[0], 409)
+            send.assert_not_called()
+        # 3. Concurrent protection: in-flight pending screenshot MUST NOT be evicted by a later request under tight quota.
+        img_c = make_png(width=12, height=12, seed=43)
+        img_d = make_png(width=12, height=12, seed=44)
+        shot_c = encode_shot(img_c, 'image/png')
+        shot_d = encode_shot(img_d, 'image/png')
+        sha_c = hashlib.sha256(img_c).hexdigest()
+        sha_d = hashlib.sha256(img_d).hexdigest()
+        started, release = threading.Event(), threading.Event()
+        def paused_forward(url, payload):
+            if payload.get('error_id') == 'err-pending-c':
+                started.set()
+                self.assertTrue(release.wait(5))
+        tight_limit = max(len(img_c), len(img_d)) + 16
+        with patch.object(feedback, 'MAX_ATTACHMENT_STORE_BYTES', tight_limit), \
+                patch.object(feedback, 'forward', side_effect=paused_forward), ThreadPoolExecutor() as pool:
+            first = pool.submit(self.request, '/api/feedback/with-attachments', base | {
+                'error_id': 'err-pending-c', 'fingerprint': 'fp-pending-c', 'attachments': [shot_c]}, True)
+            self.assertTrue(started.wait(3))
+            try:
+                # Second submission arrives while first is pending: must get 507 and NOT evict first's screenshot.
+                code_d, err_d = self.request('/api/feedback/with-attachments', base | {
+                    'error_id': 'err-pending-d', 'fingerprint': 'fp-pending-d', 'attachments': [shot_d]}, hub=True)
+                self.assertEqual(code_d, 507, err_d)
+                self.assertIn('正在转发', err_d['error'])
+                self.assertTrue((att_dir / f'{sha_c}.png').is_file())
+                self.assertFalse((att_dir / f'{sha_d}.png').exists())
+            finally:
+                release.set()
+            code_c, res_c = first.result()
+            self.assertEqual(code_c, 200, res_c)
+            self.assertEqual(self.raw_hub_get(f"/api/feedback/{res_c['feedback_id']}/attachments/{sha_c}")[0], 200)
+            # Once first is sent, next submission succeeds and evicts first.
+            code_d2, res_d2 = self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-pending-d', 'fingerprint': 'fp-pending-d', 'attachments': [shot_d]}, hub=True)
+            self.assertEqual(code_d2, 200, res_d2)
+            self.assertEqual(self.raw_hub_get(f"/api/feedback/{res_c['feedback_id']}/attachments/{sha_c}")[0], 404)
+            # Retrying err-pending-c via dashboard submit_feedback surfaces attachments_evicted=True!
+            evicted_fault = diagnostics.record(self.home, 'backend', '已淘汰测试', OSError('fault'))
+            prepared_ev = self.preview(error_id=evicted_fault['error_id'], attachments=[shot_c])
+            # Rewrite stored prepared error_id to match the already-sent evicted hub record.
+            self.dashboard.feedback_previews[prepared_ev['ticket']]['prepared']['payload']['error_id'] = 'err-pending-c'
+            self.dashboard.feedback_previews[prepared_ev['ticket']]['prepared']['payload']['fingerprint'] = 'fp-pending-c'
+            sub_code, sub_res = self.request('/api/diagnostics/submit', {'ticket': prepared_ev['ticket']})
+            self.assertEqual(sub_code, 200, sub_res)
+            self.assertEqual(sub_res, {'submitted': True, 'attachments_evicted': True})
+        # 4. Slow /api/diagnostics/submit must NOT hold feedback_lock across network I/O.
+        slow_preview = self.preview(attachments=[shot_a])
+        orig_ttl = self.dashboard.feedback_preview_ttl
+        self.dashboard.feedback_preview_ttl = 0.05
+        try:
+            ephemeral = self.preview(attachments=[shot_b])
+        finally:
+            self.dashboard.feedback_preview_ttl = orig_ttl
+        discard_me = self.preview(attachments=[shot_a])
+        submit_started, submit_release = threading.Event(), threading.Event()
+        def slow_submit(home, prepared):
+            submit_started.set()
+            self.assertTrue(submit_release.wait(5))
+            return {'submitted': True}
+        with patch.object(team, 'submit_feedback', side_effect=slow_submit), ThreadPoolExecutor() as pool:
+            fut = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': slow_preview['ticket']})
+            self.assertTrue(submit_started.wait(3))
+            try:
+                # Duplicate submit of SAME in-flight ticket is rejected immediately.
+                dup_code, dup_err = self.request('/api/diagnostics/submit', {'ticket': slow_preview['ticket']})
+                self.assertEqual(dup_code, 400, dup_err)
+                self.assertIn('正在发送', dup_err['error'])
+                # Unrelated discard succeeds immediately without blocking on slow_submit.
+                self.assertEqual(self.request('/api/diagnostics/preview-discard', {'ticket': discard_me['ticket']})[0], 200)
+                self.assertNotIn(discard_me['ticket'], self.dashboard.feedback_previews)
+                # Background timer prunes unrelated expired preview while slow_submit is still blocked.
+                deadline = time.monotonic() + 2.0
+                while ephemeral['ticket'] in self.dashboard.feedback_previews and time.monotonic() < deadline:
+                    time.sleep(0.03)
+                self.assertNotIn(ephemeral['ticket'], self.dashboard.feedback_previews)
+            finally:
+                submit_release.set()
+            self.assertEqual(fut.result(), (200, {'submitted': True}))
+            self.assertNotIn(slow_preview['ticket'], self.dashboard.feedback_previews)
+
     def test_frontend_screenshot_validators_and_interactions(self):
         source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text(encoding='utf-8')
         functions = '\n'.join(extract_function(source, signature) for signature in (
@@ -899,7 +1061,8 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             'function bytesToBase64(', 'function validateFeedbackFileBytes(',
             'function discardFeedbackTicket(', 'function setFeedbackShotError(',
             'function announceFeedbackShots(', 'function setFeedbackViewerActualSize(',
-            'function renderFeedbackShots(', 'function openFeedbackShotViewer(',
+            'function focusFeedbackFallback(', 'function renderFeedbackShots(',
+            'function openFeedbackShotViewer(', 'function handleFeedbackViewerClose(',
             'function removeFeedbackShot(', 'async function addFeedbackFiles(',
             'async function updateFeedbackPreview(', 'function handleFeedbackClose(',
             'async function sendFeedback('))
@@ -916,7 +1079,8 @@ const FEEDBACK_MAX_IMAGE_PIXELS = 16000000;
 let feedbackSequence = 0, feedbackDialogEpoch = 1, feedbackErrorId = 'err1', feedbackTicket = 't0';
 let feedbackSending = false, feedbackReadingFiles = 0, feedbackAttachments = [], feedbackAttachmentSeq = 0;
 let feedbackCanAttach = true, feedbackAttachReason = '', feedbackSubmitted = false, feedbackViewerTrigger = null;
-let feedbackViewerActualSize = false, feedbackPendingFocus = null;
+let feedbackViewerShotId = 0, feedbackViewerActualSize = false, feedbackPendingFocus = null;
+let feedbackLastPayloadText = '';
 const calls = [], focused = [];
 const makeNode = id => ({{
   id, value: '', textContent: '', innerHTML: '', hidden: false, disabled: false, open: true, isConnected: true,
@@ -928,16 +1092,24 @@ const makeNode = id => ({{
   removeAttribute() {{}},
   contains(el) {{ return Boolean(el && el.inList); }},
   querySelector(sel) {{
-    const m = /data-remove-shot="(\\d+)"/.exec(sel);
-    if (!m) return null;
-    const item = feedbackAttachments.find(x => x.id === Number(m[1]));
-    if (!item) return null;
-    return {{ inList: true, disabled: false, dataset: {{ removeShot: String(item.id) }}, focus() {{ focused.push('remove-id-' + item.id); document.activeElement = this; }} }};
+    const rm = /data-remove-shot="(\\d+)"/.exec(sel);
+    if (rm) {{
+      const item = feedbackAttachments.find(x => x.id === Number(rm[1]));
+      if (!item) return null;
+      return {{ inList: true, disabled: false, dataset: {{ removeShot: String(item.id) }}, focus() {{ focused.push('remove-id-' + item.id); document.activeElement = this; }} }};
+    }}
+    const vw = /data-view-shot="(\\d+)"/.exec(sel);
+    if (vw) {{
+      const item = feedbackAttachments.find(x => x.id === Number(vw[1]));
+      if (!item) return null;
+      return {{ inList: true, disabled: false, dataset: {{ viewShot: String(item.id) }}, focus() {{ focused.push('view-id-' + item.id); document.activeElement = this; }} }};
+    }}
+    return null;
   }},
   querySelectorAll() {{ return feedbackAttachments.map((x, i) => ({{ inList: true, disabled: false, dataset: {{ removeShot: String(x.id) }}, focus() {{ focused.push('remove-' + i); document.activeElement = this; }} }})); }},
 }});
 const nodes = Object.fromEntries([
-  'feedback-dialog', 'feedback-note', 'feedback-shot-input', 'feedback-shots-count', 'feedback-shots-notice',
+  'feedback-dialog', 'feedback-note', 'feedback-close', 'feedback-shot-input', 'feedback-shots-count', 'feedback-shots-notice',
   'feedback-shots-controls', 'feedback-shot-pick', 'feedback-shots-list', 'feedback-shots-error',
   'feedback-shots-status', 'feedback-send', 'feedback-preview', 'feedback-copy', 'feedback-export',
   'feedback-text', 'feedback-identity', 'feedback-summary', 'feedback-message',
@@ -951,16 +1123,19 @@ const feedbackButton = () => '';
 let decodeResult = {{ok: true, width: 10, height: 10}};
 let decodeGate = null;
 let submitFail = false;
+let submitEvicted = false;
 let offlinePreview = false;
+let previewThrow = false;
 const decodeFeedbackImage = async () => {{ if (decodeGate) await decodeGate; return decodeResult; }};
 let ticketNum = 0;
 const api = async (path, body) => {{
   calls.push({{path, body}});
   if (path === '/api/diagnostics/submit') {{
     if (submitFail) throw new Error('模拟提交失败');
-    return {{submitted: true}};
+    return submitEvicted ? {{submitted: true, attachments_evicted: true}} : {{submitted: true}};
   }}
   if (path === '/api/diagnostics/preview') {{
+    if (previewThrow) throw new Error('模拟刷新预览超时');
     if (offlinePreview) {{
       return {{
         ticket: 't' + (++ticketNum), can_send: false, can_attach: false,
@@ -1076,13 +1251,61 @@ assert.equal(validateFeedbackFileBytes(png, 2, FEEDBACK_MAX_SHOTS_TOTAL - png.le
   assert.equal(feedbackAttachments.length, 0);
   assert.equal(focused.at(-1), 'feedback-shot-pick');
   assert.match(nodes['feedback-shots-status'].textContent, /全部截图/);
-  // 7. Closing dialog discards active ticket and clears screenshots.
+  // 7. Failed preview refresh preserves last diagnostic text and keeps copy/export enabled.
+  const prevPayloadText = nodes['feedback-text'].value;
+  assert.ok(prevPayloadText.includes('"error_id"'));
+  previewThrow = true;
+  await updateFeedbackPreview();
+  previewThrow = false;
+  assert.equal(nodes['feedback-text'].value, prevPayloadText);
+  assert.equal(nodes['feedback-copy'].disabled, false);
+  assert.equal(nodes['feedback-export'].disabled, false);
+  assert.equal(nodes['feedback-preview'].hidden, false);
+  assert.match(nodes['feedback-message'].innerHTML, /上一次预览内容/);
+  await updateFeedbackPreview();
+  // 8. Removing last shot then async offline refresh hides pick button -> focus falls back to feedback-note.
   decodeResult = {{ok: true, width: 10, height: 10}};
+  await addFeedbackFiles([makeFile(png, 'image/png')]);
+  focused.length = 0;
+  offlinePreview = true;
+  removeFeedbackShot(feedbackAttachments[0].id);
+  await new Promise(setImmediate);
+  offlinePreview = false;
+  assert.equal(nodes['feedback-shots-controls'].hidden, true);
+  assert.equal(focused.at(-1), 'feedback-note');
+  await updateFeedbackPreview();
+  // 9. Closing full-size viewer recovers focus by shot id when original trigger was detached by list re-render,
+  //    and falls back to an operable control when the shot no longer exists.
+  await addFeedbackFiles([makeFile(png, 'image/png')]);
+  const shotId = feedbackAttachments[0].id;
+  const detachedTrigger = {{ isConnected: false, disabled: false, focus() {{ focused.push('detached'); }} }};
+  focused.length = 0;
+  openFeedbackShotViewer(shotId, detachedTrigger);
+  handleFeedbackViewerClose();
+  assert.equal(focused.at(-1), 'view-id-' + shotId);
+  focused.length = 0;
+  openFeedbackShotViewer(shotId, detachedTrigger);
+  feedbackAttachments = [];
+  feedbackCanAttach = false;
+  renderFeedbackShots();
+  handleFeedbackViewerClose();
+  assert.equal(focused.at(-1), 'feedback-note');
+  // 10. Evicted duplicate receipt shows explicit notice about cleaned-up screenshots.
+  feedbackCanAttach = true;
+  await updateFeedbackPreview();
+  submitEvicted = true;
+  await sendFeedback();
+  submitEvicted = false;
+  assert.match(nodes['feedback-message'].textContent, /原留底截图已超过保留上限被清理/);
+  // 11. Closing dialog discards active ticket and clears screenshots.
+  feedbackSubmitted = false;
+  feedbackCanAttach = true;
   await addFeedbackFiles([makeFile(png, 'image/png')]);
   const activeBeforeClose = feedbackTicket;
   handleFeedbackClose();
   assert.equal(feedbackAttachments.length, 0);
   assert.equal(feedbackTicket, '');
+  assert.equal(feedbackLastPayloadText, '');
   assert.ok(calls.some(c => c.path === '/api/diagnostics/preview-discard' && c.body.ticket === activeBeforeClose));
 }})().catch(err => {{ console.error(err); process.exitCode = 1; }});
 '''
