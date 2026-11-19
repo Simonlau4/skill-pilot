@@ -205,18 +205,28 @@ def installed(project):
 def check(home, project=PROJECT):
     project = Path(project).resolve()
     before = installed(project)
+    start_build = read_build(project)
     remote = git(project, 'ls-remote', SOURCE, 'refs/heads/' + BRANCH, timeout=60).split()
     if len(remote) != 2 or len(remote[0]) != 40 or any(c not in '0123456789abcdef' for c in remote[0]):
         raise ValueError('没能读取 SP 的最新版本，请检查网络后重试。')
     target = remote[0]
+    if before['checkout'] and target == before.get('revision'):
+        end_build = read_build(project)
+        if (git(project, 'status', '--porcelain', '--untracked-files=normal')
+                or git(project, 'rev-parse', 'HEAD') != before['revision']
+                or end_build['version'] != start_build['version']):
+            raise ValueError('SP 程序文件在检查期间发生了改动，已保留当前版本。请先确认本地文件后再重新检查更新。')
+        current_version = end_build['version']
+        return {'before': before, 'target': target, 'current': before.get('date', ''),
+                'latest': before.get('date', ''), 'current_version': current_version,
+                'latest_version': current_version, 'available': False, 'temporary': '',
+                'changes': [], 'changes_total': 0, 'changes_partial': False}
     build = read_build(project)
     current_version = build['version']
     review = {'before': before, 'target': target, 'current': before.get('date', ''),
               'latest': before.get('date', ''), 'current_version': current_version,
               'latest_version': current_version, 'available': False, 'temporary': '',
               'changes': [], 'changes_total': 0, 'changes_partial': False}
-    if before['checkout'] and target == before.get('revision'):
-        return review
     temporary = Path(tempfile.mkdtemp(prefix='skill-pilot-self-update-')).resolve()
     candidate = temporary / 'candidate'
     candidate.mkdir()
@@ -409,6 +419,20 @@ def apply(review, home, project=PROJECT):
     installed_version = review.get('latest_version') or format_version(review.get('latest', ''), review.get('target', ''))
     actual_version = read_build(project)['version']
     version_verified = bool(installed_version and actual_version and actual_version == installed_version)
+    has_unmanaged_files = False
+    if not version_verified and not before['checkout']:
+        expected_files = set(review['files'])
+        try:
+            has_unmanaged_files = any(
+                rel not in expected_files
+                for directory in OFFICIAL_DIRS
+                if (project / directory).is_dir() and not (project / directory).is_symlink()
+                for path in (project / directory).rglob('*')
+                if path.is_file() and is_official_path(rel := path.relative_to(project).as_posix())
+            )
+        except OSError:
+            has_unmanaged_files = False
     return {'available': False, 'current': review['latest'], 'latest': review['latest'],
             'latest_version': installed_version, 'pending_version': installed_version,
-            'installed_version': actual_version, 'version_verified': version_verified}
+            'installed_version': actual_version, 'version_verified': version_verified,
+            'has_unmanaged_files': has_unmanaged_files}

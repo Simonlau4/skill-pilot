@@ -264,7 +264,7 @@ class AutoUpdateCheckTests(unittest.TestCase):
                  'message': 'SP 已是最新版本', 'available': False, 'error': '', 'checked_at': checked_at,
                  'changes': [], 'changes_total': 0, 'changes_partial': False,
                  'current_version': app_version.running_build()['version'],
-                 'latest_version': '', 'pending_version': '', 'failed_action': ''}
+                 'latest_version': '', 'pending_version': '', 'failed_action': '', 'can_retry_apply': False}
         dashboard = server.Dashboard(self.inventory)
         try:
             dashboard.program_progress = saved.copy()

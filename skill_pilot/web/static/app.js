@@ -2869,17 +2869,15 @@ function renderProgramPopup() {
   const ready = phase === 'ready', applying = phase === 'apply', failed = phase === 'error';
   $('program-popup-title').textContent = ready ? 'Skill Pilot 升级完成' : applying ? '正在升级 Skill Pilot…'
     : failed ? '升级未完成' : 'Skill Pilot 发现新版本';
-  const current = programVersionLabel(progress.current_version, progress.current);
+  const current = String(progress.current_version || '').trim();
+  const currentText = current || '暂未读到版本';
   const latest = programVersionLabel(progress.latest_version, progress.latest);
   const pending = programVersionLabel(progress.pending_version || progress.latest_version, progress.latest);
   const versionLine = ready
-    ? (current && pending ? `当前运行 ${current} → 待刷新生效 ${pending}`
-      : pending ? `待刷新生效 ${pending}` : current ? `当前运行 ${current}` : '')
+    ? (pending ? `当前运行 ${currentText} → 待刷新生效 ${pending}` : `当前运行 ${currentText}`)
     : failed
-      ? (current && latest ? `当前 ${current} · 本次尝试升级至 ${latest}`
-        : latest ? `本次尝试升级至 ${latest}` : current ? `当前 ${current}` : '')
-    : (current && latest ? `当前 ${current} → 新版 ${latest}`
-      : latest ? `新版 ${latest}` : current ? `当前 ${current}` : '');
+      ? (latest ? `当前 ${currentText} · 本次尝试升级至 ${latest}` : `当前 ${currentText}`)
+    : (latest ? `当前 ${currentText} → 新版 ${latest}` : `当前 ${currentText}`);
   const versionHtml = versionLine ? `<p class="muted program-popup-version">${escape(versionLine)}</p>` : '';
   const body = ready ? `${versionHtml}<p>刷新页面即可启用新版，技能、分配和个人设置都会保留。</p>`
     : applying ? `${versionHtml}<p>${escape(programText(progress.message || '正在安装新版，请稍候…'))}</p>`
@@ -2888,8 +2886,9 @@ function renderProgramPopup() {
   // 轮询时保留相同内容的节点，避免打断阅读、滚动或键盘焦点。
   if ($('program-popup-body').innerHTML !== body) $('program-popup-body').innerHTML = body;
   $('program-popup-later').textContent = ready ? '稍后刷新' : failed || applying ? '关闭' : '稍后再说';
+  const canRetryApply = failed && progress.can_retry_apply !== false;
   const button = $('program-popup-action');
-  button.textContent = ready ? '刷新生效' : applying ? '正在升级…' : failed ? '重试升级' : '立即升级';
+  button.textContent = ready ? '刷新生效' : applying ? '正在升级…' : failed ? (canRetryApply ? '重试升级' : '重新检查') : '立即升级';
   button.disabled = applying || Boolean(writeBusy) || progress.running;
   button.setAttribute('aria-busy', String(applying));
   popup.inert = false;
@@ -2913,7 +2912,8 @@ function renderProgram() {
   const progress = programUpdate;
   const readOnly = progress.write_allowed === false;
   const applyFailed = progress.phase === 'error' && (programFailedAction === 'apply' || progress.failed_action === 'apply');
-  const current = programVersionLabel(progress.current_version, progress.current);
+  const current = String(progress.current_version || '').trim();
+  const currentText = current || (progress.write_allowed !== undefined ? '暂未读到版本' : '');
   const latest = programVersionLabel(progress.latest_version, progress.latest);
   const pending = programVersionLabel(progress.pending_version || progress.latest_version, progress.latest);
   const message = (readOnly && !progress.error
@@ -2921,22 +2921,21 @@ function renderProgram() {
     : (progress.message || '从 Skill Pilot 官方项目获取新版')).replace(/\bSP\b/g, 'Skill Pilot');
   const parts = [];
   if (progress.phase === 'ready') {
-    if (current) parts.push(`当前运行：${current}`);
+    if (currentText) parts.push(`当前运行：${currentText}`);
     if (pending) parts.push(`待刷新生效：${pending}`);
   } else if (progress.phase === 'apply' && progress.running) {
-    if (current) parts.push(`当前运行：${current}`);
+    if (currentText) parts.push(`当前运行：${currentText}`);
     if (latest) parts.push(`正在升级至：${latest}`);
   } else if (applyFailed) {
-    if (current) parts.push(`当前版本：${current}`);
+    if (currentText) parts.push(`当前版本：${currentText}`);
     if (latest) parts.push(`本次尝试升级至：${latest}`);
   } else if (progress.available && !readOnly) {
-    if (current) parts.push(`当前版本：${current}`);
+    if (currentText) parts.push(`当前版本：${currentText}`);
     if (latest) parts.push(`最新版本：${latest}`);
   } else {
-    if (current) parts.push(`当前版本：${current}`);
+    if (currentText) parts.push(`当前版本：${currentText}`);
     if (!readOnly && progress.phase === 'latest' && latest && latest !== current) parts.push(`最新版本：${latest}`);
   }
-  if (!parts.length && progress.write_allowed !== undefined) parts.push('当前版本：暂未读到版本');
   $('program-version').hidden = !parts.length;
   $('program-version').textContent = parts.join(' · ');
   $('program-message').textContent = message;
@@ -3055,6 +3054,7 @@ $('program-popup-later').addEventListener('click', dismissProgramPopup);
 $('program-popup-action').addEventListener('click', event => {
   if (event.currentTarget.disabled) return;
   if (programUpdate.phase === 'ready') location.reload();
+  else if (programPopupPhase() === 'error' && programUpdate.can_retry_apply === false) programAction('check', event.currentTarget);
   else programAction('apply', event.currentTarget);
 });
 $('program-update-popup').addEventListener('keydown', event => {

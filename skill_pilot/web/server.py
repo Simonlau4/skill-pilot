@@ -180,6 +180,7 @@ class Dashboard(ThreadingHTTPServer):
         self.program_progress.setdefault('latest_version', '')
         self.program_progress.setdefault('pending_version', '')
         self.program_progress.setdefault('failed_action', '')
+        self.program_progress.setdefault('can_retry_apply', False)
         # 换进程/重载时先清理上一会话被中断的运行中状态与过时检查结论，再执行本次启动同步，避免覆盖新错误。
         interrupted_auto_check = False
         if resume and self.program_progress.get('running'):
@@ -958,7 +959,7 @@ class Dashboard(ThreadingHTTPServer):
             self.program_action = action
             progress = self._set_program_progress({
                 'running': True, 'phase': action, 'error': '', 'error_id': '',
-                'automatic': automatic, 'failed_action': '',
+                'automatic': automatic, 'failed_action': '', 'can_retry_apply': False,
                 'message': '正在下载并检查新版…' if action == 'check' else '正在升级，等当前操作完成…',
             })
             self.program_thread = threading.Thread(
@@ -974,7 +975,7 @@ class Dashboard(ThreadingHTTPServer):
         self._set_program_progress(
             {
                 'running': False, 'phase': 'idle', 'available': False, 'error': '', 'error_id': '',
-                'failed_action': '', 'latest': '', 'current_version': self.running_version,
+                'failed_action': '', 'can_retry_apply': False, 'latest': '', 'current_version': self.running_version,
                 'latest_version': '', 'pending_version': '',
                 'changes': [], 'changes_total': 0, 'changes_partial': False,
                 'message': '从 GitHub 官方项目获取新版',
@@ -995,7 +996,7 @@ class Dashboard(ThreadingHTTPServer):
         self._set_program_progress(
             {
                 'running': False, 'phase': 'idle', 'available': False, 'error': '', 'error_id': '',
-                'failed_action': '', 'current': date, 'latest': '',
+                'failed_action': '', 'can_retry_apply': False, 'current': date, 'latest': '',
                 'current_version': version, 'latest_version': '', 'pending_version': '',
                 'changes': [], 'changes_total': 0, 'changes_partial': False,
                 'message': '从 GitHub 官方项目获取新版',
@@ -1029,7 +1030,7 @@ class Dashboard(ThreadingHTTPServer):
                     new_review = self_update.check(self.home)
                     disk_version = new_review.get('current_version') or ''
                     checked_disk_version = disk_version
-                    current_version = self.running_version or disk_version
+                    current_version = self.running_version
                     latest_version = new_review.get('latest_version') or ''
                     if new_review['available']:
                         phase = 'available'
@@ -1075,6 +1076,7 @@ class Dashboard(ThreadingHTTPServer):
                         pending_version=pending_version,
                         error=error_text,
                         failed_action=failed_action,
+                        can_retry_apply=False,
                         changes=new_review.get('changes', []) if new_review['available'] else [],
                         changes_total=new_review.get('changes_total', 0) if new_review['available'] else 0,
                         changes_partial=new_review.get('changes_partial', False) if new_review['available'] else False,
@@ -1106,15 +1108,22 @@ class Dashboard(ThreadingHTTPServer):
                                            result.get('latest', apply_review.get('latest', '') if apply_review else ''),
                                            apply_review.get('target', '') if apply_review else ''))
                     if result.get('version_verified') is False:
+                        if result.get('has_unmanaged_files'):
+                            verify_message = '新版已写入，但程序目录存在额外本地文件'
+                            verify_error = 'SP 新版文件已写入，但程序代码或脚本目录里存在未托管的额外文件，版本未能核对一致。请移出额外文件后刷新或重新打开看板。'
+                        else:
+                            verify_message = '新版已写入，但未能核实安装后的版本'
+                            verify_error = '新版文件已写入，但未能核实安装后的版本，请刷新页面或重新检查。'
                         update_payload = {
                             **result,
                             'phase': 'error',
-                            'message': '新版已写入，但程序目录存在额外本地文件',
-                            'error': 'SP 新版文件已写入，但程序代码或脚本目录里存在未托管的额外文件，版本未能核对一致。请移出额外文件后刷新或重新打开看板。',
+                            'message': verify_message,
+                            'error': verify_error,
                             'current_version': self.running_version,
                             'latest_version': pending_version,
                             'pending_version': '',
                             'failed_action': 'apply',
+                            'can_retry_apply': False,
                             'changes': [], 'changes_total': 0, 'changes_partial': False,
                         }
                     else:
@@ -1125,11 +1134,14 @@ class Dashboard(ThreadingHTTPServer):
                             'latest_version': pending_version,
                             'pending_version': pending_version,
                             'failed_action': '',
+                            'can_retry_apply': False,
                             'changes': [], 'changes_total': 0, 'changes_partial': False,
                         }
             except Exception as error:
                 captured = self_update.record_failure(self.home, action, error) or {}
-                update_payload = {'changes': [], 'changes_total': 0, 'changes_partial': False, 'pending_version': ''}
+                update_payload = {'changes': [], 'changes_total': 0, 'changes_partial': False,
+                                  'pending_version': '', 'current_version': self.running_version,
+                                  'can_retry_apply': bool(action == 'apply' and apply_review and apply_review.get('available'))}
                 if action == 'check':
                     update_payload['latest_version'] = ''
                 if captured:

@@ -639,19 +639,58 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertNotIn('checked_at', dashboard.program_progress)
             self.assertNotIn('target', dashboard.program_progress)
 
-            # Path 1e: apply() reporting version_verified=False (unmanaged extra file in official dir)
-            # MUST NOT enter 'ready' (avoids ready->mismatch->idle loop) and reports clear error instead.
+            # Path 1e: apply() reporting version_verified=False distinguishes unmanaged files vs general failure
+            # and sets can_retry_apply=False (while rollback failure with available review sets can_retry_apply=True).
             dashboard.program_review = {'temporary': '', 'target': 't' * 40, 'available': True,
                                         'latest': '2026-11-19', 'latest_version': 'v1.0.0-9999999'}
             with patch.object(self_update, 'apply', return_value={
                     'available': False, 'current': '2026-11-19', 'latest': '2026-11-19',
                     'latest_version': 'v1.0.0-9999999', 'pending_version': 'v1.0.0-9999999',
-                    'installed_version': 'v1.0.0-ddddddd', 'version_verified': False}):
+                    'installed_version': 'v1.0.0-ddddddd', 'version_verified': False, 'has_unmanaged_files': True}):
                 dashboard.program_work('apply', automatic=False)
             self.assertEqual(dashboard.program_progress['phase'], 'error')
             self.assertEqual(dashboard.program_progress['pending_version'], '')
             self.assertEqual(dashboard.program_progress['failed_action'], 'apply')
-            self.assertIn('额外', dashboard.program_progress['error'])
+            self.assertFalse(dashboard.program_progress['can_retry_apply'])
+            self.assertIn('额外文件', dashboard.program_progress['error'])
+
+            dashboard.program_review = {'temporary': '', 'target': 't' * 40, 'available': True,
+                                        'latest': '2026-11-19', 'latest_version': 'v1.0.0-9999999'}
+            with patch.object(self_update, 'apply', return_value={
+                    'available': False, 'current': '2026-11-19', 'latest': '2026-11-19',
+                    'latest_version': 'v1.0.0-9999999', 'pending_version': 'v1.0.0-9999999',
+                    'installed_version': '', 'version_verified': False, 'has_unmanaged_files': False}):
+                dashboard.program_work('apply', automatic=False)
+            self.assertEqual(dashboard.program_progress['phase'], 'error')
+            self.assertFalse(dashboard.program_progress['can_retry_apply'])
+            self.assertIn('未能核实安装后的版本', dashboard.program_progress['error'])
+            self.assertNotIn('额外文件', dashboard.program_progress['error'])
+
+            dashboard.program_review = {'temporary': '', 'target': 't' * 40, 'available': True,
+                                        'latest': '2026-11-19', 'latest_version': 'v1.0.0-9999999'}
+            with patch.object(self_update, 'apply', side_effect=ValueError('升级没有完成，已恢复原版')):
+                dashboard.program_work('apply', automatic=False)
+            self.assertEqual(dashboard.program_progress['phase'], 'error')
+            self.assertTrue(dashboard.program_progress['can_retry_apply'])
+
+            # Path 1f: When running_version is empty, program_work('check') NEVER fills current_version with disk_version.
+            saved_dash_running = dashboard.running_version
+            dashboard.running_version = ''
+            try:
+                for auto, available, expect_phase in (
+                    (False, False, 'error'),
+                    (True, False, 'idle'),
+                    (False, True, 'available'),
+                ):
+                    with self.subTest(empty_running=True, auto=auto, available=available), \
+                            patch.object(self_update, 'check', return_value={
+                                'temporary': '', 'target': 't' * 40, 'current': '2026-11-19', 'latest': '2026-11-19',
+                                'current_version': pending, 'latest_version': pending, 'available': available}):
+                        dashboard.program_work('check', automatic=auto)
+                    self.assertEqual(dashboard.program_progress['current_version'], '')
+                    self.assertEqual(dashboard.program_progress['phase'], expect_phase)
+            finally:
+                dashboard.running_version = saved_dash_running
 
             # Path 2: Resuming a session on a new running version (or legacy session without current_version,
             # or interrupted auto-check with version change) clears running=True and invalidates stale results.
@@ -754,6 +793,64 @@ const api = async (path) => {
 '''
         result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, encoding='utf-8', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        # Verify popup button switches to 「重新检查」 when can_retry_apply===false and empty current_version
+        # displays 「暂未读到版本」 instead of fabricating a date version from progress.current.
+        render_fns = '\n'.join(extract_function(source, sig) for sig in (
+            'function programText(',
+            'function programVersionLabel(',
+            'function programChangesHtml(',
+            'function programPopupPhase(',
+            'function renderProgramPopup(',
+            'function renderProgram(',
+        ))
+        ui_script = r'''
+const assert = require('node:assert/strict');
+const makeEl = () => ({
+  hidden: false, disabled: false, inert: false, textContent: '', innerHTML: '',
+  attrs: {}, classes: new Set(),
+  classList: { remove(c) {}, add(c) {}, contains() { return false; } },
+  setAttribute(k, v) { this.attrs[k] = v; },
+  querySelector() { return this.span || (this.span = {textContent: ''}); },
+});
+const els = {};
+const $ = id => els[id] || (els[id] = makeEl());
+const escape = s => String(s || '');
+const feedbackButton = () => '';
+const appendFeedback = () => {};
+const setTask = () => {};
+const clearTask = () => {};
+const positionProgramPopup = () => {};
+const prefersReducedMotion = () => true;
+const renderHomeTodos = () => {};
+let homeVisible = false, writeBusy = false, programFailedAction = '', programActionRunning = false;
+let programPopupHideTimer = null;
+const programPopupDismissed = new Set();
+let programUpdate = {};
+''' + render_fns + r'''
+// 1. Non-retryable apply failure (version_verified=false) shows 「重新检查」, not 「重试升级」,
+//    and empty current_version with a current date shows 「暂未读到版本」 instead of v2026.11.19.
+programUpdate = {
+  running: false, phase: 'error', available: false, write_allowed: true,
+  failed_action: 'apply', can_retry_apply: false, target: 'abc',
+  current: '2026-11-19T00:00:00Z', current_version: '',
+  latest: '2026-11-19T00:00:00Z', latest_version: 'v1.0.0-2222222',
+  message: '新版已写入，但未能核实安装后的版本', error: '新版文件已写入，但未能核实安装后的版本，请刷新页面或重新检查。',
+};
+renderProgram();
+assert.equal($('program-popup-action').textContent, '重新检查');
+assert.ok($('program-version').textContent.includes('暂未读到版本'), $('program-version').textContent);
+assert.ok(!$('program-version').textContent.includes('v2026.11.19'), $('program-version').textContent);
+assert.ok($('program-popup-body').innerHTML.includes('暂未读到版本'), $('program-popup-body').innerHTML);
+assert.ok(!$('program-popup-body').innerHTML.includes('v2026.11.19'), $('program-popup-body').innerHTML);
+
+// 2. Retryable apply failure (can_retry_apply=true) still offers 「重试升级」.
+programUpdate.can_retry_apply = true;
+renderProgramPopup();
+assert.equal($('program-popup-action').textContent, '重试升级');
+'''
+        ui_result = subprocess.run(['node', '-'], input=ui_script, capture_output=True, text=True, encoding='utf-8', timeout=15)
+        self.assertEqual(ui_result.returncode, 0, ui_result.stdout + ui_result.stderr)
 
     def test_zip_official_file_verification_and_private_files(self):
         with patch.object(self_update, 'run_installer'):
@@ -887,8 +984,26 @@ const api = async (path) => {
         with patch.object(self_update, 'run_installer'):
             applied_unmanaged = self_update.apply(unmanaged_review, self.home, self.code)
         self.assertFalse(applied_unmanaged['version_verified'])
+        self.assertTrue(applied_unmanaged['has_unmanaged_files'])
         self.assertNotEqual(applied_unmanaged['installed_version'], applied_unmanaged['pending_version'])
         extra_code.unlink()
+
+        # 6. Checkout fast-return rejects local modifications made while ls-remote is in flight
+        #    so modified local files are never echoed as both current_version and latest_version.
+        with patch.object(self_update, 'run_installer'):
+            make_fixture(self, checkout=True)
+        original_git = self_update.git
+
+        def mutate_during_ls_remote(project, *args, **kwargs):
+            output = original_git(project, *args, **kwargs)
+            if args and args[0] == 'ls-remote':
+                readme_path = self.code / 'README.md'
+                readme_path.write_text(readme_path.read_text(encoding='utf-8') + '\nlocal edit mid-check\n', encoding='utf-8')
+            return output
+
+        with patch.object(self_update, 'git', side_effect=mutate_during_ls_remote):
+            with self.assertRaisesRegex(ValueError, '检查期间发生了改动'):
+                self_update.check(self.home, self.code)
 
     def test_program_work_run_id_atomic_dict_and_snapshot_isolation(self):
         with patch.dict(os.environ, {'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '0'}):
