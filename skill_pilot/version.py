@@ -338,7 +338,7 @@ def read_git_tree_version(project, revision):
         return ''
     try:
         listed = subprocess.run(
-            ['git', '-C', str(project), 'ls-tree', '-r', '-z', revision.strip()],
+            ['git', '--no-replace-objects', '-C', str(project), 'ls-tree', '-r', '-z', revision.strip()],
             env=_git_env(), stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
@@ -364,7 +364,7 @@ def read_git_tree_version(project, revision):
     batch_input = ('\n'.join(oid for _, oid in entries) + '\n').encode('ascii')
     try:
         batched = subprocess.run(
-            ['git', '-C', str(project), 'cat-file', '--batch'],
+            ['git', '--no-replace-objects', '-C', str(project), 'cat-file', '--batch'],
             env=_git_env(), input=batch_input, capture_output=True, timeout=10,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )

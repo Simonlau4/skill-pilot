@@ -212,12 +212,12 @@ def check(home, project=PROJECT):
         raise ValueError('没能读取 SP 的最新版本，请检查网络后重试。')
     target = remote[0]
     if before['checkout'] and target == before.get('revision'):
+        official_latest = read_git_tree_version(project, target)
         end_build = read_build(project)
         if (git(project, 'status', '--porcelain', '--untracked-files=normal')
                 or git(project, 'rev-parse', 'HEAD') != before['revision']
                 or end_build['version'] != start_build['version']):
             raise ValueError('SP 程序文件在检查期间发生了改动，已保留当前版本。请先确认本地文件后再重新检查更新。')
-        official_latest = read_git_tree_version(project, target)
         return {'before': before, 'target': target, 'current': before.get('date', ''),
                 'latest': before.get('date', ''), 'current_version': end_build['version'],
                 'latest_version': official_latest, 'available': False, 'temporary': '',
@@ -421,6 +421,7 @@ def apply(review, home, project=PROJECT):
     actual_version = ''
     version_verified = False
     has_unmanaged_files = False
+    verify_error_id = ''
     try:
         actual_version = read_build(project)['version']
         version_verified = bool(installed_version and actual_version and actual_version == installed_version)
@@ -433,11 +434,20 @@ def apply(review, home, project=PROJECT):
                 for path in (project / directory).rglob('*')
                 if path.is_file() and is_official_path(rel := path.relative_to(project).as_posix())
             )
-    except Exception:
+    except Exception as verify_error:
         actual_version = ''
         version_verified = False
         has_unmanaged_files = False
+        try:
+            failure = ValueError('新版文件已写入，但未能核实安装后的版本，请刷新页面或重新检查。')
+            failure.diagnostic_detail = f'程序升级后版本核对失败：{type(verify_error).__name__}'
+            failure.__cause__ = verify_error
+            captured = record_failure(home, 'apply', failure) or {}
+            verify_error_id = captured.get('error_id', '')
+        except Exception:
+            verify_error_id = ''
     return {'available': False, 'current': review['latest'], 'latest': review['latest'],
             'latest_version': installed_version, 'pending_version': installed_version,
             'installed_version': actual_version, 'version_verified': version_verified,
-            'has_unmanaged_files': has_unmanaged_files}
+            'has_unmanaged_files': has_unmanaged_files,
+            **({'error_id': verify_error_id} if verify_error_id else {})}

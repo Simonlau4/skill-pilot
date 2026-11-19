@@ -1119,6 +1119,7 @@ class Dashboard(ThreadingHTTPServer):
                             'phase': 'error',
                             'message': verify_message,
                             'error': verify_error,
+                            'error_id': result.get('error_id', ''),
                             'current_version': self.running_version,
                             'latest_version': pending_version,
                             'pending_version': '',

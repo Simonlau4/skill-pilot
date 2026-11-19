@@ -659,11 +659,13 @@ class VersionFormatAndReadTests(unittest.TestCase):
             with patch.object(self_update, 'apply', return_value={
                     'available': False, 'current': '2026-11-19', 'latest': '2026-11-19',
                     'latest_version': 'v1.0.0-9999999', 'pending_version': 'v1.0.0-9999999',
-                    'installed_version': '', 'version_verified': False, 'has_unmanaged_files': False}):
+                    'installed_version': '', 'version_verified': False, 'has_unmanaged_files': False,
+                    'error_id': 'e' * 32}):
                 dashboard.program_work('apply', automatic=False)
             self.assertEqual(dashboard.program_progress['phase'], 'error')
             self.assertIsNone(dashboard.program_review)
             self.assertFalse(dashboard.program_progress['can_retry_apply'])
+            self.assertEqual(dashboard.program_progress['error_id'], 'e' * 32)
             self.assertIn('未能核实安装后的版本', dashboard.program_progress['error'])
             self.assertNotIn('额外文件', dashboard.program_progress['error'])
 
@@ -1020,8 +1022,8 @@ assert.equal($('program-popup-action').textContent, '重试升级');
         self.assertNotEqual(applied_unmanaged['installed_version'], applied_unmanaged['pending_version'])
         extra_code.unlink()
 
-        # 5b. Post-write read_build() exception inside apply() must be caught and return
-        #     version_verified=False, has_unmanaged_files=False (never re-raise into retryable error).
+        # 5b. Post-write read_build() exception inside apply() must be caught, record sanitized diagnostics
+        #     with error_id, and return version_verified=False, has_unmanaged_files=False.
         readme.write_text(readme.read_text(encoding='utf-8') + '\npost-write exception release\n', encoding='utf-8')
         commit(self.upstream, 'Post-write exception release')
         post_err_review = self_update.check(self.home, self.code)
@@ -1034,13 +1036,33 @@ assert.equal($('program-popup-action').textContent, '重试升级');
         self.assertFalse(applied_post_err['version_verified'])
         self.assertFalse(applied_post_err['has_unmanaged_files'])
         self.assertEqual(applied_post_err['installed_version'], '')
+        self.assertTrue(applied_post_err.get('error_id'))
+        recent_rows = diagnostics.recent(self.home)
+        matched_diag = next((row for row in recent_rows if row.get('error_id') == applied_post_err['error_id']), None)
+        self.assertIsNotNone(matched_diag)
+        self.assertEqual(matched_diag['environment']['app_version'], diagnostics.RUNNING_BUILD['app_version'])
 
         # 6. Checkout fast-return computes latest_version independently from git commit tree `target`
-        #    so --skip-worktree modified files (empty git status) are never echoed as latest_version,
-        #    and mid-check modifications during ls-remote are rejected.
+        #    (ignoring local `git replace` objects and --skip-worktree edits), and detects mid-check
+        #    modifications made during ls-remote OR during read_git_tree_version.
         with patch.object(self_update, 'run_installer'):
             make_fixture(self, checkout=True)
+        head_rev = git(self.code, 'rev-parse', 'HEAD')
         official_checkout_version = app_version.read_build(self.code)['version']
+        orig_blob = git(self.code, 'rev-parse', 'HEAD:README.md')
+        fake_blob = subprocess.run(
+            ['git', '-C', str(self.code), 'hash-object', '-w', '--stdin'],
+            input='replaced official readme\n', capture_output=True, text=True, encoding='utf-8', check=True,
+        ).stdout.strip()
+        git(self.code, 'replace', orig_blob, fake_blob)
+        try:
+            self.assertEqual(app_version.read_git_tree_version(self.code, head_rev), official_checkout_version)
+            replace_check = self_update.check(self.home, self.code)
+            self.assertEqual(replace_check['latest_version'], official_checkout_version)
+            self.assertEqual(replace_check['current_version'], official_checkout_version)
+        finally:
+            git(self.code, 'replace', '-d', orig_blob)
+
         git(self.code, 'update-index', '--skip-worktree', 'README.md')
         readme_path = self.code / 'README.md'
         original_readme = readme_path.read_text(encoding='utf-8')
@@ -1053,6 +1075,20 @@ assert.equal($('program-popup-action').textContent, '重试升级');
         finally:
             readme_path.write_text(original_readme, encoding='utf-8')
             git(self.code, 'update-index', '--no-skip-worktree', 'README.md')
+
+        original_read_tree = self_update.read_git_tree_version
+
+        def mutate_during_read_tree(project, revision):
+            version = original_read_tree(project, revision)
+            readme_path.write_text(original_readme + '\nlocal edit during tree read\n', encoding='utf-8')
+            return version
+
+        try:
+            with patch.object(self_update, 'read_git_tree_version', side_effect=mutate_during_read_tree):
+                with self.assertRaisesRegex(ValueError, '检查期间发生了改动'):
+                    self_update.check(self.home, self.code)
+        finally:
+            readme_path.write_text(original_readme, encoding='utf-8')
 
         original_git = self_update.git
 
