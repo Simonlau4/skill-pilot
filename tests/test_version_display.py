@@ -158,7 +158,7 @@ class VersionFormatAndReadTests(unittest.TestCase):
                     [sys.executable, '-B', '-c',
                      'import json; from skill_pilot import diagnostics, version; '
                      'print(json.dumps({"v": version.RUNNING_BUILD["version"], "d": diagnostics.RUNNING_BUILD["app_version"]}))'],
-                    cwd=code, capture_output=True, text=True, timeout=20)
+                    cwd=code, capture_output=True, text=True, encoding='utf-8', timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 parsed = json.loads(result.stdout)
                 self.assertEqual(parsed['v'], expected_local)
@@ -169,7 +169,7 @@ class VersionFormatAndReadTests(unittest.TestCase):
         doctor = subprocess.run(
             [sys.executable, '-B', '-m', 'skill_pilot', 'doctor', '--json'],
             cwd=code, env={**os.environ, 'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '1'},
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, encoding='utf-8', timeout=20)
         self.assertEqual(doctor.returncode, 0, doctor.stderr)
         self.assertEqual(json.loads(doctor.stdout)['environment']['app_version'], expected_local)
         with self.assertRaises(ValueError) as caught:
@@ -588,7 +588,7 @@ const api = async (path) => {
   assert.equal(programFailedAction, '');
 })().catch(e => { console.error(e); process.exitCode = 1; });
 '''
-        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True, encoding='utf-8', timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_zip_official_file_verification_and_private_files(self):
