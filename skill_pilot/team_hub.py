@@ -599,11 +599,12 @@ class HubStore:
         except OSError:
             raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
 
-    def _write_feedback_attachments(self, attachments):
+    def _write_feedback_attachments(self, attachments, protected_files=()):
         if not attachments:
             return []
         folder = self._feedback_attachment_dir()
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        protected = set(protected_files)
         created = []
         try:
             for item in attachments:
@@ -622,7 +623,8 @@ class HubStore:
             return created
         except OSError:
             for path in created:
-                path.unlink(missing_ok=True)
+                if path.name not in protected:
+                    path.unlink(missing_ok=True)
             raise
 
     def _feedback(self):
@@ -756,12 +758,19 @@ class HubStore:
         self._trim_feedback_rows([*rows, row], protected=(row_id,), reject_if_full=True)
         rows = self._evict_attachments_for_budget(rows, attachments)
         next_rows = self._trim_feedback_rows([*rows, row], protected=(row_id,), reject_if_full=True)
-        created = self._write_feedback_attachments(attachments)
+        existing_used = {
+            att['file']
+            for item in rows
+            for att in item.get('attachments', ())
+            if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str)
+        }
+        created = self._write_feedback_attachments(attachments, protected_files=existing_used)
         try:
             atomic_write(self.data / 'feedback.json', next_rows)
         except OSError:
             for path in created:
-                path.unlink(missing_ok=True)
+                if path.name not in existing_used:
+                    path.unlink(missing_ok=True)
             raise
         self._in_flight_feedback.add(row_id)
         # Commit succeeded; cleanup of obsolete files is best-effort and never rolls back new files.
@@ -786,7 +795,14 @@ class HubStore:
         path = self._feedback_attachment_dir() / f'{digest}.{ext}'
         if not path.is_file():
             raise HubError(404, '没有找到这张反馈截图，或已被清理。')
-        return path.open('rb'), path.stat().st_size, kind, f'feedback-{row_id[:8]}-{digest[:8]}.{ext}'
+        try:
+            with path.open('rb') as stream:
+                raw = stream.read(feedback.MAX_ATTACHMENT_BYTES + 1)
+        except FileNotFoundError:
+            raise HubError(404, '没有找到这张反馈截图，或已被清理。') from None
+        if len(raw) > feedback.MAX_ATTACHMENT_BYTES:
+            raise HubError(500, '截图留底文件异常，请联系管理员检查。')
+        return raw, kind, f'feedback-{row_id[:8]}-{digest[:8]}.{ext}'
 
     def finish_feedback(self, row_id, state):
         with self.locked():
@@ -1352,9 +1368,17 @@ class Handler(BaseHTTPRequestHandler):
         store = self.server.store
         with store.locked():
             member = store._authenticate(self.headers.get('Authorization', ''))
-            stream, size, kind, filename = store._feedback_attachment_file(member['id'], row_id, digest)
-        self._send_file(stream, size, kind, attachment=True, filename=filename,
-                        csp="default-src 'none'; sandbox")
+            raw, kind, filename = store._feedback_attachment_file(member['id'], row_id, digest)
+        # File handle is already closed before writing to the network so unlinked evicted files free disk immediately.
+        self.send_response(200)
+        self.send_header('Content-Type', kind)
+        self.send_header('Content-Length', str(len(raw)))
+        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Content-Security-Policy', "default-src 'none'; sandbox")
+        self.end_headers()
+        self.wfile.write(raw)
 
     def _send_file(self, stream, size, kind, range_header=None, attachment=False, filename=None, csp=None):
         # Stream outside the data lock; the version was checked when opening the file.

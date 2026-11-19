@@ -568,6 +568,11 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         jpeg_bad_sos_comp[sos_pos + 4 + 1] = 9
         jpeg_missing_dht_ref = bytearray(clean_jpeg)
         jpeg_missing_dht_ref[sos_pos + 4 + 2] = 0x33
+        dht_pos = clean_jpeg.index(b'\xff\xc4')
+        # First DHT table in clean_jpeg has 12 symbols total: set counts[0]=3 (3 1-bit codes -> violates Kraft).
+        jpeg_bad_kraft_dht = bytearray(clean_jpeg)
+        jpeg_bad_kraft_dht[dht_pos + 5] = 3
+        jpeg_bad_kraft_dht[dht_pos + 6:dht_pos + 21] = bytes([9] + [0] * 14)
         fake_webp_vp8 = b'RIFF' + struct.pack('<I', 20) + b'WEBP' + b'VP8 ' + struct.pack('<I', 8) + b'\x00' * 8
         vp8_header_only_data = b'\x10\x00\x00\x9d\x01\x2a\x01\x00\x01\x00'
         vp8_header_only = b'RIFF' + struct.pack('<I', 12 + len(vp8_header_only_data)) + b'WEBP' + b'VP8 ' + struct.pack('<I', len(vp8_header_only_data)) + vp8_header_only_data
@@ -599,6 +604,7 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             ('jpeg_missing_dqt_ref', encode_shot(bytes(jpeg_missing_dqt_ref), 'image/jpeg')),
             ('jpeg_bad_sos_comp', encode_shot(bytes(jpeg_bad_sos_comp), 'image/jpeg')),
             ('jpeg_missing_dht_ref', encode_shot(bytes(jpeg_missing_dht_ref), 'image/jpeg')),
+            ('jpeg_bad_kraft_dht', encode_shot(bytes(jpeg_bad_kraft_dht), 'image/jpeg')),
             ('fake_webp_bad_sync', encode_shot(fake_webp_vp8, 'image/webp')),
             ('raw_unconverted_webp', encode_shot(make_webp(), 'image/webp')),
             ('vp8_header_only', encode_shot(vp8_header_only, 'image/webp')),
@@ -1196,13 +1202,36 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
                 'attachments': [shot_corrupt_target]}, hub=True)
             self.assertEqual(rep_ok, 200)
         self.assertEqual(corrupt_path.read_bytes(), img_corrupt_target)
-        # 10. Preview cache full (20 MB or 100 entries all sending) does NOT write into cache,
-        #     but still returns 200 with full sanitized payload and can_send=False so copy/export works.
+        # Same-size corrupted file replaced by a new submission whose feedback.json write fails MUST keep repaired file
+        # intact because an existing committed record still references it.
+        same_size_corrupt = b'\x00' * len(img_corrupt_target)
+        corrupt_path.write_bytes(same_size_corrupt)
+        real_os_replace = team_hub.os.replace
+        def fail_fb_json_replace(src, dst):
+            if Path(dst).name == 'feedback.json':
+                raise OSError('模拟写盘失败')
+            return real_os_replace(src, dst)
+        with patch.object(team_hub.os, 'replace', side_effect=fail_fb_json_replace), \
+                patch.object(feedback, 'forward') as send_rb:
+            rb_code, _ = self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-corrupt-rollback', 'fingerprint': 'fp-corrupt-rollback',
+                'attachments': [shot_corrupt_target]}, hub=True)
+            self.assertEqual(rb_code, 500)
+            send_rb.assert_not_called()
+        self.assertEqual(corrupt_path.read_bytes(), img_corrupt_target)
+        # Verify download returns bytes directly (file handle already closed before network send).
+        rows_now = json.loads(fb_path.read_text(encoding='utf-8'))
+        owner_row = next(r for r in rows_now if r['payload']['error_id'] == 'err-corrupt-replace-ok')
+        with self.hub.store.locked():
+            raw_dl, mime_dl, _ = self.hub.store._feedback_attachment_file(self.member['id'], owner_row['id'], sha_corrupt_target)
+        self.assertIsInstance(raw_dl, bytes)
+        self.assertEqual(raw_dl, img_corrupt_target)
+        self.assertEqual(mime_dl, 'image/png')
+        # 10a. Preview byte cap (20 MB) with all entries sending: does NOT cache new screenshot preview,
+        #      returns 200 with full sanitized payload, and preserves original non-sendable reason in read-only mode.
         clean_a_size = len(feedback.sanitize_image(img_a, 'image/png'))
         orig_cap = self.dashboard.feedback_preview_max_bytes
-        orig_entries = self.dashboard.feedback_preview_max_entries
         self.dashboard.feedback_preview_max_bytes = clean_a_size * 2 + 10
-        self.dashboard.feedback_preview_max_entries = 2
         try:
             self.dashboard.feedback_previews.clear()
             p_cap1 = self.preview(attachments=[shot_a])
@@ -1218,7 +1247,6 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
                 s2 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': p_cap2['ticket']})
                 cap_barrier.wait(5)
                 try:
-                    # 3rd screenshot preview exceeds 20 MB while both are sending -> 200 fallback, not cached.
                     over_code, over_res = self.request('/api/diagnostics/preview', {
                         'error_id': self.row['error_id'], 'attachments': [shot_a]})
                     self.assertEqual(over_code, 200, over_res)
@@ -1232,7 +1260,37 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
                         for entry in self.dashboard.feedback_previews.values()
                     )
                     self.assertLessEqual(cached_total, self.dashboard.feedback_preview_max_bytes)
-                    # Plain-text preview when all max_entries slots are sending STILL returns 200 with full sanitized payload!
+                    # Plain-text preview still fits under entry cap and succeeds with a ticket.
+                    plain_code, plain_res = self.request('/api/diagnostics/preview', {'error_id': self.row['error_id']})
+                    self.assertEqual(plain_code, 200, plain_res)
+                    self.assertTrue(plain_res['can_send'])
+                    self.assertTrue(plain_res['ticket'])
+                    self.request('/api/diagnostics/preview-discard', {'ticket': plain_res['ticket']})
+                finally:
+                    cap_release.set()
+                self.assertEqual(s1.result(), (200, {'submitted': True}))
+                self.assertEqual(s2.result(), (200, {'submitted': True}))
+        finally:
+            self.dashboard.feedback_preview_max_bytes = orig_cap
+        # 10b. Preview entry cap (100 entries) with all entries sending: plain-text preview still returns 200 with
+        #      full sanitized payload; read-only mode keeps its original read-only reason instead of cache-full text.
+        orig_entries = self.dashboard.feedback_preview_max_entries
+        self.dashboard.feedback_preview_max_entries = 2
+        try:
+            self.dashboard.feedback_previews.clear()
+            p_ent1 = self.preview()
+            p_ent2 = self.preview()
+            ent_barrier = threading.Barrier(3)
+            ent_release = threading.Event()
+            def hold_ent_submit(home, prepared):
+                ent_barrier.wait(5)
+                self.assertTrue(ent_release.wait(5))
+                return {'submitted': True}
+            with patch.object(team, 'submit_feedback', side_effect=hold_ent_submit), ThreadPoolExecutor(max_workers=2) as pool:
+                e1 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': p_ent1['ticket']})
+                e2 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': p_ent2['ticket']})
+                ent_barrier.wait(5)
+                try:
                     text_code, text_res = self.request('/api/diagnostics/preview', {'error_id': self.row['error_id']})
                     self.assertEqual(text_code, 200, text_res)
                     self.assertEqual(text_res['ticket'], '')
@@ -1240,12 +1298,17 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
                     self.assertIn('复制', text_res['reason'])
                     self.assertEqual(text_res['payload']['error_id'], self.row['error_id'])
                     self.assertEqual(len(self.dashboard.feedback_previews), 2)
+                    with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
+                        ro_code, ro_res = self.request('/api/diagnostics/preview', {'error_id': self.row['error_id']})
+                    self.assertEqual(ro_code, 200, ro_res)
+                    self.assertEqual(ro_res['ticket'], '')
+                    self.assertFalse(ro_res['can_send'])
+                    self.assertIn('只读模式', ro_res['reason'])
                 finally:
-                    cap_release.set()
-                self.assertEqual(s1.result(), (200, {'submitted': True}))
-                self.assertEqual(s2.result(), (200, {'submitted': True}))
+                    ent_release.set()
+                self.assertEqual(e1.result(), (200, {'submitted': True}))
+                self.assertEqual(e2.result(), (200, {'submitted': True}))
         finally:
-            self.dashboard.feedback_preview_max_bytes = orig_cap
             self.dashboard.feedback_preview_max_entries = orig_entries
 
     def test_frontend_screenshot_validators_and_interactions(self):

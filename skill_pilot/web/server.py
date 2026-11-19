@@ -1443,25 +1443,31 @@ class Handler(BaseHTTPRequestHandler):
                         over_bytes = new_bytes > 0 and cached_bytes() + new_bytes > self.server.feedback_preview_max_bytes
                         if over_entries or over_bytes:
                             self.server._schedule_feedback_prune_locked()
-                            fallback = {k: v for k, v in prepared.items() if not k.startswith('_')}
-                            fallback['ticket'] = ''
-                            fallback['can_send'] = False
-                            fallback['can_attach'] = False
-                            if over_bytes:
-                                fallback['reason'] = '当前有其他带图反馈正在发送，暂无法缓存新截图预览。请稍后重试，或移除截图后复制、导出下方纯文本诊断信息。'
-                                fallback['attach_reason'] = '当前有其他带图反馈正在发送，暂无法附带新截图；可先复制或导出下方纯文本诊断信息，或稍后重试。'
-                            else:
-                                fallback['reason'] = '当前有较多反馈正在发送，暂无法直接提交。请稍后重试，或先复制、导出下方脱敏诊断信息。'
-                                fallback['attach_reason'] = '当前有较多反馈正在发送，暂无法附带新截图；可先复制或导出下方纯文本诊断信息。'
-                            self.reply(200, fallback)
-                            return
-                        self.server.feedback_previews[ticket] = {
-                            'expires': now_mono + self.server.feedback_preview_ttl,
-                            'prepared': prepared,
-                            'sending': False,
-                        }
-                        self.server._schedule_feedback_prune_locked()
-                    self.reply(200, {k: v for k, v in prepared.items() if not k.startswith('_')} | {'ticket': ticket})
+                            response = {k: v for k, v in prepared.items() if not k.startswith('_')}
+                            response['ticket'] = ''
+                            if response.get('can_send'):
+                                response['can_send'] = False
+                                response['reason'] = (
+                                    '当前有其他带图反馈正在发送，暂无法缓存新截图预览。请稍后重试，或移除截图后复制、导出下方纯文本诊断信息。'
+                                    if over_bytes else
+                                    '当前有较多反馈正在发送，暂无法直接提交。请稍后重试，或先复制、导出下方脱敏诊断信息。'
+                                )
+                            if response.get('can_attach'):
+                                response['can_attach'] = False
+                                response['attach_reason'] = (
+                                    '当前有其他带图反馈正在发送，暂无法附带新截图；可先复制或导出下方纯文本诊断信息，或稍后重试。'
+                                    if over_bytes else
+                                    '当前有较多反馈正在发送，暂无法附带新截图；可先复制或导出下方纯文本诊断信息。'
+                                )
+                        else:
+                            self.server.feedback_previews[ticket] = {
+                                'expires': now_mono + self.server.feedback_preview_ttl,
+                                'prepared': prepared,
+                                'sending': False,
+                            }
+                            self.server._schedule_feedback_prune_locked()
+                            response = {k: v for k, v in prepared.items() if not k.startswith('_')} | {'ticket': ticket}
+                    self.reply(200, response)
                 elif path.endswith('/submit'):
                     ticket_key = body.get('ticket')
                     with self.server.feedback_lock:
