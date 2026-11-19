@@ -596,8 +596,9 @@ function jobNewSessionAgents(job) {
   if (job.status !== 'done' && !(job.completed?.length || job.updated?.length)) return [];
   const ops = job.operations || [];
   if (!ops.length) return job.new_session_agents || [];
+  const serverUndone = new Set(job.undone_operations || []);
   const logsById = new Map((state.logs || []).map(record => [record.id, record]));
-  const activeOps = ops.filter(id => !logsById.get(id)?.undone);
+  const activeOps = ops.filter(id => !serverUndone.has(id) && !logsById.get(id)?.undone);
   if (!activeOps.length) return [];
   const opMap = job.operation_new_session_agents || null;
   const hasPerOp = activeOps.every(id => (opMap && Object.prototype.hasOwnProperty.call(opMap, id))
@@ -642,7 +643,9 @@ function jobStatusLine(job) {
 /* 操作记录里已经撤销过的条目不再给「撤销」，免得重复点。 */
 function jobUndoAvailable(job) {
   if (!(job.operations || []).length) return false;
+  const serverUndone = new Set(job.undone_operations || []);
   return job.operations.some(id => {
+    if (serverUndone.has(id)) return false;
     const record = (state.logs || []).find(item => item.id === id);
     return !record || !record.undone;
   });

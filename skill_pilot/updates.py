@@ -378,7 +378,7 @@ def _validate_name(incoming, local):
         raise ValueError('新版技能的名称与本机不同，请先核对。')
 
 
-def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_lark=False):
+def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_lark=False, progress=None):
     if not confirmed:
         raise ValueError('请先核对选中的更新，再确认执行。')
     home, registry, _ = operations.load(review['home'])
@@ -407,6 +407,10 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
         except operations.RollbackError as error:
             error.operations = completed
             error.updated = updated
+            error.new_session_agents = [a for item in completed for a in item.get('new_session_agents', [])]
+            error.operation_new_session_agents = {
+                item['id']: list(item.get('new_session_agents') or []) for item in completed if item.get('id')
+            }
             raise
         except (ValueError, OSError) as error:
             if len(names) == 1:
@@ -417,10 +421,25 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
                 failed.append({'name': name, 'error': reason, **captured})
                 if name in by_name:
                     by_name[name].update(update_error=reason, status='没更新')
+        except Exception as error:
+            if completed:
+                error.operations = completed
+                error.updated = updated
+                error.new_session_agents = [a for item in completed for a in item.get('new_session_agents', [])]
+                error.operation_new_session_agents = {
+                    item['id']: list(item.get('new_session_agents') or []) for item in completed if item.get('id')
+                }
+            raise
         else:
             completed.append({**result, 'skills': group})
             updated.extend(group)
             normalization_results.update(result['normalization'])
+            if progress is not None:
+                agents_for_op = list(result.get('new_session_agents') or [])
+                progress['operations'].append(result['id'])
+                progress['updated'].extend(group)
+                progress['new_session'].extend(agents_for_op)
+                progress['by_op'][result['id']] = agents_for_op
     new_session = profiles.new_session_agents(
         [a['id'] for item in completed for a in item.get('new_session_agents', [])],
         review['home'],
