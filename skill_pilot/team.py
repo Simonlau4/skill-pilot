@@ -306,6 +306,9 @@ def _catalog(config):
         if has_installs and (not isinstance(data['my_installs'], list) or
                             any(not isinstance(key, str) for key in data['my_installs'])):
             raise ValueError
+        if 'my_all_installs' in data and (not has_installs or not isinstance(data['my_all_installs'], list) or
+                                          any(not isinstance(key, str) for key in data['my_all_installs'])):
+            raise ValueError
         result, seen = [], set()
         for card in data['cards']:
             if (not isinstance(card, dict) or not isinstance(card.get('key'), str) or card['key'] in seen or
@@ -342,6 +345,8 @@ def _catalog(config):
         catalog = {'cards': sorted(result, key=lambda c: c['listings'][0]['updated_at'], reverse=True)}
         if has_installs:
             catalog['my_installs'] = data['my_installs']
+        if 'my_all_installs' in data:
+            catalog['my_all_installs'] = data['my_all_installs']
         if 'packs' in data:
             if not isinstance(data['packs'], list):
                 raise ValueError
@@ -466,17 +471,39 @@ def _plan(card, cards, registry):
     return install, reuse, []
 
 
+def _counted_local(card, row, state, local_name, registry):
+    if state in {'installed', 'update'}:
+        return not registry['skills'].get(local_name, {}).get('withdrawn')
+    if state == 'external':
+        return True
+    if state != 'conflict':
+        return False
+    skill = registry['skills'].get(local_name, {})
+    if skill.get('withdrawn'):
+        return False
+    origin = _origin(skill)
+    source = row['source']
+    if origin['kind'] == 'team' and source['kind'] == 'files' and origin['key'] != card['key']:
+        return False
+    if origin['kind'] == 'github' and source['kind'] == 'github':
+        return (origin['repository'].lower() == source['repository'].lower() and
+                PurePosixPath(origin['path']) == PurePosixPath(source['path']))
+    return True
+
+
 def catalog(home):
     config = _connection(home)
     member = _me(config)
     data = _catalog(config)
     cards = data['cards']
     _, registry, _ = operations.load(home)
+    has_all = 'my_all_installs' in data
     result, current = [], set()
     for card in cards:
         row = card['listings'][0]
         state, local_name = _local(row, registry)
         mine = any(r['member']['id'] == member['id'] for r in card['listings'])
+        counted = _counted_local(card, row, state, local_name, registry)
         reason = ''
         if mine:
             state = 'mine'
@@ -487,7 +514,7 @@ def catalog(home):
                 reason = next(r['reason'] for r in skipped if r['name'] == row['name'])
         if state in {'lark', 'conflict', 'external'}:
             reason = LOCAL_LABELS[state] + '。'
-        if state in {'installed', 'update'} and not registry['skills'].get(local_name, {}).get('withdrawn'):
+        if counted and (has_all or not mine):
             current.add(card['key'])
         local = {'status': state, 'label': LOCAL_LABELS[state], 'reason': reason,
                  'agents': registry['skills'].get(local_name, {}).get('assigned_agents', [])}
@@ -526,16 +553,17 @@ def catalog(home):
         if 'installs' in card:
             result[-1]['installs'] = card['installs']
     if 'my_installs' in data and store.write_allowed(home):
-        previous = set(data['my_installs'])
+        previous = set(data['my_all_installs'] if has_all else data['my_installs'])
         if current != previous:
+            payload = {'keys': sorted(current), **({'include_mine': True} if has_all else {})}
             try:
-                _request(config, '/api/installs/me', 'PUT', {'keys': sorted(current)})
+                _request(config, '/api/installs/me', 'PUT', payload)
             except (ValueError, OSError):
                 pass
             else:
                 for card in result:
                     key = card['key']
-                    counted_before = key in previous and card['local']['status'] != 'mine'
+                    counted_before = key in previous and (has_all or card['local']['status'] != 'mine')
                     card['installs'] = max(0, card['installs'] - counted_before + (key in current))
     indexed = {c['key']: c for c in result}
     packs = []
@@ -1356,6 +1384,11 @@ def install_named(home, name, author=None, agents=(), confirmed=False):
         result.update(installed=installed['installed'], reuse=installed['reuse'], message=installed['message'])
         if 'id' in installed:
             result['operations'].append(installed['id'])
+        if installed['installed']:
+            try:
+                catalog(home)
+            except (ValueError, OSError):
+                pass
     if agents:
         assigned = operations.apply_assign([{'skill': plan['name'], 'agent': a, 'enabled': True} for a in agents],
                                            confirmed=True, home=home)

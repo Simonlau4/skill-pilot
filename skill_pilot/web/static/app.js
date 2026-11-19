@@ -1200,7 +1200,7 @@ const state = {
   team: null,          // /api/team：有没有连上分享站、我是谁
   store: null,         // /api/team/catalog：团队技能商店的全部卡片；null 是还没读
   storeError: '',
-  storeSort: 'latest', // 全部技能的排序：latest / rating / popular
+  storeSort: 'latest', // 全部技能的排序：latest / rating / installs
   storeGroup: '',      // 选中的分组；'-' 是没分组
   storeMine: false,    // 只看我上架的
   storeDetail: null,   // 详情面板里正在看的卡片编号或技能包编号（pack: 开头）
@@ -3494,10 +3494,11 @@ function forgetCandidates() {
 
 const storeTime = card => Date.parse(card.updated_at) || 0;
 const storeScore = card => card.rating?.count ? card.rating.average : -1;
+const storeInstalls = card => Number.isInteger(card.installs) ? card.installs : 0;
 const STORE_SORTS = {
   latest: (a, b) => storeTime(b) - storeTime(a),
   rating: (a, b) => storeScore(b) - storeScore(a) || (b.rating?.count || 0) - (a.rating?.count || 0) || storeTime(b) - storeTime(a),
-  popular: (a, b) => b.listings.length - a.listings.length || storeScore(b) - storeScore(a) || storeTime(b) - storeTime(a),
+  installs: (a, b) => storeInstalls(b) - storeInstalls(a) || b.listings.length - a.listings.length || storeScore(b) - storeScore(a) || storeTime(b) - storeTime(a),
 };
 
 function storeFilter(cards, {query = '', group = '', mine = false} = {}) {
@@ -3789,8 +3790,8 @@ function renderStoreQueue() {
 
 /* 几排推荐按这个顺序挑卡片；同一张卡片只出现在第一排挑中它的地方，免得几排看起来一样。 */
 const STORE_SHELVES = [
+  {sort: 'installs', title: '安装最多', pick: cards => cards.filter(card => storeInstalls(card) > 1)},
   {sort: 'rating', title: '最受好评', pick: cards => cards.filter(card => card.rating?.count)},
-  {sort: 'popular', title: '同事推荐最多', pick: cards => cards.filter(card => card.listings.length > 1)},
   {sort: 'latest', title: '最新上架', pick: cards => cards},
 ];
 const SHELF_SIZE = 4;
@@ -4679,7 +4680,7 @@ function renderStoreAll(cards) {
     `<button class="store-group" type="button" data-store-group="${escape(name)}" aria-pressed="${name === state.storeGroup}">${
       escape(name === '' ? '全部' : name === '-' ? '未分组' : name)}<span class="n">${number(count)}</span></button>`).join(''), 'data-store-group');
   $('store-groups').hidden = groups.length < 2 && !state.storeGroup;
-  const rows = storeFilter(base, {group: state.storeGroup}).sort(STORE_SORTS[state.storeSort]);
+  const rows = storeFilter(base, {group: state.storeGroup}).sort(STORE_SORTS[state.storeSort] || STORE_SORTS.latest);
   $('store-all-title').textContent = state.storeMine ? '我的上架' : query ? '搜索结果' : '全部技能';
   $('store-count').textContent = `${number(rows.length)} 个`;
   for (const button of $('store-sort').querySelectorAll('[data-store-sort]')) {
