@@ -383,7 +383,7 @@ assert(context.jobFailedHtml({status:'failed', failed:[{name:'demo', error_id:'x
         subprocess.run(['node', '-e', script], cwd=diagnostics.PROJECT, check=True, capture_output=True)
 
     def test_async_program_update_results_and_inline_errors_keep_ids(self):
-        source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text()
+        source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text(encoding='utf-8')
         functions = '\n'.join(extract_function(source, signature) for signature in (
             'async function programAction(', 'function programText(', 'function showReview(', 'function renderUpdateBar(',
             'function showDetailTagError(', 'function feedbackButton('))
@@ -419,11 +419,11 @@ const runWrite = async options => {try {return await options.work()} catch (erro
   assert(!nodes['detail-tag-error'].innerHTML.includes('data-feedback'));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
-        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, capture_output=True)
+        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, encoding='utf-8', capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_runtime_and_finished_job_errors_keep_feedback_ids(self):
-        source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text()
+        source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text(encoding='utf-8')
         functions = '\n'.join(extract_function(source, signature) for signature in (
             'async function refreshProgram(', 'function finishJobs('))
         script = r'''
@@ -443,7 +443,7 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
   assert.deepEqual(messages.map(row=>row.error_id), ['job-id','attention-id','refresh-id']);
 })().catch(error => {console.error(error);process.exitCode=1});
 '''
-        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, capture_output=True)
+        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, encoding='utf-8', capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def raw_hub_get(self, path, token=None):
@@ -906,21 +906,28 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
                 pass
             def do_GET(self):
                 old_calls.append(('GET', self.path))
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({
+                body = json.dumps({
                     'service': 'skill-pilot-team', 'api': 2,
                     'member': {k: self.member[k] for k in ('id', 'name')},
                     'feedback_supported': True, 'feedback_configured': True,
                     'feedback_attachments_supported': True,
-                }).encode())
+                }).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             def do_POST(self):
                 old_calls.append(('POST', self.path))
+                length = int(self.headers.get('Content-Length') or '0')
+                if length:
+                    self.rfile.read(length)
+                body = b'{"error":"no route"}'
                 self.send_response(404)
                 self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
-                self.wfile.write(b'{"error":"no route"}')
+                self.wfile.write(body)
         OldHub.member = self.member
         old_hub = ThreadingHTTPServer(('127.0.0.1', 0), OldHub)
         self.serve(old_hub)
@@ -1234,23 +1241,29 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         self.assertIsInstance(raw_dl, bytes)
         self.assertEqual(raw_dl, img_corrupt_target)
         self.assertEqual(mime_dl, 'image/png')
-        # Client disconnect while writing download body MUST NOT trigger a second 500 JSON response.
+        # Client disconnect while writing body OR timeout while sending headers MUST NOT trigger a second 500 JSON response.
         class BrokenWriteStream:
             def write(self, data):
                 raise BrokenPipeError('client disconnected')
-        fake_handler = team_hub.Handler.__new__(team_hub.Handler)
-        fake_handler.server = self.hub
-        fake_handler.command = 'GET'
-        fake_handler.path = f"/api/feedback/{owner_row['id']}/attachments/{sha_corrupt_target}"
-        fake_handler.headers = {'Authorization': 'Bearer ' + self.member['token']}
-        fake_handler.wfile = BrokenWriteStream()
-        sent_responses = []
-        fake_handler.send_response = lambda code, message=None: sent_responses.append(code)
-        fake_handler.send_header = lambda k, v: None
-        fake_handler.end_headers = lambda: None
-        fake_handler._json = lambda status, data: sent_responses.append(('json', status, data))
-        fake_handler._handle()
-        self.assertEqual(sent_responses, [200])
+        for mode in ('body_disconnect', 'header_timeout'):
+            fake_handler = team_hub.Handler.__new__(team_hub.Handler)
+            fake_handler.server = self.hub
+            fake_handler.command = 'GET'
+            fake_handler.path = f"/api/feedback/{owner_row['id']}/attachments/{sha_corrupt_target}"
+            fake_handler.headers = {'Authorization': 'Bearer ' + self.member['token']}
+            fake_handler.wfile = BrokenWriteStream()
+            sent_responses = []
+            fake_handler.send_response = lambda code, message=None: sent_responses.append(code)
+            fake_handler.send_header = lambda k, v: None
+            if mode == 'header_timeout':
+                def raise_header_timeout():
+                    raise TimeoutError('header send timed out')
+                fake_handler.end_headers = raise_header_timeout
+            else:
+                fake_handler.end_headers = lambda: None
+            fake_handler._json = lambda status, data: sent_responses.append(('json', status, data))
+            fake_handler._handle()
+            self.assertEqual(sent_responses, [200], mode)
         # 10a. Preview byte cap (20 MB) with all entries sending: does NOT cache new screenshot preview,
         #      returns 200 with full sanitized payload, and preserves original non-sendable reason in read-only mode.
         clean_a_size = len(feedback.sanitize_image(img_a, 'image/png'))
@@ -1625,5 +1638,5 @@ assert.equal(validateFeedbackFileBytes(png, 2, FEEDBACK_MAX_SHOTS_TOTAL - png.le
   assert.ok(calls.some(c => c.path === '/api/diagnostics/preview-discard' && c.body.ticket === activeBeforeClose));
 }})().catch(err => {{ console.error(err); process.exitCode = 1; }});
 '''
-        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, capture_output=True)
+        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, encoding='utf-8', capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
