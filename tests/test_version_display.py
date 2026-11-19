@@ -662,6 +662,7 @@ class VersionFormatAndReadTests(unittest.TestCase):
                     'installed_version': '', 'version_verified': False, 'has_unmanaged_files': False}):
                 dashboard.program_work('apply', automatic=False)
             self.assertEqual(dashboard.program_progress['phase'], 'error')
+            self.assertIsNone(dashboard.program_review)
             self.assertFalse(dashboard.program_progress['can_retry_apply'])
             self.assertIn('未能核实安装后的版本', dashboard.program_progress['error'])
             self.assertNotIn('额外文件', dashboard.program_progress['error'])
@@ -673,7 +674,8 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertEqual(dashboard.program_progress['phase'], 'error')
             self.assertTrue(dashboard.program_progress['can_retry_apply'])
 
-            # Path 1f: When running_version is empty, program_work('check') NEVER fills current_version with disk_version.
+            # Path 1f: When running_version is empty, program_work('check') NEVER fills current_version with disk_version,
+            # and neither idle static refresh nor deferred recheck fills empty running_version from disk.
             saved_dash_running = dashboard.running_version
             dashboard.running_version = ''
             try:
@@ -689,6 +691,36 @@ class VersionFormatAndReadTests(unittest.TestCase):
                         dashboard.program_work('check', automatic=auto)
                     self.assertEqual(dashboard.program_progress['current_version'], '')
                     self.assertEqual(dashboard.program_progress['phase'], expect_phase)
+
+                # Idle static refresh with empty running_version withdraws stale check and keeps running_version empty.
+                with patch.object(runtime, 'version', return_value=dashboard.code_version), \
+                        patch.object(app_version, 'read_build', return_value={
+                            'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                            'manifest_valid': True, 'version': 'v1.0.0-9999999'}):
+                    dashboard.request_reload()
+                self.assertEqual(dashboard.running_version, '')
+                self.assertEqual(dashboard.program_progress['current_version'], '')
+                self.assertEqual(dashboard.program_progress['phase'], 'idle')
+
+                # Deferred recheck overlapping with check keeps running_version empty and withdraws stale check.
+                seq_empty = dashboard.static_refresh_seq
+                dashboard.program_progress.update(
+                    running=True, phase='check', available=False, current_version='', checked_at=12345.0)
+                dashboard.program_action = 'check'
+                with patch.object(runtime, 'version', return_value=dashboard.code_version):
+                    dashboard.request_reload()
+                with patch.object(self_update, 'check', return_value={
+                        'temporary': '', 'target': 't' * 40, 'current': '2026-11-19', 'latest': '2026-11-19',
+                        'current_version': pending, 'latest_version': pending, 'available': False}), \
+                        patch.object(runtime, 'version', return_value=dashboard.code_version), \
+                        patch.object(app_version, 'read_build', return_value={
+                            'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                            'manifest_valid': True, 'version': 'v1.0.0-9999999'}):
+                    dashboard.program_work('check', automatic=False, start_refresh_seq=seq_empty)
+                self.assertEqual(dashboard.running_version, '')
+                self.assertEqual(dashboard.program_progress['current_version'], '')
+                self.assertEqual(dashboard.program_progress['phase'], 'idle')
+                self.assertNotIn('checked_at', dashboard.program_progress)
             finally:
                 dashboard.running_version = saved_dash_running
 
@@ -988,16 +1020,45 @@ assert.equal($('program-popup-action').textContent, '重试升级');
         self.assertNotEqual(applied_unmanaged['installed_version'], applied_unmanaged['pending_version'])
         extra_code.unlink()
 
-        # 6. Checkout fast-return rejects local modifications made while ls-remote is in flight
-        #    so modified local files are never echoed as both current_version and latest_version.
+        # 5b. Post-write read_build() exception inside apply() must be caught and return
+        #     version_verified=False, has_unmanaged_files=False (never re-raise into retryable error).
+        readme.write_text(readme.read_text(encoding='utf-8') + '\npost-write exception release\n', encoding='utf-8')
+        commit(self.upstream, 'Post-write exception release')
+        post_err_review = self_update.check(self.home, self.code)
+        if post_err_review['temporary']:
+            self.addCleanup(shutil.rmtree, post_err_review['temporary'], True)
+        self.assertTrue(post_err_review['available'])
+        with patch.object(self_update, 'run_installer'), \
+                patch.object(self_update, 'read_build', side_effect=RuntimeError('transient read fault')):
+            applied_post_err = self_update.apply(post_err_review, self.home, self.code)
+        self.assertFalse(applied_post_err['version_verified'])
+        self.assertFalse(applied_post_err['has_unmanaged_files'])
+        self.assertEqual(applied_post_err['installed_version'], '')
+
+        # 6. Checkout fast-return computes latest_version independently from git commit tree `target`
+        #    so --skip-worktree modified files (empty git status) are never echoed as latest_version,
+        #    and mid-check modifications during ls-remote are rejected.
         with patch.object(self_update, 'run_installer'):
             make_fixture(self, checkout=True)
+        official_checkout_version = app_version.read_build(self.code)['version']
+        git(self.code, 'update-index', '--skip-worktree', 'README.md')
+        readme_path = self.code / 'README.md'
+        original_readme = readme_path.read_text(encoding='utf-8')
+        try:
+            readme_path.write_text(original_readme + '\nskip-worktree local edit\n', encoding='utf-8')
+            self.assertEqual(git(self.code, 'status', '--porcelain', '--untracked-files=normal'), '')
+            skip_check = self_update.check(self.home, self.code)
+            self.assertEqual(skip_check['latest_version'], official_checkout_version)
+            self.assertNotEqual(skip_check['current_version'], skip_check['latest_version'])
+        finally:
+            readme_path.write_text(original_readme, encoding='utf-8')
+            git(self.code, 'update-index', '--no-skip-worktree', 'README.md')
+
         original_git = self_update.git
 
         def mutate_during_ls_remote(project, *args, **kwargs):
             output = original_git(project, *args, **kwargs)
             if args and args[0] == 'ls-remote':
-                readme_path = self.code / 'README.md'
                 readme_path.write_text(readme_path.read_text(encoding='utf-8') + '\nlocal edit mid-check\n', encoding='utf-8')
             return output
 

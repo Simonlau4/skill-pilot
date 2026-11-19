@@ -1110,7 +1110,7 @@ class Dashboard(ThreadingHTTPServer):
                     if result.get('version_verified') is False:
                         if result.get('has_unmanaged_files'):
                             verify_message = '新版已写入，但程序目录存在额外本地文件'
-                            verify_error = 'SP 新版文件已写入，但程序代码或脚本目录里存在未托管的额外文件，版本未能核对一致。请移出额外文件后刷新或重新打开看板。'
+                            verify_error = 'SP 新版文件已写入，但程序目录里存在未托管的额外文件，版本未能核对一致。请移出额外文件后刷新或重新打开看板。'
                         else:
                             verify_message = '新版已写入，但未能核实安装后的版本'
                             verify_error = '新版文件已写入，但未能核实安装后的版本，请刷新页面或重新检查。'
@@ -1168,6 +1168,8 @@ class Dashboard(ThreadingHTTPServer):
                     else:
                         if backend_changed or refresh_failed or (refreshed is not None and not refreshed.get('version')):
                             self._invalidate_stale_program_check()
+                        elif refreshed is not None and not self.running_version:
+                            self._invalidate_stale_program_check()
                         elif refreshed is not None and refreshed.get('version') != self.running_version:
                             self._reset_stale_program_check(refreshed)
                         elif refreshed is not None and checked_disk_version and refreshed.get('version') != checked_disk_version:
@@ -1177,7 +1179,12 @@ class Dashboard(ThreadingHTTPServer):
                                 self.program_review = new_review
                                 new_review = None
                             if applied_review and self.program_review:
-                                self.program_review['available'] = False
+                                if update_payload.get('phase') == 'error':
+                                    if self.program_review.get('temporary'):
+                                        rmtree(self.program_review['temporary'], ignore_errors=True)
+                                    self.program_review = None
+                                else:
+                                    self.program_review['available'] = False
                             final_updates = dict(update_payload)
                             if action == 'check':
                                 final_updates['checked_at'] = time.time()
@@ -1246,7 +1253,7 @@ class Dashboard(ThreadingHTTPServer):
                             refreshed = None
                         if runtime.version() != self.code_version:
                             changed = True
-                        elif not refreshed or not refreshed.get('version'):
+                        elif not refreshed or not refreshed.get('version') or not self.running_version:
                             self._invalidate_stale_program_check()
                         elif refreshed['version'] != self.running_version:
                             self._reset_stale_program_check(refreshed)

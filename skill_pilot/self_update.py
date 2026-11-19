@@ -15,7 +15,8 @@ from .environment import tool_environment
 from .platform_support import rmtree
 from .sources.github import git as repository_git
 from .store import PROJECT, guard, write_allowed
-from .version import OFFICIAL_DIRS, OFFICIAL_FILES, REQUIRED_FILES, format_version, is_official_path, is_safe_manifest_path, read_build
+from .version import (OFFICIAL_DIRS, OFFICIAL_FILES, REQUIRED_FILES, format_version,
+                      is_official_path, is_safe_manifest_path, read_build, read_git_tree_version)
 
 SOURCE = 'https://github.com/Simonlau4/skill-pilot.git'
 BRANCH = 'main'
@@ -216,10 +217,10 @@ def check(home, project=PROJECT):
                 or git(project, 'rev-parse', 'HEAD') != before['revision']
                 or end_build['version'] != start_build['version']):
             raise ValueError('SP 程序文件在检查期间发生了改动，已保留当前版本。请先确认本地文件后再重新检查更新。')
-        current_version = end_build['version']
+        official_latest = read_git_tree_version(project, target)
         return {'before': before, 'target': target, 'current': before.get('date', ''),
-                'latest': before.get('date', ''), 'current_version': current_version,
-                'latest_version': current_version, 'available': False, 'temporary': '',
+                'latest': before.get('date', ''), 'current_version': end_build['version'],
+                'latest_version': official_latest, 'available': False, 'temporary': '',
                 'changes': [], 'changes_total': 0, 'changes_partial': False}
     build = read_build(project)
     current_version = build['version']
@@ -417,12 +418,14 @@ def apply(review, home, project=PROJECT):
         if not retain_backup:
             rmtree(backup, ignore_errors=True)
     installed_version = review.get('latest_version') or format_version(review.get('latest', ''), review.get('target', ''))
-    actual_version = read_build(project)['version']
-    version_verified = bool(installed_version and actual_version and actual_version == installed_version)
+    actual_version = ''
+    version_verified = False
     has_unmanaged_files = False
-    if not version_verified and not before['checkout']:
-        expected_files = set(review['files'])
-        try:
+    try:
+        actual_version = read_build(project)['version']
+        version_verified = bool(installed_version and actual_version and actual_version == installed_version)
+        if not version_verified and not before['checkout']:
+            expected_files = set(review['files'])
             has_unmanaged_files = any(
                 rel not in expected_files
                 for directory in OFFICIAL_DIRS
@@ -430,8 +433,10 @@ def apply(review, home, project=PROJECT):
                 for path in (project / directory).rglob('*')
                 if path.is_file() and is_official_path(rel := path.relative_to(project).as_posix())
             )
-        except OSError:
-            has_unmanaged_files = False
+    except Exception:
+        actual_version = ''
+        version_verified = False
+        has_unmanaged_files = False
     return {'available': False, 'current': review['latest'], 'latest': review['latest'],
             'latest_version': installed_version, 'pending_version': installed_version,
             'installed_version': actual_version, 'version_verified': version_verified,

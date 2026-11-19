@@ -124,11 +124,14 @@ def _file_stamp(path):
     return [hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mode & 0o111]
 
 
-def _normalized_digest(path):
-    data = path.read_bytes()
+def _normalized_bytes_digest(data):
     if b'\0' not in data:
         data = data.replace(b'\r\n', b'\n')
     return hashlib.sha256(data).hexdigest()
+
+
+def _normalized_digest(path):
+    return _normalized_bytes_digest(path.read_bytes())
 
 
 def is_safe_manifest_path(name):
@@ -326,6 +329,76 @@ def _read_git_head(project):
     revision = lines[0] if lines and HEX_RE.fullmatch(lines[0]) else ''
     date = lines[1] if len(lines) > 1 else ''
     return revision, date
+
+
+def read_git_tree_version(project, revision):
+    """Compute the official release version directly from a git commit tree object."""
+    project = Path(project)
+    if not isinstance(revision, str) or not HEX_RE.fullmatch(revision.strip()):
+        return ''
+    try:
+        listed = subprocess.run(
+            ['git', '-C', str(project), 'ls-tree', '-r', '-z', revision.strip()],
+            env=_git_env(), stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    if listed.returncode != 0:
+        return ''
+    entries = []
+    for raw in listed.stdout.split(b'\0'):
+        if not raw or b'\t' not in raw:
+            continue
+        meta, raw_path = raw.split(b'\t', 1)
+        parts = meta.decode('ascii', 'replace').split()
+        if len(parts) != 3 or parts[1] != 'blob' or parts[0] not in ('100644', '100755'):
+            continue
+        rel = raw_path.decode('utf-8', 'surrogateescape')
+        if not is_official_path(rel):
+            continue
+        entries.append((rel, parts[2]))
+    if not entries:
+        return ''
+    entries.sort(key=lambda item: item[0])
+    batch_input = ('\n'.join(oid for _, oid in entries) + '\n').encode('ascii')
+    try:
+        batched = subprocess.run(
+            ['git', '-C', str(project), 'cat-file', '--batch'],
+            env=_git_env(), input=batch_input, capture_output=True, timeout=10,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    if batched.returncode != 0:
+        return ''
+    output = batched.stdout
+    pos = 0
+    digest = hashlib.sha256()
+    base_version = APP_VERSION
+    for rel, _ in entries:
+        nl = output.find(b'\n', pos)
+        if nl == -1:
+            return ''
+        header = output[pos:nl].decode('ascii', 'replace').split()
+        if len(header) != 3 or header[1] != 'blob':
+            return ''
+        try:
+            size = int(header[2])
+        except ValueError:
+            return ''
+        start = nl + 1
+        end = start + size
+        if end > len(output):
+            return ''
+        data = output[start:end]
+        pos = end + 1
+        if rel == 'skill_pilot/version.py':
+            match = APP_VERSION_RE.search(data.decode('utf-8', 'replace'))
+            if match:
+                base_version = match.group(1)
+        digest.update(rel.encode('utf-8') + b'\0' + _normalized_bytes_digest(data).encode('ascii') + b'\n')
+    return format_version(fallback_digest=digest.hexdigest(), base_version=base_version)
 
 
 def read_build(project=PROJECT, *, file_names=None):
