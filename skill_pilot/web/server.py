@@ -147,6 +147,7 @@ class Dashboard(ThreadingHTTPServer):
         self.feedback_prune_timer = None
         self.feedback_preview_ttl = 600
         self.feedback_preview_max_bytes = 20 * 1024 * 1024
+        self.feedback_preview_max_entries = 100
         self.jobs = []
         self.jobs_version = 0
         self.jobs_blocked = session.get('jobs_blocked', '')
@@ -1431,17 +1432,28 @@ class Handler(BaseHTTPRequestHandler):
                             return sum(sum(a['size'] for a in entry['prepared'].get('_attachments', ()))
                                        for entry in self.server.feedback_previews.values())
                         while self.server.feedback_previews and (
-                                len(self.server.feedback_previews) >= 100 or
+                                len(self.server.feedback_previews) >= self.server.feedback_preview_max_entries or
                                 cached_bytes() + new_bytes > self.server.feedback_preview_max_bytes):
                             evict_key = next((k for k, v in self.server.feedback_previews.items()
                                               if not v.get('sending')), None)
                             if evict_key is None:
                                 break
                             self.server.feedback_previews.pop(evict_key, None)
-                        if len(self.server.feedback_previews) >= 100 or (
-                                new_bytes > 0 and cached_bytes() + new_bytes > self.server.feedback_preview_max_bytes):
+                        over_entries = len(self.server.feedback_previews) >= self.server.feedback_preview_max_entries
+                        over_bytes = new_bytes > 0 and cached_bytes() + new_bytes > self.server.feedback_preview_max_bytes
+                        if over_entries or over_bytes:
                             self.server._schedule_feedback_prune_locked()
-                            self.reply(503, {'error': '当前有其他带图反馈正在发送，暂无法缓存新截图预览。请稍后重试，或移除截图后复制、导出纯文本诊断信息。'})
+                            fallback = {k: v for k, v in prepared.items() if not k.startswith('_')}
+                            fallback['ticket'] = ''
+                            fallback['can_send'] = False
+                            fallback['can_attach'] = False
+                            if over_bytes:
+                                fallback['reason'] = '当前有其他带图反馈正在发送，暂无法缓存新截图预览。请稍后重试，或移除截图后复制、导出下方纯文本诊断信息。'
+                                fallback['attach_reason'] = '当前有其他带图反馈正在发送，暂无法附带新截图；可先复制或导出下方纯文本诊断信息，或稍后重试。'
+                            else:
+                                fallback['reason'] = '当前有较多反馈正在发送，暂无法直接提交。请稍后重试，或先复制、导出下方脱敏诊断信息。'
+                                fallback['attach_reason'] = '当前有较多反馈正在发送，暂无法附带新截图；可先复制或导出下方纯文本诊断信息。'
+                            self.reply(200, fallback)
                             return
                         self.server.feedback_previews[ticket] = {
                             'expires': now_mono + self.server.feedback_preview_ttl,

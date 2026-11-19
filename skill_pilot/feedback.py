@@ -175,6 +175,7 @@ def _sanitize_png(raw):
 
 def _check_jpeg_dqt(seg_data):
     pos = 0
+    table_ids = set()
     if not seg_data:
         raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
     while pos < len(seg_data):
@@ -185,11 +186,14 @@ def _check_jpeg_dqt(seg_data):
         size = 1 + (64 if pq == 0 else 128)
         if pos + size > len(seg_data):
             raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
+        table_ids.add(tq)
         pos += size
+    return table_ids
 
 
 def _check_jpeg_dht(seg_data):
     pos = 0
+    dc_ids, ac_ids = set(), set()
     if not seg_data:
         raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
     while pos < len(seg_data):
@@ -202,7 +206,9 @@ def _check_jpeg_dht(seg_data):
         count = sum(seg_data[pos + 1:pos + 17])
         if count > 256 or pos + 17 + count > len(seg_data):
             raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+        (dc_ids if tc == 0 else ac_ids).add(th)
         pos += 17 + count
+    return dc_ids, ac_ids
 
 
 def _sanitize_jpeg(raw):
@@ -211,8 +217,11 @@ def _sanitize_jpeg(raw):
     out = [b'\xff\xd8']
     pos = 2
     sof = None
-    has_dqt = False
-    has_dht = False
+    sof_marker = None
+    sof_components = {}
+    dqt_ids = set()
+    dc_dht_ids = set()
+    ac_dht_ids = set()
     has_sos = False
     has_eoi = False
     while pos < len(raw):
@@ -250,15 +259,22 @@ def _sanitize_jpeg(raw):
             _check_dimensions(width, height)
             if precision != 8 or components not in {1, 3, 4} or len(seg_data) != 6 + 3 * components:
                 raise AttachmentError('图片格式不受支持或已损坏，请重新截图后再试。')
+            for idx in range(components):
+                comp_id, sampling, tq = seg_data[6 + 3 * idx:6 + 3 * idx + 3]
+                h_samp, v_samp = sampling >> 4, sampling & 0x0f
+                if not (1 <= h_samp <= 4 and 1 <= v_samp <= 4) or tq > 3 or comp_id in sof_components:
+                    raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+                sof_components[comp_id] = tq
             sof = (width, height, components)
+            sof_marker = marker
             out.append(segment)
         elif marker == 0xdb:
-            _check_jpeg_dqt(seg_data)
-            has_dqt = True
+            dqt_ids.update(_check_jpeg_dqt(seg_data))
             out.append(segment)
         elif marker == 0xc4:
-            _check_jpeg_dht(seg_data)
-            has_dht = True
+            dc_ids, ac_ids = _check_jpeg_dht(seg_data)
+            dc_dht_ids.update(dc_ids)
+            ac_dht_ids.update(ac_ids)
             out.append(segment)
         elif marker == 0xdd:
             if len(seg_data) != 2:
@@ -275,11 +291,35 @@ def _sanitize_jpeg(raw):
             # Strip EXIF, XMP, IPTC, ICC profiles and comments.
             continue
         elif marker == 0xda:
-            if sof is None or not has_dqt or not has_dht or len(seg_data) < 4:
+            if sof is None or not dqt_ids or not (dc_dht_ids or ac_dht_ids) or len(seg_data) < 4:
                 raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
             ns = seg_data[0]
             if not 1 <= ns <= sof[2] or len(seg_data) != 1 + 2 * ns + 3:
                 raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+            ss, se, ah_al = seg_data[1 + 2 * ns:1 + 2 * ns + 3]
+            ah, al = ah_al >> 4, ah_al & 0x0f
+            if sof_marker in {0xc0, 0xc1}:
+                if ss != 0 or se != 63 or ah != 0 or al != 0:
+                    raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+            else:
+                if ss > se or se > 63 or ah > 13 or al > 13 or (ss == 0 and se != 0) or (ss > 0 and ns != 1):
+                    raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+            seen_cs = set()
+            for idx in range(ns):
+                cs = seg_data[1 + 2 * idx]
+                td_ta = seg_data[2 + 2 * idx]
+                td, ta = td_ta >> 4, td_ta & 0x0f
+                if cs not in sof_components or cs in seen_cs or sof_components[cs] not in dqt_ids or td > 3 or ta > 3:
+                    raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+                if sof_marker in {0xc0, 0xc1}:
+                    if td not in dc_dht_ids or ta not in ac_dht_ids:
+                        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+                else:
+                    if ss == 0 and ah == 0 and td not in dc_dht_ids:
+                        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+                    if se > 0 and ta not in ac_dht_ids:
+                        raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
+                seen_cs.add(cs)
             has_sos = True
             out.append(segment)
             scan_start = pos
@@ -307,7 +347,8 @@ def _sanitize_jpeg(raw):
                 raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
         else:
             raise AttachmentError('图片格式不受支持或已损坏，请重新截图或转为 PNG 后再试。')
-    if sof is None or not has_dqt or not has_dht or not has_sos or not has_eoi:
+    if (sof is None or not dqt_ids or not (dc_dht_ids or ac_dht_ids) or not has_sos or not has_eoi or
+            any(tq not in dqt_ids for tq in sof_components.values())):
         raise AttachmentError('图片内容不完整，请重新截图或选择有效图片。')
     return b''.join(out)
 

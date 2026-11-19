@@ -559,6 +559,15 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         trailing_jpeg = valid_jpeg + b'hidden-after-eoi'
         no_dqt_jpeg = (b'\xff\xd8\xff\xc0\x00\x0b\x08\x00\x01\x00\x01\x01\x01\x11\x00'
                        b'\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\xaa\xbb\xff\xd9')
+        clean_jpeg = feedback.sanitize_image(valid_jpeg, 'image/jpeg')
+        sof_pos = clean_jpeg.index(b'\xff\xc0')
+        sos_pos = clean_jpeg.index(b'\xff\xda')
+        jpeg_missing_dqt_ref = bytearray(clean_jpeg)
+        jpeg_missing_dqt_ref[sof_pos + 4 + 8] = 3
+        jpeg_bad_sos_comp = bytearray(clean_jpeg)
+        jpeg_bad_sos_comp[sos_pos + 4 + 1] = 9
+        jpeg_missing_dht_ref = bytearray(clean_jpeg)
+        jpeg_missing_dht_ref[sos_pos + 4 + 2] = 0x33
         fake_webp_vp8 = b'RIFF' + struct.pack('<I', 20) + b'WEBP' + b'VP8 ' + struct.pack('<I', 8) + b'\x00' * 8
         vp8_header_only_data = b'\x10\x00\x00\x9d\x01\x2a\x01\x00\x01\x00'
         vp8_header_only = b'RIFF' + struct.pack('<I', 12 + len(vp8_header_only_data)) + b'WEBP' + b'VP8 ' + struct.pack('<I', len(vp8_header_only_data)) + vp8_header_only_data
@@ -587,6 +596,9 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             ('fake_jpeg_no_sof', encode_shot(fake_jpeg, 'image/jpeg')),
             ('trailing_jpeg', encode_shot(trailing_jpeg, 'image/jpeg')),
             ('no_dqt_jpeg', encode_shot(no_dqt_jpeg, 'image/jpeg')),
+            ('jpeg_missing_dqt_ref', encode_shot(bytes(jpeg_missing_dqt_ref), 'image/jpeg')),
+            ('jpeg_bad_sos_comp', encode_shot(bytes(jpeg_bad_sos_comp), 'image/jpeg')),
+            ('jpeg_missing_dht_ref', encode_shot(bytes(jpeg_missing_dht_ref), 'image/jpeg')),
             ('fake_webp_bad_sync', encode_shot(fake_webp_vp8, 'image/webp')),
             ('raw_unconverted_webp', encode_shot(make_webp(), 'image/webp')),
             ('vp8_header_only', encode_shot(vp8_header_only, 'image/webp')),
@@ -1096,16 +1108,25 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
                 recovered_hub.store.finish_feedback(row_new['id'], 'sent')
         finally:
             recovered_hub.server_close()
-        # 7. Concurrent dashboard submits for two distinct errors keep BOTH receipts in local feedback.json.
+        # 7. Concurrent dashboard submits for two distinct errors keep BOTH receipts in local feedback.json,
+        #    even when synchronized right across the local feedback.json read/write window.
         fault_1 = diagnostics.record(self.home, 'backend', '并发回执一', OSError('fault-1'))
         fault_2 = diagnostics.record(self.home, 'backend', '并发回执二', OSError('fault-2'))
         prev_1 = self.preview(error_id=fault_1['error_id'])
         prev_2 = self.preview(error_id=fault_2['error_id'])
+        real_read_json = diagnostics.read_json
+        def slow_receipt_read(path):
+            data = real_read_json(path)
+            if Path(path).name == 'feedback.json':
+                time.sleep(0.03)
+            return data
         barrier = threading.Barrier(2)
         def synced_forward(url, payload):
             if payload.get('error_id') in {fault_1['error_id'], fault_2['error_id']}:
                 barrier.wait(5)
-        with patch.object(feedback, 'forward', side_effect=synced_forward), ThreadPoolExecutor(max_workers=2) as pool:
+        with patch.object(feedback, 'forward', side_effect=synced_forward), \
+                patch.object(diagnostics, 'read_json', side_effect=slow_receipt_read), \
+                ThreadPoolExecutor(max_workers=2) as pool:
             f1 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': prev_1['ticket']})
             f2 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': prev_2['ticket']})
             self.assertEqual(f1.result(), (200, {'submitted': True}))
@@ -1113,11 +1134,75 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         local_saved = diagnostics.read_json(self.home / '.skill-pilot/feedback.json').get('submitted', [])
         self.assertTrue(any(entry.endswith(':' + fault_1['error_id']) for entry in local_saved), local_saved)
         self.assertTrue(any(entry.endswith(':' + fault_2['error_id']) for entry in local_saved), local_saved)
-        # 8. Preview cache cap (20 MB) rejects new screenshot preview with 503 when all cached entries are in-flight,
-        #    while plain-text preview still succeeds so copy/export remains available.
+        # 8. In-flight error_id MUST still be rejected after > 300s while forwarding has not finished.
+        in_flight_started, in_flight_release = threading.Event(), threading.Event()
+        def paused_slow_forward(url, payload):
+            if payload.get('error_id') == 'err-inflight-old':
+                in_flight_started.set()
+                self.assertTrue(in_flight_release.wait(5))
+        with patch.object(feedback, 'forward', side_effect=paused_slow_forward) as send_inf, \
+                ThreadPoolExecutor() as pool:
+            fut_inf = pool.submit(self.request, '/api/feedback', base | {
+                'error_id': 'err-inflight-old', 'fingerprint': 'fp-inflight-old'}, True)
+            self.assertTrue(in_flight_started.wait(3))
+            try:
+                # Backdate submitted_at > 300s while row is still in _in_flight_feedback.
+                with self.hub.store.locked():
+                    rows_inf = json.loads(fb_path.read_text(encoding='utf-8'))
+                    for r in rows_inf:
+                        if r['payload']['error_id'] == 'err-inflight-old':
+                            r['payload']['submitted_at'] = '2020-01-01T00:00:00+00:00'
+                    fb_path.write_text(json.dumps(rows_inf, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+                dup_inf_code, dup_inf_err = self.request('/api/feedback', base | {
+                    'error_id': 'err-inflight-old', 'fingerprint': 'fp-inflight-old'}, hub=True)
+                self.assertEqual(dup_inf_code, 429, dup_inf_err)
+                self.assertIn('正在转发', dup_inf_err['error'])
+            finally:
+                in_flight_release.set()
+            self.assertEqual(fut_inf.result()[0], 200)
+            self.assertEqual(send_inf.call_count, 1)
+        # 9. Replacing a corrupted same-name attachment file must count peak replacement bytes against quota.
+        img_corrupt_target = make_png(width=12, height=12, seed=51)
+        shot_corrupt_target = encode_shot(img_corrupt_target, 'image/png')
+        sha_corrupt_target = hashlib.sha256(img_corrupt_target).hexdigest()
+        corrupt_path = att_dir / f'{sha_corrupt_target}.png'
+        with patch.object(feedback, 'forward'):
+            self.assertEqual(self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-corrupt-owner', 'fingerprint': 'fp-corrupt-owner',
+                'attachments': [shot_corrupt_target]}, hub=True)[0], 200)
+        # Corrupt the stored file on disk (smaller size, wrong content) while referenced by an unremovable file or tight quota.
+        corrupt_bytes = b'corrupt-old-bytes'
+        corrupt_path.write_bytes(corrupt_bytes)
+        real_unlink = Path.unlink
+        def block_corrupt_unlink(path_self, *args, **kwargs):
+            if path_self.name == corrupt_path.name:
+                raise OSError('文件被占用')
+            return real_unlink(path_self, *args, **kwargs)
+        # Budget fits only new image alone, NOT corrupt_bytes + new image peak during temp-file replace -> 507.
+        with patch.object(Path, 'unlink', block_corrupt_unlink), \
+                patch.object(feedback, 'MAX_ATTACHMENT_STORE_BYTES', len(img_corrupt_target) + 2), \
+                patch.object(feedback, 'forward') as send_rep:
+            rep_code, rep_err = self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-corrupt-replace-tight', 'fingerprint': 'fp-corrupt-replace-tight',
+                'attachments': [shot_corrupt_target]}, hub=True)
+            self.assertEqual(rep_code, 507, rep_err)
+            send_rep.assert_not_called()
+        self.assertEqual(corrupt_path.read_bytes(), corrupt_bytes)
+        # Once budget covers peak (existing corrupt_bytes + new temp file), replacement succeeds and restores valid bytes.
+        with patch.object(feedback, 'MAX_ATTACHMENT_STORE_BYTES', len(corrupt_bytes) + len(img_corrupt_target) + 16), \
+                patch.object(feedback, 'forward'):
+            rep_ok, _ = self.request('/api/feedback/with-attachments', base | {
+                'error_id': 'err-corrupt-replace-ok', 'fingerprint': 'fp-corrupt-replace-ok',
+                'attachments': [shot_corrupt_target]}, hub=True)
+            self.assertEqual(rep_ok, 200)
+        self.assertEqual(corrupt_path.read_bytes(), img_corrupt_target)
+        # 10. Preview cache full (20 MB or 100 entries all sending) does NOT write into cache,
+        #     but still returns 200 with full sanitized payload and can_send=False so copy/export works.
         clean_a_size = len(feedback.sanitize_image(img_a, 'image/png'))
         orig_cap = self.dashboard.feedback_preview_max_bytes
+        orig_entries = self.dashboard.feedback_preview_max_entries
         self.dashboard.feedback_preview_max_bytes = clean_a_size * 2 + 10
+        self.dashboard.feedback_preview_max_entries = 2
         try:
             self.dashboard.feedback_previews.clear()
             p_cap1 = self.preview(attachments=[shot_a])
@@ -1133,26 +1218,35 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
                 s2 = pool.submit(self.request, '/api/diagnostics/submit', {'ticket': p_cap2['ticket']})
                 cap_barrier.wait(5)
                 try:
-                    # 3rd screenshot preview would exceed feedback_preview_max_bytes while both existing are sending -> 503.
+                    # 3rd screenshot preview exceeds 20 MB while both are sending -> 200 fallback, not cached.
                     over_code, over_res = self.request('/api/diagnostics/preview', {
                         'error_id': self.row['error_id'], 'attachments': [shot_a]})
-                    self.assertEqual(over_code, 503, over_res)
-                    self.assertIn('正在发送', over_res['error'])
+                    self.assertEqual(over_code, 200, over_res)
+                    self.assertEqual(over_res['ticket'], '')
+                    self.assertFalse(over_res['can_send'])
+                    self.assertFalse(over_res['can_attach'])
+                    self.assertIn('正在发送', over_res['reason'])
+                    self.assertEqual(over_res['payload']['error_id'], self.row['error_id'])
                     cached_total = sum(
                         sum(a['size'] for a in entry['prepared'].get('_attachments', ()))
                         for entry in self.dashboard.feedback_previews.values()
                     )
                     self.assertLessEqual(cached_total, self.dashboard.feedback_preview_max_bytes)
-                    # Plain-text preview still succeeds so user can copy/export diagnostics.
+                    # Plain-text preview when all max_entries slots are sending STILL returns 200 with full sanitized payload!
                     text_code, text_res = self.request('/api/diagnostics/preview', {'error_id': self.row['error_id']})
                     self.assertEqual(text_code, 200, text_res)
+                    self.assertEqual(text_res['ticket'], '')
+                    self.assertFalse(text_res['can_send'])
+                    self.assertIn('复制', text_res['reason'])
                     self.assertEqual(text_res['payload']['error_id'], self.row['error_id'])
+                    self.assertEqual(len(self.dashboard.feedback_previews), 2)
                 finally:
                     cap_release.set()
                 self.assertEqual(s1.result(), (200, {'submitted': True}))
                 self.assertEqual(s2.result(), (200, {'submitted': True}))
         finally:
             self.dashboard.feedback_preview_max_bytes = orig_cap
+            self.dashboard.feedback_preview_max_entries = orig_entries
 
     def test_frontend_screenshot_validators_and_interactions(self):
         source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text(encoding='utf-8')

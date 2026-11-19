@@ -9939,7 +9939,7 @@ async function updateFeedbackPreview(options) {
       discardFeedbackTicket(result.ticket);
       return;
     }
-    feedbackTicket = result.ticket;
+    feedbackTicket = result.ticket || '';
     feedbackCanAttach = Boolean(result.can_attach);
     feedbackAttachReason = result.attach_reason || '';
     feedbackSubmitted = Boolean(result.submitted);

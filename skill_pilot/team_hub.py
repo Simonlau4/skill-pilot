@@ -583,6 +583,22 @@ class HubStore:
                 return
         self._collect_feedback_attachments(rows)
 
+    def _attachment_file_matches(self, path, item):
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
+        if not stat.S_ISREG(st.st_mode) or st.st_size != item['size']:
+            return False
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256']
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
+
     def _write_feedback_attachments(self, attachments):
         if not attachments:
             return []
@@ -592,7 +608,7 @@ class HubStore:
         try:
             for item in attachments:
                 target = folder / f"{item['sha256']}.{item['ext']}"
-                if target.is_file() and target.stat().st_size == item['size']:
+                if self._attachment_file_matches(target, item):
                     continue
                 fd, temporary = tempfile.mkstemp(prefix='.att-', dir=folder)
                 temp_path = Path(temporary)
@@ -645,7 +661,8 @@ class HubStore:
             return committed_rows
         # First clean up only files already unreferenced by the committed feedback.json.
         self._collect_feedback_attachments(committed_rows)
-        new_files = {f"{item['sha256']}.{item['ext']}": item['size'] for item in attachments}
+        folder = self._feedback_attachment_dir()
+        unique_items = {f"{item['sha256']}.{item['ext']}": item for item in attachments}
         in_flight_files = {
             att['file']
             for item in committed_rows
@@ -655,7 +672,12 @@ class HubStore:
         }
         while True:
             disk_sizes = self._attachment_disk_sizes()
-            added_bytes = sum(size for name, size in new_files.items() if name not in disk_sizes)
+            # Reuse an on-disk file ONLY if its size and SHA-256 content match; otherwise account for
+            # the full peak bytes of the new temp file alongside existing on-disk bytes during replace.
+            added_bytes = sum(
+                item['size'] for name, item in unique_items.items()
+                if not (name in disk_sizes and self._attachment_file_matches(folder / name, item))
+            )
             if sum(disk_sizes.values()) + added_bytes <= feedback.MAX_ATTACHMENT_STORE_BYTES:
                 return committed_rows
             target = next((
@@ -692,10 +714,12 @@ class HubStore:
         rows = self._feedback()
         current = datetime.now(timezone.utc)
         incoming_ids = [item['sha256'] for item in attachments]
-        # Exact error_id idempotency/conflict holds for as long as the row remains in feedback.json.
+        # Exact error_id in-flight / idempotency / conflict checks hold regardless of elapsed time.
         for row in reversed(rows):
             if row['member_id'] != member['id'] or row['payload']['error_id'] != payload['error_id']:
                 continue
+            if row.get('id') in self._in_flight_feedback:
+                raise HubError(429, '这条反馈正在转发中，请稍候，不要重复提交。')
             if row['state'] == 'sent':
                 # Compare against the original submitted attachment digests even if files were later evicted.
                 existing_ids = [
