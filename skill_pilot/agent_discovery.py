@@ -106,8 +106,10 @@ def save(home, data):
         except (OSError, ValueError):
             current = None
         # The clock is not a change to the discovered assistants. Rewriting it on
-        # every refresh made the user-data fingerprint flap.
-        if isinstance(current, dict) and _without_clock(current) == _without_clock(data):
+        # every refresh made the user-data fingerprint flap. A cache this program
+        # would refuse to read is not kept.
+        if (isinstance(current, dict) and isinstance(current.get('checked_at'), str)
+                and _without_clock(current) == _without_clock(data)):
             return
         temporary = None
         try:

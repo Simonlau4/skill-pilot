@@ -1,5 +1,7 @@
 """Small OS boundary for user identity and process locks."""
+import ctypes
 import os
+from ctypes import wintypes
 from pathlib import Path
 
 
@@ -90,21 +92,21 @@ def user_id():
     return os.environ.get('USERNAME', 'user') if os.name == 'nt' else os.getuid()
 
 
+class _LockOffset(ctypes.Structure):
+    """Windows OVERLAPPED. Offset fields stay 32-bit even where c_ulong is 64-bit."""
+    _fields_ = (
+        ('Internal', ctypes.c_size_t),
+        ('InternalHigh', ctypes.c_size_t),
+        ('Offset', ctypes.c_uint32),
+        ('OffsetHigh', ctypes.c_uint32),
+        ('hEvent', ctypes.c_void_p),
+    )
+
+
 if os.name != 'nt':
     import fcntl
 else:
-    import ctypes
     import msvcrt
-    from ctypes import wintypes
-
-    class _LockOffset(ctypes.Structure):
-        _fields_ = (
-            ('Internal', ctypes.c_size_t),
-            ('InternalHigh', ctypes.c_size_t),
-            ('Offset', wintypes.DWORD),
-            ('OffsetHigh', wintypes.DWORD),
-            ('hEvent', wintypes.HANDLE),
-        )
 
     _kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
     _kernel32.LockFileEx.argtypes = (

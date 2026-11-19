@@ -130,6 +130,14 @@ class DiscoveryTests(unittest.TestCase):
         agent_discovery.save(self.home, changed)
         self.assertNotEqual((self.home / agent_discovery.CACHE).read_bytes(), saved)
         self.assertEqual(agent_discovery.read(self.home)['candidates'], changed['candidates'])
+        path = self.home / agent_discovery.CACHE
+        broken = json.loads(path.read_text())
+        broken['checked_at'] = 1
+        path.write_text(json.dumps(broken))
+        self.assertEqual(agent_discovery.read(self.home)['candidates'], [])
+        agent_discovery.save(self.home, changed)
+        self.assertEqual(agent_discovery.read(self.home)['candidates'], changed['candidates'])
+        self.assertIsInstance(agent_discovery.read(self.home)['checked_at'], str)
 
     def test_failed_cache_write_keeps_the_saved_result_and_removes_temporary_file(self):
         findings = agent_discovery.find(self.home)

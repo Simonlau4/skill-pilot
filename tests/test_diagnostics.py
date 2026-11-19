@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import importlib.util
 import http.client
 import json
@@ -216,6 +217,38 @@ vm.runInNewContext(fs.readFileSync('skill_pilot/web/static/diagnostics.js', 'utf
             rows = diagnostics.recent(self.home)
             self.assertEqual(len(rows), 24, f'第 {round_number + 1} 轮丢失了错误记录')
             self.assertEqual(len({row['error_id'] for row in rows}), 24)
+
+    def test_overlapping_rewrites_drop_a_record_when_the_lock_does_not_exclude(self):
+        barrier = threading.Barrier(2)
+        original = diagnostics.recent
+
+        def read_then_wait(home, sanitize_records=True):
+            rows = original(home, sanitize_records=sanitize_records)
+            if not sanitize_records:
+                barrier.wait(3)
+            return rows
+
+        @contextmanager
+        def no_lock(path, home):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            yield
+
+        class NoThreadLock:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(diagnostics, 'recent', read_then_wait), patch.object(
+                diagnostics, 'log_lock', no_lock), patch.object(diagnostics, 'LOCK', NoThreadLock()):
+            threads = [threading.Thread(target=self.record) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(diagnostics.recent(self.home)), 1)
 
     def test_log_directory_outside_home_is_not_written(self):
         outside = Path(self.temp.name) / 'outside'

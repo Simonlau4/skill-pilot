@@ -54,6 +54,15 @@ class PlatformTests(unittest.TestCase):
             self.assertEqual(entry.resolve(), target)
             self.assertEqual({p: store.physical_state(home / p) for p in roots}, before)
 
+    def test_windows_lock_structure_matches_the_system_layout(self):
+        import ctypes
+        from skill_pilot.platform_support import _LockOffset
+        pointer = ctypes.sizeof(ctypes.c_void_p)
+        self.assertEqual(ctypes.sizeof(_LockOffset), 32 if pointer == 8 else 20)
+        self.assertEqual(_LockOffset.Offset.offset, 16 if pointer == 8 else 8)
+        self.assertEqual(_LockOffset.OffsetHigh.offset, _LockOffset.Offset.offset + 4)
+        self.assertEqual(_LockOffset.hEvent.offset, _LockOffset.Offset.offset + 8)
+
     def test_process_lock_preserves_readable_payload_and_releases_on_close(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'lock'
