@@ -238,11 +238,7 @@ function syncToastReminders() {
       const active = source.operationIds.filter(id => !prevUndone.has(id));
       allUndone = active.length === 0;
       if (!allUndone) {
-        const hasPerOp = active.every(id => Array.isArray(logsById.get(id)?.new_session_agents));
-        const agents = hasPerOp
-          ? active.flatMap(id => logsById.get(id).new_session_agents)
-          : source.agents || [];
-        nextReminder = newSessionReminderText(agents, source.kind || 'enable');
+        nextReminder = newSessionReminderText(source.agents || [], source.kind || 'enable');
       }
     }
     setToastReminder(item, nextReminder);
@@ -591,9 +587,12 @@ function newSessionAgentsFrom(list) {
       }
       continue;
     }
+    if (typeof item !== 'object') continue;
     if (item.activation_mode && item.activation_mode !== 'new_session') continue;
-    const id = item.id || item.name;
-    const name = item.name || nameOf(item.id);
+    const rawId = typeof item.id === 'string' ? item.id.trim() : '';
+    const rawName = typeof item.name === 'string' ? item.name.trim() : '';
+    const id = rawId || rawName;
+    const name = rawName || (rawId ? nameOf(rawId) : '');
     if (id && name && !seen.has(id)) {
       seen.add(id);
       names.push(name);
@@ -609,14 +608,22 @@ function newSessionReminderText(agents, kind = 'enable') {
   return `${names.join('、')} ${suffix}`;
 }
 
+/* 跳过服务端已确认撤销或操作记录里已撤销的编号，供任务卡片、提示条和撤销动作共用。 */
+function jobActiveOperations(job) {
+  const ops = job?.operations || [];
+  if (!ops.length) return [];
+  const serverUndone = new Set(job.undone_operations || []);
+  const logsById = new Map((state.logs || []).map(record => [record.id, record]));
+  return ops.filter(id => !serverUndone.has(id) && !logsById.get(id)?.undone);
+}
+
 function jobNewSessionAgents(job) {
   if (!job || jobActive(job)) return [];
   if (job.status !== 'done' && !(job.completed?.length || job.updated?.length)) return [];
   const ops = job.operations || [];
   if (!ops.length) return job.new_session_agents || [];
-  const serverUndone = new Set(job.undone_operations || []);
   const logsById = new Map((state.logs || []).map(record => [record.id, record]));
-  const activeOps = ops.filter(id => !serverUndone.has(id) && !logsById.get(id)?.undone);
+  const activeOps = jobActiveOperations(job);
   if (!activeOps.length) return [];
   const opMap = job.operation_new_session_agents || null;
   const hasPerOp = activeOps.every(id => (opMap && Object.prototype.hasOwnProperty.call(opMap, id))
@@ -628,7 +635,7 @@ function jobNewSessionAgents(job) {
     const list = (opMap && Object.prototype.hasOwnProperty.call(opMap, id) ? opMap[id] : null)
       || logsById.get(id)?.new_session_agents || [];
     for (const agent of list) {
-      if (agent?.id && !seen.has(agent.id)) {
+      if (typeof agent?.id === 'string' && agent.id.trim() && !seen.has(agent.id)) {
         seen.add(agent.id);
         active.push(agent);
       }
@@ -660,13 +667,7 @@ function jobStatusLine(job) {
 
 /* 操作记录里已经撤销过的条目不再给「撤销」，免得重复点。 */
 function jobUndoAvailable(job) {
-  if (!(job.operations || []).length) return false;
-  const serverUndone = new Set(job.undone_operations || []);
-  return job.operations.some(id => {
-    if (serverUndone.has(id)) return false;
-    const record = (state.logs || []).find(item => item.id === id);
-    return !record || !record.undone;
-  });
+  return jobActiveOperations(job).length > 0;
 }
 
 function jobActions(job) {
@@ -1018,9 +1019,16 @@ function applyJobs(result, {force = false} = {}) {
 }
 
 async function undoJob(job, button = null) {
-  const ids = [...(job.operations || [])].reverse();
+  const live = (state.jobs || []).find(entry => entry.id === job?.id);
+  const current = live
+    ? {
+        ...live,
+        undone_operations: [...new Set([...(job?.undone_operations || []), ...(live.undone_operations || [])])],
+      }
+    : job;
+  const ids = jobActiveOperations(current).reverse();
   if (!ids.length) return false;
-  const done = await undoOperation(ids, {skills: job.skills || [], message: job.summary || pastTense(job.message || ''), button});
+  const done = await undoOperation(ids, {skills: current.skills || [], message: current.summary || pastTense(current.message || ''), button});
   if (done) renderJobs();
   return done;
 }
@@ -1202,7 +1210,7 @@ function finishJobs(finished) {
         text: pastTense(job.message || '任务已完成'),
         reminder: jobReminderText(job),
         reminderSource,
-        undo: job.operations?.length && jobUndoAvailable(job) ? button => undoJob(job, button) : null,
+        undo: job.operations?.length && jobUndoAvailable(job) ? button => undoJob(reminderSource.job || job, button) : null,
       });
     } else if (job.status === 'failed') {
       toast({text: jobStatusLine(job), reminder: jobReminderText(job), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});

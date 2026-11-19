@@ -821,41 +821,69 @@ class ActivationReminderJobTests(unittest.TestCase):
         # Clean up the corrupted log file so subsequent tests/teardown stay clean.
         (self.home / '.skill-pilot/logs' / (corrupt_job['operations'][0] + '.json')).unlink(missing_ok=True)
 
-        # 8. Concurrent jobs_status writeback must NOT overwrite newly added retry ops/reminders!
+        # 8. Concurrent real retry_job() changes the job ID while jobs_status() is mid-flight:
+        #    confirmed undone_operations must be merged by operation ID onto the new retried job,
+        #    NOT dropped because the old job ID disappeared, AND must survive into completion!
+        operations.apply_assign([{'skill': 'acme-a', 'agent': 'codex', 'enabled': False}], confirmed=True, home=self.home)
         op_a = {'id': 'antigravity', 'name': 'Antigravity', 'activation_note': '需新开对话生效'}
-        op_b = {'id': 'codex', 'name': 'Codex', 'activation_note': '需新开对话生效'}
-        live_job = {
-            'id': 'race-job', 'kind': 'assignment', 'status': 'done',
-            'skills': ['acme-a'], 'agents': ['antigravity'],
+        old_job = {
+            'id': 'race-old-job', 'kind': 'assignment', 'status': 'failed',
+            'skills': ['acme-a'], 'agents': ['antigravity', 'codex'],
+            'summary': '调整分配「示例甲」', 'message': '部分完成',
+            'completed': ['acme-a'],
             'operations': ['op-undone-1'],
             'new_session_agents': [op_a],
             'operation_new_session_agents': {'op-undone-1': [op_a]},
+            'remaining_changes': [{'skill': 'acme-a', 'agent': 'codex', 'enabled': True}],
+            '_parameters': {'kind': 'assignment', **self.assignment_params([{'skill': 'acme-a', 'agent': 'codex', 'enabled': True}])},
+            '_intent': 'race-old-intent',
         }
         with self.server.jobs_lock:
-            self.server.jobs.append(live_job)
+            self.server.jobs.append(old_job)
         real_hc = self.server._history_and_catalog
+        real_exec_race = self.server.execute_job
+        allow_retry_exec = threading.Event()
+        retried_id_holder = []
 
-        def hc_with_concurrent_retry():
+        def gated_exec(item):
+            allow_retry_exec.wait(5)
+            return real_exec_race(item)
+
+        def hc_with_real_concurrent_retry():
             records, catalog, order = real_hc()
             records['op-undone-1'] = {'id': 'op-undone-1', 'undone': True, 'new_session_agents': [op_a]}
-            # Simulate a concurrent retry publishing a new op ('op-fresh-2' -> Codex) before writeback acquires jobs_lock.
-            with self.server.jobs_lock:
-                live_job['operations'] = ['op-undone-1', 'op-fresh-2']
-                live_job['new_session_agents'] = [op_b]
-                live_job['operation_new_session_agents'] = {'op-undone-1': [op_a], 'op-fresh-2': [op_b]}
+            if not retried_id_holder:
+                retried = self.server.retry_job({'id': 'race-old-job'})
+                retried_id_holder.append(retried['job']['id'])
             return records, catalog, order
 
         try:
-            with patch.object(self.server, '_history_and_catalog', side_effect=hc_with_concurrent_retry):
+            with patch.object(self.server, 'execute_job', side_effect=gated_exec), \
+                 patch.object(self.server, '_history_and_catalog', side_effect=hc_with_real_concurrent_retry):
                 self.server.jobs_status()
-            with self.server.jobs_lock:
-                self.assertEqual(live_job.get('undone_operations'), ['op-undone-1'])
-                self.assertEqual([a['id'] for a in live_job.get('new_session_agents', [])], ['codex'])
-                self.assertIn('op-fresh-2', live_job.get('operation_new_session_agents', {}))
-                self.assertNotIn('op-undone-1', live_job.get('operation_new_session_agents', {}))
+                self.assertEqual(len(retried_id_holder), 1)
+                new_job_id = retried_id_holder[0]
+                self.assertNotEqual(new_job_id, 'race-old-job')
+                with self.server.jobs_lock:
+                    new_raw = next(j for j in self.server.jobs if j['id'] == new_job_id)
+                    self.assertEqual(new_raw.get('undone_operations'), ['op-undone-1'])
+                    self.assertEqual(new_raw.get('new_session_agents'), [])
+                    self.assertNotIn('op-undone-1', new_raw.get('operation_new_session_agents', {}))
+                # Now let the retried Codex assignment complete!
+                allow_retry_exec.set()
+                settled_jobs = self.wait_jobs()
+            settled_new = next(j for j in settled_jobs if j['id'] == new_job_id)
+            self.assertEqual(settled_new['status'], 'done', settled_new)
+            # Even if logs are later unreadable, op-undone-1 stays undone and only Codex remains!
+            with patch.object(operations, 'history', side_effect=OSError('logs vanished')):
+                polled_after = next(j for j in self.server.jobs_status()['items'] if j['id'] == new_job_id)
+            self.assertEqual(polled_after.get('undone_operations'), ['op-undone-1'])
+            self.assertEqual([a['id'] for a in polled_after.get('new_session_agents', [])], ['codex'])
+            self.assertNotIn('op-undone-1', polled_after.get('operation_new_session_agents', {}))
         finally:
+            allow_retry_exec.set()
             with self.server.jobs_lock:
-                self.server.jobs = [j for j in self.server.jobs if j.get('id') != 'race-job']
+                self.server.jobs = [j for j in self.server.jobs if j.get('id') not in {'race-old-job', *retried_id_holder}]
 
 
 class ActivationReminderStaticTests(unittest.TestCase):
@@ -890,10 +918,12 @@ class ActivationReminderStaticTests(unittest.TestCase):
             "const jobActions = () => [];",
             "const jobStatusInfo = job => ({done: {tone: 'tag-ok', label: '已完成'}, failed: {tone: 'tag-danger', label: '没完成'}}[job.status] || {tone: 'tag-quiet', label: job.status});",
             extract_function(app, 'function pastTense('),
+            extract_function(app, 'function jobActiveOperations('),
             extract_function(app, 'function jobUndoAvailable('),
             reminder_fns,
             extract_function(app, 'function jobStatusLine('),
             extract_function(app, 'function jobItemHtml('),
+            extract_function(app, 'async function undoJob('),
             block(app, 'function setToastReminder('),
             block(app, 'function syncToastReminders('),
             block(app, 'function toast('),
@@ -968,7 +998,7 @@ assert.equal(jobReminderText(partialJob), '新对话工具 需新开对话才会
 // 3. Minimal DOM mock supporting classList, querySelector, replaceWith, remove
 function makeEl(tag) {
   const el = {
-    tag, _classes: new Set(), textContent: '', innerHTML: '', children: [], attrs: {}, parent: null,
+    tag, _classes: new Set(), _listeners: {}, textContent: '', innerHTML: '', children: [], attrs: {}, parent: null,
     get className() { return [...this._classes].join(' '); },
     set className(val) { this._classes = new Set(String(val || '').split(/\s+/).filter(Boolean)); },
     classList: {
@@ -979,7 +1009,8 @@ function makeEl(tag) {
     append(...nodes) { for (const n of nodes) { n.parent = this; this.children.push(n); } },
     prepend(n) { n.parent = this; this.children.unshift(n); },
     setAttribute(k, v) { this.attrs[k] = v; },
-    addEventListener() {},
+    addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); },
+    async click() { for (const fn of (this._listeners.click || [])) await fn({target: this}); },
     remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; },
     replaceWith(other) {
       if (!this.parent) return;
@@ -1118,6 +1149,70 @@ state.logs = [];
 syncToastReminders();
 assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
 assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
+
+// 7. Toast undo button & undoJob share undone-operation filtering (even after card cleared & log rotated!)
+const undoSubmitted = [];
+async function undoOperation(ids) {
+  undoSubmitted.push(ids);
+  return true;
+}
+(async () => {
+  const jobUndoTest = {
+    id: 'j8', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op8a', 'op8b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+    operation_new_session_agents: {
+      op8a: [{id: 'fresh-b', name: '新对话工具'}],
+      op8b: [{id: 'fresh-c', name: '扩展工具'}],
+    },
+  };
+  state.jobs = [jobUndoTest];
+  state.logs = [];
+  toastsContainer.children = [];
+  finishJobs([jobUndoTest]);
+  const undoToast = toastsContainer.children[0];
+  // Latest op (op8b) is undone via logs, then job card is cleared AND op8b's log disappears.
+  state.logs = [{id: 'op8b', undone: true}, {id: 'op8a', undone: false}];
+  syncToastReminders();
+  state.jobs = [];
+  state.logs = [];
+  syncToastReminders();
+  await undoToast._undoButton.click();
+  assert.deepEqual(undoSubmitted.at(-1), ['op8a']);
+
+  // Also verify calling undoJob with a stale job snapshot uses live state.jobs undone_operations!
+  const updatedLiveJob = {...jobUndoTest, undone_operations: ['op8b']};
+  state.jobs = [updatedLiveJob];
+  state.logs = [];
+  await undoJob(jobUndoTest);
+  assert.deepEqual(undoSubmitted.at(-1), ['op8a']);
+
+  // 8. Direct-operation toast keeps API original new_session_agents (ignores corrupted logs) & malformed entries filtered.
+  assert.deepEqual(newSessionAgentsFrom([{id: ['broken'], name: 123}, {id: 'fresh-b', name: '新对话工具'}]), ['新对话工具']);
+  toastsContainer.children = [];
+  state.logs = [];
+  toast({
+    text: '已导入配置',
+    reminder: newSessionReminderText([{id: 'fresh-b', name: '新对话工具'}], 'enable'),
+    reminderSource: {operationIds: ['op-import-1'], agents: [{id: 'fresh-b', name: '新对话工具'}], kind: 'enable'},
+    undo: () => true,
+  });
+  const directToast = toastsContainer.children[0];
+  state.logs = [{id: 'op-import-1', undone: false, new_session_agents: [{id: 'fresh-c', name: '被损坏的日志名'}, {id: ['bad'], name: 999}]}];
+  syncToastReminders();
+  assert.match(directToast.querySelector('.toast-reminder').innerHTML, /新对话工具 需新开对话才会加载新技能/);
+  assert.doesNotMatch(directToast.querySelector('.toast-reminder').innerHTML, /被损坏的日志名/);
+
+  // Once marked undone in logs, reminder & undo button clear and stay cleared even after log rotates out.
+  state.logs = [{id: 'op-import-1', undone: true}];
+  syncToastReminders();
+  assert.equal(directToast.querySelector('.toast-reminder'), null);
+  assert.equal(directToast._undoButton, null);
+  state.logs = [];
+  syncToastReminders();
+  assert.equal(directToast.querySelector('.toast-reminder'), null);
+})().catch(err => { console.error(err); process.exit(1); });
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

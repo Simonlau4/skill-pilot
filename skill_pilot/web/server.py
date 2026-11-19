@@ -274,7 +274,7 @@ class Dashboard(ThreadingHTTPServer):
             version, blocked = self.jobs_version, self.jobs_blocked
         if any(item.get('operations') for item in items):
             records, catalog, order = self._history_and_catalog()
-            updates_by_id = {}
+            confirmed_undone = set()
             for item in items:
                 ops = item.get('operations') or []
                 if not ops:
@@ -292,18 +292,20 @@ class Dashboard(ThreadingHTTPServer):
                     item.pop('operation_new_session_agents', None)
                 if undone_ops:
                     item['undone_operations'] = undone_ops
-                    updates_by_id[item['id']] = undone_ops
+                    confirmed_undone.update(undone_ops)
                 else:
                     item.pop('undone_operations', None)
-            if updates_by_id:
+            if confirmed_undone:
                 with self.jobs_lock:
                     for raw in self.jobs:
-                        undone_ops = updates_by_id.get(raw.get('id'))
-                        if not undone_ops:
+                        raw_ops_list = list(raw.get('operations') or [])
+                        all_raw_ops = list(dict.fromkeys(list(raw.get('_completed_operations') or []) + raw_ops_list))
+                        matched_undone = [op for op in all_raw_ops if op in confirmed_undone]
+                        if not matched_undone:
                             continue
-                        persisted = list(dict.fromkeys(list(raw.get('undone_operations') or []) + undone_ops))
+                        persisted = list(dict.fromkeys(list(raw.get('undone_operations') or []) + matched_undone))
                         raw['undone_operations'] = persisted
-                        raw_ops = self._order_operations(raw.get('operations') or [], records)
+                        raw_ops = self._order_operations(raw_ops_list, records)
                         raw_merged, raw_active_map, _ = self._resolve_job_reminders(
                             raw_ops, raw.get('operation_new_session_agents'),
                             raw.get('new_session_agents'), records, catalog, order,
@@ -376,6 +378,10 @@ class Dashboard(ThreadingHTTPServer):
             }
             target['_operation_new_session_agents'] = copy.deepcopy(combined)
             target['operation_new_session_agents'] = copy.deepcopy(combined)
+        prior_undone = list(previous.get('undone_operations') or [])
+        if prior_undone:
+            target['undone_operations'] = list(dict.fromkeys(
+                prior_undone + list(target.get('undone_operations') or [])))
         if previous.get('undone_operations'):
             target['undone_operations'] = list(dict.fromkeys(
                 list(previous['undone_operations']) + list(target.get('undone_operations') or [])))
