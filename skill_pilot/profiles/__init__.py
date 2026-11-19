@@ -201,11 +201,3 @@ def new_session_agents(agent_ids, home=None, catalog=None):
                 'activation_note': activation_note(profile),
             })
     return result
-
-
-def new_session_reminder(agents, action='enable'):
-    names = [item['name'] for item in (agents or []) if isinstance(item, dict) and item.get('name')]
-    if not names:
-        return ''
-    suffix = '需新开对话才会加载新版技能' if action == 'update' else '需新开对话才会加载新技能'
-    return '、'.join(names) + ' ' + suffix

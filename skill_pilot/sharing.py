@@ -273,8 +273,7 @@ def import_config(data, assigned=None, home=None, expected=None, member_name=Non
             current.update(assignments['registry'])
             changed = sorted(set(plan['install']) | set(plan['dependencies']) | set(assignments['changed']))
             reconcile_assignments(current, home, checked, changed)
-            return changed, plan['install'], {**result,
-                                              'new_session_agents': profiles.new_session_agents(assignments['added_agents'], home)}
+            return changed, plan['install'], result
         prefix = f'从{member_name}的分享导入了技能' if member_name is not None else '导入了技能配置'
         return operations._run(home, registry, agents, expected,
                                f'{prefix}：新装 {len(plan["install"])} 个，沿用本机 {len(plan["reuse"])} 个', mutate)

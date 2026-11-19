@@ -232,6 +232,7 @@ def join(requests, plan_id, expected=None, choices=None, home=None, *, preserve_
                 if after[agent]['versions'][name] != expected_versions:
                     raise ValueError('接入后的内容与所选版本不一致，已经恢复原样。')
         return changed, content, {'agents': plan['agents'], 'after': after, '_agents_changed': True,
+                                  '_visibility_before': plan['before'],
                                   '_expected_visibility': {a: state['available'] for a, state in after.items()}}
     return operations._run(home, registry, managed, current, '接入了 ' + '、'.join(p['name'] for p in plan['profiles']), mutate, extra_paths=plan['roots'])
 

@@ -270,8 +270,27 @@ class Dashboard(ThreadingHTTPServer):
 
     def jobs_status(self):
         with self.jobs_lock:
-            return {'items': [self.public_job(item) for item in self.jobs],
-                    'version': self.jobs_version, 'blocked': self.jobs_blocked}
+            items = [self.public_job(item) for item in self.jobs]
+            version, blocked = self.jobs_version, self.jobs_blocked
+        if any(item.get('operations') for item in items):
+            try:
+                records = {r['id']: r for r in operations.history(self.home)}
+            except (OSError, ValueError):
+                records = {}
+            for item in items:
+                ops = item.get('operations') or []
+                if not ops:
+                    continue
+                by_op = dict(item.get('operation_new_session_agents') or {})
+                for op in ops:
+                    if op in records:
+                        by_op[op] = list(records[op].get('new_session_agents') or [])
+                if not by_op:
+                    continue
+                active_groups = [by_op[op] for op in ops if op in by_op and not records.get(op, {}).get('undone')]
+                item['operation_new_session_agents'] = {op: by_op[op] for op in ops if op in by_op}
+                item['new_session_agents'] = self.merge_new_session_agents(*active_groups)
+        return {'items': items, 'version': version, 'blocked': blocked}
 
     @staticmethod
     def public_job(item):
@@ -308,6 +327,32 @@ class Dashboard(ThreadingHTTPServer):
         if self.jobs_blocked:
             raise ValueError(self.jobs_blocked)
 
+    def _carry_previous(self, target, previous, kind):
+        if not previous or previous['status'] not in {'failed', 'attention'}:
+            return
+        target['_batch'] = target.get('_batch') or previous.get('_batch', previous['id'])
+        prior_ops = list(previous.get('operations', []))
+        target['_completed_operations'] = list(dict.fromkeys(
+            target.get('_completed_operations', []) + prior_ops))
+        target['operations'] = list(dict.fromkeys(target.get('operations', []) + prior_ops))
+        prior_done = list(previous.get('completed', []))
+        target['_completed'] = sorted(set(target.get('_completed', [])) | set(prior_done))
+        target['completed'] = sorted(set(target.get('completed', [])) | set(prior_done))
+        if previous.get('new_session_agents'):
+            merged = self.merge_new_session_agents(
+                target.get('_new_session_agents'), target.get('new_session_agents'), previous['new_session_agents'])
+            if merged:
+                target['_new_session_agents'] = merged
+                target['new_session_agents'] = merged
+        if previous.get('operation_new_session_agents'):
+            combined = {**previous['operation_new_session_agents'], **target.get('operation_new_session_agents', {})}
+            target['_operation_new_session_agents'] = copy.deepcopy(combined)
+            target['operation_new_session_agents'] = copy.deepcopy(combined)
+        if kind == 'github_install' and (previous.get('remaining') or previous.get('_retry_skills')):
+            target['_retry_skills'] = list(previous.get('remaining') or previous['_retry_skills'])
+        if kind == 'update':
+            target['_updated'] = sorted(set(target.get('_updated', [])) | set(previous.get('updated', [])))
+
     def _add_job(self, parameters, previous=None, team_info=None):
         kind = parameters['kind']
         intent = json.dumps({k: v for k, v in parameters.items() if k != 'seen'}, sort_keys=True)
@@ -316,6 +361,7 @@ class Dashboard(ThreadingHTTPServer):
             existing = next((i for i in self.jobs if i.get('_intent') == intent and i['status'] in ACTIVE_JOBS), None)
             if existing:
                 if previous:
+                    self._carry_previous(existing, previous, kind)
                     self.jobs.remove(previous)
                     self.jobs_version += 1
                 return {'job': self.public_job(existing), 'duplicate': True, 'version': self.jobs_version}
@@ -346,19 +392,7 @@ class Dashboard(ThreadingHTTPServer):
                             summary='安装「' + title + '」', installed=[], reuse=[], skipped=[], operation=None,
                             message='等待安装。')
             if previous:
-                if previous['status'] in {'failed', 'attention'}:
-                    item['_batch'] = previous.get('_batch', previous['id'])
-                    item['_completed_operations'] = list(previous['operations'])
-                    item['operations'] = list(previous['operations'])
-                    item['_completed'] = list(previous.get('completed', []))
-                    item['completed'] = list(previous.get('completed', []))
-                    if previous.get('new_session_agents'):
-                        item['_new_session_agents'] = copy.deepcopy(previous['new_session_agents'])
-                        item['new_session_agents'] = copy.deepcopy(previous['new_session_agents'])
-                    if kind == 'github_install' and (previous.get('remaining') or previous.get('_retry_skills')):
-                        item['_retry_skills'] = list(previous.get('remaining') or previous['_retry_skills'])
-                    if kind == 'update':
-                        item['_updated'] = list(previous.get('updated', []))
+                self._carry_previous(item, previous, kind)
                 self.jobs.remove(previous)
             self.jobs.append(item)
             self.jobs_version += 1
@@ -573,6 +607,23 @@ class Dashboard(ThreadingHTTPServer):
                         merged.append(copy.deepcopy(entry))
             return merged
 
+    def job_new_session_agents(self, operation_ids, existing_map=None, fallback=()):
+        by_op = copy.deepcopy(existing_map or {})
+        records = {}
+        if operation_ids:
+            try:
+                records = {r['id']: r for r in operations.history(self.home) if r['id'] in operation_ids}
+            except (OSError, ValueError):
+                records = {}
+            for op in operation_ids:
+                if op in records:
+                    by_op[op] = list(records[op].get('new_session_agents') or [])
+        if operation_ids and by_op:
+            active_groups = [by_op[op] for op in operation_ids if op in by_op and not records.get(op, {}).get('undone')]
+            ordered_map = {op: by_op[op] for op in operation_ids if op in by_op}
+            return self.merge_new_session_agents(*active_groups), ordered_map
+        return self.merge_new_session_agents(fallback), {}
+
     def jobs_work(self):
         while True:
             with self.jobs_lock:
@@ -602,10 +653,19 @@ class Dashboard(ThreadingHTTPServer):
                         result.update(skills=sorted(set(item['skills']) | {n for r in records for n in r['skills']}),
                                       agents=sorted(set(item['agents']) | {a for r in records for a in r['agents']}))
                 except operations.RollbackError as error:
+                    op_ids = list(dict.fromkeys(
+                        item.get('_completed_operations', []) + item.get('operations', []) +
+                        [r['id'] for r in getattr(error, 'operations', [])]))
+                    merged_new_session, by_op = self.job_new_session_agents(
+                        op_ids, item.get('_operation_new_session_agents'), item.get('_new_session_agents'))
                     with self.jobs_lock:
-                        item['operations'] += [r['id'] for r in getattr(error, 'operations', [])]
+                        item['operations'] = op_ids
                         item['completed'] = sorted(set(item.get('completed', []) + getattr(error, 'completed', [])))
-                        item['updated'] = item.get('_updated', []) + getattr(error, 'updated', [])
+                        item['updated'] = sorted(set(item.get('_updated', []) + getattr(error, 'updated', [])))
+                        if merged_new_session:
+                            item['new_session_agents'] = merged_new_session
+                        if by_op:
+                            item['operation_new_session_agents'] = by_op
                     item.update(diagnostics.failure(self.home, 'job', item['kind'], error))
                     self.stop_jobs()
                     result = None
@@ -621,15 +681,22 @@ class Dashboard(ThreadingHTTPServer):
                     except (OSError, ValueError) as error:
                         diagnostics.record(self.home, 'backend', '刷新技能名单', error)  # Preserve the task result.
                 if result is not None:
+                    result['operations'] = list(dict.fromkeys(item.get('_completed_operations', []) + result.get('operations', [])))
                     if item.get('_completed'):
                         result['completed'] = sorted(set(item['_completed'] + result.get('completed', [])))
                         result['message'] = '此前已完成：' + self.skill_message('、'.join(item['_completed'])) + '。' + result['message']
-                    merged_new_session = self.merge_new_session_agents(
-                        item.get('_new_session_agents'), result.get('new_session_agents'))
+                    if item.get('_updated') and 'updated' not in result:
+                        result['updated'] = list(item['_updated'])
+                        result['message'] = '此前已更新：' + self.skill_message('、'.join(item['_updated'])) + '。' + result['message']
+                    merged_new_session, by_op = self.job_new_session_agents(
+                        result['operations'], item.get('_operation_new_session_agents'),
+                        self.merge_new_session_agents(item.get('_new_session_agents'), result.get('new_session_agents')))
                     if merged_new_session:
                         result['new_session_agents'] = merged_new_session
                     elif 'new_session_agents' in result:
                         result['new_session_agents'] = []
+                    if by_op:
+                        result['operation_new_session_agents'] = by_op
                     with self.jobs_lock:
                         item.update({'status': 'done', **result})
                         self.jobs_version += 1

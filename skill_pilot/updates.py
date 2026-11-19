@@ -489,9 +489,7 @@ def _apply_group(review, names, choices, merge_ids, batch):
             skill['last_update_choice'] = row['_choice']
         reconcile_assignments(current, home, checked, names,
                               {name: list(current['skills'][name]['entries']) for name in names})
-        affected = [a for a in agents if any(a in current['skills'][n]['assigned_agents'] for n in content)]
-        return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names},
-                                'new_session_agents': profiles.new_session_agents(affected, home)}
+        return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names}}
     def current_registry():
         current = operations.load(home)[1]
         if any(row['name'] not in current['skills'] or

@@ -173,25 +173,76 @@ $('confirm-body').addEventListener('click', event => {
 
 /* 提示条：成功会自己消失，出错留着让用户看清。
    带撤销或新开对话提醒的提示至少停 20 秒，撤销自己也会先弹确认框，用户取消时提示条留着。 */
-function toast({text, reminder = '', tone = 'ok', undo = null, sticky = false, error_id = ''}) {
-  const item = document.createElement('div');
-  item.className = 'toast' + (tone === 'error' ? ' toast-error' : '') + (reminder ? ' toast-remind' : '');
-  if (reminder) {
-    const body = document.createElement('div');
-    body.className = 'toast-body';
-    const message = document.createElement('p');
-    message.className = 'toast-text';
-    message.textContent = text;
-    const note = document.createElement('p');
-    note.className = 'toast-reminder';
-    note.innerHTML = `${icon('info')}<span>${escape(reminder)}</span>`;
-    body.append(message, note);
-    item.append(body);
-  } else {
-    const message = document.createElement('p');
-    message.textContent = text;
-    item.append(message);
+function setToastReminder(item, reminder) {
+  const text = String(reminder || '').trim();
+  const body = item.querySelector('.toast-body');
+  const note = item.querySelector('.toast-reminder');
+  if (!text) {
+    item.classList.remove('toast-remind');
+    note?.remove();
+    return;
   }
+  item.classList.add('toast-remind');
+  if (note) {
+    note.innerHTML = `${icon('info')}<span>${escape(text)}</span>`;
+    return;
+  }
+  const next = document.createElement('p');
+  next.className = 'toast-reminder';
+  next.innerHTML = `${icon('info')}<span>${escape(text)}</span>`;
+  if (body) {
+    body.append(next);
+    return;
+  }
+  const message = item.querySelector('p');
+  if (!message) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'toast-body';
+  message.className = 'toast-text';
+  message.replaceWith(wrap);
+  wrap.append(message, next);
+}
+
+function syncToastReminders() {
+  const container = $('toasts');
+  if (!container) return;
+  const logsById = new Map((state.logs || []).map(record => [record.id, record]));
+  for (const item of [...container.children]) {
+    const source = item._reminderSource;
+    if (!source) continue;
+    let nextReminder = '';
+    let allUndone = false;
+    if (source.jobId) {
+      const job = (state.jobs || []).find(entry => entry.id === source.jobId) || source.job;
+      nextReminder = job ? jobReminderText(job) : '';
+      allUndone = Boolean(job?.operations?.length) && !jobUndoAvailable(job);
+    } else if (source.operationIds?.length) {
+      const active = source.operationIds.filter(id => !logsById.get(id)?.undone);
+      allUndone = active.length === 0;
+      if (!allUndone) {
+        const hasPerOp = active.every(id => Array.isArray(logsById.get(id)?.new_session_agents));
+        const agents = hasPerOp
+          ? active.flatMap(id => logsById.get(id).new_session_agents)
+          : source.agents || [];
+        nextReminder = newSessionReminderText(agents, source.kind || 'enable');
+      }
+    }
+    setToastReminder(item, nextReminder);
+    if (allUndone && item._undoButton) {
+      item._undoButton.remove();
+      item._undoButton = null;
+    }
+  }
+}
+
+function toast({text, reminder = '', tone = 'ok', undo = null, sticky = false, error_id = '', reminderSource = null}) {
+  const item = document.createElement('div');
+  item.className = 'toast' + (tone === 'error' ? ' toast-error' : '');
+  const message = document.createElement('p');
+  message.textContent = text;
+  item.append(message);
+  if (reminder) setToastReminder(item, reminder);
+  if (reminderSource) item._reminderSource = reminderSource;
   if (tone === 'error') appendFeedback(item, error_id);
   if (undo) {
     const button = document.createElement('button');
@@ -208,6 +259,7 @@ function toast({text, reminder = '', tone = 'ok', undo = null, sticky = false, e
         toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
       }
     });
+    item._undoButton = button;
     item.append(button);
   }
   const close = document.createElement('button');
@@ -539,11 +591,37 @@ function newSessionReminderText(agents, kind = 'enable') {
   return `${names.join('、')} ${suffix}`;
 }
 
+function jobNewSessionAgents(job) {
+  if (!job || jobActive(job)) return [];
+  if (job.status !== 'done' && !(job.completed?.length || job.updated?.length)) return [];
+  const ops = job.operations || [];
+  if (!ops.length) return job.new_session_agents || [];
+  const logsById = new Map((state.logs || []).map(record => [record.id, record]));
+  const activeOps = ops.filter(id => !logsById.get(id)?.undone);
+  if (!activeOps.length) return [];
+  const opMap = job.operation_new_session_agents || null;
+  const hasPerOp = activeOps.every(id => (opMap && Object.prototype.hasOwnProperty.call(opMap, id))
+    || Array.isArray(logsById.get(id)?.new_session_agents));
+  if (!hasPerOp) return job.new_session_agents || [];
+  const seen = new Set();
+  const active = [];
+  for (const id of activeOps) {
+    const list = (opMap && Object.prototype.hasOwnProperty.call(opMap, id) ? opMap[id] : null)
+      || logsById.get(id)?.new_session_agents || [];
+    for (const agent of list) {
+      if (agent?.id && !seen.has(agent.id)) {
+        seen.add(agent.id);
+        active.push(agent);
+      }
+    }
+  }
+  const order = new Map((state.agents || []).map((agent, index) => [agent.id, index]));
+  active.sort((a, b) => (order.get(a.id) ?? 999) - (order.get(b.id) ?? 999));
+  return active;
+}
+
 function jobReminderText(job) {
-  if (!job || jobActive(job)) return '';
-  if (job.operations?.length && !jobUndoAvailable(job)) return '';
-  if (job.status !== 'done' && !(job.completed?.length || job.updated?.length)) return '';
-  return newSessionReminderText(job.new_session_agents || [], job.kind === 'update' ? 'update' : 'enable');
+  return newSessionReminderText(jobNewSessionAgents(job), job?.kind === 'update' ? 'update' : 'enable');
 }
 
 function jobReminderHtml(job) {
@@ -910,6 +988,7 @@ function applyJobs(result, {force = false} = {}) {
   state.jobsVersion = version;
   state.jobsBlocked = blocked;
   renderJobs();
+  syncToastReminders();
   renderJobBlocked();
   renderJobState();
   if (blockedChanged) renderJobAvailability();
@@ -1096,16 +1175,18 @@ function finishJobs(finished) {
         continue;
       }
     }
+    const reminderSource = {jobId: job.id, job};
     if (job.status === 'done') {
       toast({
         text: pastTense(job.message || '任务已完成'),
         reminder: jobReminderText(job),
+        reminderSource,
         undo: job.operations?.length && jobUndoAvailable(job) ? button => undoJob(job, button) : null,
       });
     } else if (job.status === 'failed') {
-      toast({text: jobStatusLine(job), reminder: jobReminderText(job), error_id: job.error_id, tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), reminder: jobReminderText(job), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});
     } else if (job.status === 'attention') {
-      toast({text: jobStatusLine(job), reminder: jobReminderText(job), error_id: job.error_id, tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), reminder: jobReminderText(job), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});
     }
   }
   for (const key of packKeys) announcePackBatch(key, state.jobs);
@@ -2727,6 +2808,8 @@ async function applyAbsorb(review, choices, button) {
     onError: error => { $('absorb-message').innerHTML = escape(error.message) + feedbackButton(error.error_id); },
     success: written => ({
       text: '技能副本已经纳入统一管理',
+      reminder: newSessionReminderText(written.new_session_agents || [], 'update'),
+      reminderSource: written.id ? {operationIds: [written.id], agents: written.new_session_agents || [], kind: 'update'} : null,
       undo: undoButton => undoOperation(written.id, {skills: review.skills, message: written.message, button: undoButton}),
     }),
   });
@@ -3325,6 +3408,7 @@ $('config-import-apply').addEventListener('click', async event => {
     success: result => ({
       text: result.complete ? result.message : '可用部分已处理，未完成项见导入结果。',
       reminder: newSessionReminderText(result.new_session_agents || []),
+      reminderSource: result.id ? {operationIds: [result.id], agents: result.new_session_agents || [], kind: 'enable'} : null,
       undo: result.id ? button => undoConfigImport(result, button) : null,
     }),
   });
@@ -6329,6 +6413,7 @@ async function refreshLog() {
     state.logs = await api('/api/log');
     renderLog();
     renderJobs();   // 已撤销的记录不再给任务列表里的「撤销」
+    syncToastReminders();
   } catch (error) {
     toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
   }
@@ -6510,6 +6595,8 @@ async function joinAgent(id, button) {
       const text = result.message || '新 Agent 已接入';
       return {
         text: missing.length ? `${text}，一并接入 ${missing.join('、')}` : text,
+        reminder: newSessionReminderText(result.new_session_agents || [], 'update'),
+        reminderSource: result.id ? {operationIds: [result.id], agents: result.new_session_agents || [], kind: 'update'} : null,
         undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
       };
     },
@@ -6637,6 +6724,8 @@ $('join-apply').addEventListener('click', async event => {
     },
     success: result => ({
       text: result.message || '新 Agent 已接入',
+      reminder: newSessionReminderText(result.new_session_agents || [], 'update'),
+      reminderSource: result.id ? {operationIds: [result.id], agents: result.new_session_agents || [], kind: 'update'} : null,
       undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
     }),
   });
@@ -7061,6 +7150,7 @@ async function decideDependency(skill, requires, confirmed, button) {
     success: result => ({
       text: confirmed ? '已添加前置依赖' : '已移除前置依赖',
       reminder: confirmed ? newSessionReminderText(result?.new_session_agents || []) : '',
+      reminderSource: confirmed && result?.id ? {operationIds: [result.id], agents: result.new_session_agents || [], kind: 'enable'} : null,
     }),
   });
 }
