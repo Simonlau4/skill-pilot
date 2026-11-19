@@ -1022,28 +1022,33 @@ assert.equal($('program-popup-action').textContent, '重试升级');
         self.assertNotEqual(applied_unmanaged['installed_version'], applied_unmanaged['pending_version'])
         extra_code.unlink()
 
-        # 5b. Post-write read_build() exception inside apply() must be caught, record sanitized diagnostics
-        #     with error_id, and return version_verified=False, has_unmanaged_files=False.
-        readme.write_text(readme.read_text(encoding='utf-8') + '\npost-write exception release\n', encoding='utf-8')
-        commit(self.upstream, 'Post-write exception release')
-        post_err_review = self_update.check(self.home, self.code)
-        if post_err_review['temporary']:
-            self.addCleanup(shutil.rmtree, post_err_review['temporary'], True)
-        self.assertTrue(post_err_review['available'])
-        with patch.object(self_update, 'run_installer'), \
-                patch.object(self_update, 'read_build', side_effect=RuntimeError('transient read fault')):
-            applied_post_err = self_update.apply(post_err_review, self.home, self.code)
-        self.assertFalse(applied_post_err['version_verified'])
-        self.assertFalse(applied_post_err['has_unmanaged_files'])
-        self.assertEqual(applied_post_err['installed_version'], '')
-        self.assertTrue(applied_post_err.get('error_id'))
-        recent_rows = diagnostics.recent(self.home)
-        matched_diag = next((row for row in recent_rows if row.get('error_id') == applied_post_err['error_id']), None)
-        self.assertIsNotNone(matched_diag)
-        self.assertEqual(matched_diag['environment']['app_version'], diagnostics.RUNNING_BUILD['app_version'])
+        # 5b. Post-write read_build() exception (both RuntimeError and plain ValueError) inside apply()
+        #     must be caught, record sanitized diagnostics with error_id, and return version_verified=False.
+        for label, exc in (
+            ('runtime-error', RuntimeError('transient read fault')),
+            ('plain-value-error', ValueError('unexpected verification value')),
+        ):
+            with self.subTest(post_write_exc=label):
+                readme.write_text(readme.read_text(encoding='utf-8') + f'\npost-write {label}\n', encoding='utf-8')
+                commit(self.upstream, f'Post-write {label}')
+                post_err_review = self_update.check(self.home, self.code)
+                if post_err_review['temporary']:
+                    self.addCleanup(shutil.rmtree, post_err_review['temporary'], True)
+                self.assertTrue(post_err_review['available'])
+                with patch.object(self_update, 'run_installer'), \
+                        patch.object(self_update, 'read_build', side_effect=exc):
+                    applied_post_err = self_update.apply(post_err_review, self.home, self.code)
+                self.assertFalse(applied_post_err['version_verified'])
+                self.assertFalse(applied_post_err['has_unmanaged_files'])
+                self.assertEqual(applied_post_err['installed_version'], '')
+                self.assertTrue(applied_post_err.get('error_id'))
+                recent_rows = diagnostics.recent(self.home)
+                matched_diag = next((row for row in recent_rows if row.get('error_id') == applied_post_err['error_id']), None)
+                self.assertIsNotNone(matched_diag)
+                self.assertEqual(matched_diag['environment']['app_version'], diagnostics.RUNNING_BUILD['app_version'])
 
         # 6. Checkout fast-return computes latest_version independently from git commit tree `target`
-        #    (ignoring local `git replace` objects and --skip-worktree edits), and detects mid-check
+        #    (ignoring local `git replace` blob & commit objects and --skip-worktree edits), and detects mid-check
         #    modifications made during ls-remote OR during read_git_tree_version.
         with patch.object(self_update, 'run_installer'):
             make_fixture(self, checkout=True)
@@ -1062,6 +1067,22 @@ assert.equal($('program-popup-action').textContent, '重试升级');
             self.assertEqual(replace_check['current_version'], official_checkout_version)
         finally:
             git(self.code, 'replace', '-d', orig_blob)
+
+        # Also replace the commit object itself to lock ls-tree --no-replace-objects.
+        empty_tree = subprocess.run(
+            ['git', '-C', str(self.code), 'mktree'],
+            input='', capture_output=True, text=True, encoding='utf-8', check=True,
+        ).stdout.strip()
+        fake_commit = subprocess.run(
+            ['git', '-C', str(self.code), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+             'commit-tree', empty_tree, '-m', 'fake replaced commit'],
+            capture_output=True, text=True, encoding='utf-8', check=True,
+        ).stdout.strip()
+        git(self.code, 'replace', head_rev, fake_commit)
+        try:
+            self.assertEqual(app_version.read_git_tree_version(self.code, head_rev), official_checkout_version)
+        finally:
+            git(self.code, 'replace', '-d', head_rev)
 
         git(self.code, 'update-index', '--skip-worktree', 'README.md')
         readme_path = self.code / 'README.md'

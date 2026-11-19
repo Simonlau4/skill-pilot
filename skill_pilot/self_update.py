@@ -439,7 +439,7 @@ def apply(review, home, project=PROJECT):
         version_verified = False
         has_unmanaged_files = False
         try:
-            failure = ValueError('新版文件已写入，但未能核实安装后的版本，请刷新页面或重新检查。')
+            failure = RuntimeError('新版文件已写入，但未能核实安装后的版本，请刷新页面或重新检查。')
             failure.diagnostic_detail = f'程序升级后版本核对失败：{type(verify_error).__name__}'
             failure.__cause__ = verify_error
             captured = record_failure(home, 'apply', failure) or {}
