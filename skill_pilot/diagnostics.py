@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import traceback
 import tomllib
 import uuid
@@ -242,17 +243,31 @@ def record(home, source, action, error, user_message='操作没有完成，请�
         if write_allowed(home):
             path = guard(home / '.skill-pilot/logs/errors.jsonl', home)
             with LOCK, log_lock(path, home):
-                rows = list(reversed(recent(home, sanitize_records=False))) + [row]
-                encoded = [(json.dumps(r, ensure_ascii=False) + '\n').encode() for r in rows[-MAX_RECORDS:]]
-                while sum(map(len, encoded)) > MAX_BYTES:
-                    encoded.pop(0)
-                fd, temporary = tempfile.mkstemp(prefix='.errors-', dir=path.parent)
-                try:
-                    with os.fdopen(fd, 'wb') as stream:
-                        stream.write(b''.join(encoded))
-                    os.replace(temporary, guard(path, home))
-                finally:
-                    Path(temporary).unlink(missing_ok=True)
+                for attempt in range(8):
+                    rows = list(reversed(recent(home, sanitize_records=False))) + [row]
+                    encoded = [(json.dumps(r, ensure_ascii=False) + '\n').encode() for r in rows[-MAX_RECORDS:]]
+                    while sum(map(len, encoded)) > MAX_BYTES:
+                        encoded.pop(0)
+                    fd, temporary = tempfile.mkstemp(prefix='.errors-', dir=path.parent)
+                    committed = False
+                    try:
+                        with os.fdopen(fd, 'wb') as stream:
+                            stream.write(b''.join(encoded))
+                        try:
+                            os.replace(temporary, guard(path, home))
+                            committed = True
+                        except PermissionError:
+                            # Windows can refuse the replacement while another
+                            # program still has the previous file open. The lock
+                            # is still held, so reading again cannot lose a line.
+                            if attempt == 7:
+                                raise
+                            time.sleep(0.02 * (attempt + 1))
+                            continue
+                        break
+                    finally:
+                        if not committed:
+                            Path(temporary).unlink(missing_ok=True)
         return row
     except Exception:
         # Diagnostics must never replace the original failure.

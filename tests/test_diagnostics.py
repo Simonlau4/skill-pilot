@@ -59,6 +59,23 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(self.record(), {})
         self.assertEqual([p for p in (self.private / 'logs').iterdir() if p.name != '.errors.lock'], [])
 
+    def test_a_brief_file_lock_is_retried_and_the_record_is_kept(self):
+        real = os.replace
+        calls = {'n': 0}
+
+        def occupied(source, destination):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise PermissionError('文件正被占用')
+            return real(source, destination)
+
+        with patch('skill_pilot.diagnostics.os.replace', occupied):
+            row = self.record()
+        self.assertTrue(row.get('error_id'))
+        self.assertEqual([item['error_id'] for item in diagnostics.recent(self.home)], [row['error_id']])
+        self.assertGreater(calls['n'], 1)
+        self.assertEqual([p.name for p in (self.private / 'logs').iterdir() if p.name.startswith('.errors-')], [])
+
     def test_redacts_secrets_names_paths_and_control_characters(self):
         (self.private / 'settings.json').write_text(json.dumps({'llm': {'api_key': 'private-ai-key'}}))
         (self.private / 'team.json').write_text(json.dumps({'key': 'member-secret', 'url': 'https://private-team.example', 'name': 'Private Person'}))
