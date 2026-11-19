@@ -172,13 +172,26 @@ $('confirm-body').addEventListener('click', event => {
 });
 
 /* 提示条：成功会自己消失，出错留着让用户看清。
-   带撤销的提示，撤销自己也会先弹确认框，用户取消时提示条留着。 */
-function toast({text, tone = 'ok', undo = null, sticky = false, error_id = ''}) {
+   带撤销或新开对话提醒的提示至少停 20 秒，撤销自己也会先弹确认框，用户取消时提示条留着。 */
+function toast({text, reminder = '', tone = 'ok', undo = null, sticky = false, error_id = ''}) {
   const item = document.createElement('div');
-  item.className = 'toast' + (tone === 'error' ? ' toast-error' : '');
-  const message = document.createElement('p');
-  message.textContent = text;
-  item.append(message);
+  item.className = 'toast' + (tone === 'error' ? ' toast-error' : '') + (reminder ? ' toast-remind' : '');
+  if (reminder) {
+    const body = document.createElement('div');
+    body.className = 'toast-body';
+    const message = document.createElement('p');
+    message.className = 'toast-text';
+    message.textContent = text;
+    const note = document.createElement('p');
+    note.className = 'toast-reminder';
+    note.innerHTML = `${icon('info')}<span>${escape(reminder)}</span>`;
+    body.append(message, note);
+    item.append(body);
+  } else {
+    const message = document.createElement('p');
+    message.textContent = text;
+    item.append(message);
+  }
   if (tone === 'error') appendFeedback(item, error_id);
   if (undo) {
     const button = document.createElement('button');
@@ -204,7 +217,7 @@ function toast({text, tone = 'ok', undo = null, sticky = false, error_id = ''}) 
   close.addEventListener('click', () => item.remove());
   item.append(close);
   $('toasts').prepend(item);
-  if (!sticky && tone !== 'error') autoDismiss(item, undo ? 20000 : 6000);
+  if (!sticky && tone !== 'error') autoDismiss(item, undo || reminder ? 20000 : 6000);
 }
 
 /* 自动消失：带撤销的提示至少留 20 秒，鼠标移上去或键盘聚焦时暂停。 */
@@ -487,6 +500,58 @@ const jobStatusInfo = job => (job.completed?.length || job.updated?.length) && [
   attention: {tone: 'tag-warn', label: '需要处理'},
 }[job.status] || {tone: 'tag-quiet', label: '未知状态'});
 
+function agentProfileOf(id) {
+  return (state.agents || []).find(agent => agent.id === id)
+    || state.catalog?.get(id)
+    || null;
+}
+
+/* 按 Agent 档案的 activation_mode 筛选需要新开对话才生效的名称，不硬编码工具名。 */
+function newSessionAgentsFrom(list) {
+  if (!Array.isArray(list)) return [];
+  const names = [];
+  const seen = new Set();
+  for (const item of list) {
+    if (!item) continue;
+    if (typeof item === 'string') {
+      const agent = agentProfileOf(item);
+      if (agent?.activation_mode === 'new_session' && !seen.has(agent.id)) {
+        seen.add(agent.id);
+        names.push(agent.name || agent.id);
+      }
+      continue;
+    }
+    if (item.activation_mode && item.activation_mode !== 'new_session') continue;
+    const id = item.id || item.name;
+    const name = item.name || nameOf(item.id);
+    if (id && name && !seen.has(id)) {
+      seen.add(id);
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+function newSessionReminderText(agents, kind = 'enable') {
+  const names = newSessionAgentsFrom(agents);
+  if (!names.length) return '';
+  const suffix = kind === 'update' ? '需新开对话才会加载新版技能' : '需新开对话才会加载新技能';
+  return `${names.join('、')} ${suffix}`;
+}
+
+function jobReminderText(job) {
+  if (!job || jobActive(job)) return '';
+  if (job.operations?.length && !jobUndoAvailable(job)) return '';
+  if (job.status !== 'done' && !(job.completed?.length || job.updated?.length)) return '';
+  return newSessionReminderText(job.new_session_agents || [], job.kind === 'update' ? 'update' : 'enable');
+}
+
+function jobReminderHtml(job) {
+  const text = jobReminderText(job);
+  if (!text) return '';
+  return `<p class="job-reminder" role="note">${icon('info')}<span>${escape(text)}</span></p>`;
+}
+
 function jobStatusLine(job) {
   const message = job.message || '';
   if ((job.completed?.length || job.updated?.length) && ['failed', 'attention'].includes(job.status)) return `部分完成：${message}`;
@@ -600,6 +665,7 @@ function jobItemHtml(job) {
       <span class="tag ${status.tone}">${escape(status.label)}</span>
     </div>
     <p class="job-status">${escape(jobStatusLine(job))}</p>
+    ${jobReminderHtml(job)}
     ${['failed', 'attention'].includes(job.status) ? feedbackButton(job.error_id) : ''}
     ${jobConflictHtml(job)}${jobFailedHtml(job)}${jobImpactHtml(job)}
     ${actions.length ? `<div class="job-actions">${actions.map(action => jobActionButton(job, action)).join('')}</div>` : ''}
@@ -648,9 +714,12 @@ function renderJobs({force = false} = {}) {
   const ended = items.filter(job => !jobActive(job)).length;
   $('jobs-clear').hidden = !ended;
   $('jobs-clear').disabled = !jobsWritable();
-  // 状态变化用读屏读出来；数量和每个条目的当前状态都写在同一处。
+  // 状态变化用读屏读出来；数量、状态和需新开对话提醒都写在同一处。
   $('jobs-live').textContent = items.length
-    ? items.map(job => `${job.summary || '后台任务'}：${jobStatusInfo(job).label}`).join('；')
+    ? items.map(job => {
+      const reminder = jobReminderText(job);
+      return `${job.summary || '后台任务'}：${jobStatusInfo(job).label}${reminder ? `，${reminder}` : ''}`;
+    }).join('；')
     : '后台任务列表为空。';
 
   if (jobsPanelOpen && focusInList) {
@@ -1030,12 +1099,13 @@ function finishJobs(finished) {
     if (job.status === 'done') {
       toast({
         text: pastTense(job.message || '任务已完成'),
+        reminder: jobReminderText(job),
         undo: job.operations?.length && jobUndoAvailable(job) ? button => undoJob(job, button) : null,
       });
     } else if (job.status === 'failed') {
-      toast({text: jobStatusLine(job), error_id: job.error_id, tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), reminder: jobReminderText(job), error_id: job.error_id, tone: 'error', sticky: true});
     } else if (job.status === 'attention') {
-      toast({text: jobStatusLine(job), error_id: job.error_id, tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), reminder: jobReminderText(job), error_id: job.error_id, tone: 'error', sticky: true});
     }
   }
   for (const key of packKeys) announcePackBatch(key, state.jobs);
@@ -3243,14 +3313,20 @@ $('config-import-apply').addEventListener('click', async event => {
     work: async () => {
       const result = await api('/api/config/apply', {config: configImportData, agents: configImportAgents(), revision: plan.revision, confirmed: true});
       configImportResult = result;
+      const reminder = newSessionReminderText(result.new_session_agents || []);
       $('config-import-title').textContent = '导入结果';
-      $('config-import-message').textContent = result.message + (result.complete ? '。' : '。未完成项见下方明细。');
+      $('config-import-message').textContent = result.message
+        + (result.complete ? '。' : '。未完成项见下方明细。')
+        + (reminder ? ` ${reminder}。` : '');
       renderConfigImportReview({...plan, ...result}, true);
       await refreshEverything();
       return result;
     },
-    success: result => ({text: result.complete ? result.message : '可用部分已处理，未完成项见导入结果。',
-      undo: result.id ? button => undoConfigImport(result, button) : null}),
+    success: result => ({
+      text: result.complete ? result.message : '可用部分已处理，未完成项见导入结果。',
+      reminder: newSessionReminderText(result.new_session_agents || []),
+      undo: result.id ? button => undoConfigImport(result, button) : null,
+    }),
   });
 });
 
@@ -6978,11 +7054,14 @@ async function decideDependency(skill, requires, confirmed, button) {
     button,
     busyText: '正在处理…',
     work: async () => {
-      await api('/api/dependencies', {decisions: [{skill, requires, confirmed}], revision: state.table.revision, confirmed: true});
+      const result = await api('/api/dependencies', {decisions: [{skill, requires, confirmed}], revision: state.table.revision, confirmed: true});
       await refreshEverything();
-      return true;
+      return result;
     },
-    success: () => ({text: confirmed ? '已添加前置依赖' : '已移除前置依赖'}),
+    success: result => ({
+      text: confirmed ? '已添加前置依赖' : '已移除前置依赖',
+      reminder: confirmed ? newSessionReminderText(result?.new_session_agents || []) : '',
+    }),
   });
 }
 

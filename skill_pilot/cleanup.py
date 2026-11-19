@@ -1,7 +1,7 @@
 """Manual withdrawal, deletion and reversible restoration of registered skills."""
 from datetime import datetime, timezone
 
-from . import labels, normalization, operations
+from . import labels, normalization, operations, profiles
 from .sources import normalize
 from .store import remove
 from .sync import reconcile_assignments
@@ -138,5 +138,6 @@ def restore(names, home=None, expected=None):
             current['skills'][name].pop('withdrawn_at',None)
         changed = sorted(set(names)|set(plan['changed']))
         reconcile_assignments(current,home,checked,changed,{n:current['skills'][n]['withdrawn_entries'] for n in names})
-        return changed, [], {'restored':names,'reasons':plan['reasons']}
+        return changed, [], {'restored':names,'reasons':plan['reasons'],
+                             'new_session_agents': profiles.new_session_agents(plan['added_agents'], home)}
     return operations._run(home,registry,agents,expected or operations.revision(home,agents),f'恢复了 {len(names)} 个已撤下的技能',mutate)

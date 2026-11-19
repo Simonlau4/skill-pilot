@@ -174,7 +174,8 @@ def table(home=None):
     return {'home': str(home), 'revision': revision(home, agents), 'write_allowed': write_allowed(home), 'skills': rows,
             'actual_assignments': {s['name']: [a for a in agents if s['name'] in actual[a]['available']] for s in rows},
             'agents': [{'id': a, 'name': catalog[a]['name'],
-                        'activation': '目录改变后会动态刷新' if catalog[a]['activation'] == 'immediate' else '新会话生效',
+                        'activation': profiles.activation_note(catalog[a]),
+                        'activation_mode': catalog[a]['activation'],
                         'activation_text': profiles.activation_text(catalog[a]),
                         'count': sum(a in s['assigned_agents'] for s in rows),
                         'description_tokens': sum(s['description_tokens'] for s in rows if a in s['assigned_agents'])}
@@ -318,15 +319,16 @@ def assignment_plan(registry, agents, changes, home=None):
         if skill['assigned_agents'] != registry['skills'][name]['assigned_agents']:
             changed.add(name)
             removed += sorted(set(skill.get('entries', [])) - set(assignment_entries(name, skill['assigned_agents'], home, managed)))
-    summary = []
+    summary, added_agents = [], []
     for agent in agents:
         added = [n for n in changed if agent in result['skills'][n]['assigned_agents'] and agent not in registry['skills'][n]['assigned_agents']]
         withdrawn = [n for n in changed if agent not in result['skills'][n]['assigned_agents'] and agent in registry['skills'][n]['assigned_agents']]
         if added:
+            added_agents.append(agent)
             summary.append(f'将给 {catalog[agent]["name"]} 加 {len(added)} 个')
         if withdrawn:
             summary.append(f'从 {catalog[agent]["name"]} 撤下 {len(withdrawn)} 个')
-    return {'registry': result, 'changed': sorted(changed), 'reasons': reasons, 'auto_added': auto_added,
+    return {'registry': result, 'changed': sorted(changed), 'added_agents': added_agents, 'reasons': reasons, 'auto_added': auto_added,
             'dependency_warnings': dependency_warnings, 'path_warnings': path_warnings(removed, home),
             'message': '、'.join(summary) or '分配没有变化'}
 
@@ -667,7 +669,7 @@ def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=Fal
         return {'needs_confirmation': True, **review}
     if not plan['changed']:
         return {'message': '这些改动已经完成，已与最新状态对齐。' if recheck else plan['message'],
-                'reasons': plan['reasons']}
+                'reasons': plan['reasons'], 'new_session_agents': []}
     had_drift = any((set(before[a]) & set(registry['skills'])) !=
         {n for n, s in registry['skills'].items() if a in s['assigned_agents']} for a in agents)
     def check_current():
@@ -684,7 +686,9 @@ def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=Fal
             current['codex_config'] = working['codex_config']
         expected_visibility = {a: sorted((set(before[a]) - set(plan['changed'])) |
             {n for n in plan['changed'] if a in working['skills'][n]['assigned_agents']}) for a in agents}
-        result = {'reasons': plan['reasons'], '_expected_visibility': expected_visibility}
+        result = {'reasons': plan['reasons'],
+                  'new_session_agents': profiles.new_session_agents(plan['added_agents'], home),
+                  '_expected_visibility': expected_visibility}
         if had_drift:
             result['_assignment_before'] = before
         return plan['changed'], [], result
@@ -716,7 +720,7 @@ def decide_dependencies(decisions, expected=None, home=None):
     names.update(plan['changed'])
     def mutate(current, checked):
         reconcile_assignments(current, home, checked, sorted(names))
-        return sorted(names), [], {}
+        return sorted(names), [], {'new_session_agents': profiles.new_session_agents(plan['added_agents'], home)}
     return _run(home, registry, agents, expected or revision(home, agents), f'修改了 {len(decisions)} 条需要的技能', mutate)
 
 
@@ -790,6 +794,7 @@ def install(review, names, assigned=None, expected=None, home=None, confirmed=Tr
         changed = sorted(set(names) | set(plan['changed']))
         reconcile_assignments(current, home, checked, changed)
         return changed, sorted(names), {'reasons': plan['reasons'],
+                                      'new_session_agents': profiles.new_session_agents(plan['added_agents'], home),
                                       'normalization': {n: current['skills'][n]['normalization'] for n in names}}
     return _run(home, registry, agents, expected or revision(home, agents), f'安装了 {len(items)} 个技能', mutate)
 

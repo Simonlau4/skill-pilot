@@ -37,6 +37,8 @@ def overview(home=None, discovered=None):
     return {'revision': operations.revision(home, local['onboarded'])
             if discovered is None and (home / '.skill-pilot/registry.json').is_file() else None,
             'managed': [{'id': p['id'], 'name': p['name'], 'skill_roots': p['skill_roots'],
+                         'activation': profiles.activation_note(p),
+                         'activation_mode': p['activation'],
                          'activation_text': profiles.activation_text(p),
                          'shared_with': [q['id'] for q in managed if q != p and set(q['skill_roots']) & set(p['skill_roots'])],
                          'can_leave': len(managed) > 1} for p in managed],

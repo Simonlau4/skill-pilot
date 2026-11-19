@@ -421,9 +421,14 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
             completed.append({**result, 'skills': group})
             updated.extend(group)
             normalization_results.update(result['normalization'])
+    new_session = profiles.new_session_agents(
+        [a['id'] for item in completed for a in item.get('new_session_agents', [])],
+        review['home'],
+    )
     message = f'已更新 {len(updated)} 个技能' + (f'，{len(failed)} 个没更新，请查看原因。' if failed else '。')
     return {**(completed[0] if len(completed) == 1 else {}),
             'updated': updated, 'failed': failed, 'operations': completed, 'complete': not failed,
+            'new_session_agents': new_session,
             'normalization': normalization_results, 'message': message}
 
 
@@ -484,7 +489,9 @@ def _apply_group(review, names, choices, merge_ids, batch):
             skill['last_update_choice'] = row['_choice']
         reconcile_assignments(current, home, checked, names,
                               {name: list(current['skills'][name]['entries']) for name in names})
-        return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names}}
+        affected = [a for a in agents if any(a in current['skills'][n]['assigned_agents'] for n in content)]
+        return names, content, {'normalization': {n: current['skills'][n].get('normalization', {}) for n in names},
+                                'new_session_agents': profiles.new_session_agents(affected, home)}
     def current_registry():
         current = operations.load(home)[1]
         if any(row['name'] not in current['skills'] or

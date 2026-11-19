@@ -349,7 +349,7 @@ const runWrite = async options => {try {return await options.work()} catch (erro
 const assert = require('node:assert/strict'), headers = {}, messages = [];
 const state = {assignmentIntents:new Set()}, assignmentSubmitting = false;
 const fetch = async () => ({status:409,ok:false,json:async()=>({error:'无法读取程序',error_id:'runtime-id'})});
-const toast = value => messages.push(value), jobStatusLine = job => job.message;
+const toast = value => messages.push(value), jobStatusLine = job => job.message, jobReminderText = () => '';
 const jobsHasActive = () => false, renderJobs = () => {};
 const refreshTable = async () => {throw Object.assign(new Error('无法刷新'), {error_id:'refresh-id'})};
 const refreshLog = async () => {}, loadCleanup = async () => {};

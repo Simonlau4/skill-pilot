@@ -247,7 +247,7 @@ def import_config(data, assigned=None, home=None, expected=None, member_name=Non
     if not plan['install'] and not plan['dependencies'] and not operations.assignment_plan(registry, agents, changes, home)['changed']:
         message = ('配置里没有在用技能，文件没有改动。' if not rows else
                    '本机已有可用部分，分配没有变化。' if changes else '没有可导入的技能，请先补齐清单里的待处理项。')
-        return {**result, 'message': message}
+        return {**result, 'message': message, 'new_session_agents': []}
     reviews, incoming = {}, []
     try:
         for name in plan['install']:
@@ -273,7 +273,8 @@ def import_config(data, assigned=None, home=None, expected=None, member_name=Non
             current.update(assignments['registry'])
             changed = sorted(set(plan['install']) | set(plan['dependencies']) | set(assignments['changed']))
             reconcile_assignments(current, home, checked, changed)
-            return changed, plan['install'], result
+            return changed, plan['install'], {**result,
+                                              'new_session_agents': profiles.new_session_agents(assignments['added_agents'], home)}
         prefix = f'从{member_name}的分享导入了技能' if member_name is not None else '导入了技能配置'
         return operations._run(home, registry, agents, expected,
                                f'{prefix}：新装 {len(plan["install"])} 个，沿用本机 {len(plan["reuse"])} 个', mutate)

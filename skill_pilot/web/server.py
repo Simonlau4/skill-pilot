@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import apply, backups, guard, preview, restore, target_home
-from .. import diagnostics, operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization
+from .. import diagnostics, operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization, profiles
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from ..environment import tool_environment
@@ -352,6 +352,9 @@ class Dashboard(ThreadingHTTPServer):
                     item['operations'] = list(previous['operations'])
                     item['_completed'] = list(previous.get('completed', []))
                     item['completed'] = list(previous.get('completed', []))
+                    if previous.get('new_session_agents'):
+                        item['_new_session_agents'] = copy.deepcopy(previous['new_session_agents'])
+                        item['new_session_agents'] = copy.deepcopy(previous['new_session_agents'])
                     if kind == 'github_install' and (previous.get('remaining') or previous.get('_retry_skills')):
                         item['_retry_skills'] = list(previous.get('remaining') or previous['_retry_skills'])
                     if kind == 'update':
@@ -554,6 +557,22 @@ class Dashboard(ThreadingHTTPServer):
                 self.update_users[identifier] -= 1
             self.prune_update_reviews()
 
+    def merge_new_session_agents(self, *groups):
+        ids = [entry['id'] for group in groups for entry in (group or [])
+               if isinstance(entry, dict) and entry.get('id')]
+        if not ids:
+            return []
+        try:
+            return profiles.new_session_agents(ids, self.home)
+        except (OSError, ValueError):
+            seen, merged = set(), []
+            for group in groups:
+                for entry in (group or []):
+                    if isinstance(entry, dict) and entry.get('id') and entry['id'] not in seen:
+                        seen.add(entry['id'])
+                        merged.append(copy.deepcopy(entry))
+            return merged
+
     def jobs_work(self):
         while True:
             with self.jobs_lock:
@@ -605,6 +624,12 @@ class Dashboard(ThreadingHTTPServer):
                     if item.get('_completed'):
                         result['completed'] = sorted(set(item['_completed'] + result.get('completed', [])))
                         result['message'] = '此前已完成：' + self.skill_message('、'.join(item['_completed'])) + '。' + result['message']
+                    merged_new_session = self.merge_new_session_agents(
+                        item.get('_new_session_agents'), result.get('new_session_agents'))
+                    if merged_new_session:
+                        result['new_session_agents'] = merged_new_session
+                    elif 'new_session_agents' in result:
+                        result['new_session_agents'] = []
                     with self.jobs_lock:
                         item.update({'status': 'done', **result})
                         self.jobs_version += 1
@@ -666,7 +691,7 @@ class Dashboard(ThreadingHTTPServer):
                     return {**result, 'completed': names}
                 if len(groups) < 2:
                     return result
-            completed, failed, ids, conflicts, impacts = [], [], [], [], []
+            completed, failed, ids, conflicts, impacts, new_session = [], [], [], [], [], []
             preview = copy.deepcopy(parameters.get('seen', {}))
             for group in groups:
                 child_parameters = copy.deepcopy(parameters)
@@ -687,6 +712,7 @@ class Dashboard(ThreadingHTTPServer):
                 ids.extend(result.get('operations', []))
                 if result.get('status', 'done') == 'done':
                     completed.extend(group)
+                    new_session.extend(result.get('new_session_agents', []))
                     continue
                 for name in group:
                     reason = '；'.join(c['message'] for c in result.get('conflicts', [])
@@ -706,8 +732,10 @@ class Dashboard(ThreadingHTTPServer):
                 message += '未完成：' + '、'.join(remaining) + '。'
                 if completed:
                     message += '已完成的部分已保留。'
+            merged_new_session = self.merge_new_session_agents(new_session)
             return {'status': status, 'message': self.skill_message(message), 'completed': completed,
                     'failed': failed, 'remaining': remaining, 'operations': ids, 'conflicts': conflicts,
+                    **({'new_session_agents': merged_new_session} if merged_new_session else {}),
                     **({'remaining_changes': [c for c in parameters['changes'] if c['skill'] in remaining]} if kind == 'assignment' else {}),
                     **({'attention': 'confirmation', 'new_impacts': impacts, 'preview': preview} if impacts else
                        {'attention': 'conflict'} if conflicts else {})}
@@ -798,7 +826,8 @@ class Dashboard(ThreadingHTTPServer):
                 return {'status': 'failed' if failed else 'done', 'message': self.job_message(self.skill_message(message)),
                         'updated': result['updated'], 'failed': [
                             {'name': r['name'], 'error': self.job_message(self.skill_message(r['error'])), **({'error_id': r['error_id']} if r.get('error_id') else {})} for r in failed],
-                        'operations': ids}
+                        'operations': ids,
+                        **({'new_session_agents': result['new_session_agents']} if result.get('new_session_agents') else {})}
         elif kind in {'cleanup_withdraw', 'cleanup_delete'}:
             action = cleanup.delete_preview if kind == 'cleanup_delete' else cleanup.preview
             plan = action(names, self.home)
@@ -876,7 +905,8 @@ class Dashboard(ThreadingHTTPServer):
                     **({'skills': sorted(set(result['installed'] + result['reuse']))} if result['installed'] else {}),
                     **({'operation': result['id']} if 'id' in result else {}),
                     'operations': [result['id']] if 'id' in result else []}
-        return {'message': result['message'], 'operations': [result['id']] if 'id' in result else []}
+        return {'message': result['message'], 'operations': [result['id']] if 'id' in result else [],
+                **({'new_session_agents': result['new_session_agents']} if result.get('new_session_agents') else {})}
 
     def auto_check_program(self):
         with self.runtime_lock:
