@@ -206,13 +206,16 @@ vm.runInNewContext(fs.readFileSync('skill_pilot/web/static/diagnostics.js', 'utf
 
     def test_parallel_processes_keep_every_record(self):
         code = "from skill_pilot.diagnostics import record; from skill_pilot.store import target_home; [record(target_home(), 'backend', '并发读取', OSError('failure')) for _ in range(8)]"
-        processes = [subprocess.Popen([sys.executable, '-B', '-c', code], stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(3)]
-        for process in processes:
-            _, error = process.communicate(timeout=20)
-            self.assertEqual(process.returncode, 0, error)
-        rows = diagnostics.recent(self.home)
-        self.assertEqual(len(rows), 24)
-        self.assertEqual(len({row['error_id'] for row in rows}), 24)
+        for round_number in range(4):
+            if self.log.exists():
+                self.log.unlink()
+            processes = [subprocess.Popen([sys.executable, '-B', '-c', code], stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(3)]
+            for process in processes:
+                _, error = process.communicate(timeout=20)
+                self.assertEqual(process.returncode, 0, error)
+            rows = diagnostics.recent(self.home)
+            self.assertEqual(len(rows), 24, f'第 {round_number + 1} 轮丢失了错误记录')
+            self.assertEqual(len({row['error_id'] for row in rows}), 24)
 
     def test_log_directory_outside_home_is_not_written(self):
         outside = Path(self.temp.name) / 'outside'

@@ -10,6 +10,10 @@ from .scan import SKIP_DISCOVERY
 from .store import guard, write_allowed
 
 CACHE = '.skill-pilot/agent-discovery.json'
+
+
+def _without_clock(data):
+    return {key: value for key, value in data.items() if key != 'checked_at'}
 SKIP = SKIP_DISCOVERY | {'memories', 'plugins', 'builtin', 'skills-marketplace',
                          'connectors', 'connectors-marketplace'}
 
@@ -97,6 +101,14 @@ def save(home, data):
     if write_allowed(home):
         path = guard(home / CACHE, home)
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            current = None
+        # The clock is not a change to the discovered assistants. Rewriting it on
+        # every refresh made the user-data fingerprint flap.
+        if isinstance(current, dict) and _without_clock(current) == _without_clock(data):
+            return
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,

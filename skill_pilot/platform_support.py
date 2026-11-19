@@ -1,6 +1,5 @@
 """Small OS boundary for user identity and process locks."""
 import os
-import time
 from pathlib import Path
 
 
@@ -94,31 +93,49 @@ def user_id():
 if os.name != 'nt':
     import fcntl
 else:
+    import ctypes
     import msvcrt
+    from ctypes import wintypes
+
+    class _LockOffset(ctypes.Structure):
+        _fields_ = (
+            ('Internal', ctypes.c_size_t),
+            ('InternalHigh', ctypes.c_size_t),
+            ('Offset', wintypes.DWORD),
+            ('OffsetHigh', wintypes.DWORD),
+            ('hEvent', wintypes.HANDLE),
+        )
+
+    _kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    _kernel32.LockFileEx.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(_LockOffset))
+    _kernel32.LockFileEx.restype = wintypes.BOOL
 
     class WindowsLocks:
         LOCK_EX = 2
         LOCK_NB = 4
+        _EXCLUSIVE = 0x2
+        _IMMEDIATE = 0x1
+        _LOCK_VIOLATION = 33
 
         @staticmethod
         def flock(file, operation):
-            # Lock beyond the payload: another launcher must still read the URL.
-            # Windows releases the byte-range lock when the descriptor closes.
-            position = file.tell()
-            try:
-                file.seek(0x7fffffff)
-                while True:
-                    try:
-                        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
-                        return
-                    except OSError as error:
-                        if error.errno not in (13, 36):
-                            raise
-                        if operation & WindowsLocks.LOCK_NB:
-                            raise BlockingIOError('Another process holds the lock') from error
-                        time.sleep(0.05)
-            finally:
-                file.seek(position)
+            # Lock one byte past anything the launcher needs to read. The CRT
+            # file pointer is not a cross-process lock: two writers can both
+            # believe they hold it and then replace the same log.
+            offset = _LockOffset()
+            offset.Offset = 0x7fffffff
+            flags = WindowsLocks._EXCLUSIVE
+            if operation & WindowsLocks.LOCK_NB:
+                flags |= WindowsLocks._IMMEDIATE
+            handle = wintypes.HANDLE(msvcrt.get_osfhandle(file.fileno()))
+            if not _kernel32.LockFileEx(handle, flags, 0, 1, 0, ctypes.byref(offset)):
+                error = ctypes.get_last_error()
+                if error == WindowsLocks._LOCK_VIOLATION and operation & WindowsLocks.LOCK_NB:
+                    raise BlockingIOError('Another process holds the lock')
+                raise OSError(error, '无法锁定这份文件')
+            file._skill_pilot_lock = offset
 
     fcntl = WindowsLocks()
 
