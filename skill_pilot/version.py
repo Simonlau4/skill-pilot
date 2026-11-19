@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import subprocess
 import threading
@@ -131,12 +131,20 @@ def _normalized_digest(path):
     return hashlib.sha256(data).hexdigest()
 
 
+def is_safe_manifest_path(name):
+    if not isinstance(name, str) or not name or name.startswith(('/', '\\')):
+        return False
+    win_path = PureWindowsPath(name)
+    if (win_path.drive or win_path.root or Path(name).is_absolute()
+            or '..' in Path(name).parts or '..' in win_path.parts):
+        return False
+    return True
+
+
 def is_official_path(name):
-    if not isinstance(name, str) or not name:
+    if not is_safe_manifest_path(name):
         return False
     relative = Path(name)
-    if relative.is_absolute() or '..' in relative.parts:
-        return False
     posix = relative.as_posix()
     if posix in _OFFICIAL_FILE_SET:
         return True
@@ -172,6 +180,8 @@ def _verify_manifest_files(project, manifest):
         if _safe_project_file(project, name) is not None and name not in files:
             return 'invalid'
     for name, expected in files.items():
+        if not is_safe_manifest_path(name):
+            return 'invalid'
         if not is_official_path(name):
             # Ignore private notes accidentally recorded by older installers.
             continue

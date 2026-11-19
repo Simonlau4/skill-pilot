@@ -405,7 +405,23 @@ class VersionFormatAndReadTests(unittest.TestCase):
                     self.assertNotIn('checked_at', dashboard.program_progress)
                     self.assertNotIn('target', dashboard.program_progress)
 
-            # Check when disk is already at latest while running_version is still behind MUST enter 'ready', not 'latest'.
+            # When disk_version != latest_version while available=False (e.g. untracked file in skill_pilot/),
+            # MUST NOT enter 'ready' or 'latest' (avoids ready->idle->ready loop) and must report local difference.
+            for auto, expect_phase in ((False, 'error'), (True, 'idle')):
+                with self.subTest(disk_differs_auto=auto), patch.object(self_update, 'check', return_value={
+                        'temporary': '', 'target': 't' * 40, 'current': '2026-11-19', 'latest': '2026-11-19',
+                        'current_version': 'v1.0.0-ddddddd', 'latest_version': pending, 'available': False}):
+                    dashboard.program_work('check', automatic=auto)
+                self.assertEqual(dashboard.program_progress['phase'], expect_phase)
+                self.assertEqual(dashboard.program_progress['pending_version'], '')
+                self.assertIn('差异', dashboard.program_progress['message'])
+                if not auto:
+                    self.assertIn('差异', dashboard.program_progress['error'])
+                    self.assertEqual(dashboard.program_progress['failed_action'], 'check')
+                else:
+                    self.assertEqual(dashboard.program_progress['error'], '')
+
+            # Check when disk is already at latest (disk_version == latest_version) while running_version is still behind MUST enter 'ready', not 'latest'.
             with patch.object(self_update, 'check', return_value={
                     'temporary': '', 'target': 't' * 40, 'current': '2026-11-19', 'latest': '2026-11-19',
                     'current_version': pending, 'latest_version': pending, 'available': False}):
@@ -549,6 +565,34 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertFalse(dashboard.program_progress['running'])
             self.assertEqual(dashboard.program_action, '')
             self.assertEqual(dashboard.program_progress['phase'], 'idle')
+            self.assertEqual(dashboard.program_progress['latest_version'], '')
+            self.assertNotIn('checked_at', dashboard.program_progress)
+            self.assertNotIn('target', dashboard.program_progress)
+
+            # Path 1c: Deferred recheck after static_refresh_seq increments MUST check runtime.version() first:
+            # if backend code changed in the meantime, keep old running_version/RUNNING_BUILD and invalidate check.
+            seq_before_backend = dashboard.static_refresh_seq
+            dashboard.program_progress.update(
+                running=True, phase='check', available=False,
+                current_version=deferred_next, latest_version='', checked_at=12345.0, target='old-target')
+            dashboard.program_action = 'check'
+            with patch.object(runtime, 'version', return_value=dashboard.code_version):
+                dashboard.request_reload()
+            with patch.object(self_update, 'check', return_value={
+                    'temporary': '', 'target': 't' * 40, 'current': '', 'latest': '',
+                    'current_version': deferred_next, 'latest_version': deferred_next, 'available': False}), \
+                    patch.object(runtime, 'version', return_value='backend-changed-during-check'), \
+                    patch.object(app_version, 'read_build', return_value={
+                        'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                        'manifest_valid': True, 'version': 'v1.0.0-eeeeeee'}):
+                dashboard.program_work('check', automatic=False, start_refresh_seq=seq_before_backend)
+            self.assertFalse(dashboard.program_progress['running'])
+            self.assertEqual(dashboard.program_action, '')
+            self.assertEqual(dashboard.running_version, deferred_next)
+            self.assertEqual(dashboard.program_progress['current_version'], deferred_next)
+            self.assertEqual(diagnostics.RUNNING_BUILD['app_version'], deferred_next)
+            self.assertEqual(dashboard.program_progress['phase'], 'idle')
+            self.assertEqual(dashboard.program_progress['latest'], '')
             self.assertEqual(dashboard.program_progress['latest_version'], '')
             self.assertNotIn('checked_at', dashboard.program_progress)
             self.assertNotIn('target', dashboard.program_progress)
@@ -740,6 +784,7 @@ const api = async (path) => {
             with self.subTest(unsafe_path=unsafe_path):
                 bad_manifest.write_text(json.dumps({
                     'files': {**complete_files, unsafe_path: ['0' * 64, 0]}, 'revision': head}), encoding='utf-8')
+                self.assertFalse(app_version.read_build(self.code)['manifest_valid'])
                 with self.assertRaisesRegex(ValueError, '重新运行一次安装程序'):
                     self_update.read_record(self.code)
         bad_manifest.write_text(json.dumps({

@@ -9,13 +9,13 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 from .environment import tool_environment
 from .platform_support import rmtree
 from .sources.github import git as repository_git
 from .store import PROJECT, guard, write_allowed
-from .version import OFFICIAL_DIRS, OFFICIAL_FILES, REQUIRED_FILES, format_version, is_official_path, read_build
+from .version import OFFICIAL_DIRS, OFFICIAL_FILES, REQUIRED_FILES, format_version, is_official_path, is_safe_manifest_path, read_build
 
 SOURCE = 'https://github.com/Simonlau4/skill-pilot.git'
 BRANCH = 'main'
@@ -156,11 +156,7 @@ def read_record(project):
         if not all(name in data['files'] for name in REQUIRED_FILES):
             raise ValueError()
         for name in data['files']:
-            if not isinstance(name, str) or not name or name.startswith(('/', '\\')):
-                raise ValueError()
-            win_path = PureWindowsPath(name)
-            if (win_path.drive or win_path.root or Path(name).is_absolute()
-                    or '..' in Path(name).parts or '..' in win_path.parts):
+            if not is_safe_manifest_path(name):
                 raise ValueError()
             if not is_official_path(name):
                 continue

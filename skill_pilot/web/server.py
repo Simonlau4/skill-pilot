@@ -1032,29 +1032,48 @@ class Dashboard(ThreadingHTTPServer):
                     current_version = self.running_version or disk_version
                     latest_version = (new_review.get('latest_version')
                                       or app_version.format_version(new_review.get('latest', ''), new_review.get('target', '')))
+                    disk_differs_from_latest = (not new_review['available']
+                                                and bool(disk_version)
+                                                and bool(latest_version)
+                                                and disk_version != latest_version)
                     disk_ahead_of_running = (not new_review['available']
-                                             and bool(self.running_version)
+                                             and bool(disk_version)
                                              and bool(latest_version)
+                                             and disk_version == latest_version
+                                             and bool(self.running_version)
                                              and self.running_version != latest_version)
                     if new_review['available']:
                         phase = 'available'
                         message = '有新版，可以一键升级'
                         pending_version = ''
+                        error_text = ''
+                        failed_action = ''
+                    elif disk_differs_from_latest:
+                        phase = 'idle' if automatic else 'error'
+                        message = '本地程序文件与官方版本有差异'
+                        pending_version = ''
+                        error_text = '' if automatic else 'SP 程序文件与官方版本有差异，已保留当前版本。请先另存或清理本地改动后再检查更新。'
+                        failed_action = '' if automatic else 'check'
                     elif disk_ahead_of_running:
                         phase = 'ready'
                         message = '新版已安装，刷新后生效'
                         pending_version = latest_version
+                        error_text = ''
+                        failed_action = ''
                     else:
                         phase = 'latest'
                         message = 'SP 已是最新版本'
                         pending_version = ''
+                        error_text = ''
+                        failed_action = ''
                     update_payload = dict(
                         phase=phase,
                         target=new_review['target'], available=new_review['available'],
                         current=new_review['current'], latest=new_review['latest'],
                         current_version=current_version, latest_version=latest_version,
                         pending_version=pending_version,
-                        failed_action='',
+                        error=error_text,
+                        failed_action=failed_action,
                         changes=new_review.get('changes', []) if new_review['available'] else [],
                         changes_total=new_review.get('changes_total', 0) if new_review['available'] else 0,
                         changes_partial=new_review.get('changes_partial', False) if new_review['available'] else False,
@@ -1112,6 +1131,7 @@ class Dashboard(ThreadingHTTPServer):
             seen_seq = start_refresh_seq
             refreshed = None
             refresh_failed = False
+            backend_changed = False
             while True:
                 with self.program_lock:
                     if self.program_run_id != run_id:
@@ -1120,7 +1140,7 @@ class Dashboard(ThreadingHTTPServer):
                     if action == 'check' and self.static_refresh_seq != seen_seq:
                         target_seq = self.static_refresh_seq
                     else:
-                        if refresh_failed or (refreshed is not None and not refreshed.get('version')):
+                        if backend_changed or refresh_failed or (refreshed is not None and not refreshed.get('version')):
                             self._invalidate_stale_program_check()
                         elif refreshed is not None and refreshed.get('version') != self.running_version:
                             self._reset_stale_program_check(refreshed)
@@ -1139,10 +1159,17 @@ class Dashboard(ThreadingHTTPServer):
                         committed = True
                         return
                 try:
-                    refreshed = app_version.read_build()
-                    refresh_failed = False
+                    backend_changed = runtime.version() != self.code_version
+                    if backend_changed:
+                        refreshed = None
+                        refresh_failed = False
+                    else:
+                        refreshed = app_version.read_build()
+                        backend_changed = runtime.version() != self.code_version
+                        refresh_failed = False
                 except Exception:
                     refreshed = None
+                    backend_changed = False
                     refresh_failed = True
                 seen_seq = target_seq
         finally:
