@@ -98,9 +98,19 @@ def _request(config, path, method='GET', data=None):
     if path == '/api/packs/me':
         limit = team_hub.MAX_PACK_BODY
     if path == '/api/feedback':
-        limit = feedback.MAX_BODY
+        has_attachments = isinstance(data, dict) and bool(data.get('attachments'))
+        if has_attachments:
+            text_only = {k: v for k, v in data.items() if k != 'attachments'}
+            if len(json.dumps(text_only, ensure_ascii=False).encode('utf-8')) > feedback.MAX_BODY:
+                raise ValueError('反馈文字内容超过 64 KB，请缩短后重试。')
+            limit = feedback.MAX_UPLOAD_BODY
+        else:
+            limit = feedback.MAX_BODY
     if body is not None and len(body) > limit:
-        raise ValueError('技能包内容超过 64 KB，请缩短后重试。' if path == '/api/packs/me' else
+        raise ValueError('反馈内容及截图超过上传上限，请减少截图数量或缩小图片后重试。'
+                         if path == '/api/feedback' and limit == feedback.MAX_UPLOAD_BODY else
+                         '反馈内容超过 64 KB，请缩短后重试。' if path == '/api/feedback' else
+                         '技能包内容超过 64 KB，请缩短后重试。' if path == '/api/packs/me' else
                          '上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
                          '上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
                          '评价内容超过 64 KB。' if limit == team_hub.MAX_RATING_BODY else
@@ -111,7 +121,8 @@ def _request(config, path, method='GET', data=None):
         headers['Authorization'] = 'Bearer ' + key
     try:
         request = urllib.request.Request(config['url'] + path, data=body, method=method, headers=headers)
-        with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=TIMEOUT) as response:
+        request_timeout = max(TIMEOUT, 30) if path == '/api/feedback' else TIMEOUT
+        with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=request_timeout) as response:
             raw = response.read(MAX_BODY + 1)
         if len(raw) > MAX_BODY:
             raise ValueError('分享站返回的内容超过 20 MB，请联系管理员检查。')
@@ -177,6 +188,7 @@ def _me(config, capabilities=False):
     member = _member(result.get('member'))
     return ({'member': member, 'feedback_supported': result.get('feedback_supported') is True,
              'feedback_configured': result.get('feedback_configured') is True,
+             'feedback_attachments_supported': result.get('feedback_attachments_supported') is True,
              'skill_file_upload': result.get('skill_file_upload') is True} if capabilities else member)
 
 
@@ -188,7 +200,8 @@ def status(home, config=None, strict=True):
         result.update(url=public_url, has_key=bool(config.get('key')), configured=bool(config))
         if config:
             info = _me(config, capabilities=True)
-            result.update({k: info[k] for k in ('member', 'feedback_supported', 'feedback_configured')})
+            result.update({k: info[k] for k in (
+                'member', 'feedback_supported', 'feedback_configured', 'feedback_attachments_supported')})
     except (ValueError, OSError) as error:
         if strict:
             raise
@@ -198,42 +211,71 @@ def status(home, config=None, strict=True):
     return result
 
 
-def feedback_preview(home, error_id='', note=''):
+def feedback_preview(home, error_id='', note='', attachments=None):
+    parsed = feedback.parse_attachments(attachments)
     report = diagnostics.bundle(home, error_id, note)['report']
     if not error_id:
         report['errors'] = []  # A manual report must not silently include unrelated past failures.
-    payload = feedback.envelope(report)
+    payload = feedback.envelope(report, attachments=parsed)
     if not error_id:
         import uuid
         payload.update(error_id=uuid.uuid4().hex, fingerprint='manual')
-    result = {'payload': payload, 'member': None, 'can_send': False, 'reason': '', 'submitted': False}
+    public_attachments = [
+        {'index': index, 'content_type': item['content_type'], 'label': item['label'],
+         'size': item['size'], 'sha256': item['sha256'][:12]}
+        for index, item in enumerate(parsed, 1)
+    ]
+    result = {
+        'payload': payload, 'member': None, 'can_send': False, 'can_attach': False,
+        'attach_reason': '', 'reason': '', 'submitted': False,
+        'attachments': public_attachments,
+        'attachment_limits': {
+            'max_count': feedback.MAX_ATTACHMENTS,
+            'max_bytes': feedback.MAX_ATTACHMENT_BYTES,
+            'max_total_bytes': feedback.MAX_ATTACHMENTS_TOTAL_BYTES,
+        },
+    }
     config = {}
     try:
         config = settings(home)
         if not store.write_allowed(home):
             result['reason'] = '只读模式不能发送反馈，请复制或导出诊断信息。'
+            result['attach_reason'] = '只读模式暂不支持随反馈上传截图，请复制或导出纯文本诊断信息。'
         elif not config:
             result['reason'] = '尚未连接分享站，请复制或导出诊断信息。'
+            result['attach_reason'] = '尚未连接团队分享站，暂不支持随反馈上传截图，可复制或导出纯文本诊断信息。'
         else:
             info = _me(config, capabilities=True)
             result['member'] = info['member']
             if not info['feedback_supported']:
                 result['reason'] = '分享站版本较旧，暂不支持反馈，请联系管理员更新。'
+                result['attach_reason'] = '当前分享站版本较旧，暂不支持随反馈上传截图，请联系管理员更新，或复制、导出纯文本诊断信息。'
             elif not info['feedback_configured']:
                 result['reason'] = '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。'
+                result['attach_reason'] = '管理员尚未启用飞书反馈接收，暂不支持随反馈上传截图，可复制或导出纯文本诊断信息。'
             elif payload['action'] == '连接分享站':
                 result['reason'] = '这次是分享站连接失败，请复制或导出诊断信息发给维护者。'
+                result['attach_reason'] = '分享站连接失败时无法随反馈上传截图，可复制或导出纯文本诊断信息发给维护者。'
+            elif not info['feedback_attachments_supported']:
+                result['attach_reason'] = '当前分享站版本较旧，暂不支持随反馈上传截图；可直接发送纯文本反馈，或复制、导出诊断信息。'
+                if parsed:
+                    result['reason'] = '当前分享站版本较旧，暂不支持上传截图。请移除截图后发送纯文本反馈，或复制、导出诊断信息。'
+                else:
+                    result['can_send'] = True
             else:
                 result['can_send'] = True
+                result['can_attach'] = True
     except (ValueError, OSError):
         result['reason'] = '连不上分享站，请复制或导出诊断信息发给维护者。'
+        result['attach_reason'] = '当前无法连接分享站，暂不支持随反馈上传截图，可复制或导出纯文本诊断信息发给维护者。'
     version = _connection_version(config)
     saved = diagnostics.read_json(Path(home) / '.skill-pilot/feedback.json').get('submitted', [])
     result['submitted'] = version + ':' + payload['error_id'] in saved
     if result['submitted']:
-        result.update(can_send=False, reason='这条反馈已提交。')
+        result.update(can_send=False, can_attach=False, reason='这条反馈已提交。', attach_reason='')
     payload.update(status='待排查', reporter=(result['member'] or {}).get('name', '未连接'))
     result['_connection'] = version
+    result['_attachments'] = parsed
     return result
 
 
@@ -247,8 +289,21 @@ def submit_feedback(home, prepared):
     if (_connection_version(config) != prepared['_connection'] or info['member'] != prepared['member'] or
             not info['feedback_supported'] or not info['feedback_configured']):
         raise ValueError('分享站连接或署名已改变，请重新打开反馈窗口核对。')
+    attachments = prepared.get('_attachments') or []
+    if attachments and not info['feedback_attachments_supported']:
+        raise ValueError('当前分享站暂不支持上传截图，请移除截图后重新打开反馈窗口核对。')
+    body = prepared['payload']
+    if attachments:
+        body = {
+            **prepared['payload'],
+            'attachments': [
+                {'content_type': item['content_type'],
+                 'data': base64.b64encode(item['data']).decode('ascii')}
+                for item in attachments
+            ],
+        }
     try:
-        result = _request(config, '/api/feedback', 'POST', prepared['payload'])
+        result = _request(config, '/api/feedback', 'POST', body)
     except (ValueError, OSError) as error:
         raise ValueError(diagnostics.sanitize(str(error), home, 400)) from None
     if result.get('submitted') is not True:

@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import apply, backups, guard, preview, restore, target_home
-from .. import diagnostics, operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization
+from .. import diagnostics, feedback, operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from ..environment import tool_environment
@@ -1344,11 +1344,24 @@ class Handler(BaseHTTPRequestHandler):
                     '/api/diagnostics/preview', '/api/diagnostics/submit'}:
             try:
                 length = int(self.headers.get('Content-Length', '0'))
-                if not 0 < length <= 16384:
-                    self.reply(413, {'error': '诊断内容太长，请缩短后重试。'})
+                max_length = feedback.MAX_UPLOAD_BODY if path.endswith('/preview') else 16384
+                if not 0 < length <= max_length:
+                    self.reply(413, {'error': '截图总大小超过 5 MB，请减少截图数量或缩小图片后重试。'
+                                     if path.endswith('/preview') else '诊断内容太长，请缩短后重试。'})
                     return
                 body = json.loads(self.rfile.read(length))
-                if not isinstance(body, dict) or any(not isinstance(v, str) for v in body.values()):
+                if not isinstance(body, dict):
+                    raise ValueError('诊断内容格式不正确。')
+                if path.endswith('/preview'):
+                    text_fields = {k: v for k, v in body.items() if k != 'attachments'}
+                    if any(not isinstance(v, str) for v in text_fields.values()):
+                        raise ValueError('诊断内容格式不正确。')
+                    if len(json.dumps(text_fields, ensure_ascii=False).encode('utf-8')) > 16384:
+                        self.reply(413, {'error': '诊断内容太长，请缩短后重试。'})
+                        return
+                    if 'attachments' in body and body['attachments'] is not None and not isinstance(body['attachments'], list):
+                        raise feedback.AttachmentError('截图附件格式不正确，请重新选择图片。')
+                elif any(not isinstance(v, str) for v in body.values()):
                     raise ValueError('诊断内容格式不正确。')
                 if path.endswith('/submit') and not preview_allowed(self.server.home):
                     self.reply(403, {'error': '只读模式不能发送反馈，请复制或导出诊断信息。'})
@@ -1356,15 +1369,22 @@ class Handler(BaseHTTPRequestHandler):
                 if path.endswith('/bundle'):
                     self.reply(200, diagnostics.bundle(self.server.home, body.get('error_id'), body.get('note', '')))
                 elif path.endswith('/preview'):
-                    prepared = team.feedback_preview(self.server.home, body.get('error_id', ''), body.get('note', ''))
+                    prepared = team.feedback_preview(
+                        self.server.home, body.get('error_id', ''), body.get('note', ''), body.get('attachments'))
                     ticket = secrets.token_urlsafe(24)
                     with self.server.feedback_lock:
                         self.server.feedback_previews = {k: v for k, v in self.server.feedback_previews.items()
                                                         if v['expires'] > time.monotonic()}
-                        if len(self.server.feedback_previews) >= 100:
+                        new_bytes = sum(a['size'] for a in prepared.get('_attachments', ()))
+                        def cached_bytes():
+                            return sum(sum(a['size'] for a in entry['prepared'].get('_attachments', ()))
+                                       for entry in self.server.feedback_previews.values())
+                        while self.server.feedback_previews and (
+                                len(self.server.feedback_previews) >= 100 or
+                                cached_bytes() + new_bytes > 20 * 1024 * 1024):
                             self.server.feedback_previews.pop(next(iter(self.server.feedback_previews)))
                         self.server.feedback_previews[ticket] = {'expires': time.monotonic() + 600, 'prepared': prepared}
-                    self.reply(200, {k: v for k, v in prepared.items() if k != '_connection'} | {'ticket': ticket})
+                    self.reply(200, {k: v for k, v in prepared.items() if not k.startswith('_')} | {'ticket': ticket})
                 elif path.endswith('/submit'):
                     with self.server.feedback_lock:
                         entry = self.server.feedback_previews.get(body.get('ticket'))
@@ -1385,6 +1405,12 @@ class Handler(BaseHTTPRequestHandler):
                     row = diagnostics.record(self.server.home, 'frontend', '页面脚本',
                         error, '页面出了点问题，请刷新重试。', force=True)
                     self.reply(200, {'error_id': row.get('error_id', '')})
+            except feedback.AttachmentTooLargeError as error:
+                self.request_validation = True
+                self.reply(413, {'error': diagnostics.sanitize(str(error), self.server.home, 400)})
+            except feedback.AttachmentError as error:
+                self.request_validation = True
+                self.reply(400, {'error': diagnostics.sanitize(str(error), self.server.home, 400)})
             except (ValueError, OSError) as error:
                 message = (diagnostics.sanitize(str(error), self.server.home, 400)
                            if path.endswith('/submit') else '诊断内容格式不正确，或记录已过期。')

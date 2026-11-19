@@ -1,13 +1,17 @@
+import base64
+import hashlib
 import http.client
 import json
 import os
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 import urllib.request
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,6 +26,33 @@ WEBHOOK = 'https://feedback.example.test/receive'
 ENVIRONMENT = {'os': 'Example OS', 'python_version': '3.12.0', 'app_version': 'abcdef012345',
                'install_mode': '压缩包', 'tools': {'git': {'available': True, 'version': '2.45.0'}},
                'agent_types': ['Claude'], 'skill_count': 2}
+
+
+def make_png(color=(47, 91, 211), pad=0):
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    ihdr = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)
+    raw = b'\x00' + bytes(color)
+    body = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) + chunk(b'IDAT', zlib.compress(raw))
+    if pad:
+        body += chunk(b'tEXt', b'p\x00' + b'x' * pad)
+    return body + chunk(b'IEND', b'')
+
+
+def make_jpeg(pad=0):
+    return b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' + (b'\x00' * pad) + b'\xff\xd9'
+
+
+def make_webp(pad=0):
+    payload = b'VP8 ' + struct.pack('<I', 8 + pad) + b'\x00' * (8 + pad)
+    return b'RIFF' + struct.pack('<I', 4 + len(payload)) + b'WEBP' + payload
+
+
+def encode_shot(raw, content_type=''):
+    item = {'data': base64.b64encode(raw).decode('ascii')}
+    if content_type:
+        item['content_type'] = content_type
+    return item
 
 
 class FeedbackTests(unittest.TestCase):
@@ -361,6 +392,256 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
   await new Promise(setImmediate);
   assert.deepEqual(messages.map(row=>row.error_id), ['job-id','attention-id','refresh-id']);
 })().catch(error => {console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(['node', '-e', script], cwd=diagnostics.PROJECT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def raw_hub_get(self, path, token=None):
+        headers = {} if token == '' else {'Authorization': 'Bearer ' + (self.member['token'] if token is None else token)}
+        connection = http.client.HTTPConnection('127.0.0.1', self.hub.server_port, timeout=15)
+        try:
+            connection.request('GET', path, headers=headers)
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    def test_screenshots_end_to_end_forward_storage_and_safe_download(self):
+        png = make_png((10, 20, 30))
+        jpeg = make_jpeg(32)
+        webp = make_webp(24)
+        shots = [
+            encode_shot(png, 'image/png') | {'filename': '/private/path/secret.png'},
+            encode_shot(jpeg, 'image/jpeg') | {'path': 'C:\\Users\\alice\\Desktop\\token.jpg'},
+            encode_shot(webp, 'image/webp'),
+        ]
+        prepared = self.preview(note='页面弹窗错位', attachments=shots)
+        self.assertTrue(prepared['can_send'])
+        self.assertTrue(prepared['can_attach'])
+        self.assertNotIn('_attachments', prepared)
+        self.assertEqual(len(prepared['attachments']), 3)
+        self.assertEqual(prepared['payload']['attachment_count'], '3')
+        self.assertIn('已附 3 张截图', prepared['payload']['attachments_summary'])
+        self.assertNotIn('secret.png', json.dumps(prepared, ensure_ascii=False))
+        self.assertNotIn('token.jpg', json.dumps(prepared, ensure_ascii=False))
+        self.assertNotIn('alice', json.dumps(prepared, ensure_ascii=False))
+        with patch.object(feedback, 'forward') as forward:
+            code, result = self.request('/api/diagnostics/submit', {'ticket': prepared['ticket']})
+            self.assertEqual((code, result), (200, {'submitted': True}))
+            payload = forward.call_args.args[1]
+            self.assertEqual(payload['attachment_count'], '3')
+            self.assertIn('feedback-attachments/', payload['attachments_summary'])
+            self.assertIn('[附带截图]', payload['detail'])
+            self.assertTrue(all(isinstance(v, str) for v in payload.values()))
+            self.assertNotIn(base64.b64encode(png).decode('ascii'), json.dumps(payload))
+            self.assertNotIn('secret.png', json.dumps(payload, ensure_ascii=False))
+            self.assertNotIn('token.jpg', json.dumps(payload, ensure_ascii=False))
+        backup = json.loads((self.data / 'feedback.json').read_text(encoding='utf-8'))[0]
+        self.assertEqual(backup['state'], 'sent')
+        self.assertEqual(len(backup['attachments']), 3)
+        att_dir = self.data / 'feedback-attachments'
+        for raw, att, expected_mime in ((png, backup['attachments'][0], 'image/png'),
+                                        (jpeg, backup['attachments'][1], 'image/jpeg'),
+                                        (webp, backup['attachments'][2], 'image/webp')):
+            digest = hashlib.sha256(raw).hexdigest()
+            self.assertEqual(att['sha256'], digest)
+            self.assertEqual((att_dir / att['file']).read_bytes(), raw)
+            status, headers, body = self.raw_hub_get(f"/api/feedback/{backup['id']}/attachments/{digest}")
+            self.assertEqual(status, 200)
+            self.assertEqual(body, raw)
+            self.assertEqual(headers.get('Content-Type'), expected_mime)
+            self.assertIn('attachment;', headers.get('Content-Disposition', ''))
+            self.assertEqual(headers.get('X-Content-Type-Options'), 'nosniff')
+            self.assertEqual(headers.get('Content-Security-Policy'), "default-src 'none'; sandbox")
+            self.assertEqual(headers.get('Cache-Control'), 'no-store')
+        other = self.hub.store.add_member('其他同事')
+        first_digest = backup['attachments'][0]['sha256']
+        self.assertEqual(self.raw_hub_get(f"/api/feedback/{backup['id']}/attachments/{first_digest}", token=other['token'])[0], 404)
+        self.assertEqual(self.raw_hub_get(f"/api/feedback/{backup['id']}/attachments/{first_digest}", token='')[0], 401)
+        self.assertEqual(self.raw_hub_get(f"/api/feedback/{backup['id']}/attachments/../members.json")[0], 404)
+
+    def test_attachment_validation_magic_count_size_and_antiforgery(self):
+        before_errors = len(diagnostics.recent(self.home))
+        valid_png = make_png()
+        valid_jpeg = make_jpeg()
+        bad_cases = [
+            ('svg', encode_shot(b'<svg xmlns="http://www.w3.org/2000/svg"></svg>', 'image/svg+xml')),
+            ('html', encode_shot(b'<html><body>hi</body></html>', 'image/png')),
+            ('text_as_png', encode_shot(b'not a png file at all 1234567890', 'image/png')),
+            ('gif', encode_shot(b'GIF89a' + b'\x00' * 30, 'image/gif')),
+            ('truncated_png', encode_shot(b'\x89PNG\r\n\x1a\n', 'image/png')),
+            ('empty', {'content_type': 'image/png', 'data': ''}),
+            ('bad_base64', {'content_type': 'image/png', 'data': '!!!not-base64!!!'}),
+            ('mime_mismatch', encode_shot(valid_jpeg, 'image/png')),
+        ]
+        for name, bad in bad_cases:
+            with self.subTest(case=name):
+                code, res = self.request('/api/diagnostics/preview', {'error_id': self.row['error_id'], 'attachments': [bad]})
+                self.assertEqual(code, 400, res)
+                hub_code, _ = self.request('/api/feedback', self.preview()['payload'] | {'attachments': [bad]}, hub=True)
+                self.assertEqual(hub_code, 400)
+        four_shots = [encode_shot(valid_png, 'image/png') for _ in range(4)]
+        self.assertEqual(self.request('/api/diagnostics/preview', {'error_id': self.row['error_id'], 'attachments': four_shots})[0], 400)
+        self.assertEqual(self.request('/api/feedback', self.preview()['payload'] | {'attachments': four_shots}, hub=True)[0], 400)
+        with patch.object(feedback, 'MAX_ATTACHMENT_BYTES', 200), patch.object(feedback, 'MAX_ATTACHMENTS_TOTAL_BYTES', 350):
+            too_big = encode_shot(make_png(pad=250), 'image/png')
+            self.assertEqual(self.request('/api/diagnostics/preview', {'error_id': self.row['error_id'], 'attachments': [too_big]})[0], 413)
+            self.assertEqual(self.request('/api/feedback', self.preview()['payload'] | {'attachments': [too_big]}, hub=True)[0], 413)
+            medium = encode_shot(make_png(pad=80), 'image/png')
+            self.assertEqual(self.request('/api/diagnostics/preview', {'error_id': self.row['error_id'], 'attachments': [medium, medium, medium]})[0], 413)
+            self.assertEqual(self.request('/api/feedback', self.preview()['payload'] | {'attachments': [medium, medium, medium]}, hub=True)[0], 413)
+        # Normal attachment validation rejections must not pollute local fault logs.
+        self.assertEqual(len(diagnostics.recent(self.home)), before_errors)
+        # Oversized text alongside attachments still triggers 413.
+        self.assertEqual(self.request('/api/feedback', self.preview()['payload'] | {'detail': 'x' * feedback.MAX_BODY, 'attachments': [encode_shot(valid_png, 'image/png')]}, hub=True)[0], 413)
+        # Server recomputes attachment_count & summary, ignoring client forgery.
+        forged = self.preview()['payload'] | {'attachment_count': '9', 'attachments_summary': '伪造截图说明'}
+        with patch.object(feedback, 'forward') as forward:
+            self.assertEqual(self.request('/api/feedback', forged, hub=True)[0], 200)
+            sent = forward.call_args.args[1]
+            self.assertEqual(sent['attachment_count'], '0')
+            self.assertEqual(sent['attachments_summary'], '')
+            self.assertNotIn('[附带截图]', sent['detail'])
+
+    def test_hub_attachment_quota_eviction_and_atomic_rollback(self):
+        base = self.preview()['payload']
+        imgs = [make_png((i * 40, 20, 80), pad=180) for i in range(3)]
+        limit = len(imgs[0]) * 2 + 20
+        with patch.object(feedback, 'MAX_ATTACHMENT_STORE_BYTES', limit), patch.object(feedback, 'forward'):
+            for i, raw in enumerate(imgs):
+                code, res = self.request('/api/feedback', base | {
+                    'error_id': f'err-{i}', 'fingerprint': f'fp-{i}',
+                    'attachments': [encode_shot(raw, 'image/png')]}, hub=True)
+                self.assertEqual(code, 200, res)
+        rows = json.loads((self.data / 'feedback.json').read_text(encoding='utf-8'))
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(rows[0]['attachments'][0].get('evicted'))
+        self.assertFalse(rows[1]['attachments'][0].get('evicted', False))
+        self.assertFalse(rows[2]['attachments'][0].get('evicted', False))
+        att_dir = self.data / 'feedback-attachments'
+        files = list(att_dir.iterdir())
+        self.assertEqual(len(files), 2)
+        self.assertLessEqual(sum(p.stat().st_size for p in files), limit)
+        self.assertEqual(self.raw_hub_get(f"/api/feedback/{rows[0]['id']}/attachments/{rows[0]['attachments'][0]['sha256']}")[0], 404)
+        self.assertEqual(self.raw_hub_get(f"/api/feedback/{rows[2]['id']}/attachments/{rows[2]['attachments'][0]['sha256']}")[0], 200)
+        # Cooldown rejection must not write orphan attachment files to disk.
+        orphan_img = make_png((200, 100, 50), pad=40)
+        orphan_digest = hashlib.sha256(orphan_img).hexdigest()
+        with patch.object(feedback, 'forward') as send:
+            self.assertEqual(self.request('/api/feedback', base | {
+                'error_id': 'err-cooldown', 'fingerprint': 'fp-2',
+                'attachments': [encode_shot(orphan_img, 'image/png')]}, hub=True)[0], 429)
+            send.assert_not_called()
+        self.assertFalse((att_dir / f'{orphan_digest}.png').exists())
+        # Atomic rollback on feedback.json write failure removes newly created files and keeps old ones.
+        before_json = (self.data / 'feedback.json').read_bytes()
+        before_files = {p.name for p in att_dir.iterdir()}
+        real_replace = team_hub.os.replace
+        def fail_feedback_json(src, dst):
+            if Path(dst).name == 'feedback.json':
+                raise OSError('模拟磁盘已满')
+            return real_replace(src, dst)
+        with patch.object(team_hub.os, 'replace', side_effect=fail_feedback_json), patch.object(feedback, 'forward') as send:
+            self.assertEqual(self.request('/api/feedback', base | {
+                'error_id': 'err-fail', 'fingerprint': 'fp-fail',
+                'attachments': [encode_shot(orphan_img, 'image/png')]}, hub=True)[0], 500)
+            send.assert_not_called()
+        self.assertEqual((self.data / 'feedback.json').read_bytes(), before_json)
+        self.assertEqual({p.name for p in att_dir.iterdir()}, before_files)
+        # Eviction by MAX_RECORDS also cleans up files belonging to dropped rows.
+        with patch.object(feedback, 'MAX_RECORDS', 1), patch.object(feedback, 'forward'):
+            fresh_img = make_png((10, 200, 10), pad=20)
+            self.assertEqual(self.request('/api/feedback', base | {
+                'error_id': 'err-keep', 'fingerprint': 'fp-keep',
+                'attachments': [encode_shot(fresh_img, 'image/png')]}, hub=True)[0], 200)
+        kept_files = {p.name for p in att_dir.iterdir()}
+        self.assertEqual(kept_files, {f"{hashlib.sha256(fresh_img).hexdigest()}.png"})
+
+    def test_degraded_modes_old_hub_offline_readonly_and_manual_with_shots(self):
+        png = encode_shot(make_png((90, 90, 90)), 'image/png')
+        # Old hub supporting text feedback only (no feedback_attachments_supported).
+        old_text_hub = {'api': 2, 'service': 'skill-pilot-team',
+                        'member': {k: self.member[k] for k in ('id', 'name')},
+                        'feedback_supported': True, 'feedback_configured': True}
+        with patch.object(team, '_request', return_value=old_text_hub):
+            plain = self.preview()
+            self.assertTrue(plain['can_send'])
+            self.assertFalse(plain['can_attach'])
+            self.assertIn('暂不支持随反馈上传截图', plain['attach_reason'])
+            with_shot = self.preview(attachments=[png])
+            self.assertFalse(with_shot['can_send'])
+            self.assertFalse(with_shot['can_attach'])
+            self.assertIn('移除截图', with_shot['reason'])
+        # Downgrade race: preview saw new hub, then hub reports no attachment support at submit time.
+        prepared = self.preview(attachments=[png])
+        self.assertTrue(prepared['can_send'])
+        with patch.object(team, '_request', return_value=old_text_hub):
+            code, err = self.request('/api/diagnostics/submit', {'ticket': prepared['ticket']})
+            self.assertEqual(code, 400)
+            self.assertIn('暂不支持上传截图', err['error'])
+        # Read-only mode, offline hub, and disconnected team sharing all keep plain text preview + attach notice.
+        with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
+            ro = self.preview()
+            self.assertFalse(ro['can_send'])
+            self.assertFalse(ro['can_attach'])
+            self.assertIn('只读模式', ro['attach_reason'])
+            self.assertEqual(ro['payload']['error_id'], self.row['error_id'])
+        with patch.object(team, '_request', side_effect=ValueError('unreachable')):
+            offline = self.preview()
+            self.assertFalse(offline['can_send'])
+            self.assertFalse(offline['can_attach'])
+            self.assertIn('无法连接分享站', offline['attach_reason'])
+            self.assertEqual(offline['payload']['error_id'], self.row['error_id'])
+        (self.home / '.skill-pilot/team.json').unlink()
+        disconnected = self.preview()
+        self.assertFalse(disconnected['can_send'])
+        self.assertFalse(disconnected['can_attach'])
+        self.assertIn('尚未连接团队分享站', disconnected['attach_reason'])
+        labels.atomic_write(self.home, 'team.json', json.dumps(self.config), 0o600)
+        # Manual feedback (no error_id) with screenshot works end-to-end.
+        status, manual = self.request('/api/diagnostics/preview', {'note': '主动反馈带图', 'attachments': [png]})
+        self.assertEqual(status, 200, manual)
+        self.assertTrue(manual['can_send'])
+        self.assertEqual(manual['payload']['source'], 'manual')
+        with patch.object(feedback, 'forward') as forward:
+            self.assertEqual(self.request('/api/diagnostics/submit', {'ticket': manual['ticket']})[0], 200)
+            sent = forward.call_args.args[1]
+            self.assertEqual(sent['attachment_count'], '1')
+            self.assertIn('[附带截图]', sent['detail'])
+
+    def test_frontend_screenshot_validators_magic_count_and_size(self):
+        source = (diagnostics.PROJECT / 'skill_pilot/web/static/app.js').read_text(encoding='utf-8')
+        functions = '\n'.join(extract_function(source, signature) for signature in (
+            'function formatFeedbackBytes(', 'function detectFeedbackImage(',
+            'function bytesToBase64(', 'function validateFeedbackFileBytes('))
+        png_b64 = base64.b64encode(make_png()).decode('ascii')
+        jpeg_b64 = base64.b64encode(make_jpeg()).decode('ascii')
+        webp_b64 = base64.b64encode(make_webp()).decode('ascii')
+        script = f'''
+const assert = require('node:assert/strict');
+const FEEDBACK_MAX_SHOTS = 3;
+const FEEDBACK_MAX_SHOT_BYTES = 2 * 1024 * 1024;
+const FEEDBACK_MAX_SHOTS_TOTAL = 5 * 1024 * 1024;
+{functions}
+const toBytes = b64 => new Uint8Array(Buffer.from(b64, 'base64'));
+const png = toBytes('{png_b64}');
+const jpeg = toBytes('{jpeg_b64}');
+const webp = toBytes('{webp_b64}');
+assert.deepEqual(detectFeedbackImage(png), {{content_type: 'image/png', label: 'PNG'}});
+assert.deepEqual(detectFeedbackImage(jpeg), {{content_type: 'image/jpeg', label: 'JPEG'}});
+assert.deepEqual(detectFeedbackImage(webp), {{content_type: 'image/webp', label: 'WebP'}});
+assert.equal(detectFeedbackImage(new Uint8Array(Buffer.from('<svg></svg>'))), null);
+assert.equal(detectFeedbackImage(new Uint8Array(Buffer.from('plain text file'))), null);
+assert.equal(bytesToBase64(png), '{png_b64}');
+assert.equal(validateFeedbackFileBytes(png, 0, 0, 'image/png').ok, true);
+assert.equal(validateFeedbackFileBytes(jpeg, 1, png.length, 'image/jpg').ok, true);
+assert.equal(validateFeedbackFileBytes(jpeg, 0, 0, 'image/png').ok, false);
+assert.equal(validateFeedbackFileBytes(png, 3, 100, 'image/png').ok, false);
+assert.equal(validateFeedbackFileBytes(new Uint8Array(0), 0, 0, 'image/png').ok, false);
+const huge = new Uint8Array(FEEDBACK_MAX_SHOT_BYTES + 1);
+huge.set(png);
+assert.equal(validateFeedbackFileBytes(huge, 0, 0, 'image/png').ok, false);
+assert.equal(validateFeedbackFileBytes(png, 2, FEEDBACK_MAX_SHOTS_TOTAL - png.length + 1, 'image/png').ok, false);
 '''
         result = subprocess.run(['node', '-e', script], cwd=diagnostics.PROJECT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

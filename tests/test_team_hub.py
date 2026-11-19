@@ -227,7 +227,8 @@ class TeamHubTests(unittest.TestCase):
         if os.name != 'nt':
             self.assertEqual(stat.S_IMODE((self.data / 'members.json').stat().st_mode), 0o600)
         self.assertEqual(self.request(), (200, {'service': 'skill-pilot-team', 'api': 2,
-            'feedback_supported': True, 'feedback_configured': False, 'skill_file_upload': True,
+            'feedback_supported': True, 'feedback_configured': False,
+            'feedback_attachments_supported': True, 'skill_file_upload': True,
             'member': {k: self.first[k] for k in ('id', 'name')}}))
         for name in ('', '  ', 'Acme\nexample', 'Acme\x00example'):
             with self.assertRaises(ValueError):

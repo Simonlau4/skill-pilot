@@ -973,9 +973,23 @@
     <div id="feedback-summary" class="feedback-summary"></div>
     <label for="feedback-note">当时你在做什么？（可选，写一两句即可）</label>
     <textarea id="feedback-note" class="input" rows="2" maxlength="1500"></textarea>
+    <div id="feedback-shots-section" class="feedback-shots">
+      <div class="feedback-shots-head">
+        <span class="feedback-shots-title">截图附件（选填）</span>
+        <span id="feedback-shots-count" class="muted">最多 3 张，单张不超过 2 MB</span>
+      </div>
+      <p id="feedback-shots-notice" class="row-note" hidden></p>
+      <div id="feedback-shots-controls" class="feedback-shots-controls" hidden>
+        <input id="feedback-shot-input" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple hidden>
+        <button id="feedback-shot-pick" class="btn btn-small" type="button">选择截图</button>
+        <span class="muted">支持 PNG、JPEG、WebP，可按 Ctrl+V / Cmd+V 直接粘贴，合计不超过 5 MB。仅上传图片内容，不含本机路径。</span>
+      </div>
+      <p id="feedback-shots-error" class="row-note is-error" role="alert" hidden></p>
+      <ul id="feedback-shots-list" class="feedback-shots-list" aria-label="已选截图预览" hidden></ul>
+    </div>
     <details class="fold">
       <summary>核对完整待发送内容</summary>
-      <p class="muted">提交时间由分享站补充。发送前请核对，说明里不要填写密钥或私人资料。</p>
+      <p class="muted">提交时间由分享站补充。发送前请核对，说明和截图中不要包含密钥或私人资料。</p>
       <textarea id="feedback-text" class="input" rows="10" readonly aria-label="完整待发送内容"></textarea>
     </details>
     <p id="feedback-message" class="row-note" role="status" aria-live="polite"></p>

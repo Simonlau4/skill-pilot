@@ -2548,8 +2548,73 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 
 #diag-text { width: 100%; resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
 #diag-errors .list-item { overflow-wrap: anywhere; }
-:is(.feedback-summary, #feedback-identity, #feedback-message) { overflow-wrap: anywhere; }
+:is(.feedback-summary, #feedback-identity, #feedback-message, #feedback-shots-notice, #feedback-shots-error) { overflow-wrap: anywhere; }
 .feedback-actions { flex-wrap: wrap; }
 #feedback-dialog textarea { width: 100%; min-width: 0; box-sizing: border-box; }
 #feedback-dialog #feedback-text { width: calc(100% - 2 * var(--sp-4)); }
+.feedback-shots {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+.feedback-shots-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.feedback-shots-title { font-weight: 600; color: var(--ink); }
+.feedback-shots-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.feedback-shots-controls .muted { font-size: 12px; line-height: 1.5; }
+.feedback-shots-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+}
+.feedback-shot-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+.feedback-shot-thumb {
+  width: 100%;
+  height: 92px;
+  object-fit: cover;
+  display: block;
+  border-radius: 6px;
+  background: var(--panel-deep);
+}
+.feedback-shot-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+}
+.feedback-shot-caption {
+  font-size: 12px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.feedback-shot-remove { flex-shrink: 0; }
 [data-feedback] { margin-left: 8px; }
