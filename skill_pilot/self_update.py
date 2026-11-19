@@ -15,7 +15,7 @@ from .environment import tool_environment
 from .platform_support import rmtree
 from .sources.github import git as repository_git
 from .store import PROJECT, guard, write_allowed
-from .version import format_version, read_build
+from .version import REQUIRED_FILES, format_version, read_build
 
 SOURCE = 'https://github.com/Simonlau4/skill-pilot.git'
 BRANCH = 'main'
@@ -152,6 +152,8 @@ def read_record(project):
         data = json.loads(safe_path(project, RECORD).read_text())
         if not isinstance(data['files'], dict) or not data['files']:
             raise ValueError()
+        if not all(name in data['files'] for name in REQUIRED_FILES):
+            raise ValueError()
         for name in data['files']:
             safe_path(project, name)
         return data
@@ -200,13 +202,14 @@ def check(home, project=PROJECT):
     if len(remote) != 2 or len(remote[0]) != 40 or any(c not in '0123456789abcdef' for c in remote[0]):
         raise ValueError('没能读取 SP 的最新版本，请检查网络后重试。')
     target = remote[0]
-    current_version = read_build(project)['version'] or format_version(
+    build = read_build(project)
+    current_version = build['version'] or format_version(
         before.get('date', ''), before.get('revision', ''))
     review = {'before': before, 'target': target, 'current': before.get('date', ''),
               'latest': before.get('date', ''), 'current_version': current_version,
               'latest_version': current_version, 'available': False, 'temporary': '',
               'changes': [], 'changes_total': 0, 'changes_partial': False}
-    if target == before.get('revision'):
+    if target == before.get('revision') and (before['checkout'] or build['manifest_valid']):
         return review
     temporary = Path(tempfile.mkdtemp(prefix='skill-pilot-self-update-')).resolve()
     candidate = temporary / 'candidate'

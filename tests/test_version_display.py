@@ -93,8 +93,8 @@ class VersionFormatAndReadTests(unittest.TestCase):
         self.assertEqual(fresh_build['install_mode'], '压缩包')
         self.assertEqual(fresh_build['version'], checkout_build['version'])
 
-        # Upgraded ZIP with revision/date and an extra private file reports the exact same version.
-        (fresh_zip / 'docs/My private note.md').write_text('personal note', encoding='utf-8')
+        # Upgraded ZIP with revision/date and an extra private file outside bundle dirs reports the exact same version.
+        (fresh_zip / 'My private note.txt').write_text('personal note', encoding='utf-8')
         self_update.record_installation(fresh_zip, rev, date, self_update.read_record(fresh_zip)['files'])
         with patch.object(app_version.subprocess, 'run', side_effect=AssertionError('ZIP不应调用git')):
             upgraded_build = app_version.read_build(fresh_zip)
@@ -176,18 +176,22 @@ class VersionFormatAndReadTests(unittest.TestCase):
         self.assertNotIn('build-app.sh', str(caught.exception))
         self.assertIn('重新运行一次安装程序', str(caught.exception))
 
-        # Legacy revision/date-only manifest, incomplete manifest (README.md only), and manifest missing root
-        # `skill-pilot` launcher are all invalid for trusted manifest scoping and still compute full bundle version.
+        # Legacy revision/date-only manifest, incomplete manifest (README.md only), and manifests missing
+        # `skill-pilot`, `README.md`, or `docs/STATUS.md` are all invalid and still compute full bundle version.
         self_update.record_installation(code, 'a' * 40, '2026-11-17T00:00:00Z')
         full_files = self_update.read_record(code)['files']
         without_launcher = {k: v for k, v in full_files.items() if k != 'skill-pilot'}
+        without_readme = {k: v for k, v in full_files.items() if k != 'README.md'}
+        without_status = {k: v for k, v in full_files.items() if k != 'docs/STATUS.md'}
         readme_stamp = self_update.stamp(code / 'README.md')
-        for stale in (
-            {'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'},
-            {'files': {'README.md': readme_stamp}, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'},
-            {'files': without_launcher, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'},
+        for label, stale in (
+            ('legacy', {'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'}),
+            ('readme-only', {'files': {'README.md': readme_stamp}, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'}),
+            ('no-launcher', {'files': without_launcher, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'}),
+            ('no-readme', {'files': without_readme, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'}),
+            ('no-status', {'files': without_status, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'}),
         ):
-            with self.subTest(stale=len(stale.get('files', {}))):
+            with self.subTest(label=label):
                 manifest.write_text(json.dumps(stale), encoding='utf-8')
                 before = app_version.read_build(code)
                 self.assertFalse(before['manifest_valid'])
@@ -201,17 +205,29 @@ class VersionFormatAndReadTests(unittest.TestCase):
                 finally:
                     app_js.write_text(original_js, encoding='utf-8')
 
-        # self_update.check() shares the exact same full-bundle calculation even with a single-file manifest.
+        # self_update.check() must NOT shortcut to "latest" when manifest is incomplete even if revision == HEAD.
         with patch.object(self_update, 'run_installer'):
             make_fixture(self, checkout=False)
+        head = git(self.upstream, 'rev-parse', 'HEAD')
+        self_update.record_installation(self.code, head, '2026-11-19T00:00:00Z')
+        complete_files = self_update.read_record(self.code)['files']
+        # Single-file manifest missing core files is rejected immediately.
         (self.code / '.skill-pilot-install.json').write_text(json.dumps({
             'files': {'README.md': self_update.stamp(self.code / 'README.md')},
-            'revision': '', 'date': ''}), encoding='utf-8')
-        partial_check = self_update.check(self.home, self.code)
-        if partial_check['temporary']:
-            self.addCleanup(shutil.rmtree, partial_check['temporary'], True)
-        self.assertEqual(partial_check['current_version'], app_version.read_build(self.code)['version'])
-        self.assertEqual(partial_check['current_version'], partial_check['latest_version'])
+            'revision': head, 'date': '2026-11-19T00:00:00Z'}), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '重新运行一次安装程序'):
+            self_update.check(self.home, self.code)
+        # Manifest missing root `skill-pilot` or `docs/STATUS.md` bypasses the revision shortcut and never claims latest.
+        for omitted in ('skill-pilot', 'README.md', 'docs/STATUS.md'):
+            with self.subTest(omitted=omitted):
+                incomplete = {k: v for k, v in complete_files.items() if k != omitted}
+                (self.code / '.skill-pilot-install.json').write_text(json.dumps({
+                    'files': incomplete, 'revision': head, 'date': '2026-11-19T00:00:00Z'}), encoding='utf-8')
+                checked = self_update.check(self.home, self.code)
+                if checked['temporary']:
+                    self.addCleanup(shutil.rmtree, checked['temporary'], True)
+                self.assertTrue(checked['available'])
+                self.assertEqual(checked['current_version'], app_version.read_build(self.code)['version'])
 
         # Manifest file mismatch: tampered file invalidates manifest and recomputes local version.
         self_update.record_installation(code, 'f' * 40, '2026-11-19T00:00:00Z')
@@ -403,6 +419,53 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertEqual(after_static_row['environment']['app_version'], static_next)
             self.assertEqual(feedback.envelope(diagnostics.bundle(self.home, after_row['error_id'])['report'])['app_version'], pending)
             self.assertEqual(feedback.envelope(diagnostics.bundle(self.home, after_static_row['error_id'])['report'])['app_version'], static_next)
+
+            # Path 1: Static refresh arriving during an in-flight check defers version recheck until check completes,
+            # then invalidates the stale check conclusion if disk version changed.
+            deferred_next = 'v1.0.0-5555555'
+            dashboard.program_progress.update(running=True, phase='check', available=False,
+                                              current_version=static_next, latest_version='')
+            with patch.object(runtime, 'version', return_value=dashboard.code_version):
+                dashboard.request_reload()
+            self.assertTrue(dashboard.static_refresh_deferred)
+            self.assertEqual(dashboard.running_version, static_next)
+            with patch.object(self_update, 'check', return_value={
+                    'temporary': '', 'target': 't' * 40, 'current': '', 'latest': '',
+                    'current_version': static_next, 'latest_version': static_next, 'available': False}), \
+                    patch.object(app_version, 'read_build', return_value={
+                        'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                        'manifest_valid': True, 'version': deferred_next}):
+                dashboard.program_work('check', automatic=False)
+            self.assertFalse(dashboard.static_refresh_deferred)
+            self.assertEqual(dashboard.running_version, deferred_next)
+            self.assertEqual(dashboard.program_progress['current_version'], deferred_next)
+            self.assertEqual(dashboard.program_progress['phase'], 'idle')
+            self.assertEqual(dashboard.program_progress['latest_version'], '')
+            self.assertNotIn('checked_at', dashboard.program_progress)
+            self.assertEqual(diagnostics.RUNNING_BUILD['app_version'], deferred_next)
+
+            # Path 2: Resuming a session on a new running version invalidates stale check results from the old version.
+            import socket
+            listener = socket.socket()
+            listener.bind(('127.0.0.1', 0))
+            listener.listen()
+            self.addCleanup(listener.close)
+            resumed = server.Dashboard({'home': str(self.home)}, resume={
+                'inventory': {'home': str(self.home)},
+                'socket_fd': listener.dup().detach(),
+                'program_progress': {
+                    'running': False, 'phase': 'latest', 'available': False, 'error': '',
+                    'current_version': 'v1.0.0-0000000', 'latest_version': 'v1.0.0-0000000',
+                    'pending_version': '', 'checked_at': 12345.0, 'target': 'old-target',
+                    'message': 'SP 已是最新版本',
+                },
+            })
+            self.addCleanup(resumed.server_close)
+            self.assertEqual(resumed.program_progress['current_version'], deferred_next)
+            self.assertEqual(resumed.program_progress['phase'], 'idle')
+            self.assertEqual(resumed.program_progress['latest_version'], '')
+            self.assertNotIn('checked_at', resumed.program_progress)
+            self.assertNotIn('target', resumed.program_progress)
 
     def test_stale_page_check_during_ready_recovers_directly_from_409_payload_even_if_progress_fails(self):
         source = (store.PROJECT / 'skill_pilot/web/static/app.js').read_text(encoding='utf-8')

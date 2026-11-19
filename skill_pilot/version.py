@@ -103,21 +103,9 @@ def _verify_manifest_files(project, manifest):
         return 'invalid'
     if not all(name in files for name in REQUIRED_FILES):
         return 'invalid'
-    launcher = project / 'skill-pilot'
-    if launcher.is_file() and not launcher.is_symlink() and 'skill-pilot' not in files:
+    expected_on_disk = {rel for rel, _ in _scan_bundle_paths(project)}
+    if not expected_on_disk or not expected_on_disk.issubset(files):
         return 'invalid'
-    for directory in ('skill_pilot', 'scripts', 'assets', 'skill'):
-        root = project / directory
-        if root.is_dir() and not root.is_symlink():
-            try:
-                for path in root.rglob('*'):
-                    if ('__pycache__' in path.parts or path.name == '.DS_Store'
-                            or path.suffix == '.pyc' or not path.is_file()):
-                        continue
-                    if path.relative_to(project).as_posix() not in files:
-                        return 'invalid'
-            except OSError:
-                return 'invalid'
     for name, expected in files.items():
         if (not isinstance(expected, list) or len(expected) != 2
                 or not isinstance(expected[0], str) or not SHA256_RE.fullmatch(expected[0])

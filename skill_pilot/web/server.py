@@ -190,7 +190,11 @@ class Dashboard(ThreadingHTTPServer):
                                          pending_version='', failed_action='',
                                          changes=[], changes_total=0, changes_partial=False)
         elif resume and self.running_version:
-            self.program_progress['current_version'] = self.running_version
+            previous_version = self.program_progress.get('current_version', '')
+            if previous_version and previous_version != self.running_version:
+                self._reset_stale_program_check(running)
+            else:
+                self.program_progress['current_version'] = self.running_version
         # 换进程时没有还在跑的线程。自动检查被关掉或刷新打断时，按还没查到处理，避免一直显示正在检查。
         if (resume and self.program_progress.get('automatic') and self.program_progress.get('running')
                 and self.program_progress.get('phase') == 'check'):
@@ -205,6 +209,7 @@ class Dashboard(ThreadingHTTPServer):
         self.active_requests = 0
         self.reload_callback = None
         self.reload_pending = False
+        self.static_refresh_deferred = False
         self.reload_error = ''
         self.reload_error_id = ''
         self.reload_thread = None
@@ -920,6 +925,23 @@ class Dashboard(ThreadingHTTPServer):
             self.program_thread.start()
             return self.program_progress.copy()
 
+    def _reset_stale_program_check(self, build):
+        self.running_version = build['version']
+        app_version.set_running_version(build['version'], date=build.get('date', ''))
+        diagnostics.sync_running_build()
+        if self.program_review:
+            rmtree(self.program_review['temporary'], ignore_errors=True)
+        self.program_review = None
+        self.program_progress.update(
+            phase='idle', available=False, error='', error_id='', failed_action='',
+            current=build.get('date', ''), latest='',
+            current_version=build['version'], latest_version='', pending_version='',
+            changes=[], changes_total=0, changes_partial=False,
+            message='从 GitHub 官方项目获取新版',
+        )
+        self.program_progress.pop('checked_at', None)
+        self.program_progress.pop('target', None)
+
     def program_work(self, action, automatic=False):
         try:
             if action == 'check':
@@ -983,9 +1005,15 @@ class Dashboard(ThreadingHTTPServer):
                     error=str(error) if isinstance(error, ValueError) else 'Skill Pilot 更新没有完成，原因未知。请稍后重试，或点击「反馈问题」查看诊断。',
                     message='SP 更新没有完成')
         finally:
-            if action == 'check':
-                self.program_progress['checked_at'] = time.time()
-            self.program_progress['running'] = False
+            with self.runtime_lock:
+                if action == 'check':
+                    self.program_progress['checked_at'] = time.time()
+                    if self.static_refresh_deferred:
+                        self.static_refresh_deferred = False
+                        refreshed = app_version.read_build()
+                        if refreshed['version'] and refreshed['version'] != self.running_version:
+                            self._reset_stale_program_check(refreshed)
+                self.program_progress['running'] = False
 
     def request_reload(self):
         changed = runtime.version() != self.code_version
@@ -1006,24 +1034,12 @@ class Dashboard(ThreadingHTTPServer):
                                                  latest_version=applied or self.program_progress.get('latest_version', ''),
                                                  pending_version='', failed_action='',
                                                  changes=[], changes_total=0, changes_partial=False)
+                elif self.program_progress['running'] and self.program_progress['phase'] == 'check':
+                    self.static_refresh_deferred = True
                 elif not self.program_progress['running'] and self.program_progress['phase'] != 'apply':
                     refreshed = app_version.read_build()
                     if refreshed['version'] and refreshed['version'] != self.running_version:
-                        self.running_version = refreshed['version']
-                        app_version.set_running_version(refreshed['version'], date=refreshed['date'])
-                        diagnostics.sync_running_build()
-                        if self.program_review:
-                            rmtree(self.program_review['temporary'], ignore_errors=True)
-                        self.program_review = None
-                        self.program_progress.update(
-                            phase='idle', available=False, error='', error_id='', failed_action='',
-                            current=refreshed['date'], latest='',
-                            current_version=refreshed['version'], latest_version='', pending_version='',
-                            changes=[], changes_total=0, changes_partial=False,
-                            message='从 GitHub 官方项目获取新版',
-                        )
-                        self.program_progress.pop('checked_at', None)
-                        self.program_progress.pop('target', None)
+                        self._reset_stale_program_check(refreshed)
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
                 self.reload_error = ''
