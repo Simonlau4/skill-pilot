@@ -405,6 +405,38 @@ class VersionFormatAndReadTests(unittest.TestCase):
                     self.assertNotIn('checked_at', dashboard.program_progress)
                     self.assertNotIn('target', dashboard.program_progress)
 
+            # Check when disk is already at latest while running_version is still behind MUST enter 'ready', not 'latest'.
+            with patch.object(self_update, 'check', return_value={
+                    'temporary': '', 'target': 't' * 40, 'current': '2026-11-19', 'latest': '2026-11-19',
+                    'current_version': pending, 'latest_version': pending, 'available': False}):
+                dashboard.program_work('check', automatic=False)
+            self.assertEqual(dashboard.program_progress['phase'], 'ready')
+            self.assertEqual(dashboard.program_progress['message'], '新版已安装，刷新后生效')
+            self.assertEqual(dashboard.program_progress['current_version'], running)
+            self.assertEqual(dashboard.program_progress['latest_version'], pending)
+            self.assertEqual(dashboard.program_progress['pending_version'], pending)
+
+            # Interleaved apply+refresh: if backend code changes between initial runtime.version() check
+            # and reading ready/disk build, request_reload() MUST trigger backend reload instead of static hot-refresh.
+            reload_called = threading.Event()
+            dashboard.reload_callback = reload_called.set
+            try:
+                with patch.object(runtime, 'version', side_effect=[dashboard.code_version, 'new-backend-code']), \
+                        patch.object(app_version, 'read_build', return_value={
+                            'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                            'manifest_valid': True, 'version': pending}):
+                    interleaved = dashboard.request_reload()
+                self.assertTrue(interleaved['changed'])
+                self.assertTrue(reload_called.wait(2))
+                if dashboard.reload_thread:
+                    dashboard.reload_thread.join(2)
+                self.assertEqual(dashboard.program_progress['phase'], 'ready')
+                self.assertEqual(dashboard.running_version, running)
+                self.assertEqual(diagnostics.RUNNING_BUILD['app_version'], running)
+            finally:
+                dashboard.reload_callback = None
+                dashboard.reload_pending = False
+
             # Static-only hot refresh when disk matches pending_version updates BOTH dashboard and diagnostics; old errors stay intact.
             dashboard.program_progress.update(
                 phase='ready', message='新版已安装，刷新后生效',
@@ -702,12 +734,14 @@ const api = async (path) => {
         legacy_build = app_version.read_build(self.code)
         self.assertTrue(legacy_build['manifest_valid'])
         self.assertEqual(legacy_build['version'], official_version)
-        # Path traversal entries in a manifest must still be rejected even though private notes are skipped.
+        # Traversal, absolute, and Windows drive/root paths in a manifest must ALL be rejected even when non-official.
         bad_manifest = self.code / '.skill-pilot-install.json'
-        bad_manifest.write_text(json.dumps({
-            'files': {**complete_files, '../escape.md': ['0' * 64, 0]}, 'revision': head}), encoding='utf-8')
-        with self.assertRaisesRegex(ValueError, '重新运行一次安装程序'):
-            self_update.read_record(self.code)
+        for unsafe_path in ('../escape.md', '..\\escape.md', '/private.md', '\\private.md', 'D:private.md', 'D:\\private.md'):
+            with self.subTest(unsafe_path=unsafe_path):
+                bad_manifest.write_text(json.dumps({
+                    'files': {**complete_files, unsafe_path: ['0' * 64, 0]}, 'revision': head}), encoding='utf-8')
+                with self.assertRaisesRegex(ValueError, '重新运行一次安装程序'):
+                    self_update.read_record(self.code)
         bad_manifest.write_text(json.dumps({
             'files': legacy_files, 'revision': head, 'date': '2026-11-19T00:00:00Z'}), encoding='utf-8')
 

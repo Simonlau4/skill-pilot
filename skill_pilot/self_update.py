@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .environment import tool_environment
 from .platform_support import rmtree
@@ -156,7 +156,11 @@ def read_record(project):
         if not all(name in data['files'] for name in REQUIRED_FILES):
             raise ValueError()
         for name in data['files']:
-            if not isinstance(name, str) or not name or Path(name).is_absolute() or '..' in Path(name).parts:
+            if not isinstance(name, str) or not name or name.startswith(('/', '\\')):
+                raise ValueError()
+            win_path = PureWindowsPath(name)
+            if (win_path.drive or win_path.root or Path(name).is_absolute()
+                    or '..' in Path(name).parts or '..' in win_path.parts):
                 raise ValueError()
             if not is_official_path(name):
                 continue

@@ -1026,21 +1026,39 @@ class Dashboard(ThreadingHTTPServer):
                     if old_review and old_review.get('temporary'):
                         rmtree(old_review['temporary'], ignore_errors=True)
                     new_review = self_update.check(self.home)
-                    current_version = (self.running_version or new_review.get('current_version')
-                                       or app_version.format_version(new_review.get('current', ''),
-                                                                     new_review.get('before', {}).get('revision', '')))
+                    disk_version = (new_review.get('current_version')
+                                    or app_version.format_version(new_review.get('current', ''),
+                                                                  new_review.get('before', {}).get('revision', '')))
+                    current_version = self.running_version or disk_version
                     latest_version = (new_review.get('latest_version')
                                       or app_version.format_version(new_review.get('latest', ''), new_review.get('target', '')))
+                    disk_ahead_of_running = (not new_review['available']
+                                             and bool(self.running_version)
+                                             and bool(latest_version)
+                                             and self.running_version != latest_version)
+                    if new_review['available']:
+                        phase = 'available'
+                        message = '有新版，可以一键升级'
+                        pending_version = ''
+                    elif disk_ahead_of_running:
+                        phase = 'ready'
+                        message = '新版已安装，刷新后生效'
+                        pending_version = latest_version
+                    else:
+                        phase = 'latest'
+                        message = 'SP 已是最新版本'
+                        pending_version = ''
                     update_payload = dict(
-                        phase='available' if new_review['available'] else 'latest',
+                        phase=phase,
                         target=new_review['target'], available=new_review['available'],
                         current=new_review['current'], latest=new_review['latest'],
-                        current_version=current_version, latest_version=latest_version, pending_version='',
+                        current_version=current_version, latest_version=latest_version,
+                        pending_version=pending_version,
                         failed_action='',
                         changes=new_review.get('changes', []) if new_review['available'] else [],
                         changes_total=new_review.get('changes_total', 0) if new_review['available'] else 0,
                         changes_partial=new_review.get('changes_partial', False) if new_review['available'] else False,
-                        message='有新版，可以一键升级' if new_review['available'] else 'SP 已是最新版本',
+                        message=message,
                     )
                 else:
                     while not self.closing:
@@ -1140,9 +1158,6 @@ class Dashboard(ThreadingHTTPServer):
         changed = runtime.version() != self.code_version
         with self.runtime_lock:
             if not changed:
-                self.reload_pending = False
-                self.reload_error = ''
-                self.reload_error_id = ''
                 with self.program_lock:
                     if self.program_progress['phase'] == 'ready':
                         expected_pending = self.program_progress.get('pending_version', '')
@@ -1150,20 +1165,23 @@ class Dashboard(ThreadingHTTPServer):
                             refreshed = app_version.read_build()
                         except Exception:
                             refreshed = None
-                        applied = refreshed.get('version', '') if refreshed else ''
-                        if applied and expected_pending and applied == expected_pending:
-                            self.running_version = applied
-                            app_version.set_running_version(applied, date=self.program_progress.get('latest', ''))
-                            diagnostics.sync_running_build()
-                            self._set_program_progress({
-                                'phase': 'latest', 'message': 'SP 已升级到最新版',
-                                'current_version': applied,
-                                'latest_version': applied,
-                                'pending_version': '', 'failed_action': '',
-                                'changes': [], 'changes_total': 0, 'changes_partial': False,
-                            })
+                        if runtime.version() != self.code_version:
+                            changed = True
                         else:
-                            self._invalidate_stale_program_check()
+                            applied = refreshed.get('version', '') if refreshed else ''
+                            if applied and expected_pending and applied == expected_pending:
+                                self.running_version = applied
+                                app_version.set_running_version(applied, date=self.program_progress.get('latest', ''))
+                                diagnostics.sync_running_build()
+                                self._set_program_progress({
+                                    'phase': 'latest', 'message': 'SP 已升级到最新版',
+                                    'current_version': applied,
+                                    'latest_version': applied,
+                                    'pending_version': '', 'failed_action': '',
+                                    'changes': [], 'changes_total': 0, 'changes_partial': False,
+                                })
+                            else:
+                                self._invalidate_stale_program_check()
                     elif self.program_progress['running'] and (self.program_action == 'check' or self.program_progress['phase'] == 'check'):
                         self.static_refresh_seq += 1
                     elif not self.program_progress['running'] and self.program_action != 'apply' and self.program_progress['phase'] != 'apply':
@@ -1171,10 +1189,16 @@ class Dashboard(ThreadingHTTPServer):
                             refreshed = app_version.read_build()
                         except Exception:
                             refreshed = None
-                        if not refreshed or not refreshed.get('version'):
+                        if runtime.version() != self.code_version:
+                            changed = True
+                        elif not refreshed or not refreshed.get('version'):
                             self._invalidate_stale_program_check()
                         elif refreshed['version'] != self.running_version:
                             self._reset_stale_program_check(refreshed)
+                if not changed:
+                    self.reload_pending = False
+                    self.reload_error = ''
+                    self.reload_error_id = ''
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
                 self.reload_error = ''
