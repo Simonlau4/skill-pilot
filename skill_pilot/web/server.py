@@ -1341,7 +1341,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urllib.parse.urlsplit(self.path).path
         if path in {'/api/diagnostics/bundle', '/api/diagnostics/client-error',
-                    '/api/diagnostics/preview', '/api/diagnostics/submit'}:
+                    '/api/diagnostics/preview', '/api/diagnostics/preview-discard',
+                    '/api/diagnostics/submit'}:
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 max_length = feedback.MAX_UPLOAD_BODY if path.endswith('/preview') else 16384
@@ -1368,7 +1369,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if path.endswith('/bundle'):
                     self.reply(200, diagnostics.bundle(self.server.home, body.get('error_id'), body.get('note', '')))
+                elif path.endswith('/preview-discard'):
+                    ticket = body.get('ticket', '')
+                    with self.server.feedback_lock:
+                        self.server.feedback_previews.pop(ticket, None)
+                    self.reply(200, {'discarded': True})
                 elif path.endswith('/preview'):
+                    previous = body.get('previous_ticket', '')
+                    if previous:
+                        with self.server.feedback_lock:
+                            self.server.feedback_previews.pop(previous, None)
                     prepared = team.feedback_preview(
                         self.server.home, body.get('error_id', ''), body.get('note', ''), body.get('attachments'))
                     ticket = secrets.token_urlsafe(24)

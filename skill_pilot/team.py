@@ -308,6 +308,13 @@ def submit_feedback(home, prepared):
         raise ValueError(diagnostics.sanitize(str(error), home, 400)) from None
     if result.get('submitted') is not True:
         raise ValueError('分享站没有确认提交成功，请复制或导出诊断信息。')
+    if attachments:
+        expected_ids = [item['sha256'] for item in attachments]
+        returned = result.get('attachments')
+        actual_ids = ([item.get('id') for item in returned if isinstance(item, dict)]
+                      if isinstance(returned, list) else [])
+        if len(actual_ids) != len(expected_ids) or actual_ids != expected_ids:
+            raise ValueError('分享站未能确认收下本次截图，请核对分享站版本后重试，或复制、导出诊断信息发给维护者。')
     path = Path(home) / '.skill-pilot/feedback.json'
     saved = diagnostics.read_json(path).get('submitted', [])
     saved = saved if isinstance(saved, list) else []

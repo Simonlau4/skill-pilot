@@ -523,7 +523,11 @@ class HubStore:
 
     def _collect_feedback_attachments(self, rows):
         folder = self._feedback_attachment_dir()
-        if not folder.is_dir():
+        try:
+            if not folder.is_dir():
+                return
+            entries = list(folder.iterdir())
+        except OSError:
             return
         used = {
             att['file']
@@ -531,12 +535,19 @@ class HubStore:
             for att in row.get('attachments', ())
             if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str)
         }
-        for entry in folder.iterdir():
+        for entry in entries:
             if entry.name not in used:
                 try:
                     entry.unlink(missing_ok=True)
-                except PermissionError:
-                    pass  # Windows may still be serving the file. Revisit on the next write.
+                except OSError:
+                    pass  # Locked or temporarily unremovable; accounted for and retried later.
+
+    def _cleanup_feedback_orphans(self):
+        try:
+            rows = self._feedback()
+        except (HubError, OSError, ValueError):
+            return
+        self._collect_feedback_attachments(rows)
 
     def _write_feedback_attachments(self, attachments):
         if not attachments:
@@ -573,15 +584,40 @@ class HubStore:
             raise HubError(500, '反馈备份没能读懂，请联系管理员检查。')
         return rows
 
-    def _save_feedback(self, rows):
+    def _save_feedback(self, rows, *, collect=True):
         rows = rows[-feedback.MAX_RECORDS:]
+        # Best-effort cleanup of already-unreferenced leftover files before measuring disk usage.
+        self._collect_feedback_attachments(rows)
+        folder = self._feedback_attachment_dir()
+        disk_sizes = {}
+        try:
+            if folder.is_dir():
+                for entry in folder.iterdir():
+                    try:
+                        if entry.is_file():
+                            disk_sizes[entry.name] = entry.stat().st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        initial_active = {
+            att['file']
+            for item in rows
+            for att in item.get('attachments', ())
+            if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str)
+        }
+        # Leftover files that could not be unlinked still occupy real disk space.
+        locked_orphan_bytes = sum(size for name, size in disk_sizes.items() if name not in initial_active)
+
         def active_attachment_bytes(items):
             seen = {}
             for item in items:
                 for att in item.get('attachments', ()):
                     if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str):
-                        seen.setdefault(att['file'], int(att.get('size', 0)))
-            return sum(seen.values())
+                        name = att['file']
+                        seen.setdefault(name, disk_sizes.get(name, int(att.get('size', 0))))
+            return locked_orphan_bytes + sum(seen.values())
+
         while active_attachment_bytes(rows) > feedback.MAX_ATTACHMENT_STORE_BYTES:
             target = next((item for item in rows if any(
                 isinstance(att, dict) and not att.get('evicted')
@@ -594,7 +630,9 @@ class HubStore:
         while rows and len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').replace('\n', os.linesep).encode()) > feedback.MAX_BYTES:
             rows.pop(0)
         atomic_write(self.data / 'feedback.json', rows)
-        self._collect_feedback_attachments(rows)
+        if collect:
+            self._collect_feedback_attachments(rows)
+        return rows
 
     def _receive_feedback(self, member, data):
         payload = feedback.clean(data)
@@ -608,13 +646,20 @@ class HubStore:
             raise HubError(400, str(error)) from None
         rows = self._feedback()
         current = datetime.now(timezone.utc)
+        incoming_ids = [item['sha256'] for item in attachments]
         for row in reversed(rows):
             if (row['member_id'] == member['id'] and
                     (row['payload']['error_id'] == payload['error_id'] or
                      row['payload']['fingerprint'] == payload['fingerprint']) and
                     (current - datetime.fromisoformat(row['payload']['submitted_at'])).total_seconds() < feedback.COOLDOWN):
                 if row['state'] == 'sent' and row['payload']['error_id'] == payload['error_id']:
-                    return row, True
+                    existing_ids = [
+                        att['sha256'] for att in row.get('attachments', ())
+                        if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('sha256'), str)
+                    ]
+                    if existing_ids == incoming_ids:
+                        return row, True
+                    raise HubError(409, '这条错误编号之前已提交，且截图内容与本次不同，本次未保存新截图。请改用主动反馈补充截图，或复制、导出诊断信息发给维护者。')
                 raise HubError(429, '刚刚提交过同类反馈，本次未再次提交。请五分钟后再试，或复制、导出诊断信息发给维护者。')
         row_id = secrets.token_hex(16)
         stored_meta = [
@@ -626,8 +671,6 @@ class HubStore:
         ]
         payload['attachment_count'] = str(len(stored_meta))
         payload['attachments_summary'] = feedback.summarize_attachments(stored_meta, row_id=row_id)
-        if stored_meta:
-            payload['detail'] = feedback.append_attachment_fallback(payload['detail'], payload['attachments_summary'])
         payload.update(status='待排查', submitted_at=current.isoformat(), reporter=feedback.text(member['name'], 40))
         row = {'id': row_id, 'member_id': member['id'], 'member_name': payload['reporter'],
                'payload': payload, 'state': 'pending'}
@@ -635,11 +678,13 @@ class HubStore:
             row['attachments'] = stored_meta
         created = self._write_feedback_attachments(attachments)
         try:
-            self._save_feedback([*rows, row])
+            saved_rows = self._save_feedback([*rows, row], collect=False)
         except OSError:
             for path in created:
                 path.unlink(missing_ok=True)
             raise
+        # Commit succeeded; cleanup of obsolete files is best-effort and never rolls back new files.
+        self._collect_feedback_attachments(saved_rows)
         return row, False
 
     def _feedback_attachment_file(self, member_id, row_id, digest):
@@ -1439,6 +1484,7 @@ class HubServer(ThreadingHTTPServer):
         self.store = HubStore(data)
         with self.store.locked():
             self.store._members()
+            self.store._cleanup_feedback_orphans()
         super().__init__((host, port), Handler)
 
 

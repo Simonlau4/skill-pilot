@@ -9536,21 +9536,60 @@ function validateFeedbackFileBytes(bytes, currentCount, currentTotal, declaredTy
   return {ok: true, content_type: detected.content_type, label: detected.label, size: bytes.length};
 }
 
+const FEEDBACK_MAX_IMAGE_DIM = 16384;
+const FEEDBACK_MAX_IMAGE_PIXELS = 64000000;
+
+function decodeFeedbackImage(previewUrl) {
+  return new Promise(resolve => {
+    if (typeof Image !== 'function') {
+      resolve({ok: false});
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      const width = img.naturalWidth || 0;
+      const height = img.naturalHeight || 0;
+      if (width > 0 && height > 0 && width <= FEEDBACK_MAX_IMAGE_DIM &&
+          height <= FEEDBACK_MAX_IMAGE_DIM && width * height <= FEEDBACK_MAX_IMAGE_PIXELS) {
+        resolve({ok: true, width, height});
+      } else {
+        resolve({ok: false});
+      }
+    };
+    img.onerror = () => resolve({ok: false});
+    img.src = previewUrl;
+  });
+}
+
+function discardFeedbackTicket(ticket) {
+  if (!ticket) return;
+  api('/api/diagnostics/preview-discard', {ticket}).catch(() => {});
+}
+
 let feedbackSequence = 0;
 let feedbackDialogEpoch = 0;
 let feedbackErrorId = '';
 let feedbackTicket = '';
 let feedbackSending = false;
+let feedbackReadingFiles = 0;
 let feedbackAttachments = [];
 let feedbackAttachmentSeq = 0;
 let feedbackCanAttach = false;
 let feedbackAttachReason = '';
 let feedbackSubmitted = false;
+let feedbackViewerTrigger = null;
 
 function setFeedbackShotError(message) {
   const node = $('feedback-shots-error');
   node.textContent = message || '';
   node.hidden = !message;
+}
+
+function announceFeedbackShots(message) {
+  const status = $('feedback-shots-status');
+  if (!status) return;
+  status.textContent = '';
+  if (message) status.textContent = message;
 }
 
 function renderFeedbackShots() {
@@ -9562,7 +9601,7 @@ function renderFeedbackShots() {
   notice.textContent = !feedbackCanAttach ? feedbackAttachReason : '';
   notice.hidden = feedbackCanAttach || !feedbackAttachReason;
   $('feedback-shots-controls').hidden = !feedbackCanAttach;
-  $('feedback-shot-pick').disabled = feedbackSending || feedbackSubmitted || !feedbackCanAttach || feedbackAttachments.length >= FEEDBACK_MAX_SHOTS;
+  $('feedback-shot-pick').disabled = feedbackSending || feedbackSubmitted || feedbackReadingFiles > 0 || !feedbackCanAttach || feedbackAttachments.length >= FEEDBACK_MAX_SHOTS;
   const list = $('feedback-shots-list');
   if (!feedbackAttachments.length) {
     list.innerHTML = '';
@@ -9572,13 +9611,53 @@ function renderFeedbackShots() {
   list.hidden = false;
   list.innerHTML = feedbackAttachments.map((item, index) => `
     <li class="feedback-shot-item">
-      <img class="feedback-shot-thumb" src="${item.previewUrl}" alt="截图 ${index + 1} 预览">
+      <button class="feedback-shot-preview" type="button" data-view-shot="${item.id}" aria-label="查看截图 ${index + 1} 完整原图">
+        <img class="feedback-shot-thumb" src="${item.previewUrl}" alt="截图 ${index + 1} 预览">
+      </button>
       <div class="feedback-shot-meta">
         <span class="feedback-shot-caption">截图 ${index + 1} · ${escape(item.label)} · ${escape(formatFeedbackBytes(item.size))}</span>
-        <button class="btn btn-small feedback-shot-remove" type="button" data-remove-shot="${item.id}" aria-label="移除截图 ${index + 1}"${feedbackSending || feedbackSubmitted ? ' disabled' : ''}>移除</button>
+        <button class="btn btn-small feedback-shot-remove" type="button" data-remove-shot="${item.id}" aria-label="移除截图 ${index + 1}"${feedbackSending || feedbackSubmitted || feedbackReadingFiles > 0 ? ' disabled' : ''}>移除</button>
       </div>
     </li>
   `).join('');
+}
+
+function openFeedbackShotViewer(shotId, trigger) {
+  const index = feedbackAttachments.findIndex(item => item.id === shotId);
+  if (index < 0) return;
+  const item = feedbackAttachments[index];
+  feedbackViewerTrigger = trigger || null;
+  const dims = item.width && item.height ? ` · ${item.width} × ${item.height}` : '';
+  $('feedback-shot-viewer-title').textContent = `查看截图 ${index + 1} 原图`;
+  $('feedback-shot-viewer-meta').textContent = `${item.label} · ${formatFeedbackBytes(item.size)}${dims}（发送前请确认画面不含密码、密钥或私人信息）`;
+  const img = $('feedback-shot-viewer-img');
+  img.src = item.previewUrl;
+  img.alt = `截图 ${index + 1} 完整原图`;
+  const viewer = $('feedback-shot-viewer');
+  if (!viewer.open) viewer.showModal();
+}
+
+function removeFeedbackShot(shotId) {
+  if (feedbackSending || feedbackSubmitted || feedbackReadingFiles > 0) return false;
+  const removedIndex = feedbackAttachments.findIndex(item => item.id === shotId);
+  if (removedIndex < 0) return false;
+  feedbackAttachments.splice(removedIndex, 1);
+  const oldTicket = feedbackTicket;
+  feedbackTicket = '';
+  discardFeedbackTicket(oldTicket);
+  setFeedbackShotError('');
+  renderFeedbackShots();
+  const remaining = $('feedback-shots-list').querySelectorAll('.feedback-shot-remove');
+  if (remaining.length) {
+    remaining[Math.min(removedIndex, remaining.length - 1)].focus();
+    announceFeedbackShots(`已移除截图，剩余 ${remaining.length} 张。`);
+  } else {
+    if (!$('feedback-shot-pick').disabled && !$('feedback-shots-controls').hidden) $('feedback-shot-pick').focus();
+    else $('feedback-note').focus();
+    announceFeedbackShots('已移除全部截图。');
+  }
+  updateFeedbackPreview();
+  return true;
 }
 
 async function addFeedbackFiles(files) {
@@ -9589,57 +9668,92 @@ async function addFeedbackFiles(files) {
     return;
   }
   const epoch = feedbackDialogEpoch;
+  feedbackReadingFiles += 1;
+  ++feedbackSequence;
+  const staleTicket = feedbackTicket;
+  feedbackTicket = '';
+  discardFeedbackTicket(staleTicket);
+  $('feedback-send').hidden = true;
+  $('feedback-send').disabled = true;
+  $('feedback-preview').hidden = true;
+  $('feedback-copy').disabled = $('feedback-export').disabled = true;
+  $('feedback-message').textContent = '正在读取并核对截图…';
+  renderFeedbackShots();
   const errors = [];
   let added = 0;
   const noteError = text => { if (text && !errors.includes(text)) errors.push(text); };
-  for (const file of items) {
-    if (epoch !== feedbackDialogEpoch || !$('feedback-dialog').open || feedbackSending || feedbackSubmitted) return;
-    if (feedbackAttachments.length >= FEEDBACK_MAX_SHOTS) {
-      noteError(`最多只能附带 ${FEEDBACK_MAX_SHOTS} 张截图，请先移除已有截图。`);
-      continue;
+  try {
+    for (const file of items) {
+      if (epoch !== feedbackDialogEpoch || !$('feedback-dialog').open || feedbackSending || feedbackSubmitted) return;
+      if (feedbackAttachments.length >= FEEDBACK_MAX_SHOTS) {
+        noteError(`最多只能附带 ${FEEDBACK_MAX_SHOTS} 张截图，请先移除已有截图。`);
+        continue;
+      }
+      if (typeof file.size === 'number' && file.size > FEEDBACK_MAX_SHOT_BYTES) {
+        noteError(`单张截图不能超过 ${formatFeedbackBytes(FEEDBACK_MAX_SHOT_BYTES)}，请压缩或裁剪后再添加。`);
+        continue;
+      }
+      let bytes;
+      try {
+        const buffer = typeof file.arrayBuffer === 'function'
+          ? await file.arrayBuffer()
+          : await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = () => reject(new Error('read failed'));
+              reader.readAsArrayBuffer(file);
+            });
+        bytes = new Uint8Array(buffer);
+      } catch {
+        noteError('未能读取所选图片，请重新选择或粘贴截图。');
+        continue;
+      }
+      if (epoch !== feedbackDialogEpoch || !$('feedback-dialog').open || feedbackSending || feedbackSubmitted) return;
+      const currentTotal = feedbackAttachments.reduce((sum, item) => sum + item.size, 0);
+      const checked = validateFeedbackFileBytes(bytes, feedbackAttachments.length, currentTotal, file.type || '');
+      if (!checked.ok) {
+        noteError(checked.error);
+        continue;
+      }
+      const base64 = bytesToBase64(bytes);
+      const previewUrl = `data:${checked.content_type};base64,${base64}`;
+      const decoded = await decodeFeedbackImage(previewUrl);
+      if (epoch !== feedbackDialogEpoch || !$('feedback-dialog').open || feedbackSending || feedbackSubmitted) return;
+      if (!decoded.ok) {
+        noteError('图片内容已损坏，无法显示，请重新截图或选择有效图片。');
+        continue;
+      }
+      const liveTotal = feedbackAttachments.reduce((sum, item) => sum + item.size, 0);
+      if (feedbackAttachments.length >= FEEDBACK_MAX_SHOTS) {
+        noteError(`最多只能附带 ${FEEDBACK_MAX_SHOTS} 张截图，请先移除已有截图。`);
+        continue;
+      }
+      if (liveTotal + checked.size > FEEDBACK_MAX_SHOTS_TOTAL) {
+        noteError(`截图总大小不能超过 ${formatFeedbackBytes(FEEDBACK_MAX_SHOTS_TOTAL)}，请减少截图数量或缩小图片。`);
+        continue;
+      }
+      feedbackAttachments.push({
+        id: ++feedbackAttachmentSeq,
+        content_type: checked.content_type,
+        label: checked.label,
+        size: checked.size,
+        width: decoded.width,
+        height: decoded.height,
+        data: base64,
+        previewUrl,
+      });
+      added += 1;
     }
-    if (typeof file.size === 'number' && file.size > FEEDBACK_MAX_SHOT_BYTES) {
-      noteError(`单张截图不能超过 ${formatFeedbackBytes(FEEDBACK_MAX_SHOT_BYTES)}，请压缩或裁剪后再添加。`);
-      continue;
+  } finally {
+    feedbackReadingFiles = Math.max(0, feedbackReadingFiles - 1);
+    if (epoch === feedbackDialogEpoch && $('feedback-dialog').open) {
+      setFeedbackShotError(errors.join(' '));
+      renderFeedbackShots();
+      if (added > 0) announceFeedbackShots(`已添加 ${added} 张截图，当前共 ${feedbackAttachments.length} 张。`);
+      if (feedbackReadingFiles === 0 && !feedbackSending && !feedbackSubmitted) {
+        updateFeedbackPreview({keepShotError: errors.length > 0});
+      }
     }
-    let bytes;
-    try {
-      const buffer = typeof file.arrayBuffer === 'function'
-        ? await file.arrayBuffer()
-        : await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result);
-            reader.onerror = () => reject(new Error('read failed'));
-            reader.readAsArrayBuffer(file);
-          });
-      bytes = new Uint8Array(buffer);
-    } catch {
-      noteError('未能读取所选图片，请重新选择或粘贴截图。');
-      continue;
-    }
-    if (epoch !== feedbackDialogEpoch || !$('feedback-dialog').open || feedbackSending || feedbackSubmitted) return;
-    const currentTotal = feedbackAttachments.reduce((sum, item) => sum + item.size, 0);
-    const checked = validateFeedbackFileBytes(bytes, feedbackAttachments.length, currentTotal, file.type || '');
-    if (!checked.ok) {
-      noteError(checked.error);
-      continue;
-    }
-    const base64 = bytesToBase64(bytes);
-    feedbackAttachments.push({
-      id: ++feedbackAttachmentSeq,
-      content_type: checked.content_type,
-      label: checked.label,
-      size: checked.size,
-      data: base64,
-      previewUrl: `data:${checked.content_type};base64,${base64}`,
-    });
-    added += 1;
-  }
-  if (epoch !== feedbackDialogEpoch || !$('feedback-dialog').open) return;
-  setFeedbackShotError(errors.join(' '));
-  renderFeedbackShots();
-  if (added > 0) {
-    updateFeedbackPreview({keepShotError: errors.length > 0});
   }
 }
 
@@ -9652,6 +9766,7 @@ document.addEventListener('click', event => {
   feedbackCanAttach = false;
   feedbackAttachReason = '';
   feedbackSubmitted = false;
+  feedbackReadingFiles = 0;
   $('feedback-note').value = '';
   $('feedback-shot-input').value = '';
   setFeedbackShotError('');
@@ -9663,11 +9778,14 @@ window.addEventListener('diagnostic-error', event => {
   if (event.detail?.error_id) toast({text: '页面出了点问题，请刷新重试。', tone: 'error', error_id: event.detail.error_id});
 });
 
-async function updateFeedbackPreview(options = {}) {
+async function updateFeedbackPreview(options) {
+  const keepShotError = Boolean(options && options.keepShotError);
   const sequence = ++feedbackSequence;
+  const previousTicket = feedbackTicket;
   feedbackTicket = '';
-  if (!options.keepShotError) setFeedbackShotError('');
+  if (!keepShotError) setFeedbackShotError('');
   $('feedback-send').hidden = true;
+  $('feedback-send').disabled = true;
   $('feedback-preview').hidden = true;
   $('feedback-copy').disabled = $('feedback-export').disabled = true;
   $('feedback-text').value = '';
@@ -9677,8 +9795,13 @@ async function updateFeedbackPreview(options = {}) {
   const note = $('feedback-note').value;
   const attachments = feedbackAttachments.map(({content_type, data}) => ({content_type, data}));
   try {
-    const result = await api('/api/diagnostics/preview', {error_id: feedbackErrorId, note, attachments});
-    if (sequence !== feedbackSequence || !$('feedback-dialog').open) return;
+    const reqBody = {error_id: feedbackErrorId, note, attachments};
+    if (previousTicket) reqBody.previous_ticket = previousTicket;
+    const result = await api('/api/diagnostics/preview', reqBody);
+    if (sequence !== feedbackSequence || !$('feedback-dialog').open) {
+      discardFeedbackTicket(result.ticket);
+      return;
+    }
     feedbackTicket = result.ticket;
     feedbackCanAttach = Boolean(result.can_attach);
     feedbackAttachReason = result.attach_reason || '';
@@ -9693,7 +9816,7 @@ async function updateFeedbackPreview(options = {}) {
     $('feedback-text').value = JSON.stringify(payload, null, 2);
     $('feedback-message').textContent = result.reason || '核对内容后再发送。';
     $('feedback-send').hidden = !result.can_send;
-    $('feedback-send').disabled = false;
+    $('feedback-send').disabled = feedbackReadingFiles > 0;
     $('feedback-send').textContent = '发送到飞书表格';
     $('feedback-copy').disabled = $('feedback-export').disabled = false;
   } catch (error) {
@@ -9706,7 +9829,7 @@ async function updateFeedbackPreview(options = {}) {
 }
 
 $('feedback-shot-pick').addEventListener('click', () => {
-  if (!feedbackSending && !feedbackSubmitted && feedbackCanAttach) $('feedback-shot-input').click();
+  if (!feedbackSending && !feedbackSubmitted && feedbackReadingFiles === 0 && feedbackCanAttach) $('feedback-shot-input').click();
 });
 $('feedback-shot-input').addEventListener('change', () => {
   const input = $('feedback-shot-input');
@@ -9715,18 +9838,22 @@ $('feedback-shot-input').addEventListener('change', () => {
   addFeedbackFiles(files);
 });
 $('feedback-shots-list').addEventListener('click', event => {
-  const button = event.target.closest('[data-remove-shot]');
-  if (!button || feedbackSending || feedbackSubmitted) return;
-  const targetId = Number(button.dataset.removeShot);
-  const before = feedbackAttachments.length;
-  feedbackAttachments = feedbackAttachments.filter(item => item.id !== targetId);
-  if (feedbackAttachments.length === before) return;
-  setFeedbackShotError('');
-  renderFeedbackShots();
-  updateFeedbackPreview();
+  const viewBtn = event.target.closest('[data-view-shot]');
+  if (viewBtn) {
+    openFeedbackShotViewer(Number(viewBtn.dataset.viewShot), viewBtn);
+    return;
+  }
+  const removeBtn = event.target.closest('[data-remove-shot]');
+  if (removeBtn) removeFeedbackShot(Number(removeBtn.dataset.removeShot));
+});
+$('feedback-shot-viewer-close').addEventListener('click', () => $('feedback-shot-viewer').close());
+$('feedback-shot-viewer').addEventListener('close', () => {
+  $('feedback-shot-viewer-img').removeAttribute('src');
+  if (feedbackViewerTrigger && feedbackViewerTrigger.isConnected) feedbackViewerTrigger.focus();
+  feedbackViewerTrigger = null;
 });
 document.addEventListener('paste', event => {
-  if (!$('feedback-dialog').open || feedbackSending || feedbackSubmitted) return;
+  if (!$('feedback-dialog').open || $('feedback-shot-viewer').open || feedbackSending || feedbackSubmitted) return;
   const clipboard = event.clipboardData;
   if (!clipboard) return;
   const files = [];
@@ -9748,7 +9875,9 @@ document.addEventListener('paste', event => {
 
 $('feedback-note').addEventListener('input', () => {
   ++feedbackSequence;
+  const oldTicket = feedbackTicket;
   feedbackTicket = '';
+  discardFeedbackTicket(oldTicket);
   $('feedback-send').hidden = true;
   $('feedback-preview').hidden = false;
   $('feedback-copy').disabled = $('feedback-export').disabled = true;
@@ -9756,19 +9885,25 @@ $('feedback-note').addEventListener('input', () => {
 });
 $('feedback-preview').addEventListener('click', () => updateFeedbackPreview());
 $('feedback-close').addEventListener('click', () => $('feedback-dialog').close());
-$('feedback-dialog').addEventListener('close', () => {
+function handleFeedbackClose() {
+  if ($('feedback-shot-viewer').open) $('feedback-shot-viewer').close();
   ++feedbackSequence;
   ++feedbackDialogEpoch;
+  const oldTicket = feedbackTicket;
+  feedbackTicket = '';
+  discardFeedbackTicket(oldTicket);
   feedbackAttachments = [];
   feedbackCanAttach = false;
   feedbackAttachReason = '';
   feedbackSubmitted = false;
+  feedbackReadingFiles = 0;
   $('feedback-shot-input').value = '';
   setFeedbackShotError('');
   renderFeedbackShots();
-});
-$('feedback-send').addEventListener('click', async () => {
-  if (!feedbackTicket || feedbackSending) return;
+}
+
+async function sendFeedback() {
+  if (!feedbackTicket || feedbackSending || feedbackReadingFiles > 0) return;
   feedbackSending = true;
   const ticket = feedbackTicket;
   const sequence = feedbackSequence;
@@ -9792,7 +9927,9 @@ $('feedback-send').addEventListener('click', async () => {
   } catch (error) {
     if (sequence === feedbackSequence) {
       $('feedback-send').hidden = true;
-      $('feedback-message').textContent = error.message + ' 可复制或导出诊断信息发给维护者。';
+      $('feedback-preview').hidden = false;
+      $('feedback-message').textContent = error.message + ' 可点「更新预览」重新核对并重试，或复制、导出诊断信息发给维护者。';
+      discardFeedbackTicket(ticket);
       feedbackTicket = '';
     }
   } finally {
@@ -9800,7 +9937,10 @@ $('feedback-send').addEventListener('click', async () => {
     $('feedback-note').disabled = false;
     renderFeedbackShots();
   }
-});
+}
+
+$('feedback-dialog').addEventListener('close', handleFeedbackClose);
+$('feedback-send').addEventListener('click', sendFeedback);
 $('feedback-copy').addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText($('feedback-text').value);
