@@ -19,6 +19,7 @@ from .store import PROJECT
 APP_VERSION = '1.0.0'
 RECORD = '.skill-pilot-install.json'
 BUNDLE_DIRS = ('skill_pilot', 'scripts', 'assets', 'docs', 'skill', 'tests', '.github')
+OFFICIAL_DIRS = ('skill_pilot', 'scripts', 'assets', 'skill', 'tests', '.github')
 ROOT_FILES = (
     '.gitignore',
     '.gitattributes',
@@ -32,6 +33,20 @@ ROOT_FILES = (
     'WINDOWS.md',
     'skill-pilot',
 )
+OFFICIAL_DOC_FILES = (
+    'docs/STATUS.md',
+    'docs/brand/skill-pilot-brandkit.png',
+    'docs/dependency-decisions.json',
+    'docs/evidence.json',
+    'docs/lark-paired-snapshot.json',
+    'docs/path-references.md',
+    'docs/sharing-config.md',
+    'docs/source-attribution.md',
+    'docs/spikes.md',
+    'docs/team-hub.md',
+)
+OFFICIAL_FILES = ROOT_FILES + OFFICIAL_DOC_FILES
+_OFFICIAL_FILE_SET = frozenset(OFFICIAL_FILES)
 REQUIRED_FILES = (
     'skill_pilot/cli.py',
     'skill_pilot/web/server.py',
@@ -116,6 +131,23 @@ def _normalized_digest(path):
     return hashlib.sha256(data).hexdigest()
 
 
+def is_official_path(name):
+    if not isinstance(name, str) or not name:
+        return False
+    relative = Path(name)
+    if relative.is_absolute() or '..' in relative.parts:
+        return False
+    posix = relative.as_posix()
+    if posix in _OFFICIAL_FILE_SET:
+        return True
+    parts = relative.parts
+    if not parts or parts[0] not in OFFICIAL_DIRS:
+        return False
+    if '__pycache__' in parts or relative.name == '.DS_Store' or relative.suffix == '.pyc':
+        return False
+    return True
+
+
 def _verify_manifest_files(project, manifest):
     if 'files' not in manifest:
         return 'absent'
@@ -124,24 +156,25 @@ def _verify_manifest_files(project, manifest):
         return 'invalid'
     if not all(name in files for name in REQUIRED_FILES):
         return 'invalid'
-    for directory in BUNDLE_DIRS:
-        if directory == 'docs':
-            continue
+    for directory in OFFICIAL_DIRS:
         root = project / directory
         if root.is_dir() and not root.is_symlink():
             try:
                 for path in root.rglob('*'):
-                    if ('__pycache__' in path.parts or path.name == '.DS_Store'
-                            or path.suffix == '.pyc' or not path.is_file()):
+                    if not path.is_file():
                         continue
-                    if path.relative_to(project).as_posix() not in files:
+                    rel = path.relative_to(project).as_posix()
+                    if is_official_path(rel) and rel not in files:
                         return 'invalid'
             except OSError:
                 return 'invalid'
-    for name in ROOT_FILES:
+    for name in OFFICIAL_FILES:
         if _safe_project_file(project, name) is not None and name not in files:
             return 'invalid'
     for name, expected in files.items():
+        if not is_official_path(name):
+            # Ignore private notes accidentally recorded by older installers.
+            continue
         if (not isinstance(expected, list) or len(expected) != 2
                 or not isinstance(expected[0], str) or not SHA256_RE.fullmatch(expected[0])
                 or type(expected[1]) is not int):
@@ -178,10 +211,10 @@ def _git_tracked_paths(project):
         return None
     items = {}
     for name in result.stdout.split('\0'):
-        if not name:
+        if not name or not is_official_path(name):
             continue
         path = _safe_project_file(project, name)
-        if path is None or path.name == '.DS_Store' or path.suffix == '.pyc':
+        if path is None:
             continue
         items[path.relative_to(project).as_posix()] = path
     return sorted(items.items())
@@ -191,20 +224,20 @@ def _scan_bundle_paths(project):
     items = {}
     try:
         candidates = []
-        for directory in BUNDLE_DIRS:
+        for directory in OFFICIAL_DIRS:
             root = project / directory
             if root.is_dir() and not root.is_symlink():
                 for path in root.rglob('*'):
                     if '__pycache__' not in path.parts:
                         candidates.append(path)
-        for name in ROOT_FILES:
+        for name in OFFICIAL_FILES:
             candidates.append(project / name)
         for path in candidates:
-            if path.name == '.DS_Store' or path.suffix == '.pyc':
-                continue
             try:
                 rel = path.relative_to(project).as_posix()
             except ValueError:
+                continue
+            if not is_official_path(rel):
                 continue
             checked = _safe_project_file(project, rel)
             if checked is not None:
@@ -220,8 +253,10 @@ def bundle_fingerprint(project=PROJECT, *, file_names=None):
     if file_names is not None:
         pairs = []
         for name in sorted(set(file_names)):
+            if not is_official_path(name):
+                continue
             path = _safe_project_file(project, name)
-            if path is None or path.name == '.DS_Store' or path.suffix == '.pyc':
+            if path is None:
                 continue
             pairs.append((path.relative_to(project).as_posix(), path))
     elif (project / '.git').exists():

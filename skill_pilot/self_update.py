@@ -15,7 +15,7 @@ from .environment import tool_environment
 from .platform_support import rmtree
 from .sources.github import git as repository_git
 from .store import PROJECT, guard, write_allowed
-from .version import REQUIRED_FILES, format_version, read_build
+from .version import OFFICIAL_DIRS, OFFICIAL_FILES, REQUIRED_FILES, format_version, is_official_path, read_build
 
 SOURCE = 'https://github.com/Simonlau4/skill-pilot.git'
 BRANCH = 'main'
@@ -134,17 +134,18 @@ def is_checkout(project):
 
 def bundle_files(project):
     if is_checkout(project):
-        names = git(project, 'ls-files', '-z').split('\0')
-        paths = [safe_path(project, name) for name in names if name]
+        names = [name for name in git(project, 'ls-files', '-z').split('\0') if name and is_official_path(name)]
+        paths = [safe_path(project, name) for name in names]
     else:
-        paths = [p for name in BUNDLE_DIRS for p in (project / name).rglob('*')
+        paths = [p for name in OFFICIAL_DIRS if (project / name).is_dir()
+                 for p in (project / name).rglob('*')
                  if p.is_file() and '__pycache__' not in p.parts]
-        paths += list(project.glob('*.md'))
-        for name in ('.gitignore', '.gitattributes', '.claude/launch.json', 'skill-pilot'):
+        for name in OFFICIAL_FILES:
             if (project / name).exists():
                 paths.append(project / name)
-    return {p.relative_to(project).as_posix(): stamp(safe_path(project, p.relative_to(project).as_posix()))
-            for p in sorted(paths) if p.name != '.DS_Store' and p.suffix != '.pyc'}
+    return {rel: stamp(safe_path(project, rel))
+            for p in sorted(paths)
+            if is_official_path(rel := p.relative_to(project).as_posix())}
 
 
 def read_record(project):
@@ -170,7 +171,8 @@ def record_installation(project=PROJECT, revision='', date='', files=None):
     elif not revision:
         try:
             old = read_record(project)
-            if old['files'] == files:
+            old_official = {name: expected for name, expected in old['files'].items() if is_official_path(name)}
+            if old_official == files:
                 revision, date = old.get('revision', ''), old.get('date', '')
         except ValueError:
             pass
@@ -188,11 +190,12 @@ def installed(project):
         return {'files': bundle_files(project), 'revision': git(project, 'rev-parse', 'HEAD'),
                 'date': git(project, 'show', '-s', '--format=%cI', 'HEAD'), 'checkout': True}
     data = read_record(project)
-    for name, expected in data['files'].items():
+    official_files = {name: expected for name, expected in data['files'].items() if is_official_path(name)}
+    for name, expected in official_files.items():
         path = safe_path(project, name)
         if not path.is_file() or stamp(path) != expected:
             raise ValueError('SP 程序文件有本地改动，已保留当前版本。请先另存或恢复这些改动，再检查更新。')
-    return {**data, 'checkout': False}
+    return {**data, 'files': official_files, 'checkout': False}
 
 
 def check(home, project=PROJECT):
@@ -360,7 +363,8 @@ def apply(review, home, project=PROJECT):
                 for name in review['files']:
                     copy_file(candidate / name, project / name)
                 for name in before['files'].keys() - review['files'].keys():
-                    (project / name).unlink()
+                    if is_official_path(name):
+                        (project / name).unlink(missing_ok=True)
             for name, expected in review['files'].items():
                 if stamp(project / name) != expected:
                     raise ValueError('新版文件没有保存完整。')
