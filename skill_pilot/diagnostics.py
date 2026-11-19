@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import traceback
 import tomllib
 import uuid
@@ -37,6 +38,47 @@ def log_lock(path, home):
     with os.fdopen(fd, 'a+b') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         yield  # Closing the file releases the lock on both supported platforms.
+
+
+def _append_line(path, line):
+    """Add one complete line. Never rewrite lines that are already stored."""
+    created = not path.exists()
+    descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    try:
+        pending = memoryview(line)
+        while pending:
+            wrote = os.write(descriptor, pending)
+            if wrote <= 0:
+                raise OSError('错误记录没有写上')
+            pending = pending[wrote:]
+    except Exception:
+        os.close(descriptor)
+        if created:
+            path.unlink(missing_ok=True)
+        raise
+    os.close(descriptor)
+
+
+def _rewrite_log(path, home, payload):
+    """Replace the whole log. Used only when old lines must be trimmed."""
+    for attempt in range(8):
+        descriptor, temporary = tempfile.mkstemp(prefix='.errors-', dir=path.parent)
+        committed = False
+        try:
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(payload)
+            try:
+                os.replace(temporary, guard(path, home))
+                committed = True
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+                continue
+            return
+        finally:
+            if not committed:
+                Path(temporary).unlink(missing_ok=True)
 
 
 def read_json(path):
@@ -241,18 +283,22 @@ def record(home, source, action, error, user_message='操作没有完成，请�
             pass  # Keep the original error even when its environment cannot be read.
         if write_allowed(home):
             path = guard(home / '.skill-pilot/logs/errors.jsonl', home)
+            line = (json.dumps(row, ensure_ascii=False) + '\n').encode()
             with LOCK, log_lock(path, home):
-                rows = list(reversed(recent(home, sanitize_records=False))) + [row]
-                encoded = [(json.dumps(r, ensure_ascii=False) + '\n').encode() for r in rows[-MAX_RECORDS:]]
-                while sum(map(len, encoded)) > MAX_BYTES:
-                    encoded.pop(0)
-                fd, temporary = tempfile.mkstemp(prefix='.errors-', dir=path.parent)
                 try:
-                    with os.fdopen(fd, 'wb') as stream:
-                        stream.write(b''.join(encoded))
-                    os.replace(temporary, guard(path, home))
-                finally:
-                    Path(temporary).unlink(missing_ok=True)
+                    existing = path.read_bytes()
+                except OSError:
+                    existing = b''
+                normal = existing if existing.endswith(b'\n') or not existing else existing + b'\n'
+                lines = normal.splitlines(keepends=True) if normal else []
+                lines.append(line)
+                while lines and (len(lines) > MAX_RECORDS or sum(map(len, lines)) > MAX_BYTES):
+                    lines.pop(0)
+                payload = b''.join(lines)
+                if payload == normal + line:
+                    _append_line(path, line)
+                else:
+                    _rewrite_log(path, home, payload)
         return row
     except Exception:
         # Diagnostics must never replace the original failure.

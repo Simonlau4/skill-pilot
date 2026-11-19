@@ -115,13 +115,38 @@ class DiscoveryTests(unittest.TestCase):
             agent_discovery.save(self.home, agent_discovery.find(self.home))
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_scanning_again_keeps_the_cache_when_the_list_is_unchanged(self):
+        from skill_pilot.web.server import Dashboard
+        server = Dashboard({'home': str(self.home)})
+        self.addCleanup(server.server_close)
+        server.scan_agents(False)
+        before = store.physical_state(self.home / '.skill-pilot')
+        saved = (self.home / agent_discovery.CACHE).read_bytes()
+        server.scan_agents(False)
+        self.assertEqual(store.physical_state(self.home / '.skill-pilot'), before)
+        self.assertEqual((self.home / agent_discovery.CACHE).read_bytes(), saved)
+        changed = agent_discovery.find(self.home)
+        changed['candidates'] = [{'id': 'added', 'name': 'Added', 'skill_roots': ['.added/skills']}]
+        agent_discovery.save(self.home, changed)
+        self.assertNotEqual((self.home / agent_discovery.CACHE).read_bytes(), saved)
+        self.assertEqual(agent_discovery.read(self.home)['candidates'], changed['candidates'])
+        path = self.home / agent_discovery.CACHE
+        broken = json.loads(path.read_text())
+        broken['checked_at'] = 1
+        path.write_text(json.dumps(broken))
+        self.assertEqual(agent_discovery.read(self.home)['candidates'], [])
+        agent_discovery.save(self.home, changed)
+        self.assertEqual(agent_discovery.read(self.home)['candidates'], changed['candidates'])
+        self.assertIsInstance(agent_discovery.read(self.home)['checked_at'], str)
+
     def test_failed_cache_write_keeps_the_saved_result_and_removes_temporary_file(self):
         findings = agent_discovery.find(self.home)
         agent_discovery.save(self.home, findings)
         path = self.home / agent_discovery.CACHE
         saved = path.read_bytes()
+        changed = dict(findings, candidates=[{'id': 'added', 'name': 'Added', 'skill_roots': ['.added/skills']}])
         with patch.object(agent_discovery.json, 'dump', side_effect=OSError('disk full')):
             with self.assertRaises(OSError):
-                agent_discovery.save(self.home, findings)
+                agent_discovery.save(self.home, changed)
         self.assertEqual(path.read_bytes(), saved)
         self.assertEqual(list(path.parent.glob('.agent-discovery-*')), [])
