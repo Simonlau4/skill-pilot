@@ -421,6 +421,22 @@ class VersionFormatAndReadTests(unittest.TestCase):
                 else:
                     self.assertEqual(dashboard.program_progress['error'], '')
 
+            # When disk_version or latest_version is empty while available=False (e.g. unreadable file in program dir),
+            # MUST NEVER report 'latest' ("已是最新版本").
+            for case_name, c_ver, l_ver in (
+                ('empty-disk-version', '', pending),
+                ('empty-latest-version', running, ''),
+                ('both-empty', '', ''),
+            ):
+                for auto, expect_phase in ((False, 'error'), (True, 'idle')):
+                    with self.subTest(unverified=case_name, auto=auto), patch.object(self_update, 'check', return_value={
+                            'temporary': '', 'target': 't' * 40, 'current': '', 'latest': '',
+                            'current_version': c_ver, 'latest_version': l_ver, 'available': False}):
+                        dashboard.program_work('check', automatic=auto)
+                    self.assertEqual(dashboard.program_progress['phase'], expect_phase)
+                    self.assertEqual(dashboard.program_progress['pending_version'], '')
+                    self.assertNotIn('已是最新', dashboard.program_progress['message'])
+
             # Check when disk is already at latest (disk_version == latest_version) while running_version is still behind MUST enter 'ready', not 'latest'.
             with patch.object(self_update, 'check', return_value={
                     'temporary': '', 'target': 't' * 40, 'current': '2026-11-19', 'latest': '2026-11-19',
@@ -596,6 +612,46 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertEqual(dashboard.program_progress['latest_version'], '')
             self.assertNotIn('checked_at', dashboard.program_progress)
             self.assertNotIn('target', dashboard.program_progress)
+
+            # Path 1d: Deferred recheck when running A, check saw disk B (would enter 'ready'),
+            # then disk reverted back to A and static refresh fired -> A != checked_disk_version (B),
+            # so stale 'ready' conclusion MUST be withdrawn instead of publishing B as pending!
+            seq_before_revert = dashboard.static_refresh_seq
+            dashboard.program_progress.update(
+                running=True, phase='check', available=False,
+                current_version=deferred_next, latest_version='', checked_at=12345.0, target='old-target')
+            dashboard.program_action = 'check'
+            with patch.object(runtime, 'version', return_value=dashboard.code_version):
+                dashboard.request_reload()
+            with patch.object(self_update, 'check', return_value={
+                    'temporary': '', 'target': 't' * 40, 'current': '2026-11-19', 'latest': '2026-11-19',
+                    'current_version': 'v1.0.0-bbbbbbb', 'latest_version': 'v1.0.0-bbbbbbb', 'available': False}), \
+                    patch.object(runtime, 'version', return_value=dashboard.code_version), \
+                    patch.object(app_version, 'read_build', return_value={
+                        'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                        'manifest_valid': True, 'version': deferred_next}):
+                dashboard.program_work('check', automatic=False, start_refresh_seq=seq_before_revert)
+            self.assertFalse(dashboard.program_progress['running'])
+            self.assertEqual(dashboard.running_version, deferred_next)
+            self.assertEqual(dashboard.program_progress['phase'], 'idle')
+            self.assertEqual(dashboard.program_progress['pending_version'], '')
+            self.assertEqual(dashboard.program_progress['latest_version'], '')
+            self.assertNotIn('checked_at', dashboard.program_progress)
+            self.assertNotIn('target', dashboard.program_progress)
+
+            # Path 1e: apply() reporting version_verified=False (unmanaged extra file in official dir)
+            # MUST NOT enter 'ready' (avoids ready->mismatch->idle loop) and reports clear error instead.
+            dashboard.program_review = {'temporary': '', 'target': 't' * 40, 'available': True,
+                                        'latest': '2026-11-19', 'latest_version': 'v1.0.0-9999999'}
+            with patch.object(self_update, 'apply', return_value={
+                    'available': False, 'current': '2026-11-19', 'latest': '2026-11-19',
+                    'latest_version': 'v1.0.0-9999999', 'pending_version': 'v1.0.0-9999999',
+                    'installed_version': 'v1.0.0-ddddddd', 'version_verified': False}):
+                dashboard.program_work('apply', automatic=False)
+            self.assertEqual(dashboard.program_progress['phase'], 'error')
+            self.assertEqual(dashboard.program_progress['pending_version'], '')
+            self.assertEqual(dashboard.program_progress['failed_action'], 'apply')
+            self.assertIn('额外', dashboard.program_progress['error'])
 
             # Path 2: Resuming a session on a new running version (or legacy session without current_version,
             # or interrupted auto-check with version change) clears running=True and invalidates stale results.
@@ -817,6 +873,22 @@ const api = async (path) => {
         upgraded_record = self_update.read_record(self.code)
         self.assertNotIn('docs/My private note.md', upgraded_record['files'])
         self.assertNotIn('My private note.md', upgraded_record['files'])
+
+        # 5. Unmanaged extra file in an official directory (e.g. skill_pilot/extra_local.py) causes apply()
+        #    to report version_verified=False so server does not falsely enter a ready->mismatch loop.
+        extra_code = self.code / 'skill_pilot/extra_local.py'
+        extra_code.write_text('# unmanaged local file\n', encoding='utf-8')
+        readme.write_text(readme.read_text(encoding='utf-8') + '\nanother official release\n', encoding='utf-8')
+        commit(self.upstream, 'Another official release')
+        unmanaged_review = self_update.check(self.home, self.code)
+        if unmanaged_review['temporary']:
+            self.addCleanup(shutil.rmtree, unmanaged_review['temporary'], True)
+        self.assertTrue(unmanaged_review['available'])
+        with patch.object(self_update, 'run_installer'):
+            applied_unmanaged = self_update.apply(unmanaged_review, self.home, self.code)
+        self.assertFalse(applied_unmanaged['version_verified'])
+        self.assertNotEqual(applied_unmanaged['installed_version'], applied_unmanaged['pending_version'])
+        extra_code.unlink()
 
     def test_program_work_run_id_atomic_dict_and_snapshot_isolation(self):
         with patch.dict(os.environ, {'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '0'}):

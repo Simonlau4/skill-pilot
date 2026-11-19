@@ -210,8 +210,7 @@ def check(home, project=PROJECT):
         raise ValueError('没能读取 SP 的最新版本，请检查网络后重试。')
     target = remote[0]
     build = read_build(project)
-    current_version = build['version'] or format_version(
-        before.get('date', ''), before.get('revision', ''))
+    current_version = build['version']
     review = {'before': before, 'target': target, 'current': before.get('date', ''),
               'latest': before.get('date', ''), 'current_version': current_version,
               'latest_version': current_version, 'available': False, 'temporary': '',
@@ -258,7 +257,7 @@ def check(home, project=PROJECT):
                 # Release notes are optional; a missing title must not block an upgrade.
                 pass
         latest_date = git(candidate, 'show', '-s', '--format=%cI', target)
-        latest_version = read_build(candidate)['version'] or format_version(latest_date, target)
+        latest_version = read_build(candidate)['version']
         if not available:
             rmtree(temporary, ignore_errors=True)
             return {**review, 'temporary': '', 'files': files,
@@ -408,5 +407,8 @@ def apply(review, home, project=PROJECT):
         if not retain_backup:
             rmtree(backup, ignore_errors=True)
     installed_version = review.get('latest_version') or format_version(review.get('latest', ''), review.get('target', ''))
+    actual_version = read_build(project)['version']
+    version_verified = bool(installed_version and actual_version and actual_version == installed_version)
     return {'available': False, 'current': review['latest'], 'latest': review['latest'],
-            'latest_version': installed_version, 'pending_version': installed_version}
+            'latest_version': installed_version, 'pending_version': installed_version,
+            'installed_version': actual_version, 'version_verified': version_verified}

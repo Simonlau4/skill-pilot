@@ -1018,6 +1018,7 @@ class Dashboard(ThreadingHTTPServer):
             apply_review = self.program_review if action == 'apply' else None
         update_payload = {}
         new_review = None
+        checked_disk_version = ''
         applied_review = False
         committed = False
         try:
@@ -1026,46 +1027,46 @@ class Dashboard(ThreadingHTTPServer):
                     if old_review and old_review.get('temporary'):
                         rmtree(old_review['temporary'], ignore_errors=True)
                     new_review = self_update.check(self.home)
-                    disk_version = (new_review.get('current_version')
-                                    or app_version.format_version(new_review.get('current', ''),
-                                                                  new_review.get('before', {}).get('revision', '')))
+                    disk_version = new_review.get('current_version') or ''
+                    checked_disk_version = disk_version
                     current_version = self.running_version or disk_version
-                    latest_version = (new_review.get('latest_version')
-                                      or app_version.format_version(new_review.get('latest', ''), new_review.get('target', '')))
-                    disk_differs_from_latest = (not new_review['available']
-                                                and bool(disk_version)
-                                                and bool(latest_version)
-                                                and disk_version != latest_version)
-                    disk_ahead_of_running = (not new_review['available']
-                                             and bool(disk_version)
-                                             and bool(latest_version)
-                                             and disk_version == latest_version
-                                             and bool(self.running_version)
-                                             and self.running_version != latest_version)
+                    latest_version = new_review.get('latest_version') or ''
                     if new_review['available']:
                         phase = 'available'
                         message = '有新版，可以一键升级'
                         pending_version = ''
                         error_text = ''
                         failed_action = ''
-                    elif disk_differs_from_latest:
+                    elif not disk_version or not latest_version:
+                        phase = 'idle' if automatic else 'error'
+                        message = '暂未核实当前程序版本'
+                        pending_version = ''
+                        error_text = '' if automatic else '没能核实当前程序版本，请检查程序文件夹后重试。'
+                        failed_action = '' if automatic else 'check'
+                    elif disk_version != latest_version:
                         phase = 'idle' if automatic else 'error'
                         message = '本地程序文件与官方版本有差异'
                         pending_version = ''
                         error_text = '' if automatic else 'SP 程序文件与官方版本有差异，已保留当前版本。请先另存或清理本地改动后再检查更新。'
                         failed_action = '' if automatic else 'check'
-                    elif disk_ahead_of_running:
+                    elif self.running_version and self.running_version != latest_version:
                         phase = 'ready'
                         message = '新版已安装，刷新后生效'
                         pending_version = latest_version
                         error_text = ''
                         failed_action = ''
-                    else:
+                    elif self.running_version == latest_version:
                         phase = 'latest'
                         message = 'SP 已是最新版本'
                         pending_version = ''
                         error_text = ''
                         failed_action = ''
+                    else:
+                        phase = 'idle' if automatic else 'error'
+                        message = '暂未核实当前程序版本'
+                        pending_version = ''
+                        error_text = '' if automatic else '没能核实当前运行版本，请刷新或重新打开看板后再检查更新。'
+                        failed_action = '' if automatic else 'check'
                     update_payload = dict(
                         phase=phase,
                         target=new_review['target'], available=new_review['available'],
@@ -1104,15 +1105,28 @@ class Dashboard(ThreadingHTTPServer):
                                        or app_version.format_version(
                                            result.get('latest', apply_review.get('latest', '') if apply_review else ''),
                                            apply_review.get('target', '') if apply_review else ''))
-                    update_payload = {
-                        **result,
-                        'phase': 'ready', 'message': '新版已安装，刷新后生效',
-                        'current_version': self.running_version,
-                        'latest_version': pending_version,
-                        'pending_version': pending_version,
-                        'failed_action': '',
-                        'changes': [], 'changes_total': 0, 'changes_partial': False,
-                    }
+                    if result.get('version_verified') is False:
+                        update_payload = {
+                            **result,
+                            'phase': 'error',
+                            'message': '新版已写入，但程序目录存在额外本地文件',
+                            'error': 'SP 新版文件已写入，但程序代码或脚本目录里存在未托管的额外文件，版本未能核对一致。请移出额外文件后刷新或重新打开看板。',
+                            'current_version': self.running_version,
+                            'latest_version': pending_version,
+                            'pending_version': '',
+                            'failed_action': 'apply',
+                            'changes': [], 'changes_total': 0, 'changes_partial': False,
+                        }
+                    else:
+                        update_payload = {
+                            **result,
+                            'phase': 'ready', 'message': '新版已安装，刷新后生效',
+                            'current_version': self.running_version,
+                            'latest_version': pending_version,
+                            'pending_version': pending_version,
+                            'failed_action': '',
+                            'changes': [], 'changes_total': 0, 'changes_partial': False,
+                        }
             except Exception as error:
                 captured = self_update.record_failure(self.home, action, error) or {}
                 update_payload = {'changes': [], 'changes_total': 0, 'changes_partial': False, 'pending_version': ''}
@@ -1144,6 +1158,8 @@ class Dashboard(ThreadingHTTPServer):
                             self._invalidate_stale_program_check()
                         elif refreshed is not None and refreshed.get('version') != self.running_version:
                             self._reset_stale_program_check(refreshed)
+                        elif refreshed is not None and checked_disk_version and refreshed.get('version') != checked_disk_version:
+                            self._invalidate_stale_program_check()
                         else:
                             if action == 'check':
                                 self.program_review = new_review

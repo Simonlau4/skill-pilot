@@ -25,8 +25,10 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.inventory = {'home': str(self.home)}
         self.enterContext(patch.dict(os.environ, {'HOME': str(self.home),
             'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '0'}))
+        current_ver = app_version.running_build()['version']
         self.review = {'temporary': '', 'target': 'latest-version', 'current': 'old',
-                       'latest': 'new', 'available': True}
+                       'latest': 'new', 'current_version': current_ver,
+                       'latest_version': current_ver, 'available': True}
         self.check = self.enterContext(patch.object(self_update, 'check', return_value=self.review))
         self.enterContext(patch.object(server.operations, 'bootstrap'))
         self.enterContext(patch.object(server, 'scan', return_value=self.inventory))
@@ -459,8 +461,10 @@ class CloseDuringAutomaticCheckTests(unittest.TestCase):
         self.entered = threading.Event()
         self.boards = []
         self.addCleanup(self.stop)
+        current_ver = app_version.running_build()['version']
         self.review = {'temporary': '', 'target': 'latest-version', 'current': 'old',
-                       'latest': 'new', 'available': False}
+                       'latest': 'new', 'current_version': current_ver,
+                       'latest_version': current_ver, 'available': False}
 
         def blocked(home):
             self.entered.set()
