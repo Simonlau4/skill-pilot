@@ -419,7 +419,7 @@ const runWrite = async options => {try {return await options.work()} catch (erro
   assert(!nodes['detail-tag-error'].innerHTML.includes('data-feedback'));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
-        result = subprocess.run(['node', '-e', script], cwd=diagnostics.PROJECT, text=True, capture_output=True)
+        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_runtime_and_finished_job_errors_keep_feedback_ids(self):
@@ -443,7 +443,7 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
   assert.deepEqual(messages.map(row=>row.error_id), ['job-id','attention-id','refresh-id']);
 })().catch(error => {console.error(error);process.exitCode=1});
 '''
-        result = subprocess.run(['node', '-e', script], cwd=diagnostics.PROJECT, text=True, capture_output=True)
+        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def raw_hub_get(self, path, token=None):
@@ -573,6 +573,12 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         jpeg_bad_kraft_dht = bytearray(clean_jpeg)
         jpeg_bad_kraft_dht[dht_pos + 5] = 3
         jpeg_bad_kraft_dht[dht_pos + 6:dht_pos + 21] = bytes([9] + [0] * 14)
+        # kraft == 65536 (2 1-bit codes, no room for reserved all-1s codeword per JPEG T.81 Annex C).
+        dht_exact = b'\x00' + bytes([2] + [0] * 15) + b'\x00\x01'
+        jpeg_exact_kraft_dht = (
+            clean_jpeg[:dht_pos] + b'\xff\xc4' + struct.pack('>H', len(dht_exact) + 2) + dht_exact +
+            clean_jpeg[dht_pos + 2 + struct.unpack('>H', clean_jpeg[dht_pos + 2:dht_pos + 4])[0]:]
+        )
         fake_webp_vp8 = b'RIFF' + struct.pack('<I', 20) + b'WEBP' + b'VP8 ' + struct.pack('<I', 8) + b'\x00' * 8
         vp8_header_only_data = b'\x10\x00\x00\x9d\x01\x2a\x01\x00\x01\x00'
         vp8_header_only = b'RIFF' + struct.pack('<I', 12 + len(vp8_header_only_data)) + b'WEBP' + b'VP8 ' + struct.pack('<I', len(vp8_header_only_data)) + vp8_header_only_data
@@ -605,6 +611,7 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
             ('jpeg_bad_sos_comp', encode_shot(bytes(jpeg_bad_sos_comp), 'image/jpeg')),
             ('jpeg_missing_dht_ref', encode_shot(bytes(jpeg_missing_dht_ref), 'image/jpeg')),
             ('jpeg_bad_kraft_dht', encode_shot(bytes(jpeg_bad_kraft_dht), 'image/jpeg')),
+            ('jpeg_exact_kraft_dht', encode_shot(jpeg_exact_kraft_dht, 'image/jpeg')),
             ('fake_webp_bad_sync', encode_shot(fake_webp_vp8, 'image/webp')),
             ('raw_unconverted_webp', encode_shot(make_webp(), 'image/webp')),
             ('vp8_header_only', encode_shot(vp8_header_only, 'image/webp')),
@@ -1227,6 +1234,23 @@ const refreshLog = async () => {}, loadCleanup = async () => {};
         self.assertIsInstance(raw_dl, bytes)
         self.assertEqual(raw_dl, img_corrupt_target)
         self.assertEqual(mime_dl, 'image/png')
+        # Client disconnect while writing download body MUST NOT trigger a second 500 JSON response.
+        class BrokenWriteStream:
+            def write(self, data):
+                raise BrokenPipeError('client disconnected')
+        fake_handler = team_hub.Handler.__new__(team_hub.Handler)
+        fake_handler.server = self.hub
+        fake_handler.command = 'GET'
+        fake_handler.path = f"/api/feedback/{owner_row['id']}/attachments/{sha_corrupt_target}"
+        fake_handler.headers = {'Authorization': 'Bearer ' + self.member['token']}
+        fake_handler.wfile = BrokenWriteStream()
+        sent_responses = []
+        fake_handler.send_response = lambda code, message=None: sent_responses.append(code)
+        fake_handler.send_header = lambda k, v: None
+        fake_handler.end_headers = lambda: None
+        fake_handler._json = lambda status, data: sent_responses.append(('json', status, data))
+        fake_handler._handle()
+        self.assertEqual(sent_responses, [200])
         # 10a. Preview byte cap (20 MB) with all entries sending: does NOT cache new screenshot preview,
         #      returns 200 with full sanitized payload, and preserves original non-sendable reason in read-only mode.
         clean_a_size = len(feedback.sanitize_image(img_a, 'image/png'))
@@ -1601,5 +1625,5 @@ assert.equal(validateFeedbackFileBytes(png, 2, FEEDBACK_MAX_SHOTS_TOTAL - png.le
   assert.ok(calls.some(c => c.path === '/api/diagnostics/preview-discard' && c.body.ticket === activeBeforeClose));
 }})().catch(err => {{ console.error(err); process.exitCode = 1; }});
 '''
-        result = subprocess.run(['node', '-e', script], cwd=diagnostics.PROJECT, text=True, capture_output=True)
+        result = subprocess.run(['node', '-'], input=script, cwd=diagnostics.PROJECT, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

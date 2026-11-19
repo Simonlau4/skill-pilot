@@ -206,7 +206,7 @@ def _check_jpeg_dht(seg_data):
         counts = seg_data[pos + 1:pos + 17]
         count = sum(counts)
         kraft = sum(c * (1 << (16 - i)) for i, c in enumerate(counts, 1))
-        if count > 256 or kraft > (1 << 16) or pos + 17 + count > len(seg_data):
+        if count > 256 or kraft >= (1 << 16) or pos + 17 + count > len(seg_data):
             raise AttachmentError('图片内容已损坏，请重新截图或选择有效图片。')
         (dc_ids if tc == 0 else ac_ids).add(th)
         pos += 17 + count

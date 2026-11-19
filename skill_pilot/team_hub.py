@@ -1370,15 +1370,18 @@ class Handler(BaseHTTPRequestHandler):
             member = store._authenticate(self.headers.get('Authorization', ''))
             raw, kind, filename = store._feedback_attachment_file(member['id'], row_id, digest)
         # File handle is already closed before writing to the network so unlinked evicted files free disk immediately.
-        self.send_response(200)
-        self.send_header('Content-Type', kind)
-        self.send_header('Content-Length', str(len(raw)))
-        self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'none'; sandbox")
-        self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', kind)
+            self.send_header('Content-Length', str(len(raw)))
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Content-Security-Policy', "default-src 'none'; sandbox")
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, OSError):
+            return
 
     def _send_file(self, stream, size, kind, range_header=None, attachment=False, filename=None, csp=None):
         # Stream outside the data lock; the version was checked when opening the file.
