@@ -206,6 +206,7 @@ function setToastReminder(item, reminder) {
 function syncToastReminders() {
   const container = $('toasts');
   if (!container) return;
+  const knownUndone = rememberUndoneOps();
   const logsById = new Map((state.logs || []).map(record => [record.id, record]));
   for (const item of [...container.children]) {
     const source = item._reminderSource;
@@ -221,9 +222,10 @@ function syncToastReminders() {
       }
       if (source.job) {
         for (const id of source.job.operations || []) {
-          if (logsById.get(id)?.undone) prevUndone.add(id);
+          if (knownUndone.has(id) || logsById.get(id)?.undone) prevUndone.add(id);
         }
         if (prevUndone.size) {
+          rememberUndoneOps(prevUndone);
           source.job = {...source.job, undone_operations: [...prevUndone]};
         }
       }
@@ -233,8 +235,9 @@ function syncToastReminders() {
     } else if (source.operationIds?.length) {
       const prevUndone = source.undoneOps || (source.undoneOps = new Set());
       for (const id of source.operationIds) {
-        if (logsById.get(id)?.undone) prevUndone.add(id);
+        if (knownUndone.has(id) || logsById.get(id)?.undone) prevUndone.add(id);
       }
+      if (prevUndone.size) rememberUndoneOps(prevUndone);
       const active = source.operationIds.filter(id => !prevUndone.has(id));
       allUndone = active.length === 0;
       if (!allUndone) {
@@ -608,13 +611,35 @@ function newSessionReminderText(agents, kind = 'enable') {
   return `${names.join('、')} ${suffix}`;
 }
 
+/* 本页会话单调累积已确认撤销的操作编号，供任务卡片、提示条和撤销动作共用。 */
+function undoneOpSet() {
+  return state.undoneOps instanceof Set ? state.undoneOps : (state.undoneOps = new Set());
+}
+
+function rememberUndoneOps(ids = []) {
+  const set = undoneOpSet();
+  for (const id of ids || []) {
+    if (typeof id === 'string' && id) set.add(id);
+  }
+  for (const record of state.logs || []) {
+    if (record?.undone && typeof record.id === 'string' && record.id) set.add(record.id);
+  }
+  for (const job of state.jobs || []) {
+    for (const id of job?.undone_operations || []) {
+      if (typeof id === 'string' && id) set.add(id);
+    }
+  }
+  return set;
+}
+
 /* 跳过服务端已确认撤销或操作记录里已撤销的编号，供任务卡片、提示条和撤销动作共用。 */
 function jobActiveOperations(job) {
   const ops = job?.operations || [];
   if (!ops.length) return [];
+  const knownUndone = state.undoneOps instanceof Set ? state.undoneOps : null;
   const serverUndone = new Set(job.undone_operations || []);
   const logsById = new Map((state.logs || []).map(record => [record.id, record]));
-  return ops.filter(id => !serverUndone.has(id) && !logsById.get(id)?.undone);
+  return ops.filter(id => !knownUndone?.has(id) && !serverUndone.has(id) && !logsById.get(id)?.undone);
 }
 
 function jobNewSessionAgents(job) {
@@ -1009,6 +1034,7 @@ function applyJobs(result, {force = false} = {}) {
   state.jobs = items;
   state.jobsVersion = version;
   state.jobsBlocked = blocked;
+  rememberUndoneOps();
   renderJobs();
   syncToastReminders();
   renderJobBlocked();
@@ -1020,16 +1046,18 @@ function applyJobs(result, {force = false} = {}) {
 
 async function undoJob(job, button = null, reminderSource = null) {
   const resolveCurrent = () => {
+    const knownUndone = rememberUndoneOps();
     const base = reminderSource?.job || job;
     const live = (state.jobs || []).find(entry => entry.id === base?.id);
+    const target = live || base;
+    if (!target) return target;
     const mergedUndone = [...new Set([
       ...(job?.undone_operations || []),
       ...(reminderSource?.job?.undone_operations || []),
       ...(reminderSource?.undoneOps || []),
       ...(live?.undone_operations || []),
+      ...(target.operations || []).filter(id => knownUndone.has(id)),
     ])];
-    const target = live || base;
-    if (!target) return target;
     return mergedUndone.length ? {...target, undone_operations: mergedUndone} : target;
   };
   const current = resolveCurrent();
@@ -1217,9 +1245,13 @@ function finishJobs(finished) {
       }
     }
     const initialUndone = new Set(job.undone_operations || []);
+    const knownUndone = state.undoneOps instanceof Set ? state.undoneOps : null;
     for (const id of job.operations || []) {
-      if ((state.logs || []).some(record => record.id === id && record.undone)) initialUndone.add(id);
+      if (knownUndone?.has(id) || (state.logs || []).some(record => record.id === id && record.undone)) {
+        initialUndone.add(id);
+      }
     }
+    if (initialUndone.size && typeof rememberUndoneOps === 'function') rememberUndoneOps(initialUndone);
     const initialJob = initialUndone.size ? {...job, undone_operations: [...initialUndone]} : job;
     const reminderSource = {jobId: job.id, job: initialJob, undoneOps: initialUndone};
     if (job.status === 'done') {
@@ -1326,9 +1358,12 @@ async function heartbeat() {
 async function undoOperation(id, {skills = [], message = '', button = null, resolveIds = null} = {}) {
   const ids = Array.isArray(id) ? id : [id];
   const resolveLatestIds = () => {
+    const knownUndone = rememberUndoneOps();
     const raw = typeof resolveIds === 'function' ? resolveIds() : ids;
     const logsById = new Map((state.logs || []).map(record => [record.id, record]));
-    return (Array.isArray(raw) ? raw : [raw]).filter(opId => opId && !logsById.get(opId)?.undone);
+    return (Array.isArray(raw) ? raw : [raw]).filter(
+      opId => opId && !knownUndone.has(opId) && !logsById.get(opId)?.undone
+    );
   };
   const ok = await confirmDialog({
     title: '撤销这次操作',
@@ -1350,13 +1385,16 @@ async function undoOperation(id, {skills = [], message = '', button = null, reso
       const targetIds = resolveLatestIds();
       if (!targetIds.length) return false;
       const history = targetIds.length > 1 ? await api('/api/log') : [];
+      rememberUndoneOps(history.filter(record => record?.undone).map(record => record.id));
       let done = 0;
       try {
         for (const operationId of targetIds) {
-          if (history.some(record => record.id === operationId && record.undone)) continue;
           if (!resolveLatestIds().includes(operationId)) continue;
           const table = await api('/api/table');
+          // 等待版本号返回期间可能刚收到新的撤销状态，真正提交前再按最新状态过滤一次。
+          if (!resolveLatestIds().includes(operationId)) continue;
           await api('/api/undo', {id: operationId, revision: table.revision, confirmed: true});
+          rememberUndoneOps([operationId]);
           done++;
         }
       } catch (error) {
@@ -1393,6 +1431,7 @@ const state = {
   jobs: [],          // 后台任务：技能、清理、更新和团队安装共用一份队列
   jobsVersion: -1,
   jobsBlocked: '',
+  undoneOps: new Set(), // 本页会话已确认撤销的操作编号，单调累积
   skillSelected: new Set(),
   assignmentIntents: new Map(), // 只记用户亲手选的改动，依赖始终根据最新状态重算。
   autoAdded: new Map(),   // 「技能|agent」→ 需要它的那个技能（预览的 auto_added）
@@ -6472,6 +6511,7 @@ $('labels-all').addEventListener('click', async () => {
 async function refreshLog() {
   try {
     state.logs = await api('/api/log');
+    rememberUndoneOps();
     renderLog();
     renderJobs();   // 已撤销的记录不再给任务列表里的「撤销」
     syncToastReminders();

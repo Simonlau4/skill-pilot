@@ -918,11 +918,14 @@ class ActivationReminderStaticTests(unittest.TestCase):
             "const jobActions = () => [];",
             "const jobStatusInfo = job => ({done: {tone: 'tag-ok', label: '已完成'}, failed: {tone: 'tag-danger', label: '没完成'}}[job.status] || {tone: 'tag-quiet', label: job.status});",
             extract_function(app, 'function pastTense('),
+            extract_function(app, 'function undoneOpSet('),
+            extract_function(app, 'function rememberUndoneOps('),
             extract_function(app, 'function jobActiveOperations('),
             extract_function(app, 'function jobUndoAvailable('),
             reminder_fns,
             extract_function(app, 'function jobStatusLine('),
             extract_function(app, 'function jobItemHtml('),
+            block(app, 'function applyJobs('),
             block(app, 'async function undoJob('),
             block(app, 'async function undoOperation('),
             block(app, 'function setToastReminder('),
@@ -941,6 +944,9 @@ const state = {
   catalog: new Map(),
   logs: [],
   jobs: [],
+  jobsVersion: -1,
+  jobsBlocked: '',
+  undoneOps: new Set(),
   table: {llm_configured: false},
 };
 
@@ -1151,16 +1157,25 @@ syncToastReminders();
 assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
 assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
 
-// 7. Toast undo button & real undoJob + undoOperation share undone-operation filtering across all race windows!
+// 7. Toast undo button & real undoJob + undoOperation share global monotonic state.undoneOps across all race windows!
 const undoApiCalls = [];
 let confirmHook = async () => true;
+let tableHook = null;
 async function confirmDialog(opts) { return await confirmHook(opts); }
 async function runWrite({work}) { return await work(); }
 async function refreshEverything() {}
 async function refreshUpdates() {}
+function renderJobBlocked() {}
+function renderJobState() {}
+function renderJobAvailability() {}
+function scheduleJobsPoll() {}
+function stopJobsPolling() {}
 async function api(path, body) {
   if (path === '/api/log') return [];
-  if (path === '/api/table') return {revision: 'rev-1'};
+  if (path === '/api/table') {
+    if (tableHook) await tableHook();
+    return {revision: 'rev-1'};
+  }
   if (path === '/api/undo') {
     undoApiCalls.push(body.id);
     return {ok: true};
@@ -1194,12 +1209,17 @@ async function api(path, body) {
   assert.deepEqual(undoApiCalls, ['op8a']);
 
   // 7b. Calling undoJob with a stale job snapshot uses live state.jobs undone_operations!
-  const updatedLiveJob = {...jobUndoTest, undone_operations: ['op8b']};
-  state.jobs = [updatedLiveJob];
+  const staleJobB = {
+    id: 'j8b', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op8c', 'op8d'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [{...staleJobB, undone_operations: ['op8d']}];
   state.logs = [];
   undoApiCalls.length = 0;
-  await undoJob(jobUndoTest);
-  assert.deepEqual(undoApiCalls, ['op8a']);
+  await undoJob(staleJobB);
+  assert.deepEqual(undoApiCalls, ['op8c']);
 
   // 7c. Toast created when op9b is ALREADY undone in state.logs, then logs & jobs immediately clear without sync:
   //     source.undoneOps initialized at toast creation still skips op9b and submits ONLY op9a!
@@ -1218,7 +1238,6 @@ async function api(path, body) {
   toastsContainer.children = [];
   finishJobs([jobInitUndone]);
   const initUndoneToast = toastsContainer.children[0];
-  // Immediately drop logs and clear jobs BEFORE any syncToastReminders call!
   state.logs = [];
   state.jobs = [];
   undoApiCalls.length = 0;
@@ -1245,7 +1264,6 @@ async function api(path, body) {
   confirmHook = () => new Promise(resolve => { resolveConfirm = resolve; });
   undoApiCalls.length = 0;
   const pendingClick = confirmRaceToast._undoButton.click();
-  // While confirm dialog is open, op10b gets undone in server jobs & synced, then card clears & logs empty!
   state.jobs = [{...jobDuringConfirm, undone_operations: ['op10b']}];
   syncToastReminders();
   state.jobs = [];
@@ -1255,20 +1273,91 @@ async function api(path, body) {
   assert.deepEqual(undoApiCalls, ['op10a']);
 
   // 7e. While undo confirmDialog is OPEN, ALL remaining ops become undone -> after user confirms, ZERO /api/undo calls!
-  state.jobs = [jobDuringConfirm];
+  const jobAllUndoneConfirm = {
+    id: 'j10e', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op10c', 'op10d'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [jobAllUndoneConfirm];
   state.logs = [];
   toastsContainer.children = [];
-  finishJobs([jobDuringConfirm]);
+  finishJobs([jobAllUndoneConfirm]);
   const allUndoneRaceToast = toastsContainer.children[0];
   confirmHook = () => new Promise(resolve => { resolveConfirm = resolve; });
   undoApiCalls.length = 0;
   const pendingAllUndone = allUndoneRaceToast._undoButton.click();
-  state.jobs = [{...jobDuringConfirm, undone_operations: ['op10a', 'op10b']}];
+  state.jobs = [{...jobAllUndoneConfirm, undone_operations: ['op10c', 'op10d']}];
   syncToastReminders();
   resolveConfirm(true);
   await pendingAllUndone;
   assert.deepEqual(undoApiCalls, []);
+
+  // 7f. Clicking Undo from a JOB CARD (no reminderSource): while confirmDialog is open,
+  //     applyJobs poll reports op11b undone, THEN card is cleared AND logs are empty -> global state.undoneOps
+  //     keeps op11b skipped and submits ONLY op11a!
+  const cardJob = {
+    id: 'j11', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op11a', 'op11b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [cardJob];
+  state.logs = [];
+  toastsContainer.children = [];
+  confirmHook = () => new Promise(resolve => { resolveConfirm = resolve; });
+  undoApiCalls.length = 0;
+  const pendingCardUndo = undoJob(cardJob);
+  applyJobs({items: [{...cardJob, undone_operations: ['op11b']}], version: 10, blocked: ''}, {force: true});
+  applyJobs({items: [], version: 11, blocked: ''}, {force: true});
+  state.logs = [];
+  resolveConfirm(true);
+  await pendingCardUndo;
+  assert.deepEqual(undoApiCalls, ['op11a']);
   confirmHook = async () => true;
+
+  // 7g. Partial undo arrives WHILE awaiting /api/table (after confirm, right before /api/undo):
+  //     op12b becomes undone during /api/table -> skipped without error, loop continues to undo op12a!
+  const tableRacePartial = {
+    id: 'j12', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op12a', 'op12b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [tableRacePartial];
+  state.logs = [];
+  undoApiCalls.length = 0;
+  let tableCalls = 0;
+  tableHook = async () => {
+    tableCalls += 1;
+    if (tableCalls === 1) {
+      applyJobs({items: [{...tableRacePartial, undone_operations: ['op12b']}], version: 12, blocked: ''}, {force: true});
+      applyJobs({items: [], version: 13, blocked: ''}, {force: true});
+    }
+  };
+  const partialOk = await undoJob(tableRacePartial);
+  tableHook = null;
+  assert.equal(partialOk, true);
+  assert.deepEqual(undoApiCalls, ['op12a']);
+
+  // 7h. ALL remaining ops become undone WHILE awaiting /api/table -> skipped cleanly with ZERO /api/undo calls and no error!
+  const tableRaceAll = {
+    id: 'j13', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op13a', 'op13b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [tableRaceAll];
+  state.logs = [];
+  undoApiCalls.length = 0;
+  tableHook = async () => {
+    applyJobs({items: [{...tableRaceAll, undone_operations: ['op13a', 'op13b']}], version: 14, blocked: ''}, {force: true});
+    applyJobs({items: [], version: 15, blocked: ''}, {force: true});
+  };
+  const allOk = await undoJob(tableRaceAll);
+  tableHook = null;
+  assert.equal(allOk, false);
+  assert.deepEqual(undoApiCalls, []);
 
   // 8. Direct-operation toast keeps API original new_session_agents (ignores corrupted logs) & malformed entries filtered.
   assert.deepEqual(newSessionAgentsFrom([{id: ['broken'], name: 123}, {id: 'fresh-b', name: '新对话工具'}]), ['新对话工具']);
@@ -1296,7 +1385,7 @@ async function api(path, body) {
   assert.equal(directToast.querySelector('.toast-reminder'), null);
 })().catch(err => { console.error(err); process.exit(1); });
 '''
-        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
