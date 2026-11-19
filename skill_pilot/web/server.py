@@ -382,9 +382,6 @@ class Dashboard(ThreadingHTTPServer):
         if prior_undone:
             target['undone_operations'] = list(dict.fromkeys(
                 prior_undone + list(target.get('undone_operations') or [])))
-        if previous.get('undone_operations'):
-            target['undone_operations'] = list(dict.fromkeys(
-                list(previous['undone_operations']) + list(target.get('undone_operations') or [])))
         if kind == 'github_install' and (previous.get('remaining') or previous.get('_retry_skills')):
             target['_retry_skills'] = list(previous.get('remaining') or previous['_retry_skills'])
         if kind == 'update':

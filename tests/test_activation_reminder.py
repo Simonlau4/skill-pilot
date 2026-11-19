@@ -923,7 +923,8 @@ class ActivationReminderStaticTests(unittest.TestCase):
             reminder_fns,
             extract_function(app, 'function jobStatusLine('),
             extract_function(app, 'function jobItemHtml('),
-            extract_function(app, 'async function undoJob('),
+            block(app, 'async function undoJob('),
+            block(app, 'async function undoOperation('),
             block(app, 'function setToastReminder('),
             block(app, 'function syncToastReminders('),
             block(app, 'function toast('),
@@ -1150,11 +1151,21 @@ syncToastReminders();
 assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
 assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
 
-// 7. Toast undo button & undoJob share undone-operation filtering (even after card cleared & log rotated!)
-const undoSubmitted = [];
-async function undoOperation(ids) {
-  undoSubmitted.push(ids);
-  return true;
+// 7. Toast undo button & real undoJob + undoOperation share undone-operation filtering across all race windows!
+const undoApiCalls = [];
+let confirmHook = async () => true;
+async function confirmDialog(opts) { return await confirmHook(opts); }
+async function runWrite({work}) { return await work(); }
+async function refreshEverything() {}
+async function refreshUpdates() {}
+async function api(path, body) {
+  if (path === '/api/log') return [];
+  if (path === '/api/table') return {revision: 'rev-1'};
+  if (path === '/api/undo') {
+    undoApiCalls.push(body.id);
+    return {ok: true};
+  }
+  return {};
 }
 (async () => {
   const jobUndoTest = {
@@ -1172,21 +1183,92 @@ async function undoOperation(ids) {
   toastsContainer.children = [];
   finishJobs([jobUndoTest]);
   const undoToast = toastsContainer.children[0];
-  // Latest op (op8b) is undone via logs, then job card is cleared AND op8b's log disappears.
+  // 7a. Latest op (op8b) is undone via logs, then job card is cleared AND op8b's log disappears.
   state.logs = [{id: 'op8b', undone: true}, {id: 'op8a', undone: false}];
   syncToastReminders();
   state.jobs = [];
   state.logs = [];
   syncToastReminders();
+  undoApiCalls.length = 0;
   await undoToast._undoButton.click();
-  assert.deepEqual(undoSubmitted.at(-1), ['op8a']);
+  assert.deepEqual(undoApiCalls, ['op8a']);
 
-  // Also verify calling undoJob with a stale job snapshot uses live state.jobs undone_operations!
+  // 7b. Calling undoJob with a stale job snapshot uses live state.jobs undone_operations!
   const updatedLiveJob = {...jobUndoTest, undone_operations: ['op8b']};
   state.jobs = [updatedLiveJob];
   state.logs = [];
+  undoApiCalls.length = 0;
   await undoJob(jobUndoTest);
-  assert.deepEqual(undoSubmitted.at(-1), ['op8a']);
+  assert.deepEqual(undoApiCalls, ['op8a']);
+
+  // 7c. Toast created when op9b is ALREADY undone in state.logs, then logs & jobs immediately clear without sync:
+  //     source.undoneOps initialized at toast creation still skips op9b and submits ONLY op9a!
+  const jobInitUndone = {
+    id: 'j9', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op9a', 'op9b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+    operation_new_session_agents: {
+      op9a: [{id: 'fresh-b', name: '新对话工具'}],
+      op9b: [{id: 'fresh-c', name: '扩展工具'}],
+    },
+  };
+  state.jobs = [jobInitUndone];
+  state.logs = [{id: 'op9b', undone: true}, {id: 'op9a', undone: false}];
+  toastsContainer.children = [];
+  finishJobs([jobInitUndone]);
+  const initUndoneToast = toastsContainer.children[0];
+  // Immediately drop logs and clear jobs BEFORE any syncToastReminders call!
+  state.logs = [];
+  state.jobs = [];
+  undoApiCalls.length = 0;
+  await initUndoneToast._undoButton.click();
+  assert.deepEqual(undoApiCalls, ['op9a']);
+
+  // 7d. While undo confirmDialog is OPEN, op10b becomes undone (partial) -> after user confirms, ONLY op10a is submitted!
+  const jobDuringConfirm = {
+    id: 'j10', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op10a', 'op10b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+    operation_new_session_agents: {
+      op10a: [{id: 'fresh-b', name: '新对话工具'}],
+      op10b: [{id: 'fresh-c', name: '扩展工具'}],
+    },
+  };
+  state.jobs = [jobDuringConfirm];
+  state.logs = [];
+  toastsContainer.children = [];
+  finishJobs([jobDuringConfirm]);
+  const confirmRaceToast = toastsContainer.children[0];
+  let resolveConfirm;
+  confirmHook = () => new Promise(resolve => { resolveConfirm = resolve; });
+  undoApiCalls.length = 0;
+  const pendingClick = confirmRaceToast._undoButton.click();
+  // While confirm dialog is open, op10b gets undone in server jobs & synced, then card clears & logs empty!
+  state.jobs = [{...jobDuringConfirm, undone_operations: ['op10b']}];
+  syncToastReminders();
+  state.jobs = [];
+  state.logs = [];
+  resolveConfirm(true);
+  await pendingClick;
+  assert.deepEqual(undoApiCalls, ['op10a']);
+
+  // 7e. While undo confirmDialog is OPEN, ALL remaining ops become undone -> after user confirms, ZERO /api/undo calls!
+  state.jobs = [jobDuringConfirm];
+  state.logs = [];
+  toastsContainer.children = [];
+  finishJobs([jobDuringConfirm]);
+  const allUndoneRaceToast = toastsContainer.children[0];
+  confirmHook = () => new Promise(resolve => { resolveConfirm = resolve; });
+  undoApiCalls.length = 0;
+  const pendingAllUndone = allUndoneRaceToast._undoButton.click();
+  state.jobs = [{...jobDuringConfirm, undone_operations: ['op10a', 'op10b']}];
+  syncToastReminders();
+  resolveConfirm(true);
+  await pendingAllUndone;
+  assert.deepEqual(undoApiCalls, []);
+  confirmHook = async () => true;
 
   // 8. Direct-operation toast keeps API original new_session_agents (ignores corrupted logs) & malformed entries filtered.
   assert.deepEqual(newSessionAgentsFrom([{id: ['broken'], name: 123}, {id: 'fresh-b', name: '新对话工具'}]), ['新对话工具']);

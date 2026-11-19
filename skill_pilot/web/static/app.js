@@ -1018,17 +1018,29 @@ function applyJobs(result, {force = false} = {}) {
   if (jobsHasActive(items)) scheduleJobsPoll(); else stopJobsPolling();
 }
 
-async function undoJob(job, button = null) {
-  const live = (state.jobs || []).find(entry => entry.id === job?.id);
-  const current = live
-    ? {
-        ...live,
-        undone_operations: [...new Set([...(job?.undone_operations || []), ...(live.undone_operations || [])])],
-      }
-    : job;
+async function undoJob(job, button = null, reminderSource = null) {
+  const resolveCurrent = () => {
+    const base = reminderSource?.job || job;
+    const live = (state.jobs || []).find(entry => entry.id === base?.id);
+    const mergedUndone = [...new Set([
+      ...(job?.undone_operations || []),
+      ...(reminderSource?.job?.undone_operations || []),
+      ...(reminderSource?.undoneOps || []),
+      ...(live?.undone_operations || []),
+    ])];
+    const target = live || base;
+    if (!target) return target;
+    return mergedUndone.length ? {...target, undone_operations: mergedUndone} : target;
+  };
+  const current = resolveCurrent();
   const ids = jobActiveOperations(current).reverse();
   if (!ids.length) return false;
-  const done = await undoOperation(ids, {skills: current.skills || [], message: current.summary || pastTense(current.message || ''), button});
+  const done = await undoOperation(ids, {
+    skills: current.skills || [],
+    message: current.summary || pastTense(current.message || ''),
+    button,
+    resolveIds: () => jobActiveOperations(resolveCurrent()).reverse(),
+  });
   if (done) renderJobs();
   return done;
 }
@@ -1204,18 +1216,25 @@ function finishJobs(finished) {
         continue;
       }
     }
-    const reminderSource = {jobId: job.id, job};
+    const initialUndone = new Set(job.undone_operations || []);
+    for (const id of job.operations || []) {
+      if ((state.logs || []).some(record => record.id === id && record.undone)) initialUndone.add(id);
+    }
+    const initialJob = initialUndone.size ? {...job, undone_operations: [...initialUndone]} : job;
+    const reminderSource = {jobId: job.id, job: initialJob, undoneOps: initialUndone};
     if (job.status === 'done') {
       toast({
         text: pastTense(job.message || '任务已完成'),
-        reminder: jobReminderText(job),
+        reminder: jobReminderText(initialJob),
         reminderSource,
-        undo: job.operations?.length && jobUndoAvailable(job) ? button => undoJob(reminderSource.job || job, button) : null,
+        undo: initialJob.operations?.length && jobUndoAvailable(initialJob)
+          ? button => undoJob(reminderSource.job || initialJob, button, reminderSource)
+          : null,
       });
     } else if (job.status === 'failed') {
-      toast({text: jobStatusLine(job), reminder: jobReminderText(job), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), reminder: jobReminderText(initialJob), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});
     } else if (job.status === 'attention') {
-      toast({text: jobStatusLine(job), reminder: jobReminderText(job), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), reminder: jobReminderText(initialJob), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});
     }
   }
   for (const key of packKeys) announcePackBatch(key, state.jobs);
@@ -1304,8 +1323,13 @@ async function heartbeat() {
 /* 撤销：先确认，再取最新状态，避免用过期版本号。
    button 是触发这次撤销的那个按钮（提示条上的或操作记录里的），由 runWrite 负责忙碌态。
    返回 false 表示用户取消了。 */
-async function undoOperation(id, {skills = [], message = '', button = null} = {}) {
+async function undoOperation(id, {skills = [], message = '', button = null, resolveIds = null} = {}) {
   const ids = Array.isArray(id) ? id : [id];
+  const resolveLatestIds = () => {
+    const raw = typeof resolveIds === 'function' ? resolveIds() : ids;
+    const logsById = new Map((state.logs || []).map(record => [record.id, record]));
+    return (Array.isArray(raw) ? raw : [raw]).filter(opId => opId && !logsById.get(opId)?.undone);
+  };
   const ok = await confirmDialog({
     title: '撤销这次操作',
     lines: [message ? `要撤销的是：${message}` : '会恢复相应的技能内容、分配入口和工具添加的停用设置。'],
@@ -1314,15 +1338,23 @@ async function undoOperation(id, {skills = [], message = '', button = null} = {}
     okText: '撤销',
   });
   if (!ok) return false;
+  if (!resolveLatestIds().length) {
+    renderJobs();
+    syncToastReminders();
+    return false;
+  }
   const result = await runWrite({
     button,
     busyText: '正在撤销…',
     work: async () => {
-      const history = ids.length > 1 ? await api('/api/log') : [];
+      const targetIds = resolveLatestIds();
+      if (!targetIds.length) return false;
+      const history = targetIds.length > 1 ? await api('/api/log') : [];
       let done = 0;
       try {
-        for (const operationId of ids) {
+        for (const operationId of targetIds) {
           if (history.some(record => record.id === operationId && record.undone)) continue;
+          if (!resolveLatestIds().includes(operationId)) continue;
           const table = await api('/api/table');
           await api('/api/undo', {id: operationId, revision: table.revision, confirmed: true});
           done++;
@@ -1334,11 +1366,11 @@ async function undoOperation(id, {skills = [], message = '', button = null} = {}
         await refreshEverything();
         await refreshUpdates();
       }
-      return true;
+      return done > 0;
     },
-    success: () => ({text: '已经撤销这次操作'}),
+    success: done => (done ? {text: '已经撤销这次操作'} : null),
   });
-  return result !== null;
+  return result === true;
 }
 
 /* ==================== 页头与导航：摘要条、页面切换、模式徽标 ==================== */
