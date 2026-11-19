@@ -1558,6 +1558,8 @@ pre {
 .program-changes ul { list-style: disc; padding-left: var(--sp-5); margin: var(--sp-2) 0; }
 .program-changes li + li { margin-top: var(--sp-1); }
 .program-changes .muted, .program-popup-body .muted { font-size: var(--fs-small); }
+.program-version { color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
+.program-popup-version { margin-bottom: var(--sp-2); overflow-wrap: anywhere; }
 
 /* ---------- 提示条 ---------- */
 

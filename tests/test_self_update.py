@@ -548,7 +548,14 @@ class SelfUpdateProcessTests(unittest.TestCase):
                 time.sleep(.03)
             self.fail('update process did not reach the expected state')
         initial = request('/api/status')
-        until('/api/program/progress', lambda p: not p['running'])
+        started_progress = until('/api/program/progress', lambda p: not p['running'])
+        initial_version = started_progress['current_version']
+        self.assertTrue(initial_version, started_progress)
+        self.assertEqual(started_progress['pending_version'], '')
+        if checkout:
+            self.assertRegex(initial_version, r'^v\d{4}\.\d{2}\.\d{2}-[0-9a-f]{7}$')
+        else:
+            self.assertRegex(initial_version, r'^初始版-[0-9a-f]{7}$')
         def saved_configuration():
             return {p.name: store.physical_state(p) for p in (self.home / '.skill-pilot').iterdir()
                     if p.name != 'agent-discovery.json' and not p.name.startswith('.agent-discovery-')}
@@ -558,20 +565,35 @@ class SelfUpdateProcessTests(unittest.TestCase):
         progress = until('/api/program/progress', lambda p: not p['running'])
         self.assertTrue(progress['available'], progress)
         self.assertEqual(progress['target'], target)
+        self.assertEqual(progress['current_version'], initial_version)
+        expected_new = progress['latest_version']
+        self.assertRegex(expected_new, r'^v\d{4}\.\d{2}\.\d{2}-' + target[:7] + '$')
+        self.assertEqual(progress['pending_version'], '')
         request('/api/program/apply', {'confirmed': True, 'target': target})
         progress = until('/api/program/progress', lambda p: not p['running'])
         self.assertEqual(progress['phase'], 'ready', progress)
+        self.assertEqual(progress['current_version'], initial_version)
+        self.assertEqual(progress['pending_version'], expected_new)
+        self.assertEqual(progress['latest_version'], expected_new)
         self.assertNotIn('self_update_marker', request('/api/status'))
         self.assertTrue(request('/api/runtime/refresh', {})['changed'])
         current = until('/api/status', lambda p: p.get('self_update_marker') == 'new edition')
         self.assertEqual(current['pid'], initial['pid'])
         self.assertNotEqual(current['version'], initial['version'])
-        self.assertEqual(request('/api/program/progress')['phase'], 'latest')
+        after_refresh = request('/api/program/progress')
+        self.assertEqual(after_refresh['phase'], 'latest')
+        self.assertEqual(after_refresh['current_version'], expected_new)
+        self.assertEqual(after_refresh['latest_version'], expected_new)
+        self.assertEqual(after_refresh['pending_version'], '')
         self.assertEqual(request('/api/table')['home'], str(self.home))
         self.assertEqual(before, saved_configuration())
         self.assertFalse(request('/api/runtime/refresh', {})['changed'])
         request('/api/program/check', {})
-        self.assertFalse(until('/api/program/progress', lambda p: not p['running'])['available'])
+        rechecked = until('/api/program/progress', lambda p: not p['running'])
+        self.assertFalse(rechecked['available'])
+        self.assertEqual(rechecked['current_version'], expected_new)
+        self.assertEqual(rechecked['latest_version'], expected_new)
+        self.assertEqual(rechecked['pending_version'], '')
 
     def test_zip_download_upgrade_refresh_and_recheck(self):
         self.run_flow(False)

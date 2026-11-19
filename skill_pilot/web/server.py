@@ -27,7 +27,7 @@ from pathlib import Path
 from ..scan import scan
 from ..store import apply, backups, guard, preview, restore, target_home
 from .. import diagnostics, operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization
-from .. import agents as agent_management, agent_discovery
+from .. import agents as agent_management, agent_discovery, version as app_version
 from ..sources import github
 from ..environment import tool_environment
 from . import runtime
@@ -160,13 +160,20 @@ class Dashboard(ThreadingHTTPServer):
         self.labels_lock = threading.Lock()
         self.labels_thread = None
         self.labels_progress = session.get('labels_progress', {'running': False, 'done': 0, 'total': 0, 'message': '', 'error': ''})
+        running = app_version.running_build()
+        self.running_version = running['version']
         self.program_review = session.get('program_review')
         self.program_progress = session.get('program_progress', {'running': False, 'phase': 'idle',
-            'message': '从 GitHub 官方项目获取新版', 'error': '', 'available': False, 'current': '', 'latest': ''})
+            'message': '从 GitHub 官方项目获取新版', 'error': '', 'available': False,
+            'current': running['date'], 'latest': '',
+            'current_version': self.running_version, 'latest_version': '', 'pending_version': ''})
         self.program_progress.setdefault('automatic', False)
         self.program_progress.setdefault('changes', [])
         self.program_progress.setdefault('changes_total', 0)
         self.program_progress.setdefault('changes_partial', False)
+        self.program_progress.setdefault('current_version', self.running_version)
+        self.program_progress.setdefault('latest_version', '')
+        self.program_progress.setdefault('pending_version', '')
         try:
             operations.sync_bundled_skill(self.home)
         except Exception as error:
@@ -175,8 +182,14 @@ class Dashboard(ThreadingHTTPServer):
                 self.jobs_blocked = str(error)
             self.program_progress.update(phase='error', error='程序可继续使用，但自带技能说明没能同步，请查看诊断后重新打开看板。')
         if self.program_progress['phase'] == 'ready':
+            new_version = self.running_version or self.program_progress.get('pending_version', '')
             self.program_progress.update(phase='latest', message='SP 已升级到最新版',
+                                         current_version=new_version,
+                                         latest_version=new_version or self.program_progress.get('latest_version', ''),
+                                         pending_version='',
                                          changes=[], changes_total=0, changes_partial=False)
+        elif resume and self.running_version:
+            self.program_progress['current_version'] = self.running_version
         # 换进程时没有还在跑的线程。自动检查被关掉或刷新打断时，按还没查到处理，避免一直显示正在检查。
         if (resume and self.program_progress.get('automatic') and self.program_progress.get('running')
                 and self.program_progress.get('phase') == 'check'):
@@ -909,8 +922,14 @@ class Dashboard(ThreadingHTTPServer):
                 self.program_review = None
                 self.program_review = self_update.check(self.home)
                 review = self.program_review
+                current_version = (self.running_version or review.get('current_version')
+                                   or app_version.format_version(review.get('current', ''),
+                                                                 review.get('before', {}).get('revision', '')))
+                latest_version = (review.get('latest_version')
+                                  or app_version.format_version(review.get('latest', ''), review.get('target', '')))
                 self.program_progress.update(phase='available' if review['available'] else 'latest',
                     target=review['target'], available=review['available'], current=review['current'], latest=review['latest'],
+                    current_version=current_version, latest_version=latest_version, pending_version='',
                     changes=review.get('changes', []) if review['available'] else [],
                     changes_total=review.get('changes_total', 0) if review['available'] else 0,
                     changes_partial=review.get('changes_partial', False) if review['available'] else False,
@@ -931,10 +950,19 @@ class Dashboard(ThreadingHTTPServer):
                 self.program_progress['message'] = '正在安装 SP 新版…'
                 result = self_update.apply(self.program_review, self.home)
                 self.program_review['available'] = False
+                pending_version = (result.get('pending_version')
+                                   or result.get('latest_version')
+                                   or self.program_review.get('latest_version')
+                                   or self.program_progress.get('latest_version')
+                                   or app_version.format_version(result.get('latest', self.program_review.get('latest', '')),
+                                                                 self.program_review.get('target', '')))
                 self.program_progress.update(result, phase='ready', message='新版已装好，刷新后生效',
+                                             current_version=self.running_version,
+                                             latest_version=pending_version,
+                                             pending_version=pending_version,
                                              changes=[], changes_total=0, changes_partial=False)
         except Exception as error:
-            self.program_progress.update(changes=[], changes_total=0, changes_partial=False)
+            self.program_progress.update(changes=[], changes_total=0, changes_partial=False, pending_version='')
             captured = self_update.record_failure(self.home, action, error) or {}
             if captured:
                 self.program_progress['error_id'] = captured['error_id']
@@ -957,7 +985,14 @@ class Dashboard(ThreadingHTTPServer):
                 self.reload_error = ''
                 self.reload_error_id = ''
                 if self.program_progress['phase'] == 'ready':
+                    applied = (self.program_progress.get('pending_version')
+                               or app_version.read_build().get('version', '')
+                               or self.running_version)
+                    self.running_version = applied
                     self.program_progress.update(phase='latest', message='SP 已升级到最新版',
+                                                 current_version=applied,
+                                                 latest_version=applied or self.program_progress.get('latest_version', ''),
+                                                 pending_version='',
                                                  changes=[], changes_total=0, changes_partial=False)
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True

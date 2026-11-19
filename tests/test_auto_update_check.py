@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import self_update
+from skill_pilot import self_update, version as app_version
 from skill_pilot.web import runtime, server, windows_runtime
 from tests import set_up_home
 
@@ -250,7 +250,9 @@ class AutoUpdateCheckTests(unittest.TestCase):
     def start_resumed(self, checked_at):
         saved = {'running': False, 'phase': 'latest', 'automatic': True,
                  'message': 'SP 已是最新版本', 'available': False, 'error': '', 'checked_at': checked_at,
-                 'changes': [], 'changes_total': 0, 'changes_partial': False}
+                 'changes': [], 'changes_total': 0, 'changes_partial': False,
+                 'current_version': app_version.running_build()['version'],
+                 'latest_version': '', 'pending_version': ''}
         dashboard = server.Dashboard(self.inventory)
         try:
             dashboard.program_progress = saved.copy()

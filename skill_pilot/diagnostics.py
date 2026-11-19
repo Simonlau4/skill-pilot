@@ -19,6 +19,7 @@ from pathlib import Path
 from contextlib import contextmanager
 from .platform_support import fcntl
 
+from . import version as app_version
 from .redaction import _hide_paths_outside_home, hide_credentials
 from .store import PROJECT, guard, target_home, write_allowed
 
@@ -48,29 +49,14 @@ def read_json(path):
 
 
 def installed_build(project):
-    project = Path(project)
-    checkout = (project / '.git').exists()
-    revision = read_json(project / '.skill-pilot-install.json').get('revision', '')
-    if checkout:
-        try:
-            result = subprocess.run(['git', '-C', str(project), 'rev-parse', 'HEAD'],
-                env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}, stdin=subprocess.DEVNULL,
-                capture_output=True, timeout=3, text=True, errors='replace')
-            revision = result.stdout.strip() if result.returncode == 0 else ''
-        except (OSError, subprocess.SubprocessError):
-            revision = ''
-    if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{7,64}', revision):
-        from .web.runtime import version
-        try:
-            revision = version()
-        except OSError:
-            revision = ''
-    return {'install_mode': '源码' if checkout else '压缩包',
-            'app_version': revision[:12] or '未能读取'}
+    build = app_version.read_build(project)
+    return {'install_mode': build['install_mode'],
+            'app_version': build['version'] or '未能读取'}
 
 
 # Keep the loaded process identity even if an upgrade replaces its files on disk.
-RUNNING_BUILD = installed_build(PROJECT)
+RUNNING_BUILD = {'install_mode': app_version.RUNNING_BUILD['install_mode'],
+                 'app_version': app_version.RUNNING_BUILD['version'] or '未能读取'}
 
 
 def sanitize(value, home, limit=6000, *, extra_secrets=()):

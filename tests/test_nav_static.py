@@ -106,7 +106,8 @@ if (!written.endsWith('#skills/Acme')) { console.error('技能页地址没写对
 
     def test_program_messages_use_full_name_without_changing_backend_state(self):
         source = (STATIC / 'app.js').read_text()
-        function = extract_function(source, 'function renderProgram(')
+        function = '\n'.join((extract_function(source, 'function programVersionLabel('),
+                              extract_function(source, 'function renderProgram(')))
         script = function + r'''
 const elements = new Map();
 function $(id) {
@@ -157,9 +158,9 @@ if ($('program-message').textContent !== '从 Skill Pilot 官方项目获取新�
     def test_program_popup_states_dismissal_content_and_controls(self):
         source = (STATIC / 'app.js').read_text()
         functions = '\n'.join(extract_function(source, signature) for signature in (
-            'function programText(', 'function programChangesHtml(', 'function programPopupPhase(',
-            'function positionProgramPopup(', 'function renderProgramPopup(', 'function dismissProgramPopup(',
-            'function renderProgram('))
+            'function programText(', 'function programVersionLabel(', 'function programChangesHtml(',
+            'function programPopupPhase(', 'function positionProgramPopup(', 'function renderProgramPopup(',
+            'function dismissProgramPopup(', 'function renderProgram('))
         events = source[source.index("$('program-popup-close').addEventListener"):source.index('setInterval(() => { if (programUpdate.running')]
         script = r'''
 const assert = require('node:assert/strict');
@@ -269,6 +270,44 @@ programUpdate = {...programUpdate, phase: 'available', available: true}; renderP
 assert.equal(popup.hidden, true, '关闭失败提醒后重查同一版本不能再弹出');
 programUpdate = {...programUpdate, phase: 'ready', available: false}; renderProgram();
 assert.equal(popup.hidden, false, '忽略版本不能隐藏升级完成提醒');
+
+// 明确版本号展示：已是最新、ZIP 初始版匹配最新、发现新版、正在升级、待刷新生效，且不出现内部技术词。
+const jargon = /\b(git|hash|commit|sha|symlink|toml)\b/i;
+programUpdate = {write_allowed: true, phase: 'idle', available: false, current_version: 'v2026.11.18-1111111'};
+renderProgram();
+assert.equal($('program-version').hidden, false);
+assert.equal($('program-version').textContent, '当前版本：v2026.11.18-1111111');
+assert(!jargon.test($('program-version').textContent));
+
+programUpdate = {write_allowed: true, phase: 'latest', available: false,
+  current_version: 'v2026.11.18-1111111', latest_version: 'v2026.11.18-1111111'};
+renderProgram();
+assert.equal($('program-version').textContent, '当前版本：v2026.11.18-1111111');
+
+programUpdate = {write_allowed: true, phase: 'latest', available: false,
+  current_version: '初始版-abc1234', latest_version: 'v2026.11.18-1111111'};
+renderProgram();
+assert.equal($('program-version').textContent, '当前版本：初始版-abc1234 · 最新版本：v2026.11.18-1111111');
+
+programUpdate = {write_allowed: true, phase: 'available', available: true, target: 'v2-target',
+  current_version: 'v2026.11.18-1111111', latest_version: 'v2026.11.19-2222222',
+  changes: ['展示明确版本号'], changes_total: 1, changes_partial: false};
+renderProgram();
+assert.equal($('program-version').textContent, '当前版本：v2026.11.18-1111111 · 最新版本：v2026.11.19-2222222');
+assert($('program-popup-body').innerHTML.includes('当前 v2026.11.18-1111111 → 新版 v2026.11.19-2222222'));
+assert(!jargon.test($('program-popup-body').innerHTML));
+
+programUpdate = {...programUpdate, phase: 'apply', running: true, available: false};
+renderProgram();
+assert.equal($('program-version').textContent, '当前运行：v2026.11.18-1111111 · 正在升级至：v2026.11.19-2222222');
+assert($('program-popup-body').innerHTML.includes('当前 v2026.11.18-1111111 → 新版 v2026.11.19-2222222'));
+
+programUpdate = {...programUpdate, phase: 'ready', running: false, available: false,
+  current_version: 'v2026.11.18-1111111', pending_version: 'v2026.11.19-2222222', latest_version: 'v2026.11.19-2222222'};
+renderProgram();
+assert.equal($('program-version').textContent, '当前运行：v2026.11.18-1111111 · 待刷新生效：v2026.11.19-2222222');
+assert($('program-popup-body').innerHTML.includes('当前运行 v2026.11.18-1111111 → 待刷新生效 v2026.11.19-2222222'));
+assert(!jargon.test($('program-version').textContent + $('program-popup-body').innerHTML));
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -411,8 +450,13 @@ if (unset[0].target !== 'settings/team') fail('没连分享站时应去设置的
 const connected = checked({team: {configured: true, member: {name: 'Acme'}}});
 if (connected.length) fail('连上分享站后不应再占一条团队提醒：' + keys(connected));
 
-const program = checked({program: {write_allowed: true, available: true, phase: 'idle'}});
+const program = checked({program: {write_allowed: true, available: true, phase: 'idle',
+  current_version: 'v2026.11.18-1111111', latest_version: 'v2026.11.19-2222222'}});
 if (keys(program) !== 'program' || program[0].target !== 'settings/version') fail('SP 有新版时应去设置的版本一块：' + JSON.stringify(program));
+if (!program[0].text.includes('v2026.11.19-2222222') || !program[0].text.includes('v2026.11.18-1111111')) fail('首页新版提醒应包含版本号：' + program[0].text);
+const programReady = checked({program: {write_allowed: true, phase: 'ready',
+  current_version: 'v2026.11.18-1111111', pending_version: 'v2026.11.19-2222222'}});
+if (!programReady[0].text.includes('v2026.11.19-2222222') || !programReady[0].text.includes('当前运行 v2026.11.18-1111111')) fail('首页待刷新提醒应区分当前运行与待生效版本：' + programReady[0].text);
 const programHidden = checked({program: {write_allowed: false, available: true, phase: 'idle'}});
 if (programHidden.length) fail('不能升级时不应显示 SP 新版条');
 

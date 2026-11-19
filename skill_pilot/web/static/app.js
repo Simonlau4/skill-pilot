@@ -2814,6 +2814,18 @@ function programText(value) {
     term => terms[term.toLowerCase()]);
 }
 
+function programVersionLabel(version, timestamp) {
+  const text = String(version || '').trim();
+  if (text) return text;
+  if (!timestamp) return '';
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) return '';
+  const year = parsed.getUTCFullYear();
+  const month = String(parsed.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(parsed.getUTCDate()).padStart(2, '0');
+  return `v${year}.${month}.${day}`;
+}
+
 function programChangesHtml(progress) {
   const changes = (progress.changes || []).map(title => {
     const text = programText(title).replace(/^(?:fix|feat|chore|docs|refactor|test|build|ci|perf)(?:\([^)]*\))?:\s*/i, '').trim();
@@ -2856,11 +2868,19 @@ function renderProgramPopup() {
   const ready = phase === 'ready', applying = phase === 'apply', failed = phase === 'error';
   $('program-popup-title').textContent = ready ? 'Skill Pilot 升级完成' : applying ? '正在升级 Skill Pilot…'
     : failed ? '升级未完成' : 'Skill Pilot 发现新版本';
-  const latest = progress.latest ? new Date(progress.latest).toLocaleDateString('zh-CN') : '';
-  const body = ready ? '<p>刷新页面即可启用新版，技能、分配和个人设置都会保留。</p>'
-    : applying ? `<p>${escape(programText(progress.message || '正在安装新版，请稍候…'))}</p>`
-    : failed ? `<p class="program-error">${escape(programText(progress.error || '请稍后重试'))}</p>${feedbackButton(progress.error_id)}`
-    : `${latest ? `<p class="muted">新版 ${escape(latest)}</p>` : ''}${programChangesHtml(progress)}`;
+  const current = programVersionLabel(progress.current_version, progress.current);
+  const latest = programVersionLabel(progress.latest_version, progress.latest);
+  const pending = programVersionLabel(progress.pending_version || progress.latest_version, progress.latest);
+  const versionLine = ready
+    ? (current && pending ? `当前运行 ${current} → 待刷新生效 ${pending}`
+      : pending ? `待刷新生效 ${pending}` : current ? `当前运行 ${current}` : '')
+    : (current && latest ? `当前 ${current} → 新版 ${latest}`
+      : latest ? `新版 ${latest}` : current ? `当前 ${current}` : '');
+  const versionHtml = versionLine ? `<p class="muted program-popup-version">${escape(versionLine)}</p>` : '';
+  const body = ready ? `${versionHtml}<p>刷新页面即可启用新版，技能、分配和个人设置都会保留。</p>`
+    : applying ? `${versionHtml}<p>${escape(programText(progress.message || '正在安装新版，请稍候…'))}</p>`
+    : failed ? `${versionHtml}<p class="program-error">${escape(programText(progress.error || '请稍后重试'))}</p>${feedbackButton(progress.error_id)}`
+    : `${versionHtml}${programChangesHtml(progress)}`;
   // 轮询时保留相同内容的节点，避免打断阅读、滚动或键盘焦点。
   if ($('program-popup-body').innerHTML !== body) $('program-popup-body').innerHTML = body;
   $('program-popup-later').textContent = ready ? '稍后刷新' : failed || applying ? '关闭' : '稍后再说';
@@ -2887,11 +2907,26 @@ function dismissProgramPopup() {
 
 function renderProgram() {
   const progress = programUpdate;
-  const date = value => value ? new Date(value).toLocaleString('zh-CN') : '首次安装版本';
+  const current = programVersionLabel(progress.current_version, progress.current);
+  const latest = programVersionLabel(progress.latest_version, progress.latest);
+  const pending = programVersionLabel(progress.pending_version || progress.latest_version, progress.latest);
   const message = (progress.message || '从 Skill Pilot 官方项目获取新版').replace(/\bSP\b/g, 'Skill Pilot');
-  $('program-version').hidden = !progress.current && !progress.latest;
-  $('program-version').textContent = `已安装：${date(progress.current)}`
-    + (progress.available ? ` · 新版：${date(progress.latest)}` : '');
+  const parts = [];
+  if (progress.phase === 'ready') {
+    if (current) parts.push(`当前运行：${current}`);
+    if (pending) parts.push(`待刷新生效：${pending}`);
+  } else if (progress.phase === 'apply' && progress.running) {
+    if (current) parts.push(`当前运行：${current}`);
+    if (latest) parts.push(`正在升级至：${latest}`);
+  } else if (progress.available) {
+    if (current) parts.push(`当前版本：${current}`);
+    if (latest) parts.push(`最新版本：${latest}`);
+  } else {
+    if (current) parts.push(`当前版本：${current}`);
+    if (progress.phase === 'latest' && latest && latest !== current) parts.push(`最新版本：${latest}`);
+  }
+  $('program-version').hidden = !parts.length;
+  $('program-version').textContent = parts.join(' · ');
   $('program-message').textContent = message;
   $('program-error').textContent = programText(progress.error || '');
   $('program-changes').hidden = !progress.available;
@@ -8657,15 +8692,24 @@ function homeTodos(input) {
     const ready = program.phase === 'ready';
     const applying = Boolean(program.running && program.phase === 'apply');
     const failed = program.phase === 'error' && program.failedAction === 'apply';
+    const currentVersion = String(program.current_version || '').trim();
+    const latestVersion = String(program.latest_version || '').trim();
+    const pendingVersion = String(program.pending_version || program.latest_version || '').trim();
     items.push({
       key: 'program',
       icon: 'update-up',
       tone: ready || failed ? 'warm' : 'calm',
       title: ready ? '新版本已安装，刷新后生效' : applying ? 'Skill Pilot 正在后台升级' : failed ? '程序升级未完成' : 'Skill Pilot 发现新版本',
-      text: ready ? 'Skill Pilot 已更新完毕，刷新页面即可启用新版，数据与设置完整保留。'
-        : applying ? '等待当前任务完成后将自动继续。'
-        : failed ? '升级遇到问题，可前往版本设置查看原因并重试。'
-        : '发现新版 Skill Pilot，支持在看板内一键升级。',
+      text: ready
+        ? (pendingVersion
+          ? `已安装新版 ${pendingVersion}${currentVersion ? `（当前运行 ${currentVersion}）` : ''}，刷新页面即可启用，数据与设置完整保留。`
+          : 'Skill Pilot 已更新完毕，刷新页面即可启用新版，数据与设置完整保留。')
+        : applying
+          ? (latestVersion ? `正在升级至 ${latestVersion}，等待当前任务完成后将自动继续。` : '等待当前任务完成后将自动继续。')
+          : failed ? '升级遇到问题，可前往版本设置查看原因并重试。'
+          : latestVersion
+            ? `发现新版 ${latestVersion}${currentVersion ? `（当前 ${currentVersion}）` : ''}，支持在看板内一键升级。`
+            : '发现新版 Skill Pilot，支持在看板内一键升级。',
       label: ready ? '前往刷新' : '查看版本',
       target: 'settings/version',
     });
@@ -9430,7 +9474,10 @@ start();
 async function refreshErrors() {
   try {
     const rows = await api('/api/diagnostics/errors');
-    $('diag-errors').innerHTML = rows.map(row => `<div class="list-item"><div><strong>${escape(row.user_message)}</strong><p class="muted">${escape(new Date(row.time).toLocaleString())} · ${escape(row.action)}</p></div><button class="btn btn-small" data-diagnostic="${escape(row.error_id)}">查看诊断</button>${feedbackButton(row.error_id)}</div>`).join('') || '<p class="muted">暂无错误记录。</p>';
+    $('diag-errors').innerHTML = rows.map(row => {
+      const version = row.environment?.app_version ? ` · ${row.environment.app_version}` : '';
+      return `<div class="list-item"><div><strong>${escape(row.user_message)}</strong><p class="muted">${escape(new Date(row.time).toLocaleString())} · ${escape(row.action)}${escape(version)}</p></div><button class="btn btn-small" data-diagnostic="${escape(row.error_id)}">查看诊断</button>${feedbackButton(row.error_id)}</div>`;
+    }).join('') || '<p class="muted">暂无错误记录。</p>';
   } catch (error) { toast({error_id: error.error_id, text: error.message, tone: 'error'}); }
 }
 async function showDiagnostic(errorId = '') {
