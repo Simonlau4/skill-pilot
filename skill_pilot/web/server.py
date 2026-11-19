@@ -292,23 +292,25 @@ class Dashboard(ThreadingHTTPServer):
                     item.pop('operation_new_session_agents', None)
                 if undone_ops:
                     item['undone_operations'] = undone_ops
-                    updates_by_id[item['id']] = (undone_ops, merged, active_map)
+                    updates_by_id[item['id']] = undone_ops
                 else:
                     item.pop('undone_operations', None)
             if updates_by_id:
                 with self.jobs_lock:
                     for raw in self.jobs:
-                        change = updates_by_id.get(raw.get('id'))
-                        if not change:
+                        undone_ops = updates_by_id.get(raw.get('id'))
+                        if not undone_ops:
                             continue
-                        undone_ops, merged, active_map = change
                         persisted = list(dict.fromkeys(list(raw.get('undone_operations') or []) + undone_ops))
                         raw['undone_operations'] = persisted
-                        raw['new_session_agents'] = merged
-                        if active_map:
-                            raw['operation_new_session_agents'] = {
-                                op: val for op, val in active_map.items() if op not in persisted
-                            }
+                        raw_ops = self._order_operations(raw.get('operations') or [], records)
+                        raw_merged, raw_active_map, _ = self._resolve_job_reminders(
+                            raw_ops, raw.get('operation_new_session_agents'),
+                            raw.get('new_session_agents'), records, catalog, order,
+                            known_undone=persisted)
+                        raw['new_session_agents'] = raw_merged
+                        if raw_active_map:
+                            raw['operation_new_session_agents'] = raw_active_map
                         else:
                             raw.pop('operation_new_session_agents', None)
         return {'items': items, 'version': version, 'blocked': blocked}
@@ -670,9 +672,20 @@ class Dashboard(ThreadingHTTPServer):
             return [next(timed_iter) if has_time(op) else op for _, op in indexed]
         return unique
 
+    @staticmethod
+    def _valid_agent_entries(entries):
+        if not isinstance(entries, list):
+            return None
+        valid = []
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get('id'), str) or not entry['id'].strip():
+                return None
+            valid.append(entry)
+        return valid
+
     def merge_new_session_agents(self, *groups, catalog=None, order=None):
         ids = [entry['id'] for group in groups for entry in (group or [])
-               if isinstance(entry, dict) and entry.get('id')]
+               if isinstance(entry, dict) and isinstance(entry.get('id'), str) and entry['id'].strip()]
         if not ids:
             return []
         if catalog is not None:
@@ -695,17 +708,24 @@ class Dashboard(ThreadingHTTPServer):
             seen, merged = set(), []
             for group in groups:
                 for entry in (group or []):
-                    if isinstance(entry, dict) and entry.get('id') and entry['id'] not in seen:
+                    if isinstance(entry, dict) and isinstance(entry.get('id'), str) and entry['id'].strip() and entry['id'] not in seen:
                         seen.add(entry['id'])
                         merged.append(copy.deepcopy(entry))
             return merged
 
     def _resolve_job_reminders(self, operation_ids, existing_map, fallback, records, catalog, order, known_undone=()):
-        by_op = copy.deepcopy(existing_map or {})
+        by_op = {}
+        for op, entries in (existing_map or {}).items():
+            valid = self._valid_agent_entries(entries)
+            if valid is not None:
+                by_op[op] = copy.deepcopy(valid)
         for op in operation_ids:
-            if op in records and isinstance(records[op].get('new_session_agents'), list):
-                by_op[op] = list(records[op]['new_session_agents'])
-        undone_set = set(known_undone or ()) | {op for op in operation_ids if records.get(op, {}).get('undone')}
+            if op in records:
+                valid = self._valid_agent_entries(records[op].get('new_session_agents'))
+                if valid is not None:
+                    # Prefer valid in-memory entries if already recorded, otherwise accept valid disk record.
+                    by_op.setdefault(op, list(valid))
+        undone_set = set(known_undone or ()) | {op for op in operation_ids if records.get(op, {}).get('undone') is True}
         undone_ops = [op for op in operation_ids if op in undone_set]
         active_ops = [op for op in operation_ids if op not in undone_set]
         if operation_ids and by_op:
@@ -830,10 +850,15 @@ class Dashboard(ThreadingHTTPServer):
                             result['message'] = '此前已更新：' + self.skill_message('、'.join(prior_updated)) + '。' + result['message']
                         matched = [records[op] for op in op_ids if op in records]
                         if matched:
-                            result.update(
-                                skills=sorted(set(item['skills']) | {n for r in matched for n in (r.get('skills') or ()) if isinstance(n, str)}),
-                                agents=sorted(set(item['agents']) | {a for r in matched for a in (r.get('agents') or ()) if isinstance(a, str)}),
-                            )
+                            extra_skills = {n for r in matched if isinstance(r.get('skills'), list)
+                                            for n in r['skills'] if isinstance(n, str)}
+                            extra_agents = {a for r in matched if isinstance(r.get('agents'), list)
+                                            for a in r['agents'] if isinstance(a, str)}
+                            if extra_skills or extra_agents:
+                                result.update(
+                                    skills=sorted(set(item['skills']) | extra_skills),
+                                    agents=sorted(set(item['agents']) | extra_agents),
+                                )
                         combined_by_op = {
                             **item.get('_operation_new_session_agents', {}),
                             **progress['by_op'],

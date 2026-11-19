@@ -797,6 +797,66 @@ class ActivationReminderJobTests(unittest.TestCase):
         self.assertTrue(self.server.jobs_blocked)
         self.server.jobs_blocked = ''
 
+        # 7. Current job's own log record has corrupted field types (skills=5, agents=True, id=['bad']):
+        #    jobs_work must NOT crash and must preserve the valid in-memory reminder!
+        operations.apply_assign([{'skill': 'acme-b', 'agent': 'antigravity', 'enabled': False}], confirmed=True, home=self.home)
+        real_exec_corrupt = self.server.execute_job
+
+        def exec_and_corrupt_current_log(item):
+            res = real_exec_corrupt(item)
+            op_id = res['operations'][0]
+            log_file = self.home / '.skill-pilot/logs' / (op_id + '.json')
+            log_file.write_text(json.dumps({
+                'id': op_id, 'time': '2026-11-19T12:00:00+00:00',
+                'skills': 5, 'agents': True,
+                'new_session_agents': [{'id': ['bad'], 'name': 'Bad'}],
+            }))
+            return res
+
+        with patch.object(self.server, 'execute_job', side_effect=exec_and_corrupt_current_log):
+            self.submit('assignment', **self.assignment_params([{'skill': 'acme-b', 'agent': 'antigravity', 'enabled': True}]))
+            corrupt_job = self.wait_jobs()[-1]
+        self.assertEqual(corrupt_job['status'], 'done', corrupt_job)
+        self.assertEqual([a['id'] for a in corrupt_job.get('new_session_agents', [])], ['antigravity'])
+        # Clean up the corrupted log file so subsequent tests/teardown stay clean.
+        (self.home / '.skill-pilot/logs' / (corrupt_job['operations'][0] + '.json')).unlink(missing_ok=True)
+
+        # 8. Concurrent jobs_status writeback must NOT overwrite newly added retry ops/reminders!
+        op_a = {'id': 'antigravity', 'name': 'Antigravity', 'activation_note': '需新开对话生效'}
+        op_b = {'id': 'codex', 'name': 'Codex', 'activation_note': '需新开对话生效'}
+        live_job = {
+            'id': 'race-job', 'kind': 'assignment', 'status': 'done',
+            'skills': ['acme-a'], 'agents': ['antigravity'],
+            'operations': ['op-undone-1'],
+            'new_session_agents': [op_a],
+            'operation_new_session_agents': {'op-undone-1': [op_a]},
+        }
+        with self.server.jobs_lock:
+            self.server.jobs.append(live_job)
+        real_hc = self.server._history_and_catalog
+
+        def hc_with_concurrent_retry():
+            records, catalog, order = real_hc()
+            records['op-undone-1'] = {'id': 'op-undone-1', 'undone': True, 'new_session_agents': [op_a]}
+            # Simulate a concurrent retry publishing a new op ('op-fresh-2' -> Codex) before writeback acquires jobs_lock.
+            with self.server.jobs_lock:
+                live_job['operations'] = ['op-undone-1', 'op-fresh-2']
+                live_job['new_session_agents'] = [op_b]
+                live_job['operation_new_session_agents'] = {'op-undone-1': [op_a], 'op-fresh-2': [op_b]}
+            return records, catalog, order
+
+        try:
+            with patch.object(self.server, '_history_and_catalog', side_effect=hc_with_concurrent_retry):
+                self.server.jobs_status()
+            with self.server.jobs_lock:
+                self.assertEqual(live_job.get('undone_operations'), ['op-undone-1'])
+                self.assertEqual([a['id'] for a in live_job.get('new_session_agents', [])], ['codex'])
+                self.assertIn('op-fresh-2', live_job.get('operation_new_session_agents', {}))
+                self.assertNotIn('op-undone-1', live_job.get('operation_new_session_agents', {}))
+        finally:
+            with self.server.jobs_lock:
+                self.server.jobs = [j for j in self.server.jobs if j.get('id') != 'race-job']
+
 
 class ActivationReminderStaticTests(unittest.TestCase):
     def test_frontend_reminder_logic_uses_config_and_renders_toast_and_job_item(self):
@@ -1027,6 +1087,37 @@ assert.equal(jobReminderText(allUndoneAheadOfLog), '');
 syncToastReminders();
 assert.equal(toastsContainer.children[0].querySelector('.toast-reminder'), null);
 assert.equal(toastsContainer.children[0]._undoButton, null);
+// 6. Undo confirmed via state.logs first, then job card cleared AND state.logs no longer contains that record:
+//    toast must monotonically retain the narrowed reminder and NEVER revert to the undone agent!
+const jobLogFirst = {
+  id: 'j7', kind: 'assignment', status: 'done', summary: '调整分配',
+  message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+  operations: ['op7a', 'op7b'],
+  new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  operation_new_session_agents: {
+    op7a: [{id: 'fresh-b', name: '新对话工具'}],
+    op7b: [{id: 'fresh-c', name: '扩展工具'}],
+  },
+};
+state.jobs = [jobLogFirst];
+state.logs = [{id: 'op7a', undone: true}, {id: 'op7b', undone: false}];
+toastsContainer.children = [];
+toast({
+  text: '给 新对话工具 加了 1 个、给 扩展工具 加了 1 个',
+  reminder: '新对话工具、扩展工具 需新开对话才会加载新技能',
+  reminderSource: {jobId: 'j7', job: jobLogFirst},
+  undo: () => true,
+});
+syncToastReminders();
+assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
+
+// Clear job card AND drop op7a from state.logs -> toast must stay narrowed to 扩展工具 only!
+state.jobs = [];
+state.logs = [];
+syncToastReminders();
+assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

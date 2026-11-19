@@ -214,15 +214,28 @@ function syncToastReminders() {
     let allUndone = false;
     if (source.jobId) {
       const liveJob = (state.jobs || []).find(entry => entry.id === source.jobId);
+      const prevUndone = source.undoneOps || (source.undoneOps = new Set(source.job?.undone_operations || []));
       if (liveJob) {
-        const mergedUndone = [...new Set([...(source.job?.undone_operations || []), ...(liveJob.undone_operations || [])])];
-        source.job = mergedUndone.length ? {...liveJob, undone_operations: mergedUndone} : liveJob;
+        for (const id of liveJob.undone_operations || []) prevUndone.add(id);
+        source.job = liveJob;
+      }
+      if (source.job) {
+        for (const id of source.job.operations || []) {
+          if (logsById.get(id)?.undone) prevUndone.add(id);
+        }
+        if (prevUndone.size) {
+          source.job = {...source.job, undone_operations: [...prevUndone]};
+        }
       }
       const job = source.job;
       nextReminder = job ? jobReminderText(job) : '';
       allUndone = Boolean(job?.operations?.length) && !jobUndoAvailable(job);
     } else if (source.operationIds?.length) {
-      const active = source.operationIds.filter(id => !logsById.get(id)?.undone);
+      const prevUndone = source.undoneOps || (source.undoneOps = new Set());
+      for (const id of source.operationIds) {
+        if (logsById.get(id)?.undone) prevUndone.add(id);
+      }
+      const active = source.operationIds.filter(id => !prevUndone.has(id));
       allUndone = active.length === 0;
       if (!allUndone) {
         const hasPerOp = active.every(id => Array.isArray(logsById.get(id)?.new_session_agents));
