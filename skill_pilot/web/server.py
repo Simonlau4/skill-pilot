@@ -980,7 +980,7 @@ class Dashboard(ThreadingHTTPServer):
                 self.program_progress.update(phase='idle', available=False, error='', failed_action='', message='还没查到新版信息')
             else:
                 self.program_progress.update(phase='error', available=False, failed_action=action,
-                    error=str(error) if isinstance(error, ValueError) else 'SP 更新没有完成，请检查网络和文件夹权限后重试。',
+                    error=str(error) if isinstance(error, ValueError) else 'Skill Pilot 更新没有完成，原因未知。请稍后重试，或点击「反馈问题」查看诊断。',
                     message='SP 更新没有完成')
         finally:
             if action == 'check':
@@ -1006,6 +1006,13 @@ class Dashboard(ThreadingHTTPServer):
                                                  latest_version=applied or self.program_progress.get('latest_version', ''),
                                                  pending_version='', failed_action='',
                                                  changes=[], changes_total=0, changes_partial=False)
+                else:
+                    refreshed = app_version.read_build()
+                    if refreshed['version'] and refreshed['version'] != self.running_version:
+                        self.running_version = refreshed['version']
+                        app_version.set_running_version(refreshed['version'], date=refreshed['date'])
+                        diagnostics.sync_running_build()
+                        self.program_progress['current_version'] = refreshed['version']
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
                 self.reload_error = ''
@@ -1400,7 +1407,8 @@ class Handler(BaseHTTPRequestHandler):
                 if path.endswith('/submit') and not preview_allowed(self.server.home):
                     self.reply(403, {'error': '只读模式不能发送反馈，请复制或导出诊断信息。'})
                     return
-                pending_version = self.server.program_progress.get('pending_version', '')
+                pending_version = (self.server.program_progress.get('pending_version', '')
+                                   if self.server.program_progress.get('phase') == 'ready' else '')
                 if path.endswith('/bundle'):
                     self.reply(200, diagnostics.bundle(self.server.home, body.get('error_id'), body.get('note', ''),
                                                        prefer_running=True, pending_version=pending_version))
@@ -1538,6 +1546,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(403, {'error': '当前处于只读模式，程序没有改动。' if path.endswith('apply')
                                               else '当前处于只读模式，不能检查或下载新版程序。'})
                     return
+                with self.server.runtime_lock:
+                    if self.server.program_progress['phase'] == 'ready':
+                        self.reply(409, {'error': '新版已安装，请先刷新页面使新版生效，再检查更新。',
+                                         'program': {**self.server.program_progress, 'write_allowed': True}})
+                        return
                 result = self.server.start_program(path.rsplit('/', 1)[1], body.get('target'))
                 self.reply(200, result)
                 return

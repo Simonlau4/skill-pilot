@@ -141,15 +141,18 @@ class VersionFormatAndReadTests(unittest.TestCase):
         expected_local = app_version.read_build(code)['version']
         manifest = code / '.skill-pilot-install.json'
 
-        # Missing fields, bad date, overflow date at subprocess import time (like doctor/dashboard start).
-        for payload in (
-            {},
-            {'date': '2026-99-99'},
-            {'date': '0001-01-01T00:00:00+01:00'},
-            {'date': '0001-01-01T00:00:00+01:00', 'revision': 'e' * 40},
+        # Missing fields, bad date, overflow date, and deeply nested JSON (RecursionError)
+        # must never block import or doctor, and readable files always use full bundle version.
+        deep_nested = '[' * 2000 + ']' * 2000
+        for raw in (
+            json.dumps({}),
+            json.dumps({'date': '2026-99-99'}),
+            json.dumps({'date': '0001-01-01T00:00:00+01:00'}),
+            json.dumps({'date': '0001-01-01T00:00:00+01:00', 'revision': 'e' * 40}),
+            deep_nested,
         ):
-            with self.subTest(payload=payload):
-                manifest.write_text(json.dumps(payload), encoding='utf-8')
+            with self.subTest(raw=raw[:40]):
+                manifest.write_text(raw, encoding='utf-8')
                 result = subprocess.run(
                     [sys.executable, '-B', '-c',
                      'import json; from skill_pilot import diagnostics, version; '
@@ -157,11 +160,36 @@ class VersionFormatAndReadTests(unittest.TestCase):
                     cwd=code, capture_output=True, text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 parsed = json.loads(result.stdout)
-                self.assertEqual(parsed['v'], parsed['d'])
-                if payload.get('revision'):
-                    self.assertEqual(parsed['v'], 'eeeeeee')
-                else:
-                    self.assertEqual(parsed['v'], expected_local)
+                self.assertEqual(parsed['v'], expected_local)
+                self.assertEqual(parsed['d'], expected_local)
+
+        # Deeply nested JSON manifest is still cleanly rejected before self-update with cross-platform guidance.
+        manifest.write_text(deep_nested, encoding='utf-8')
+        with self.assertRaises(ValueError) as caught:
+            self_update.read_record(code)
+        self.assertNotIn('build-app.sh', str(caught.exception))
+        self.assertIn('重新运行一次安装程序', str(caught.exception))
+
+        # Legacy revision/date-only manifest and incomplete manifest (e.g. README.md only)
+        # still compute full release bundle version and detect app.js edits.
+        readme_stamp = self_update.stamp(code / 'README.md')
+        for stale in (
+            {'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'},
+            {'files': {'README.md': readme_stamp}, 'revision': 'a' * 40, 'date': '2026-11-17T00:00:00Z'},
+        ):
+            with self.subTest(stale=sorted(stale)):
+                manifest.write_text(json.dumps(stale), encoding='utf-8')
+                before = app_version.read_build(code)
+                self.assertFalse(before['manifest_valid'])
+                self.assertEqual(before['version'], expected_local)
+                app_js = code / 'skill_pilot/web/static/app.js'
+                original_js = app_js.read_text(encoding='utf-8')
+                try:
+                    app_js.write_text(original_js + '\n// edit under legacy/partial manifest\n', encoding='utf-8')
+                    after = app_version.read_build(code)
+                    self.assertNotEqual(after['version'], before['version'])
+                finally:
+                    app_js.write_text(original_js, encoding='utf-8')
 
         # Manifest file mismatch: tampered file invalidates manifest and recomputes local version.
         self_update.record_installation(code, 'f' * 40, '2026-11-19T00:00:00Z')
@@ -172,9 +200,11 @@ class VersionFormatAndReadTests(unittest.TestCase):
         self.assertEqual(tampered['revision'], '')
         self.assertNotEqual(tampered['version'], expected_local)
 
-        # Unreadable / empty program folder falls back cleanly to empty / 未能读取.
+        # Unreadable / empty program folder falls back cleanly to legacy manifest or empty / 未能读取.
         empty = self.root / 'Empty Folder'
         empty.mkdir()
+        (empty / '.skill-pilot-install.json').write_text(json.dumps({'revision': 'e' * 40, 'date': '2026-11-19'}), encoding='utf-8')
+        self.assertEqual(app_version.read_build(empty)['version'], 'v2026.11.19-eeeeeee')
         (empty / '.skill-pilot-install.json').write_text('not json', encoding='utf-8')
         self.assertEqual(app_version.read_build(empty)['version'], '')
         self.assertEqual(diagnostics.installed_build(empty)['app_version'], '未能读取')
@@ -212,15 +242,27 @@ class VersionFormatAndReadTests(unittest.TestCase):
                 phase='ready', message='新版已安装，刷新后生效',
                 current_version=running, latest_version='v1.0.0-9999999', pending_version='v1.0.0-9999999')
             with patch.object(self_update, 'check') as check_mock:
-                # Online or offline manual check from stale page must be rejected without clearing ready.
+                # Online or offline manual check from stale page must be rejected with ready payload intact.
                 status, body = self.post(dashboard, '/api/program/check', {})
                 self.assertEqual(status, 409)
                 self.assertIn('先刷新页面', body['error'])
+                self.assertEqual(body['program']['phase'], 'ready')
+                self.assertEqual(body['program']['current_version'], running)
+                self.assertEqual(body['program']['pending_version'], 'v1.0.0-9999999')
                 check_mock.assert_not_called()
                 progress = self.post(dashboard, '/api/program/progress')[1]
                 self.assertEqual(progress['phase'], 'ready')
                 self.assertEqual(progress['current_version'], running)
                 self.assertEqual(progress['pending_version'], 'v1.0.0-9999999')
+
+            # Unknown unexpected failure in program_work states unknown cause without guessing network/permissions.
+            dashboard.program_progress.update(phase='idle', pending_version='')
+            with patch.object(self_update, 'check', side_effect=RuntimeError('unexpected fault')):
+                dashboard.program_work('check', automatic=False)
+            self.assertEqual(dashboard.program_progress['phase'], 'error')
+            self.assertIn('原因未知', dashboard.program_progress['error'])
+            self.assertNotIn('网络和文件夹权限', dashboard.program_progress['error'])
+            self.assertTrue(dashboard.program_progress['error_id'])
 
             # Read-only mode must block /api/program/check at the server before any temp dir or git fetch.
             dashboard.program_progress.update(phase='idle', pending_version='')
@@ -252,6 +294,21 @@ class VersionFormatAndReadTests(unittest.TestCase):
             log = self.home / '.skill-pilot/logs/errors.jsonl'
             with log.open('a', encoding='utf-8') as stream:
                 stream.write(json.dumps(legacy_row, ensure_ascii=False) + '\n')
+
+            # Ordinary disk change or mid-upgrade (not in ready phase) must NOT report pending_app_version.
+            for phase in ('idle', 'apply'):
+                with self.subTest(phase=phase), patch.object(
+                        diagnostics, 'installed_build', return_value={'install_mode': '源码', 'app_version': pending}):
+                    dashboard.program_progress.update(phase=phase, pending_version='')
+                    status, bundled = self.post(dashboard, '/api/diagnostics/bundle', {})
+                    self.assertEqual(status, 200)
+                    self.assertEqual(bundled['report']['environment']['app_version'], running)
+                    self.assertNotIn('pending_app_version', bundled['report']['environment'])
+                    status, manual = self.post(dashboard, '/api/diagnostics/preview', {'error_id': '', 'note': ''})
+                    self.assertEqual(status, 200)
+                    self.assertEqual(manual['payload']['app_version'], running)
+                    self.assertNotIn('pending_app_version', manual)
+                    self.assertEqual(manual['payload']['detail'], '')
 
             dashboard.program_progress.update(
                 phase='ready', message='新版已安装，刷新后生效',
@@ -291,7 +348,21 @@ class VersionFormatAndReadTests(unittest.TestCase):
             self.assertEqual(old_feedback['app_version'], running)
             self.assertEqual(new_feedback['app_version'], pending)
 
-    def test_stale_page_check_during_ready_recovers_ready_state_in_frontend(self):
+            # Ordinary (non-ready) static-only refresh (e.g. app.js changed on disk) also syncs running version.
+            static_next = 'v1.0.0-7777777'
+            with patch.object(runtime, 'version', return_value=dashboard.code_version), \
+                    patch.object(app_version, 'read_build', return_value={
+                        'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                        'manifest_valid': True, 'version': static_next}):
+                dashboard.request_reload()
+            self.assertEqual(dashboard.program_progress['current_version'], static_next)
+            self.assertEqual(diagnostics.RUNNING_BUILD['app_version'], static_next)
+            after_static_row = diagnostics.record(self.home, 'backend', '普通静态刷新后', RuntimeError('static'))
+            self.assertEqual(after_static_row['environment']['app_version'], static_next)
+            self.assertEqual(feedback.envelope(diagnostics.bundle(self.home, after_row['error_id'])['report'])['app_version'], pending)
+            self.assertEqual(feedback.envelope(diagnostics.bundle(self.home, after_static_row['error_id'])['report'])['app_version'], static_next)
+
+    def test_stale_page_check_during_ready_recovers_directly_from_409_payload_even_if_progress_fails(self):
         source = (store.PROJECT / 'skill_pilot/web/static/app.js').read_text(encoding='utf-8')
         fn = extract_function(source, 'async function programAction(')
         script = r'''
@@ -303,12 +374,13 @@ const programText = s => s;
 let renders = 0;
 const renderProgram = () => { renders++; };
 const api = async (path) => {
-  if (path === '/api/program/check') throw new Error('新版已安装，请先刷新页面使新版生效，再检查更新。');
-  if (path === '/api/program/progress') {
-    return {running: false, phase: 'ready', available: false, write_allowed: true,
-            current_version: 'v1.0.0-1111111', pending_version: 'v1.0.0-2222222', latest_version: 'v1.0.0-2222222'};
+  if (path === '/api/program/check') {
+    const error = new Error('新版已安装，请先刷新页面使新版生效，再检查更新。');
+    error.program = {running: false, phase: 'ready', available: false, write_allowed: true,
+      current_version: 'v1.0.0-1111111', pending_version: 'v1.0.0-2222222', latest_version: 'v1.0.0-2222222'};
+    throw error;
   }
-  throw new Error('unexpected ' + path);
+  throw new Error('follow-up progress should not be required and fails offline');
 };
 ''' + fn + r'''
 (async () => {

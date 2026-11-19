@@ -103,6 +103,7 @@ async function api(path, body, extra) {
     error.retry = Boolean(result && result.retry);
     error.recheck = Boolean(result && result.recheck);
     error.blocked = Boolean(result && result.blocked);
+    if (result && result.program) error.program = result.program;
     throw error;
   }
   return result;
@@ -3006,6 +3007,10 @@ async function programAction(action, button = $('program-apply')) {
         action === 'apply' ? {target: programUpdate.target, confirmed: true} : {});
       programUpdate = {...programUpdate, ...result};
     } catch (error) {
+      if (error.program && error.program.phase === 'ready') {
+        programUpdate = {...programUpdate, ...error.program};
+        return programUpdate;
+      }
       if (action === 'check') {
         const latest = await api('/api/program/progress').catch(() => null);
         if (latest && latest.phase === 'ready') {

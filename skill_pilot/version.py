@@ -20,6 +20,7 @@ APP_VERSION = '1.0.0'
 RECORD = '.skill-pilot-install.json'
 BUNDLE_DIRS = ('skill_pilot', 'scripts', 'assets', 'docs', 'skill', 'tests', '.github')
 ROOT_FILES = ('.gitignore', '.gitattributes', '.claude/launch.json', 'skill-pilot')
+REQUIRED_FILES = ('skill_pilot/cli.py', 'skill_pilot/web/server.py', 'skill_pilot/web/static/app.js')
 HEX_RE = re.compile(r'^[0-9a-fA-F]{7,64}$')
 SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
@@ -100,6 +101,19 @@ def _verify_manifest_files(project, manifest):
     files = manifest.get('files')
     if not isinstance(files, dict) or not files:
         return 'invalid'
+    if not all(name in files for name in REQUIRED_FILES):
+        return 'invalid'
+    package = project / 'skill_pilot'
+    if package.is_dir() and not package.is_symlink():
+        try:
+            for path in package.rglob('*'):
+                if ('__pycache__' in path.parts or path.name == '.DS_Store'
+                        or path.suffix == '.pyc' or not path.is_file()):
+                    continue
+                if path.relative_to(project).as_posix() not in files:
+                    return 'invalid'
+        except OSError:
+            return 'invalid'
     for name, expected in files.items():
         if (not isinstance(expected, list) or len(expected) != 2
                 or not isinstance(expected[0], str) or not SHA256_RE.fullmatch(expected[0])
@@ -221,7 +235,7 @@ def _read_manifest(project):
     try:
         data = json.loads((Path(project) / RECORD).read_text(encoding='utf-8'))
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
 
 
@@ -263,20 +277,22 @@ def read_build(project=PROJECT, *, file_names=None):
     revision = revision.strip().lower() if short_id(revision) else ''
     date = date.strip() if format_date(date) else ''
 
-    # Preserve compatibility with legacy manifests that omit `files` (revision/date only).
-    if not checkout and file_names is None and files_state == 'absent' and (revision or date):
+    if file_names is not None:
+        names = file_names
+    elif checkout:
+        tracked = _git_tracked_paths(project)
+        names = [rel for rel, _ in tracked] if tracked is not None else (
+            sorted(manifest['files']) if files_state == 'valid' else None)
+    else:
+        names = sorted(manifest['files']) if files_state == 'valid' else None
+    digest = bundle_fingerprint(project, file_names=names)
+    if digest:
+        display = format_version(fallback_digest=digest, base_version=read_app_version(project))
+    elif not checkout and file_names is None and files_state == 'absent' and (revision or date):
+        # Legacy manifest fallback only when actual program files cannot be read.
         display = format_version(date, revision)
     else:
-        if file_names is not None:
-            names = file_names
-        elif checkout:
-            tracked = _git_tracked_paths(project)
-            names = [rel for rel, _ in tracked] if tracked is not None else (
-                sorted(manifest['files']) if files_state == 'valid' else None)
-        else:
-            names = sorted(manifest['files']) if files_state == 'valid' else None
-        digest = bundle_fingerprint(project, file_names=names)
-        display = format_version(fallback_digest=digest, base_version=read_app_version(project)) if digest else ''
+        display = ''
 
     return {
         'install_mode': '源码' if checkout else '压缩包',

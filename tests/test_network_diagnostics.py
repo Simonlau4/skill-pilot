@@ -147,40 +147,37 @@ class NetworkDiagnosticsTests(unittest.TestCase):
                 self.assertIn('证书与服务地址不匹配', payload['detail'])
 
     def test_loaded_version_survives_installation_change_until_process_restart(self):
-        cases = [
-            ({'revision': 'a' * 40, 'date': '2026-11-17T08:00:00+08:00'},
-             {'revision': 'b' * 40, 'date': '2026-11-19T08:00:00+08:00'},
-             'v2026.11.17-aaaaaaa', 'v2026.11.19-bbbbbbb'),
-            ({'revision': 'a' * 40}, {'revision': 'b' * 40}, 'aaaaaaa', 'bbbbbbb'),
-        ]
-        for index, (before_manifest, after_manifest, before_label, after_label) in enumerate(cases):
-            with self.subTest(before=before_label, after=after_label):
-                code = self.root / f'separate program {index}'
-                shutil.copytree(diagnostics.PROJECT / 'skill_pilot', code / 'skill_pilot')
-                manifest = code / '.skill-pilot-install.json'
-                manifest.write_text(json.dumps(before_manifest))
-                script = f'''
+        code = self.root / 'separate program'
+        shutil.copytree(diagnostics.PROJECT / 'skill_pilot', code / 'skill_pilot',
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        script = '''
 import json
 from pathlib import Path
-from skill_pilot import diagnostics, feedback
+from skill_pilot import diagnostics, feedback, version
 home = Path(__import__('os').environ['SKILL_PILOT_HOME'])
-Path('.skill-pilot-install.json').write_text({json.dumps(json.dumps(after_manifest))})
+before = version.RUNNING_BUILD['version']
+app_js = Path('skill_pilot/web/static/app.js')
+app_js.write_text(app_js.read_text(encoding='utf-8') + '\\n// disk upgrade\\n', encoding='utf-8')
 row = diagnostics.record(home, 'backend', 'fixture', RuntimeError('fixture'))
 report = diagnostics.bundle(home, row['error_id'])['report']
-print(json.dumps({{'row': row, 'current': report['environment'], 'payload': feedback.envelope(report)}}))
+print(json.dumps({'before': before, 'row': row, 'current': report['environment'], 'payload': feedback.envelope(report)}))
 '''
-                result = subprocess.run([sys.executable, '-B', '-c', script], cwd=code,
-                                        capture_output=True, text=True, timeout=30)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                data = json.loads(result.stdout)
-                self.assertEqual(data['row']['environment']['app_version'], before_label)
-                self.assertEqual(data['payload']['app_version'], before_label)
-                self.assertEqual(data['current']['app_version'], after_label)
-                restarted = subprocess.run([sys.executable, '-B', '-c',
-                    'from skill_pilot.diagnostics import RUNNING_BUILD; print(RUNNING_BUILD["app_version"])'],
-                    cwd=code, capture_output=True, text=True, timeout=30)
-                self.assertEqual(restarted.returncode, 0, restarted.stderr)
-                self.assertEqual(restarted.stdout.strip(), after_label)
+        result = subprocess.run([sys.executable, '-B', '-c', script], cwd=code,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        before_label = data['before']
+        after_label = data['current']['app_version']
+        self.assertRegex(before_label, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
+        self.assertRegex(after_label, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
+        self.assertNotEqual(before_label, after_label)
+        self.assertEqual(data['row']['environment']['app_version'], before_label)
+        self.assertEqual(data['payload']['app_version'], before_label)
+        restarted = subprocess.run([sys.executable, '-B', '-c',
+            'from skill_pilot.diagnostics import RUNNING_BUILD; print(RUNNING_BUILD["app_version"])'],
+            cwd=code, capture_output=True, text=True, timeout=30)
+        self.assertEqual(restarted.returncode, 0, restarted.stderr)
+        self.assertEqual(restarted.stdout.strip(), after_label)
 
     def test_certificate_reasons_and_missing_local_trust_locations_are_visible(self):
         from types import SimpleNamespace

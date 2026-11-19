@@ -155,8 +155,8 @@ def read_record(project):
         for name in data['files']:
             safe_path(project, name)
         return data
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        raise ValueError('请先在 SP 项目文件夹运行一次 sh scripts/build-app.sh，再回来看板升级。') from error
+    except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:
+        raise ValueError('缺少安装记录，请按安装说明在项目文件夹重新运行一次安装程序，再回来看板升级。') from error
 
 
 def record_installation(project=PROJECT, revision='', date='', files=None):

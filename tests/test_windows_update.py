@@ -240,6 +240,93 @@ server.run(True)
         process.terminate()
         process.wait(timeout=10)
 
+    def test_single_dashboard_upgrade_ready_and_refresh_versions(self):
+        self.install_entries()
+        log = self.area / 'upgrade-process.log'
+        errors = self.area / 'upgrade-errors.log'
+        code = f'''import webbrowser
+webbrowser.open = lambda *a, **k: True
+from skill_pilot import self_update
+self_update.SOURCE = {self.official.as_uri()!r}
+from skill_pilot.web import server
+server.run(True)
+'''
+        env = {**os.environ, 'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '0'}
+        with log.open('w', encoding='utf-8') as output, errors.open('w', encoding='utf-8') as error:
+            process = subprocess.Popen([sys.executable, '-X', 'utf8', '-B', '-u', '-c', code],
+                                       cwd=self.project, env=env, stdout=output, stderr=error,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        for _ in range(200):
+            if log.read_text(encoding='utf-8').strip():
+                break
+            self.assertIsNone(process.poll(), errors.read_text(encoding='utf-8'))
+            time.sleep(.05)
+        launch = json.loads(log.read_text(encoding='utf-8').splitlines()[0])
+        url = urllib.parse.urlsplit(launch['url'])
+        origin = f'{url.scheme}://{url.netloc}'
+        token = urllib.parse.parse_qs(url.query)['token'][0]
+        def request(path, body=None):
+            headers = {'X-Skill-Pilot-Token': token, 'Origin': origin, 'Content-Type': 'application/json'}
+            req = urllib.request.Request(origin + path, data=json.dumps(body).encode() if body is not None else None, headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as response:
+                return json.load(response)
+        def wait_progress(predicate):
+            for _ in range(200):
+                self.assertIsNone(process.poll(), errors.read_text(encoding='utf-8'))
+                try:
+                    data = request('/api/program/progress')
+                    if predicate(data):
+                        return data
+                except OSError:
+                    pass
+                time.sleep(.05)
+            self.fail('Windows dashboard progress did not reach expected state: ' + errors.read_text(encoding='utf-8'))
+
+        initial = wait_progress(lambda p: not p['running'])
+        before_version = initial['current_version']
+        self.assertRegex(before_version, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
+        self.assertEqual(initial['pending_version'], '')
+
+        path = self.official / 'skill_pilot/web/server.py'
+        content = path.read_text(encoding='utf-8')
+        needle = "'version': self.server.code_version,"
+        self.assertIn(needle, content)
+        path.write_text(content.replace(needle, "'windows_upgrade_reloaded': True, " + needle), encoding='utf-8')
+        self.commit('windows single-dashboard release')
+
+        request('/api/program/check', {})
+        available = wait_progress(lambda p: not p['running'] and p['phase'] == 'available')
+        self.assertEqual(available['current_version'], before_version)
+        after_version = available['latest_version']
+        self.assertRegex(after_version, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
+        self.assertNotEqual(after_version, before_version)
+
+        request('/api/program/apply', {'confirmed': True, 'target': available['target']})
+        ready = wait_progress(lambda p: not p['running'] and p['phase'] == 'ready')
+        self.assertEqual(ready['message'], '新版已安装，刷新后生效')
+        self.assertEqual(ready['current_version'], before_version)
+        self.assertEqual(ready['pending_version'], after_version)
+        self.assertEqual(ready['latest_version'], after_version)
+
+        self.assertTrue(request('/api/runtime/refresh', {})['changed'])
+        for _ in range(200):
+            self.assertIsNone(process.poll(), errors.read_text(encoding='utf-8'))
+            try:
+                if request('/api/status').get('windows_upgrade_reloaded'):
+                    break
+            except OSError:
+                pass
+            time.sleep(.05)
+        else:
+            self.fail('Windows upgrade refresh did not reload: ' + errors.read_text(encoding='utf-8'))
+        final = wait_progress(lambda p: not p['running'] and p['phase'] == 'latest')
+        self.assertEqual(final['current_version'], after_version)
+        self.assertEqual(final['latest_version'], after_version)
+        self.assertEqual(final['pending_version'], '')
+        process.terminate()
+        process.wait(timeout=10)
+
 
 if __name__ == '__main__':
     unittest.main()

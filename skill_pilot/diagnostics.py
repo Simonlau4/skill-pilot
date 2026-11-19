@@ -86,7 +86,7 @@ def read_json(path):
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
 
 
@@ -313,8 +313,6 @@ def environment(home, project=PROJECT, *, runtime_only=False, prefer_running=Fal
     disk = installed_build(project)
     build = running if prefer_running else disk
     pending = pending_version.strip() if isinstance(pending_version, str) else ''
-    if prefer_running and not pending and disk['app_version'] not in {'', '未能读取', running['app_version']}:
-        pending = disk['app_version']
     runtime = {'os': os_version, 'architecture': platform.machine(),
                'python_version': platform.python_version(), **build,
                **({'pending_app_version': pending} if pending and pending != build['app_version'] else {})}
