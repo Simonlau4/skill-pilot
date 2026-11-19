@@ -174,6 +174,7 @@ class Dashboard(ThreadingHTTPServer):
         self.program_progress.setdefault('current_version', self.running_version)
         self.program_progress.setdefault('latest_version', '')
         self.program_progress.setdefault('pending_version', '')
+        self.program_progress.setdefault('failed_action', '')
         try:
             operations.sync_bundled_skill(self.home)
         except Exception as error:
@@ -186,7 +187,7 @@ class Dashboard(ThreadingHTTPServer):
             self.program_progress.update(phase='latest', message='SP 已升级到最新版',
                                          current_version=new_version,
                                          latest_version=new_version or self.program_progress.get('latest_version', ''),
-                                         pending_version='',
+                                         pending_version='', failed_action='',
                                          changes=[], changes_total=0, changes_partial=False)
         elif resume and self.running_version:
             self.program_progress['current_version'] = self.running_version
@@ -905,10 +906,15 @@ class Dashboard(ThreadingHTTPServer):
         with self.runtime_lock:
             if self.program_progress['running']:
                 return self.program_progress.copy()
+            if self.program_progress['phase'] == 'ready':
+                if automatic:
+                    return self.program_progress.copy()
+                raise ValueError('新版已安装，请先刷新页面使新版生效，再检查更新。')
             if action == 'apply' and (not self.program_review or target != self.program_review['target'] or
                                       not self.program_review['available']):
                 raise ValueError('请先检查 SP 更新，再升级。')
             self.program_progress.update(running=True, phase=action, error='', error_id='', automatic=automatic,
+                failed_action='',
                 message='正在下载并检查新版…' if action == 'check' else '正在升级，等当前操作完成…')
             self.program_thread = threading.Thread(target=self.program_work, args=(action, automatic), daemon=True)
             self.program_thread.start()
@@ -930,6 +936,7 @@ class Dashboard(ThreadingHTTPServer):
                 self.program_progress.update(phase='available' if review['available'] else 'latest',
                     target=review['target'], available=review['available'], current=review['current'], latest=review['latest'],
                     current_version=current_version, latest_version=latest_version, pending_version='',
+                    failed_action='',
                     changes=review.get('changes', []) if review['available'] else [],
                     changes_total=review.get('changes_total', 0) if review['available'] else 0,
                     changes_partial=review.get('changes_partial', False) if review['available'] else False,
@@ -956,20 +963,23 @@ class Dashboard(ThreadingHTTPServer):
                                    or self.program_progress.get('latest_version')
                                    or app_version.format_version(result.get('latest', self.program_review.get('latest', '')),
                                                                  self.program_review.get('target', '')))
-                self.program_progress.update(result, phase='ready', message='新版已装好，刷新后生效',
+                self.program_progress.update(result, phase='ready', message='新版已安装，刷新后生效',
                                              current_version=self.running_version,
                                              latest_version=pending_version,
                                              pending_version=pending_version,
+                                             failed_action='',
                                              changes=[], changes_total=0, changes_partial=False)
         except Exception as error:
             self.program_progress.update(changes=[], changes_total=0, changes_partial=False, pending_version='')
+            if action == 'check':
+                self.program_progress['latest_version'] = ''
             captured = self_update.record_failure(self.home, action, error) or {}
             if captured:
                 self.program_progress['error_id'] = captured['error_id']
             if automatic:
-                self.program_progress.update(phase='idle', available=False, error='', message='还没查到新版信息')
+                self.program_progress.update(phase='idle', available=False, error='', failed_action='', message='还没查到新版信息')
             else:
-                self.program_progress.update(phase='error', available=False,
+                self.program_progress.update(phase='error', available=False, failed_action=action,
                     error=str(error) if isinstance(error, ValueError) else 'SP 更新没有完成，请检查网络和文件夹权限后重试。',
                     message='SP 更新没有完成')
         finally:
@@ -989,10 +999,12 @@ class Dashboard(ThreadingHTTPServer):
                                or app_version.read_build().get('version', '')
                                or self.running_version)
                     self.running_version = applied
+                    app_version.set_running_version(applied, date=self.program_progress.get('latest', ''))
+                    diagnostics.sync_running_build()
                     self.program_progress.update(phase='latest', message='SP 已升级到最新版',
                                                  current_version=applied,
                                                  latest_version=applied or self.program_progress.get('latest_version', ''),
-                                                 pending_version='',
+                                                 pending_version='', failed_action='',
                                                  changes=[], changes_total=0, changes_partial=False)
             if changed and self.reload_callback and not self.reload_pending:
                 self.reload_pending = True
@@ -1388,10 +1400,13 @@ class Handler(BaseHTTPRequestHandler):
                 if path.endswith('/submit') and not preview_allowed(self.server.home):
                     self.reply(403, {'error': '只读模式不能发送反馈，请复制或导出诊断信息。'})
                     return
+                pending_version = self.server.program_progress.get('pending_version', '')
                 if path.endswith('/bundle'):
-                    self.reply(200, diagnostics.bundle(self.server.home, body.get('error_id'), body.get('note', '')))
+                    self.reply(200, diagnostics.bundle(self.server.home, body.get('error_id'), body.get('note', ''),
+                                                       prefer_running=True, pending_version=pending_version))
                 elif path.endswith('/preview'):
-                    prepared = team.feedback_preview(self.server.home, body.get('error_id', ''), body.get('note', ''))
+                    prepared = team.feedback_preview(self.server.home, body.get('error_id', ''), body.get('note', ''),
+                                                     prefer_running=True, pending_version=pending_version)
                     ticket = secrets.token_urlsafe(24)
                     with self.server.feedback_lock:
                         self.server.feedback_previews = {k: v for k, v in self.server.feedback_previews.items()
@@ -1516,13 +1531,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, {**self.server.auto_check_program(), 'write_allowed': preview_allowed(self.server.home)})
                 return
             if path in program_routes:
-                if path.endswith('apply'):
-                    if body.get('confirmed') is not True:
-                        self.reply(400, {'error': '请点击“一键升级”确认这次升级。'})
-                        return
-                    if not preview_allowed(self.server.home):
-                        self.reply(403, {'error': '当前处于只读模式，程序没有改动。'})
-                        return
+                if path.endswith('apply') and body.get('confirmed') is not True:
+                    self.reply(400, {'error': '请点击“一键升级”确认这次升级。'})
+                    return
+                if not preview_allowed(self.server.home):
+                    self.reply(403, {'error': '当前处于只读模式，程序没有改动。' if path.endswith('apply')
+                                              else '当前处于只读模式，不能检查或下载新版程序。'})
+                    return
                 result = self.server.start_program(path.rsplit('/', 1)[1], body.get('target'))
                 self.reply(200, result)
                 return

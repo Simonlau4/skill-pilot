@@ -552,10 +552,7 @@ class SelfUpdateProcessTests(unittest.TestCase):
         initial_version = started_progress['current_version']
         self.assertTrue(initial_version, started_progress)
         self.assertEqual(started_progress['pending_version'], '')
-        if checkout:
-            self.assertRegex(initial_version, r'^v\d{4}\.\d{2}\.\d{2}-[0-9a-f]{7}$')
-        else:
-            self.assertRegex(initial_version, r'^初始版-[0-9a-f]{7}$')
+        self.assertRegex(initial_version, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
         def saved_configuration():
             return {p.name: store.physical_state(p) for p in (self.home / '.skill-pilot').iterdir()
                     if p.name != 'agent-discovery.json' and not p.name.startswith('.agent-discovery-')}
@@ -567,11 +564,13 @@ class SelfUpdateProcessTests(unittest.TestCase):
         self.assertEqual(progress['target'], target)
         self.assertEqual(progress['current_version'], initial_version)
         expected_new = progress['latest_version']
-        self.assertRegex(expected_new, r'^v\d{4}\.\d{2}\.\d{2}-' + target[:7] + '$')
+        self.assertRegex(expected_new, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
+        self.assertNotEqual(expected_new, initial_version)
         self.assertEqual(progress['pending_version'], '')
         request('/api/program/apply', {'confirmed': True, 'target': target})
         progress = until('/api/program/progress', lambda p: not p['running'])
         self.assertEqual(progress['phase'], 'ready', progress)
+        self.assertEqual(progress['message'], '新版已安装，刷新后生效')
         self.assertEqual(progress['current_version'], initial_version)
         self.assertEqual(progress['pending_version'], expected_new)
         self.assertEqual(progress['latest_version'], expected_new)

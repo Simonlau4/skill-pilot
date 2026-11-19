@@ -101,6 +101,13 @@ RUNNING_BUILD = {'install_mode': app_version.RUNNING_BUILD['install_mode'],
                  'app_version': app_version.RUNNING_BUILD['version'] or '未能读取'}
 
 
+def sync_running_build():
+    current = app_version.running_build()
+    RUNNING_BUILD['install_mode'] = current['install_mode']
+    RUNNING_BUILD['app_version'] = current['version'] or '未能读取'
+    return dict(RUNNING_BUILD)
+
+
 def sanitize(value, home, limit=6000, *, extra_secrets=()):
     """Redact before truncating, including configured secrets without a prefix."""
     text = str(value)
@@ -296,14 +303,21 @@ def failure(home, source, action, error, message='操作没有完成，请重试
     return {'error_id': row['error_id']} if row else {}
 
 
-def environment(home, project=PROJECT, *, runtime_only=False):
+def environment(home, project=PROJECT, *, runtime_only=False, prefer_running=False, pending_version=''):
     os_version = ('macOS ' + platform.mac_ver()[0] if platform.system() == 'Darwin'
                   else platform.system() + ' ' + platform.release())
-    runtime = {'os': os_version, 'architecture': platform.machine(),
-               'python_version': platform.python_version(),
-               **(RUNNING_BUILD if runtime_only else installed_build(project))}
+    running = sync_running_build()
     if runtime_only:
-        return runtime
+        return {'os': os_version, 'architecture': platform.machine(),
+                'python_version': platform.python_version(), **running}
+    disk = installed_build(project)
+    build = running if prefer_running else disk
+    pending = pending_version.strip() if isinstance(pending_version, str) else ''
+    if prefer_running and not pending and disk['app_version'] not in {'', '未能读取', running['app_version']}:
+        pending = disk['app_version']
+    runtime = {'os': os_version, 'architecture': platform.machine(),
+               'python_version': platform.python_version(), **build,
+               **({'pending_app_version': pending} if pending and pending != build['app_version'] else {})}
     from .environment import tool_environment
     from .profiles import PROFILES, ADDITIONAL_PROFILES
     home, project = Path(home), Path(project)
@@ -344,13 +358,15 @@ def environment(home, project=PROJECT, *, runtime_only=False):
             'team_connected': bool(team.get('url') and team.get('key'))}
 
 
-def bundle(home=None, error_id=None, note=''):
+def bundle(home=None, error_id=None, note='', *, prefer_running=False, pending_version=''):
     home = Path(home or target_home())
     rows = recent(home)
     if error_id:
         rows = [row for row in rows if row['error_id'] == error_id]
         if not rows:
             raise ValueError('这条错误记录已不在本机，请重新选择或导出当前诊断。')
-    report = {'environment': environment(home), 'environment_captured_at': datetime.now(timezone.utc).isoformat(),
+    env_kwargs = {'prefer_running': prefer_running, 'pending_version': pending_version} if (prefer_running or pending_version) else {}
+    report = {'environment': environment(home, **env_kwargs),
+              'environment_captured_at': datetime.now(timezone.utc).isoformat(),
               'errors': rows[:20], 'note': sanitize(note, home, 1500)}
     return {'report': report, 'text': json.dumps(report, ensure_ascii=False, indent=2)}

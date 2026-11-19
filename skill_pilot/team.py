@@ -198,15 +198,18 @@ def status(home, config=None, strict=True):
     return result
 
 
-def feedback_preview(home, error_id='', note=''):
-    report = diagnostics.bundle(home, error_id, note)['report']
+def feedback_preview(home, error_id='', note='', *, prefer_running=False, pending_version=''):
+    report = diagnostics.bundle(home, error_id, note, prefer_running=prefer_running,
+                                pending_version=pending_version)['report']
     if not error_id:
         report['errors'] = []  # A manual report must not silently include unrelated past failures.
     payload = feedback.envelope(report)
     if not error_id:
         import uuid
         payload.update(error_id=uuid.uuid4().hex, fingerprint='manual')
-    result = {'payload': payload, 'member': None, 'can_send': False, 'reason': '', 'submitted': False}
+    pending = report['environment'].get('pending_app_version', '')
+    result = {'payload': payload, 'member': None, 'can_send': False, 'reason': '', 'submitted': False,
+              **({'pending_app_version': pending} if pending and pending != payload.get('app_version', '') else {})}
     config = {}
     try:
         config = settings(home)

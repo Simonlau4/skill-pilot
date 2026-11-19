@@ -15,7 +15,7 @@ from .environment import tool_environment
 from .platform_support import rmtree
 from .sources.github import git as repository_git
 from .store import PROJECT, guard, write_allowed
-from .version import code_fingerprint, format_version
+from .version import format_version, read_build
 
 SOURCE = 'https://github.com/Simonlau4/skill-pilot.git'
 BRANCH = 'main'
@@ -200,12 +200,11 @@ def check(home, project=PROJECT):
     if len(remote) != 2 or len(remote[0]) != 40 or any(c not in '0123456789abcdef' for c in remote[0]):
         raise ValueError('没能读取 SP 的最新版本，请检查网络后重试。')
     target = remote[0]
-    current_version = format_version(before.get('date', ''), before.get('revision', '')) or format_version(
-        fallback_digest=code_fingerprint(project))
-    same_version = format_version(before.get('date', ''), target)
+    current_version = read_build(project, file_names=sorted(before['files']))['version'] or format_version(
+        before.get('date', ''), before.get('revision', ''))
     review = {'before': before, 'target': target, 'current': before.get('date', ''),
               'latest': before.get('date', ''), 'current_version': current_version,
-              'latest_version': same_version, 'available': False, 'temporary': '',
+              'latest_version': current_version, 'available': False, 'temporary': '',
               'changes': [], 'changes_total': 0, 'changes_partial': False}
     if target == before.get('revision'):
         return review
@@ -249,7 +248,7 @@ def check(home, project=PROJECT):
                 # Release notes are optional; a missing title must not block an upgrade.
                 pass
         latest_date = git(candidate, 'show', '-s', '--format=%cI', target)
-        latest_version = format_version(latest_date, target)
+        latest_version = read_build(candidate, file_names=sorted(files))['version'] or format_version(latest_date, target)
         return {**review, 'temporary': str(temporary), 'candidate': str(candidate), 'files': files,
                 'latest': latest_date, 'latest_version': latest_version,
                 'available': available, 'changes': changes[:10], 'changes_total': len(changes),

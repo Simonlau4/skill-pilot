@@ -2842,7 +2842,7 @@ function programPopupPhase() {
   if (!programUpdate.write_allowed) return '';
   if (programUpdate.phase === 'ready') return 'ready';
   if (programUpdate.running && programUpdate.phase === 'apply') return 'apply';
-  if (programUpdate.phase === 'error' && programFailedAction === 'apply') return 'error';
+  if (programUpdate.phase === 'error' && (programFailedAction === 'apply' || programUpdate.failed_action === 'apply')) return 'error';
   return programUpdate.available && !programUpdate.running ? 'available' : '';
 }
 
@@ -2874,6 +2874,9 @@ function renderProgramPopup() {
   const versionLine = ready
     ? (current && pending ? `当前运行 ${current} → 待刷新生效 ${pending}`
       : pending ? `待刷新生效 ${pending}` : current ? `当前运行 ${current}` : '')
+    : failed
+      ? (current && latest ? `当前 ${current} · 本次尝试升级至 ${latest}`
+        : latest ? `本次尝试升级至 ${latest}` : current ? `当前 ${current}` : '')
     : (current && latest ? `当前 ${current} → 新版 ${latest}`
       : latest ? `新版 ${latest}` : current ? `当前 ${current}` : '');
   const versionHtml = versionLine ? `<p class="muted program-popup-version">${escape(versionLine)}</p>` : '';
@@ -2907,10 +2910,14 @@ function dismissProgramPopup() {
 
 function renderProgram() {
   const progress = programUpdate;
+  const readOnly = progress.write_allowed === false;
+  const applyFailed = progress.phase === 'error' && (programFailedAction === 'apply' || progress.failed_action === 'apply');
   const current = programVersionLabel(progress.current_version, progress.current);
   const latest = programVersionLabel(progress.latest_version, progress.latest);
   const pending = programVersionLabel(progress.pending_version || progress.latest_version, progress.latest);
-  const message = (progress.message || '从 Skill Pilot 官方项目获取新版').replace(/\bSP\b/g, 'Skill Pilot');
+  const message = (readOnly && !progress.error
+    ? '当前处于只读预览模式，可查看当前版本，暂不能检查或升级程序。'
+    : (progress.message || '从 Skill Pilot 官方项目获取新版')).replace(/\bSP\b/g, 'Skill Pilot');
   const parts = [];
   if (progress.phase === 'ready') {
     if (current) parts.push(`当前运行：${current}`);
@@ -2918,26 +2925,30 @@ function renderProgram() {
   } else if (progress.phase === 'apply' && progress.running) {
     if (current) parts.push(`当前运行：${current}`);
     if (latest) parts.push(`正在升级至：${latest}`);
-  } else if (progress.available) {
+  } else if (applyFailed) {
+    if (current) parts.push(`当前版本：${current}`);
+    if (latest) parts.push(`本次尝试升级至：${latest}`);
+  } else if (progress.available && !readOnly) {
     if (current) parts.push(`当前版本：${current}`);
     if (latest) parts.push(`最新版本：${latest}`);
   } else {
     if (current) parts.push(`当前版本：${current}`);
-    if (progress.phase === 'latest' && latest && latest !== current) parts.push(`最新版本：${latest}`);
+    if (!readOnly && progress.phase === 'latest' && latest && latest !== current) parts.push(`最新版本：${latest}`);
   }
+  if (!parts.length && progress.write_allowed !== undefined) parts.push('当前版本：暂未读到版本');
   $('program-version').hidden = !parts.length;
   $('program-version').textContent = parts.join(' · ');
   $('program-message').textContent = message;
   $('program-error').textContent = programText(progress.error || '');
-  $('program-changes').hidden = !progress.available;
-  $('program-changes').innerHTML = progress.available ? programChangesHtml(progress) : '';
+  $('program-changes').hidden = !progress.available || readOnly;
+  $('program-changes').innerHTML = progress.available && !readOnly ? programChangesHtml(progress) : '';
   $('program-error').hidden = !progress.error;
   if (progress.error) appendFeedback($('program-error'), progress.error_id);
-  $('program-check').disabled = progress.running || Boolean(writeBusy);
+  $('program-check').disabled = progress.running || Boolean(writeBusy) || progress.phase === 'ready' || readOnly;
   $('program-check').setAttribute('aria-busy', String(progress.running && progress.phase === 'check'));
   $('program-check').querySelector('span').textContent = progress.running && progress.phase === 'check'
     ? '正在检查…' : progress.phase === 'error' ? '重新检查' : '检查更新';
-  $('program-apply').hidden = !progress.available && progress.phase !== 'apply';
+  $('program-apply').hidden = readOnly || (!progress.available && progress.phase !== 'apply');
   $('program-apply').disabled = progress.running || Boolean(writeBusy) || !progress.write_allowed;
   $('program-apply').setAttribute('aria-busy', String(progress.running && progress.phase === 'apply'));
   $('program-apply').textContent = progress.phase === 'apply' ? '正在升级…' : '一键升级';
@@ -2974,21 +2985,40 @@ async function autoCheckProgram() {
 }
 
 async function programAction(action, button = $('program-apply')) {
-  if (programUpdate.running || writeBusy || (action === 'apply' && programUpdate.write_allowed === false)) return;
+  if (programUpdate.running || writeBusy || programUpdate.write_allowed === false
+      || (action === 'check' && programUpdate.phase === 'ready')) return;
   programFailedAction = '';
-  programUpdate = {...programUpdate, running: true, phase: action, error: '',
+  const previous = programUpdate;
+  programUpdate = {...programUpdate, running: true, phase: action, error: '', failed_action: '',
     message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等待当前操作完成…'};
   programActionRunning = true;
   renderProgram();
   const fail = error => {
     programFailedAction = action;
-    programUpdate = {...programUpdate, running: false, phase: 'error', available: false, error: programText(error.message), error_id: error.error_id,
+    programUpdate = {...programUpdate, running: false, phase: 'error', available: false, failed_action: action,
+      error: programText(error.message), error_id: error.error_id,
+      latest_version: action === 'apply' ? programUpdate.latest_version : '',
       changes: [], changes_total: 0, changes_partial: false};
   };
   const work = async () => {
-    const result = await api('/api/program/' + action,
-      action === 'apply' ? {target: programUpdate.target, confirmed: true} : {});
-    programUpdate = {...programUpdate, ...result};
+    try {
+      const result = await api('/api/program/' + action,
+        action === 'apply' ? {target: programUpdate.target, confirmed: true} : {});
+      programUpdate = {...programUpdate, ...result};
+    } catch (error) {
+      if (action === 'check') {
+        const latest = await api('/api/program/progress').catch(() => null);
+        if (latest && latest.phase === 'ready') {
+          programUpdate = latest;
+          return programUpdate;
+        }
+        if (previous.phase === 'ready') {
+          programUpdate = previous;
+          return programUpdate;
+        }
+      }
+      throw error;
+    }
     while (programUpdate.running) {
       await new Promise(resolve => setTimeout(resolve, 800));
       programUpdate = await api('/api/program/progress');
@@ -8687,11 +8717,11 @@ function homeTodos(input) {
     program.phase === 'ready'
     || (program.running && program.phase === 'apply')
     || Boolean(program.available)
-    || (program.phase === 'error' && program.failedAction === 'apply'));
+    || (program.phase === 'error' && (program.failedAction === 'apply' || program.failed_action === 'apply')));
   if (programDue) {
     const ready = program.phase === 'ready';
     const applying = Boolean(program.running && program.phase === 'apply');
-    const failed = program.phase === 'error' && program.failedAction === 'apply';
+    const failed = program.phase === 'error' && (program.failedAction === 'apply' || program.failed_action === 'apply');
     const currentVersion = String(program.current_version || '').trim();
     const latestVersion = String(program.latest_version || '').trim();
     const pendingVersion = String(program.pending_version || program.latest_version || '').trim();
@@ -8706,7 +8736,10 @@ function homeTodos(input) {
           : 'Skill Pilot 已更新完毕，刷新页面即可启用新版，数据与设置完整保留。')
         : applying
           ? (latestVersion ? `正在升级至 ${latestVersion}，等待当前任务完成后将自动继续。` : '等待当前任务完成后将自动继续。')
-          : failed ? '升级遇到问题，可前往版本设置查看原因并重试。'
+          : failed
+            ? (latestVersion
+              ? `本次尝试升级至 ${latestVersion}${currentVersion ? `（当前 ${currentVersion}）` : ''} 未完成，可前往版本设置查看原因并重试。`
+              : '升级遇到问题，可前往版本设置查看原因并重试。')
           : latestVersion
             ? `发现新版 ${latestVersion}${currentVersion ? `（当前 ${currentVersion}）` : ''}，支持在看板内一键升级。`
             : '发现新版 Skill Pilot，支持在看板内一键升级。',
@@ -9552,9 +9585,11 @@ async function updateFeedbackPreview() {
     const payload = result.payload;
     $('feedback-identity').textContent = result.member
       ? `将以 ${result.member.name} 的名义提交，方便维护者联系你。` : '暂时无法确认署名，可把诊断信息发给维护者。';
+    const envSummary = [payload.os, payload.install_mode, 'Python ' + payload.python_version, payload.app_version];
+    if (result.pending_app_version) envSummary.push('待刷新生效：' + result.pending_app_version);
     $('feedback-summary').innerHTML = `<p>${escape(payload.user_message || '主动反馈使用中的问题')}</p>
       <p class="muted">错误编号：${escape(payload.error_id)}<br>错误特征编号：${escape(payload.fingerprint)}</p>
-      <p class="muted">${escape([payload.os, payload.install_mode, 'Python ' + payload.python_version, payload.app_version].join(' · '))}</p>`;
+      <p class="muted">${escape(envSummary.join(' · '))}</p>`;
     $('feedback-text').value = JSON.stringify(payload, null, 2);
     $('feedback-message').textContent = result.reason || '核对内容后再发送。';
     $('feedback-send').hidden = !result.can_send;
