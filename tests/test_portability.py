@@ -203,6 +203,36 @@ class PortableInstallerTests(unittest.TestCase):
         initial = request('/api/status')
         self.pid = initial['pid']
         self.assertEqual(request('/api/table')['home'], str(self.home))
+
+        def discovery_settled():
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                try:
+                    view = request('/api/agents')
+                    if not view.get('discovery', {}).get('running'):
+                        return
+                except OSError:
+                    pass
+                time.sleep(.05)
+            self.fail('助手名单的检查还没结束')
+
+        def changed_files(root):
+            rows = {}
+            def visit(path, relative):
+                if path.is_symlink():
+                    rows[relative] = ('link', os.readlink(path))
+                elif path.is_dir():
+                    rows[relative] = ('dir',)
+                    for child in sorted(path.iterdir()):
+                        visit(child, relative + '/' + child.name)
+                else:
+                    rows[relative] = ('file', path.read_bytes())
+            if root.exists():
+                visit(root, '')
+            return rows
+
+        discovery_settled()
+        before_files = changed_files(self.home / '.skill-pilot')
         before = store.physical_state(self.home / '.skill-pilot')
         path = self.code / 'skill_pilot/web/server.py'
         source = path.read_text()
@@ -223,4 +253,9 @@ class PortableInstallerTests(unittest.TestCase):
         self.assertEqual(current.get('portable_marker'), 'updated')
         self.assertEqual(current['pid'], self.pid)
         self.assertNotEqual(current['version'], initial['version'])
-        self.assertEqual(before, store.physical_state(self.home / '.skill-pilot'))
+        discovery_settled()
+        after_files = changed_files(self.home / '.skill-pilot')
+        names = sorted(set(before_files) | set(after_files))
+        changed = [name or '（技能数据目录本身）' for name in names if before_files.get(name) != after_files.get(name)]
+        self.assertEqual(before, store.physical_state(self.home / '.skill-pilot'),
+                         '刷新后这些文件变了：' + '、'.join(changed))

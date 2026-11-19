@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import importlib.util
 import http.client
 import json
@@ -54,9 +55,28 @@ class DiagnosticsTests(unittest.TestCase):
         with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
             self.assertTrue(self.record()['error_id'])
         self.assertFalse(self.log.exists())
-        with patch('skill_pilot.diagnostics.os.replace', side_effect=OSError('磁盘已满')):
+        with patch('skill_pilot.diagnostics.os.write', side_effect=OSError('磁盘已满')):
             self.assertEqual(self.record(), {})
         self.assertEqual([p for p in (self.private / 'logs').iterdir() if p.name != '.errors.lock'], [])
+
+    def test_a_brief_file_lock_is_retried_and_the_record_is_kept(self):
+        first = self.record()
+        real = os.replace
+        calls = {'n': 0}
+
+        def occupied(source, destination):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise PermissionError('文件正被占用')
+            return real(source, destination)
+
+        with patch.object(diagnostics, 'MAX_RECORDS', 1), patch('skill_pilot.diagnostics.os.replace', occupied):
+            row = self.record()
+        self.assertTrue(row.get('error_id'))
+        self.assertNotEqual(row['error_id'], first['error_id'])
+        self.assertEqual([item['error_id'] for item in diagnostics.recent(self.home)], [row['error_id']])
+        self.assertGreater(calls['n'], 1)
+        self.assertEqual([p.name for p in (self.private / 'logs').iterdir() if p.name.startswith('.errors-')], [])
 
     def test_redacts_secrets_names_paths_and_control_characters(self):
         (self.private / 'settings.json').write_text(json.dumps({'llm': {'api_key': 'private-ai-key'}}))
@@ -206,13 +226,46 @@ vm.runInNewContext(fs.readFileSync('skill_pilot/web/static/diagnostics.js', 'utf
 
     def test_parallel_processes_keep_every_record(self):
         code = "from skill_pilot.diagnostics import record; from skill_pilot.store import target_home; [record(target_home(), 'backend', '并发读取', OSError('failure')) for _ in range(8)]"
-        processes = [subprocess.Popen([sys.executable, '-B', '-c', code], stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(3)]
-        for process in processes:
-            _, error = process.communicate(timeout=20)
-            self.assertEqual(process.returncode, 0, error)
-        rows = diagnostics.recent(self.home)
-        self.assertEqual(len(rows), 24)
-        self.assertEqual(len({row['error_id'] for row in rows}), 24)
+        for round_number in range(4):
+            if self.log.exists():
+                self.log.unlink()
+            processes = [subprocess.Popen([sys.executable, '-B', '-c', code], stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(3)]
+            for process in processes:
+                _, error = process.communicate(timeout=20)
+                self.assertEqual(process.returncode, 0, error)
+            rows = diagnostics.recent(self.home)
+            self.assertEqual(len(rows), 24, f'第 {round_number + 1} 轮丢失了错误记录')
+            self.assertEqual(len({row['error_id'] for row in rows}), 24)
+
+    def test_overlapping_rewrites_drop_a_record_when_the_lock_does_not_exclude(self):
+        barrier = threading.Barrier(2)
+
+        def rewrite_stale_snapshot(path, line):
+            current = path.read_bytes() if path.is_file() else b''
+            barrier.wait(3)
+            diagnostics._rewrite_log(path, self.home, current + line)
+
+        @contextmanager
+        def no_lock(path, home):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            yield
+
+        class NoThreadLock:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(diagnostics, '_append_line', rewrite_stale_snapshot), patch.object(
+                diagnostics, 'log_lock', no_lock), patch.object(diagnostics, 'LOCK', NoThreadLock()):
+            threads = [threading.Thread(target=self.record) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(diagnostics.recent(self.home)), 1)
 
     def test_log_directory_outside_home_is_not_written(self):
         outside = Path(self.temp.name) / 'outside'
