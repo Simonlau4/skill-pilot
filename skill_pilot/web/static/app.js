@@ -9305,7 +9305,7 @@ function renderHomeAgents() {
   box.innerHTML = homeAgents.map(agent => {
     const width = Math.max(agent.tokens ? 2 : 0, agent.tokens / max * 100).toFixed(1);
     return `<button type="button" class="home-agent" data-home-agent="${escape(agent.id)}" style="--c:${agent.color}">
-      <span class="home-agent-top"><span class="home-agent-name"><span class="swatch" aria-hidden="true"></span>${escape(agent.name)}</span><span class="home-agent-act">${escape(agent.activation)}</span></span>
+      <span class="home-agent-top"><span class="home-agent-name" title="${escape(agent.name)}"><span class="swatch" aria-hidden="true"></span><span class="home-agent-label">${escape(agent.name)}</span></span>${agent.activation ? `<span class="home-agent-act" title="${escape(agent.activation)}">${escape(agent.activation)}</span>` : ''}</span>
       <span class="home-agent-n">${homeNumber(agent.count)}<small>个技能</small></span>
       <span class="home-bar"><i style="--w:${width}%"></i></span>
       <span class="home-agent-tok">单次对话开销约 <b>${tokenText(agent.tokens)} Token</b></span>
