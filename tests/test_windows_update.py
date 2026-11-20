@@ -140,8 +140,11 @@ class WindowsUpdateTests(unittest.TestCase):
         content = path.read_text(encoding='utf-8') + '\nimport incompatible_locking\n'
         path.write_text(content, encoding='utf-8')
         self.commit('conflict')
+        review = self_update.check(self.home, self.project)
+        self.assertTrue(review['available'])
+        self.assertNotIn('candidate', review)
         with self.assertRaisesRegex(ValueError, '新版暂时无法'):
-            self_update.check(self.home, self.project)
+            self_update.download(review, self.home, self.project)
         self.assertEqual(self_update.installed(self.project), original)
 
     def test_local_edit_blocks_update(self):
