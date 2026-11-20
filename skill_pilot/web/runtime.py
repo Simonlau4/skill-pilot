@@ -1,4 +1,5 @@
 """Replace an idle dashboard while retaining its listener and session."""
+import copy
 import hashlib
 import json
 import os
@@ -36,7 +37,15 @@ def resume_state():
 def snapshot(server):
     state = {name: getattr(server, name) for name in
              ('token', 'inventory', 'install_reviews', 'team_upload_reviews',
-              'update_reviews', 'labels_progress', 'program_review', 'program_progress', 'jobs_blocked')}
+              'update_reviews', 'labels_progress', 'jobs_blocked')}
+    program_lock = getattr(server, 'program_lock', None)
+    if program_lock is not None:
+        with program_lock:
+            state['program_review'] = copy.deepcopy(server.program_review)
+            state['program_progress'] = copy.deepcopy(server.program_progress)
+    else:
+        state['program_review'] = copy.deepcopy(server.program_review)
+        state['program_progress'] = copy.deepcopy(server.program_progress)
     return state
 
 

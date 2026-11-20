@@ -213,9 +213,10 @@ def status(home, config=None, strict=True):
     return result
 
 
-def feedback_preview(home, error_id='', note='', attachments=None):
+def feedback_preview(home, error_id='', note='', attachments=None, *, prefer_running=False, pending_version=''):
     parsed = feedback.parse_attachments(attachments)
-    report = diagnostics.bundle(home, error_id, note)['report']
+    report = diagnostics.bundle(home, error_id, note, prefer_running=prefer_running,
+                                pending_version=pending_version)['report']
     if not error_id:
         report['errors'] = []  # A manual report must not silently include unrelated past failures.
     payload = feedback.envelope(report, attachments=parsed)
@@ -227,6 +228,7 @@ def feedback_preview(home, error_id='', note='', attachments=None):
          'size': item['size'], 'sha256': item['sha256'][:12]}
         for index, item in enumerate(parsed, 1)
     ]
+    pending = report['environment'].get('pending_app_version', '')
     result = {
         'payload': payload, 'member': None, 'can_send': False, 'can_attach': False,
         'attach_reason': '', 'reason': '', 'submitted': False,
@@ -236,6 +238,7 @@ def feedback_preview(home, error_id='', note='', attachments=None):
             'max_bytes': feedback.MAX_ATTACHMENT_BYTES,
             'max_total_bytes': feedback.MAX_ATTACHMENTS_TOTAL_BYTES,
         },
+        **({'pending_app_version': pending} if pending and pending != payload.get('app_version', '') else {}),
     }
     config = {}
     try:

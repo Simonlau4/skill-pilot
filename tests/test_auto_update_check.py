@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
-from skill_pilot import self_update
+from skill_pilot import self_update, version as app_version
 from skill_pilot.web import runtime, server, windows_runtime
 from tests import set_up_home
 
@@ -25,8 +25,10 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.inventory = {'home': str(self.home)}
         self.enterContext(patch.dict(os.environ, {'HOME': str(self.home),
             'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '0'}))
+        current_ver = app_version.running_build()['version']
         self.review = {'temporary': '', 'target': 'latest-version', 'current': 'old',
-                       'latest': 'new', 'available': True}
+                       'latest': 'new', 'current_version': current_ver,
+                       'latest_version': current_ver, 'available': True}
         self.check = self.enterContext(patch.object(self_update, 'check', return_value=self.review))
         self.enterContext(patch.object(server.operations, 'bootstrap'))
         self.enterContext(patch.object(server, 'scan', return_value=self.inventory))
@@ -103,17 +105,27 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.assertEqual(progress['changes_partial'], partial)
 
     def test_changes_pass_through_both_endpoints_and_clear_after_upgrade_and_refresh(self):
+        saved_running = server.app_version.running_build()
+        def restore_running():
+            server.app_version.set_running_version(saved_running['version'], date=saved_running['date'])
+            server.diagnostics.sync_running_build()
+        self.addCleanup(restore_running)
         self.review.update(changes=['改进更新提醒'], changes_total=3, changes_partial=True)
         self.start()
         self.assert_changes(self.finished(), ['改进更新提醒'], 3, True)
         self.assert_changes(self.request('/api/program/auto-check', {}), ['改进更新提醒'], 3, True)
-        with patch.object(self_update, 'apply', return_value={'available': False, 'current': 'new'}):
+        with patch.object(self_update, 'apply', return_value={
+                'available': False, 'current': 'new', 'pending_version': 'v1.0.0-1234567',
+                'latest_version': 'v1.0.0-1234567'}):
             self.request('/api/program/apply', {'confirmed': True, 'target': self.review['target']})
             ready = self.finished()
         self.assertEqual(ready['phase'], 'ready')
         self.assert_changes(ready)
         self.dashboard.program_progress.update(changes=['旧内容'], changes_total=1, changes_partial=True)
-        self.request('/api/runtime/refresh', {})
+        with patch.object(server.app_version, 'read_build', return_value={
+                'install_mode': '源码', 'checkout': True, 'revision': '', 'date': '',
+                'manifest_valid': True, 'version': 'v1.0.0-1234567'}):
+            self.request('/api/runtime/refresh', {})
         latest = self.finished()
         self.assertEqual(latest['phase'], 'latest')
         self.assert_changes(latest)
@@ -250,7 +262,9 @@ class AutoUpdateCheckTests(unittest.TestCase):
     def start_resumed(self, checked_at):
         saved = {'running': False, 'phase': 'latest', 'automatic': True,
                  'message': 'SP 已是最新版本', 'available': False, 'error': '', 'checked_at': checked_at,
-                 'changes': [], 'changes_total': 0, 'changes_partial': False}
+                 'changes': [], 'changes_total': 0, 'changes_partial': False,
+                 'current_version': app_version.running_build()['version'],
+                 'latest_version': '', 'pending_version': '', 'failed_action': '', 'can_retry_apply': False}
         dashboard = server.Dashboard(self.inventory)
         try:
             dashboard.program_progress = saved.copy()
@@ -447,8 +461,10 @@ class CloseDuringAutomaticCheckTests(unittest.TestCase):
         self.entered = threading.Event()
         self.boards = []
         self.addCleanup(self.stop)
+        current_ver = app_version.running_build()['version']
         self.review = {'temporary': '', 'target': 'latest-version', 'current': 'old',
-                       'latest': 'new', 'available': False}
+                       'latest': 'new', 'current_version': current_ver,
+                       'latest_version': current_ver, 'available': False}
 
         def blocked(home):
             self.entered.set()

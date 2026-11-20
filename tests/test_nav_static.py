@@ -106,7 +106,8 @@ if (!written.endsWith('#skills/Acme')) { console.error('技能页地址没写对
 
     def test_program_messages_use_full_name_without_changing_backend_state(self):
         source = (STATIC / 'app.js').read_text()
-        function = extract_function(source, 'function renderProgram(')
+        function = '\n'.join((extract_function(source, 'function programVersionLabel('),
+                              extract_function(source, 'function renderProgram(')))
         script = function + r'''
 const elements = new Map();
 function $(id) {
@@ -157,9 +158,9 @@ if ($('program-message').textContent !== '从 Skill Pilot 官方项目获取新�
     def test_program_popup_states_dismissal_content_and_controls(self):
         source = (STATIC / 'app.js').read_text()
         functions = '\n'.join(extract_function(source, signature) for signature in (
-            'function programText(', 'function programChangesHtml(', 'function programPopupPhase(',
-            'function positionProgramPopup(', 'function renderProgramPopup(', 'function dismissProgramPopup(',
-            'function renderProgram('))
+            'function programText(', 'function programVersionLabel(', 'function programChangesHtml(',
+            'function programPopupPhase(', 'function positionProgramPopup(', 'function renderProgramPopup(',
+            'function dismissProgramPopup(', 'function renderProgram('))
         events = source[source.index("$('program-popup-close').addEventListener"):source.index('setInterval(() => { if (programUpdate.running')]
         script = r'''
 const assert = require('node:assert/strict');
@@ -269,6 +270,69 @@ programUpdate = {...programUpdate, phase: 'available', available: true}; renderP
 assert.equal(popup.hidden, true, '关闭失败提醒后重查同一版本不能再弹出');
 programUpdate = {...programUpdate, phase: 'ready', available: false}; renderProgram();
 assert.equal(popup.hidden, false, '忽略版本不能隐藏升级完成提醒');
+
+// 明确版本号展示：已是最新、发现新版、正在升级、待刷新生效、升级失败、只读与缺版本回退，且不出现内部技术词。
+const jargon = /\b(git|hash|commit|sha|symlink|toml)\b/i;
+programFailedAction = '';
+programUpdate = {write_allowed: true, phase: 'idle', available: false, current_version: 'v1.0.0-1111111'};
+renderProgram();
+assert.equal($('program-version').hidden, false);
+assert.equal($('program-version').textContent, '当前版本：v1.0.0-1111111');
+assert.equal($('program-check').disabled, false);
+assert(!jargon.test($('program-version').textContent));
+
+programUpdate = {write_allowed: true, phase: 'latest', available: false,
+  current_version: 'v1.0.0-1111111', latest_version: 'v1.0.0-1111111'};
+renderProgram();
+assert.equal($('program-version').textContent, '当前版本：v1.0.0-1111111');
+
+programUpdate = {write_allowed: true, phase: 'available', available: true, target: 'v2-target',
+  current_version: 'v1.0.0-1111111', latest_version: 'v1.0.0-2222222',
+  changes: ['展示明确版本号'], changes_total: 1, changes_partial: false};
+renderProgram();
+assert.equal($('program-version').textContent, '当前版本：v1.0.0-1111111 · 最新版本：v1.0.0-2222222');
+assert($('program-popup-body').innerHTML.includes('当前 v1.0.0-1111111 → 新版 v1.0.0-2222222'));
+assert(!jargon.test($('program-popup-body').innerHTML));
+
+programUpdate = {...programUpdate, phase: 'apply', running: true, available: false};
+renderProgram();
+assert.equal($('program-version').textContent, '当前运行：v1.0.0-1111111 · 正在升级至：v1.0.0-2222222');
+assert($('program-popup-body').innerHTML.includes('当前 v1.0.0-1111111 → 新版 v1.0.0-2222222'));
+
+programUpdate = {...programUpdate, phase: 'ready', running: false, available: false,
+  current_version: 'v1.0.0-1111111', pending_version: 'v1.0.0-2222222', latest_version: 'v1.0.0-2222222'};
+renderProgram();
+assert.equal($('program-version').textContent, '当前运行：v1.0.0-1111111 · 待刷新生效：v1.0.0-2222222');
+assert.equal($('program-check').disabled, true, '待刷新期间应禁用检查更新');
+assert($('program-popup-body').innerHTML.includes('当前运行 v1.0.0-1111111 → 待刷新生效 v1.0.0-2222222'));
+assert(!jargon.test($('program-version').textContent + $('program-popup-body').innerHTML));
+
+// 升级失败时，设置页与小弹窗均明确展示「本次尝试升级至」目标版本。
+programFailedAction = 'apply';
+programUpdate = {write_allowed: true, phase: 'error', running: false, available: false, target: 'v2-fail',
+  failed_action: 'apply', current_version: 'v1.0.0-1111111', latest_version: 'v1.0.0-2222222',
+  error: '无法连接更新服务器', error_id: 'err-apply-1'};
+renderProgram();
+assert.equal($('program-version').textContent, '当前版本：v1.0.0-1111111 · 本次尝试升级至：v1.0.0-2222222');
+assert($('program-popup-body').innerHTML.includes('当前 v1.0.0-1111111 · 本次尝试升级至 v1.0.0-2222222'));
+
+// 只读模式保留当前版本并清晰说明只读限制，禁用检查和升级按钮。
+programFailedAction = '';
+programUpdate = {write_allowed: false, phase: 'idle', running: false, available: true,
+  current_version: 'v1.0.0-1111111', latest_version: 'v1.0.0-2222222', message: '有新版，可以一键升级'};
+renderProgram();
+assert.equal($('program-version').textContent, '当前版本：v1.0.0-1111111');
+assert($('program-message').textContent.includes('只读预览模式'));
+assert.equal($('program-check').disabled, true);
+assert.equal($('program-apply').hidden, true);
+assert.equal($('program-changes').hidden, true);
+assert.equal(popup.hidden, true);
+
+// 读不到版本号时显示明确兜底文案。
+programUpdate = {write_allowed: true, phase: 'idle', running: false, available: false, current_version: ''};
+renderProgram();
+assert.equal($('program-version').hidden, false);
+assert.equal($('program-version').textContent, '当前版本：暂未读到版本');
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -411,8 +475,16 @@ if (unset[0].target !== 'settings/team') fail('没连分享站时应去设置的
 const connected = checked({team: {configured: true, member: {name: 'Acme'}}});
 if (connected.length) fail('连上分享站后不应再占一条团队提醒：' + keys(connected));
 
-const program = checked({program: {write_allowed: true, available: true, phase: 'idle'}});
+const program = checked({program: {write_allowed: true, available: true, phase: 'idle',
+  current_version: 'v1.0.0-1111111', latest_version: 'v1.0.0-2222222'}});
 if (keys(program) !== 'program' || program[0].target !== 'settings/version') fail('SP 有新版时应去设置的版本一块：' + JSON.stringify(program));
+if (!program[0].text.includes('v1.0.0-2222222') || !program[0].text.includes('v1.0.0-1111111')) fail('首页新版提醒应包含版本号：' + program[0].text);
+const programReady = checked({program: {write_allowed: true, phase: 'ready',
+  current_version: 'v1.0.0-1111111', pending_version: 'v1.0.0-2222222'}});
+if (!programReady[0].text.includes('v1.0.0-2222222') || !programReady[0].text.includes('当前运行 v1.0.0-1111111')) fail('首页待刷新提醒应区分当前运行与待生效版本：' + programReady[0].text);
+const programFailed = checked({program: {write_allowed: true, phase: 'error', failed_action: 'apply',
+  current_version: 'v1.0.0-1111111', latest_version: 'v1.0.0-2222222'}});
+if (!programFailed[0].text.includes('本次尝试升级至 v1.0.0-2222222') || !programFailed[0].text.includes('当前 v1.0.0-1111111')) fail('首页升级失败提醒应包含本次尝试升级目标版本：' + programFailed[0].text);
 const programHidden = checked({program: {write_allowed: false, available: true, phase: 'idle'}});
 if (programHidden.length) fail('不能升级时不应显示 SP 新版条');
 
