@@ -45,7 +45,7 @@
       "disable": "codex_config",
       "disable_note": "config.toml 中按名称或文件位置停用",
       "activation": "new_session",
-      "activation_note": "新会话生效"
+      "activation_note": "需新开对话生效"
     },
     {
       "id": "claude",
@@ -79,7 +79,7 @@
       "disable": null,
       "disable_note": "本轮未验证",
       "activation": "immediate",
-      "activation_note": "目录改变后会动态刷新"
+      "activation_note": "即时生效"
     },
     {
       "id": "antigravity",
@@ -118,7 +118,7 @@
       "disable": null,
       "disable_note": "本轮未验证",
       "activation": "new_session",
-      "activation_note": "新会话核验"
+      "activation_note": "需新开对话生效"
     },
     {
       "id": "dsh",
@@ -146,7 +146,7 @@
       "disable": null,
       "disable_note": "技能正文可限制自动调用；独立停用名单未验证",
       "activation": "immediate",
-      "activation_note": "目录改变后会动态刷新"
+      "activation_note": "即时生效"
     }
   ],
   "additional_profiles": [
@@ -167,7 +167,7 @@
       "disable": null,
       "disable_note": "软件内的独立开关未核验",
       "activation": "new_session",
-      "activation_note": "新会话生效"
+      "activation_note": "需新开对话生效"
     },
     {
       "id": "doubaowork",
@@ -186,7 +186,7 @@
       "disable": null,
       "disable_note": "没有已核验的独立停用设置",
       "activation": "new_session",
-      "activation_note": "新会话生效"
+      "activation_note": "需新开对话生效"
     },
     {
       "id": "workbuddy",
@@ -210,7 +210,7 @@
       "disable": null,
       "disable_note": "软件内的独立开关未核验",
       "activation": "new_session",
-      "activation_note": "新会话生效"
+      "activation_note": "需新开对话生效"
     }
   ],
   "default_ignored": [

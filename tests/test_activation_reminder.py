@@ -1,0 +1,1393 @@
+"""Tests for Issue #218: config-driven new-session activation reminders."""
+import json
+import os
+import subprocess
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+from unittest.mock import patch
+
+from tests import set_up_home
+from tests.test_nav_static import STATIC, extract_function
+from tests.test_team_static import block
+from skill_pilot import agents as agent_management
+from skill_pilot import cleanup, operations, profiles, sharing, store, team, updates
+from skill_pilot.platform_support import rmtree
+from skill_pilot.scan import content_digest, scan
+from skill_pilot.web.server import Dashboard
+
+
+class ActivationProfileTests(unittest.TestCase):
+    def test_catalog_and_profiles_activation_unified(self):
+        all_builtin = profiles.PROFILES + profiles.ADDITIONAL_PROFILES
+        expected_notes = {'immediate': '即时生效', 'new_session': '需新开对话生效'}
+        for profile in all_builtin:
+            mode = profile['activation']
+            self.assertIn(mode, expected_notes)
+            self.assertEqual(profile['activation_note'], expected_notes[mode], profile['id'])
+            self.assertEqual(profiles.activation_text(profile), expected_notes[mode], profile['id'])
+            self.assertEqual(profiles.activation_note(profile), expected_notes[mode], profile['id'])
+
+        custom_profile = profiles.custom('mytool', '自定义助手', '.mytool/skills')
+        self.assertEqual(custom_profile['activation'], 'new_session')
+        self.assertEqual(custom_profile['activation_note'], '需新开对话生效')
+        self.assertEqual(profiles.activation_text(custom_profile), '需新开对话生效')
+
+        legacy_custom = {**custom_profile, 'activation_note': ''}
+        self.assertEqual(profiles.activation_note(legacy_custom), '需新开对话生效')
+        self.assertFalse(hasattr(profiles, 'new_session_reminder'))
+
+
+class ActivationReminderJobTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='skill pilot activation ')
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        set_up_home(self, self.root / 'User Home With Spaces')
+        curated = patch.object(operations, 'curated_dependencies', return_value=({}, {}))
+        curated.start()
+        self.addCleanup(curated.stop)
+        for name in ('acme-a', 'acme-b', 'acme-c'):
+            self.skill(self.home / '.codex/skills' / name, name)
+        store.apply(store.preview(self.home)['plan_id'], self.home)
+        self.registry(lambda r: [r['skills'][n].update(source={
+            'source': 'https://github.com/Acme/skills.git', 'repository': 'Acme/skills',
+            'source_path': 'skills/' + n + '/SKILL.md'}) for n in r['skills']])
+        operations._commit(self.home, operations.load(self.home)[1], [], [], 'Activation fixture')
+        self.server = Dashboard(scan(self.home))
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .01})
+        self.thread.start()
+        self.addCleanup(self.close)
+
+    def close(self):
+        self.server.shutdown()
+        self.thread.join(5)
+        self.server.server_close()
+        for review in [*self.server.install_reviews.values(), *self.server.update_reviews.values()]:
+            if review.get('temporary'):
+                rmtree(review['temporary'], ignore_errors=True)
+
+    def skill(self, path, name, body='原内容'):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / 'SKILL.md').write_text(f'---\nname: {name}\ndescription: 示例技能\n---\n{body}\n')
+        return path
+
+    def registry(self, action):
+        path = self.home / '.skill-pilot/registry.json'
+        data = json.loads(path.read_text())
+        action(data)
+        path.write_text(json.dumps(data))
+
+    def request(self, path, body=None, timeout=15 if os.name == 'nt' else 5):
+        headers = {
+            'X-Skill-Pilot-Token': self.server.token,
+            'Origin': self.server.origin,
+            'Content-Type': 'application/json',
+        }
+        req = urllib.request.Request(
+            self.server.origin + path,
+            headers=headers,
+            data=json.dumps(body).encode() if body is not None else None,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as error:
+            return error.code, json.load(error)
+
+    def ok(self, path, body=None):
+        status, result = self.request(path, body)
+        self.assertEqual(status, 200, result)
+        return result
+
+    def submit(self, kind, **parameters):
+        return self.ok('/api/jobs', {'kind': kind, 'confirmed': True, **parameters})['job']
+
+    def wait_jobs(self):
+        deadline = time.monotonic() + (30 if os.name == 'nt' else 8)
+        while time.monotonic() < deadline:
+            result = self.ok('/api/jobs')
+            if all(i['status'] not in {'waiting', 'running'} for i in result['items']) and not self.server.jobs_busy():
+                return result['items']
+            time.sleep(.01)
+        self.fail('任务没有按时完成：' + str(result))
+
+    def assignment_params(self, changes):
+        plan = operations.preview_assign(changes, self.home, recheck=True)
+        return {'changes': changes, 'seen': {k: plan[k] for k in ('changes', 'dependency_warnings', 'path_warnings')}}
+
+    def install_review(self, name='acme-new'):
+        temporary = self.root / ('install ' + name)
+        path = self.skill(temporary / name, name)
+        review = {
+            'id': 'review-' + name,
+            'temporary': str(temporary),
+            'skills': [{
+                'name': name,
+                'path': str(path),
+                'digest': content_digest(path),
+                'description': '新安装技能',
+                'repository_path': 'skills/' + name,
+                'source': {'source': 'https://github.com/Acme/skills.git', 'repository': 'Acme/skills',
+                           'source_path': 'skills/' + name + '/SKILL.md'},
+            }],
+        }
+        self.server.install_reviews[review['id']] = review
+        return review
+
+    def update_review(self, *names):
+        review = updates.create(self.home)
+        self.server.update_reviews[review['id']] = review
+        registry = operations.load(self.home)[1]['skills']
+        rows = []
+        for name in names:
+            upstream = self.skill(Path(review['temporary']) / name, name, body='上游新版内容')
+            tree_sha = store.git_tree(upstream)
+            rows.append({
+                'name': name,
+                'has_update': True,
+                'status': '有更新',
+                'local_modified': False,
+                'your_changes': {},
+                'source': {'kind': 'github', 'repository': 'Acme/skills', 'path': 'skills/' + name},
+                'commit': '1' * 40,
+                'tree_sha': tree_sha,
+                'normalized_tree_sha': tree_sha,
+                '_upstream_path': str(upstream),
+                '_state': updates.skill_state(self.home, name, registry[name]),
+            })
+        review.update(running=False, skills=rows, done=len(rows), update_count=len(rows), remaining=0,
+                      _groups={'Acme/skills': [(n, registry[n], {}) for n in names]})
+        return review
+
+    def test_table_and_agents_expose_activation_mode_and_unified_text(self):
+        table = self.ok('/api/table')
+        by_id = {agent['id']: agent for agent in table['agents']}
+        self.assertEqual(by_id['claude']['activation_mode'], 'immediate')
+        self.assertEqual(by_id['claude']['activation_text'], '即时生效')
+        self.assertEqual(by_id['dsh']['activation_mode'], 'immediate')
+        self.assertEqual(by_id['antigravity']['activation_mode'], 'new_session')
+        self.assertEqual(by_id['antigravity']['activation_text'], '需新开对话生效')
+        self.assertEqual(by_id['antigravity']['activation'], '需新开对话生效')
+
+        overview = self.ok('/api/agents')
+        managed = {agent['id']: agent for agent in overview['managed']}
+        self.assertEqual(managed['claude']['activation_mode'], 'immediate')
+        self.assertEqual(managed['antigravity']['activation_mode'], 'new_session')
+        self.assertEqual(managed['antigravity']['activation_text'], '需新开对话生效')
+
+    def test_assignment_job_immediate_new_session_mixed_and_withdraw(self):
+        # 1. Pure immediate (Claude + DSH): no new_session_agents reminder.
+        self.submit('assignment', **self.assignment_params([
+            {'skill': 'acme-a', 'agent': 'claude', 'enabled': True},
+            {'skill': 'acme-a', 'agent': 'dsh', 'enabled': True},
+        ]))
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+        # 2. Pure new_session (Antigravity): lists Antigravity only.
+        self.submit('assignment', **self.assignment_params([
+            {'skill': 'acme-a', 'agent': 'antigravity', 'enabled': True},
+        ]))
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual([a['id'] for a in job.get('new_session_agents', [])], ['antigravity'])
+        self.assertEqual(job['new_session_agents'][0]['name'], 'Antigravity')
+
+        # 3. Mixed enable (Claude + Antigravity) + withdraw from Codex: only Antigravity.
+        self.submit('assignment', **self.assignment_params([
+            {'skill': 'acme-b', 'agent': 'claude', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'antigravity', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'codex', 'enabled': False},
+        ]))
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual([a['id'] for a in job.get('new_session_agents', [])], ['antigravity'])
+
+        # 4. Withdraw-only on new_session agent: no reminder.
+        self.submit('assignment', **self.assignment_params([
+            {'skill': 'acme-c', 'agent': 'codex', 'enabled': False},
+        ]))
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+    def test_install_job_store_only_immediate_and_mixed(self):
+        r1 = self.install_review('acme-store-only')
+        self.submit('install', review_id=r1['id'], skills=['acme-store-only'], agents=[])
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+        r2 = self.install_review('acme-immediate')
+        self.submit('install', review_id=r2['id'], skills=['acme-immediate'], agents=['claude'])
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+        r3 = self.install_review('acme-mixed')
+        self.submit('install', review_id=r3['id'], skills=['acme-mixed'], agents=['claude', 'antigravity', 'codex'])
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual([a['id'] for a in job.get('new_session_agents', [])], ['codex', 'antigravity'])
+
+    def test_update_job_immediate_mixed_and_keep_choice(self):
+        # acme-a: move to claude only (immediate)
+        operations.apply_assign([
+            {'skill': 'acme-a', 'agent': 'codex', 'enabled': False},
+            {'skill': 'acme-a', 'agent': 'claude', 'enabled': True},
+        ], confirmed=True, home=self.home)
+        # acme-b: assign to claude + antigravity (mixed)
+        operations.apply_assign([
+            {'skill': 'acme-b', 'agent': 'codex', 'enabled': False},
+            {'skill': 'acme-b', 'agent': 'claude', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'antigravity', 'enabled': True},
+        ], confirmed=True, home=self.home)
+        # acme-c: codex only, but user chooses 'keep'
+        review = self.update_review('acme-a', 'acme-b', 'acme-c')
+
+        self.submit('update', review_id=review['id'], skills=['acme-a'], choices={'acme-a': 'upstream'})
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+        self.submit('update', review_id=review['id'], skills=['acme-b'], choices={'acme-b': 'upstream'})
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual([a['id'] for a in job.get('new_session_agents', [])], ['antigravity'])
+
+        self.submit('update', review_id=review['id'], skills=['acme-c'], choices={'acme-c': 'keep'})
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+    def test_cleanup_withdraw_and_restore_jobs(self):
+        operations.apply_assign([
+            {'skill': 'acme-a', 'agent': 'claude', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'codex', 'enabled': False},
+            {'skill': 'acme-b', 'agent': 'claude', 'enabled': True},
+        ], confirmed=True, home=self.home)
+
+        for skill_name, expected_ids in (('acme-a', ['codex']), ('acme-b', [])):
+            plan = cleanup.preview([skill_name], self.home)
+            self.submit('cleanup_withdraw', skills=[skill_name],
+                        seen={k: plan[k] for k in ('dependency_warnings', 'path_warnings')})
+            withdraw_job = self.wait_jobs()[-1]
+            self.assertEqual(withdraw_job['status'], 'done')
+            self.assertEqual(withdraw_job.get('new_session_agents', []), [])
+
+            self.submit('restore', skills=[skill_name])
+            restore_job = self.wait_jobs()[-1]
+            self.assertEqual(restore_job['status'], 'done')
+            self.assertEqual([a['id'] for a in restore_job.get('new_session_agents', [])], expected_ids)
+
+    def test_custom_and_additional_profiles_drive_reminder_without_hardcoding(self):
+        # Add Cursor (additional profile, new_session) and two custom profiles (immediate vs new_session).
+        (self.home / 'Applications/Cursor.app').mkdir(parents=True)
+        plan = self.ok('/api/agents/join/preview', {'agents': ['cursor']})
+        self.ok('/api/agents/join/apply', {
+            'agents': ['cursor'], 'plan_id': plan['plan_id'], 'revision': plan['revision'], 'confirmed': True,
+        })
+
+        agents_path = self.home / '.skill-pilot/agents.json'
+        data = json.loads(agents_path.read_text())
+        live_custom = {
+            **profiles.custom('custom-live', '即时工具', 'Custom Live/skills'),
+            'activation': 'immediate',
+            'activation_note': '即时生效',
+        }
+        fresh_custom = profiles.custom('custom-fresh', '新对话工具', 'Custom Fresh/skills')
+        data.setdefault('custom', []).extend([live_custom, fresh_custom])
+        data['onboarded'].extend(['custom-live', 'custom-fresh'])
+        agents_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        (self.home / 'Custom Live/skills').mkdir(parents=True, exist_ok=True)
+        (self.home / 'Custom Fresh/skills').mkdir(parents=True, exist_ok=True)
+
+        table = self.ok('/api/table')
+        by_id = {agent['id']: agent for agent in table['agents']}
+        self.assertEqual(by_id['cursor']['activation_mode'], 'new_session')
+        self.assertEqual(by_id['custom-live']['activation_mode'], 'immediate')
+        self.assertEqual(by_id['custom-live']['activation_text'], '即时生效')
+        self.assertEqual(by_id['custom-fresh']['activation_mode'], 'new_session')
+        self.assertEqual(by_id['custom-fresh']['activation_text'], '需新开对话生效')
+
+        # Custom immediate only -> no reminder.
+        self.submit('assignment', **self.assignment_params([
+            {'skill': 'acme-a', 'agent': 'custom-live', 'enabled': True},
+        ]))
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+        # Mixed custom immediate + custom new_session + additional Cursor -> only Cursor and 新对话工具.
+        self.submit('assignment', **self.assignment_params([
+            {'skill': 'acme-b', 'agent': 'custom-live', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'custom-fresh', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'cursor', 'enabled': True},
+        ]))
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done')
+        self.assertEqual([a['id'] for a in job.get('new_session_agents', [])], ['cursor', 'custom-fresh'])
+        self.assertEqual([a['name'] for a in job['new_session_agents']], ['Cursor', '新对话工具'])
+
+    def test_partial_assignment_and_retry_merge_new_session_agents(self):
+        # Withdraw acme-b from codex first so enabling acme-b on codex is a real enable.
+        operations.apply_assign([{'skill': 'acme-b', 'agent': 'codex', 'enabled': False}], confirmed=True, home=self.home)
+        changes = [
+            {'skill': 'acme-a', 'agent': 'antigravity', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'codex', 'enabled': True},
+        ]
+        params = self.assignment_params(changes)
+        # Introduce a blocking non-symlink file at the target path after preview.
+        conflict_entry = self.home / '.codex/skills/acme-b'
+        conflict_entry.write_text('blocking file')
+
+        self.submit('assignment', **params)
+        partial = self.wait_jobs()[-1]
+        self.assertEqual(partial['status'], 'attention', partial)
+        self.assertEqual(partial['completed'], ['acme-a'])
+        self.assertEqual(partial['remaining'], ['acme-b'])
+        self.assertEqual([a['id'] for a in partial.get('new_session_agents', [])], ['antigravity'])
+
+        # Remove the blocking entry and retry the remaining item.
+        conflict_entry.unlink()
+        self.ok('/api/jobs/retry', {'id': partial['id']})
+        retried = self.wait_jobs()[-1]
+        self.assertEqual(retried['status'], 'done', retried)
+        self.assertEqual([a['id'] for a in retried.get('new_session_agents', [])], ['codex', 'antigravity'])
+        self.assertEqual(len(retried['operations']), 2)
+
+        # Partial undo: undo the latest operation (codex) first; /api/jobs must narrow to antigravity only.
+        second_op = retried['operations'][1]
+        table = self.ok('/api/table')
+        self.ok('/api/undo', {'id': second_op, 'revision': table['revision'], 'confirmed': True})
+        after_partial_undo = self.ok('/api/jobs')['items'][-1]
+        self.assertEqual([a['id'] for a in after_partial_undo.get('new_session_agents', [])], ['antigravity'])
+
+    def test_update_skips_disabled_agent_and_identical_content_and_batch_partial_retry(self):
+        # 1. Codex has acme-a externally disabled while Claude uses it -> updating acme-a must NOT flag Codex.
+        operations.apply_assign([{'skill': 'acme-a', 'agent': 'claude', 'enabled': True}], confirmed=True, home=self.home)
+        (self.home / '.codex/config.toml').write_text(
+            '[[skills.config]]\nname = "acme-a"\nenabled = false\n', encoding='utf-8'
+        )
+        review_disabled = self.update_review('acme-a')
+        self.submit('update', review_id=review_disabled['id'], skills=['acme-a'], choices={'acme-a': 'upstream'})
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done', job)
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+        # 2. Identical upstream content on Antigravity -> even with choice='upstream', must NOT flag Antigravity.
+        operations.apply_assign([
+            {'skill': 'acme-b', 'agent': 'codex', 'enabled': False},
+            {'skill': 'acme-b', 'agent': 'antigravity', 'enabled': True},
+        ], confirmed=True, home=self.home)
+        same_review = self.update_review('acme-b')
+        same_upstream = Path(same_review['skills'][0]['_upstream_path'])
+        (same_upstream / 'SKILL.md').write_text((self.home / '.skill-pilot/store/acme-b/SKILL.md').read_text())
+        same_sha = store.git_tree(same_upstream)
+        same_review['skills'][0].update(tree_sha=same_sha, normalized_tree_sha=same_sha)
+        self.submit('update', review_id=same_review['id'], skills=['acme-b'], choices={'acme-b': 'upstream'})
+        job = self.wait_jobs()[-1]
+        self.assertEqual(job['status'], 'done', job)
+        self.assertEqual(job.get('new_session_agents', []), [])
+
+        # 3. Batch "update all" partial success (acme-b on Antigravity succeeds, acme-c on Codex fails) + retry merge.
+        batch_review = self.update_review('acme-b', 'acme-c')
+        # Corrupt acme-c's review state so group acme-c fails while acme-b succeeds.
+        batch_review['skills'][1]['_state'] = 'stale-state'
+        self.submit('update', review_id=batch_review['id'], skills=['acme-b', 'acme-c'],
+                    choices={'acme-b': 'upstream', 'acme-c': 'upstream'})
+        partial = self.wait_jobs()[-1]
+        self.assertEqual(partial['status'], 'failed', partial)
+        self.assertEqual(partial['updated'], ['acme-b'])
+        self.assertEqual([a['id'] for a in partial.get('new_session_agents', [])], ['antigravity'])
+
+        # Retry failed acme-c with a fresh review -> merges Antigravity + Codex.
+        retry_review = self.update_review('acme-c')
+        self.ok('/api/jobs/retry', {'id': partial['id'], 'review_id': retry_review['id']})
+        merged = self.wait_jobs()[-1]
+        self.assertEqual(merged['status'], 'done', merged)
+        self.assertEqual(sorted(merged['updated']), ['acme-b', 'acme-c'])
+        self.assertEqual([a['id'] for a in merged.get('new_session_agents', [])], ['codex', 'antigravity'])
+        self.assertEqual(len(merged['operations']), 2)
+
+        # Partial undo then full undo on the merged batch update job: /api/jobs narrows and then clears.
+        first_op, second_op = merged['operations'][0], merged['operations'][1]
+        table = self.ok('/api/table')
+        self.ok('/api/undo', {'id': second_op, 'revision': table['revision'], 'confirmed': True})
+        self.assertEqual([a['id'] for a in self.ok('/api/jobs')['items'][-1].get('new_session_agents', [])], ['antigravity'])
+        table = self.ok('/api/table')
+        self.ok('/api/undo', {'id': first_op, 'revision': table['revision'], 'confirmed': True})
+        self.assertEqual(self.ok('/api/jobs')['items'][-1].get('new_session_agents', []), [])
+
+    def test_import_config_dependency_and_restore_ignore_already_available_skills(self):
+        # Move acme-a to Antigravity only in registry, then place a live copy for Codex so Codex already reads it.
+        operations.apply_assign([
+            {'skill': 'acme-a', 'agent': 'codex', 'enabled': False},
+            {'skill': 'acme-a', 'agent': 'antigravity', 'enabled': True},
+        ], confirmed=True, home=self.home)
+        (self.home / '.codex/skills/acme-a').symlink_to(self.home / '.skill-pilot/store/acme-a', target_is_directory=True)
+        # Config import recording Codex assignment for already-visible acme-a -> no new_session reminder!
+        config = sharing.export_config(self.home)
+        row = next(s for s in config['skills'] if s['name'] == 'acme-a')
+        row['assigned_agents'] = ['antigravity', 'codex']
+        imported = sharing.import_config(config, home=self.home)
+        self.assertEqual(imported.get('new_session_agents', []), [])
+
+        # Adding a dependency on acme-b (already visible on Codex) for acme-c -> no new_session reminder.
+        dep_same = operations.decide_dependencies(
+            [{'skill': 'acme-c', 'requires': 'acme-b', 'confirmed': True}], home=self.home)
+        self.assertEqual(dep_same.get('new_session_agents', []), [])
+
+        # Adding a dependency on acme-a after withdrawing acme-a from Codex -> truly newly enables on Codex!
+        operations.apply_assign([{'skill': 'acme-a', 'agent': 'codex', 'enabled': False}], confirmed=True, home=self.home)
+        dep_new = operations.decide_dependencies(
+            [{'skill': 'acme-c', 'requires': 'acme-a', 'confirmed': True}], home=self.home)
+        self.assertEqual([a['id'] for a in dep_new.get('new_session_agents', [])], ['codex'])
+
+        # Cleanup withdraw then place external identical symlink before restore -> restore must not falsely remind.
+        cleanup.apply(['acme-b'], True, self.home)
+        (self.home / '.codex/skills/acme-b').symlink_to(self.home / '.skill-pilot/store/acme-b', target_is_directory=True)
+        restored = cleanup.restore(['acme-b'], self.home)
+        self.assertEqual(restored.get('new_session_agents', []), [])
+
+    def test_absorb_and_agent_join_remind_only_when_visible_version_changes(self):
+        # 1. Absorb identical external copy -> no reminder.
+        self.skill(self.home / '.gemini/config/skills/acme-a', 'acme-a', body='原内容')
+        table = self.ok('/api/table')
+        same_absorb = self.ok('/api/absorb', {'all': True, 'revision': table['revision'], 'confirmed': True})
+        self.assertEqual(same_absorb.get('new_session_agents', []), [])
+
+        # 2. Absorb different external copy on Antigravity:
+        #    (a) Choosing incoming copy replaces store -> Codex (reading store) changed -> reminds Codex only.
+        (self.home / '.gemini/config/skills/acme-b').unlink(missing_ok=True)
+        self.skill(self.home / '.gemini/config/skills/acme-b', 'acme-b', body='外部新版本')
+        table = self.ok('/api/table')
+        replaced_store = self.ok('/api/absorb', {
+            'all': True, 'revision': table['revision'],
+            'choices': {'acme-b': '.gemini/config/skills/acme-b'}, 'confirmed': True,
+        })
+        self.assertEqual([a['id'] for a in replaced_store.get('new_session_agents', [])], ['codex'])
+
+        #    (b) Choosing store over Antigravity's different copy -> Antigravity changed -> reminds Antigravity only.
+        self.skill(self.home / '.gemini/config/skills/acme-c', 'acme-c', body='另一份外部版本')
+        table = self.ok('/api/table')
+        kept_store = self.ok('/api/absorb', {
+            'all': True, 'revision': table['revision'],
+            'choices': {'acme-c': 'store'}, 'confirmed': True,
+        })
+        self.assertEqual([a['id'] for a in kept_store.get('new_session_agents', [])], ['antigravity'])
+
+        # 3. Agent join (Cursor, new_session) with a different version of acme-a:
+        (self.home / 'Applications/Cursor.app').mkdir(parents=True)
+        self.skill(self.home / '.cursor/skills/acme-a', 'acme-a', body='Cursor 独立版本')
+        plan = self.ok('/api/agents/join/preview', {'agents': ['cursor']})
+        incoming_opt = next(o['id'] for o in plan['skills'][0]['options'] if o['id'] != 'store')
+        # Choosing Cursor's copy replaces store -> Codex & Antigravity (store readers) reminded, not Cursor.
+        joined = self.ok('/api/agents/join/apply', {
+            'agents': ['cursor'], 'plan_id': plan['plan_id'], 'revision': plan['revision'],
+            'choices': {'acme-a': incoming_opt}, 'confirmed': True,
+        })
+        self.assertEqual([a['id'] for a in joined.get('new_session_agents', [])], ['codex', 'antigravity'])
+
+        # Undo join and re-join choosing 'store' -> only Cursor's visible version changed!
+        table = self.ok('/api/table')
+        self.ok('/api/undo', {'id': joined['id'], 'revision': table['revision'], 'confirmed': True})
+        plan2 = self.ok('/api/agents/join/preview', {'agents': ['cursor']})
+        joined2 = self.ok('/api/agents/join/apply', {
+            'agents': ['cursor'], 'plan_id': plan2['plan_id'], 'revision': plan2['revision'],
+            'choices': {'acme-a': 'store'}, 'confirmed': True,
+        })
+        self.assertEqual([a['id'] for a in joined2.get('new_session_agents', [])], ['cursor'])
+
+    def test_team_store_install_then_enable_and_queue_duplicate_and_rollback_preserve_reminders(self):
+        # 1. Team install saves to store only -> no premature reminder; subsequent enable reminds Antigravity only.
+        def fake_team_install(home, key):
+            r = self.install_review('acme-team')
+            res = operations.install(r, ['acme-team'], assigned=[], home=home)
+            return {'id': res['id'], 'installed': ['acme-team'], 'reuse': [], 'message': '已从团队商店装上「acme-team」'}
+
+        with patch.object(team, 'install', side_effect=fake_team_install):
+            self.server._add_job({'kind': 'team_install', 'key': 'team:acme-team'},
+                                 team_info={'name': 'acme-team', 'title': '团队技能'})
+            tjob = self.wait_jobs()[-1]
+            self.assertEqual(tjob['status'], 'done', tjob)
+            self.assertEqual(tjob.get('new_session_agents', []), [])
+
+        self.submit('assignment', **self.assignment_params([
+            {'skill': 'acme-team', 'agent': 'claude', 'enabled': True},
+            {'skill': 'acme-team', 'agent': 'antigravity', 'enabled': True},
+        ]))
+        enable_job = self.wait_jobs()[-1]
+        self.assertEqual([a['id'] for a in enable_job.get('new_session_agents', [])], ['antigravity'])
+
+        # 2. Duplicate active intent on retry carries previous partial reminder & operations.
+        prev = {
+            'id': 'prev-partial', 'kind': 'assignment', 'status': 'failed',
+            'skills': ['acme-a'], 'agents': ['antigravity'], 'operations': ['op-prev'],
+            'completed': ['acme-a'],
+            'new_session_agents': [{'id': 'antigravity', 'name': 'Antigravity', 'activation_note': '需新开对话生效'}],
+            'operation_new_session_agents': {'op-prev': [{'id': 'antigravity', 'name': 'Antigravity', 'activation_note': '需新开对话生效'}]},
+            '_parameters': {'kind': 'assignment', 'changes': [{'skill': 'acme-b', 'agent': 'codex', 'enabled': True}], 'seen': {}},
+            '_intent': 'prev-intent',
+        }
+        dup_params = {'kind': 'assignment', 'changes': [{'skill': 'acme-b', 'agent': 'codex', 'enabled': True}], 'seen': {}}
+        dup_intent = json.dumps({k: v for k, v in dup_params.items() if k != 'seen'}, sort_keys=True)
+        active = {
+            'id': 'active-dup', 'kind': 'assignment', 'status': 'running',
+            'skills': ['acme-b'], 'agents': ['codex'], 'operations': [],
+            '_parameters': dup_params, '_intent': dup_intent,
+        }
+        with self.server.jobs_lock:
+            self.server.jobs.extend([prev, active])
+        merged_dup = self.server._add_job(dup_params, previous=prev)
+        self.assertTrue(merged_dup['duplicate'])
+        self.assertEqual([a['id'] for a in merged_dup['job'].get('new_session_agents', [])], ['antigravity'])
+        self.assertIn('op-prev', merged_dup['job']['operations'])
+        with self.server.jobs_lock:
+            self.server.jobs = [j for j in self.server.jobs if j['id'] != 'active-dup']
+
+        # 3. RollbackError on a later group preserves earlier succeeded operation's reminder.
+        op_done = operations.apply_assign([{'skill': 'acme-c', 'agent': 'antigravity', 'enabled': True}], confirmed=True, home=self.home)
+        err = operations.RollbackError('这项操作没能完全恢复，后续更新已停止，请先用备份还原。')
+        err.operations = [{'id': op_done['id']}]
+        err.completed = ['acme-c']
+        with patch.object(self.server, 'execute_job', side_effect=err):
+            self.submit('assignment', **self.assignment_params([{'skill': 'acme-a', 'agent': 'codex', 'enabled': False}]))
+            stopped = self.wait_jobs()[-1]
+        self.assertEqual(stopped['status'], 'failed')
+        self.assertIn(op_done['id'], stopped['operations'])
+        self.assertEqual([a['id'] for a in stopped.get('new_session_agents', [])], ['antigravity'])
+        self.server.jobs_blocked = ''
+
+    def test_update_merge_same_vs_different_config_import_new_enable_and_cleanup_delete(self):
+        # 1. Update with choice='merge': different merged content reminds Antigravity; identical content does not.
+        operations.apply_assign([
+            {'skill': 'acme-a', 'agent': 'codex', 'enabled': False},
+            {'skill': 'acme-a', 'agent': 'antigravity', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'codex', 'enabled': False},
+            {'skill': 'acme-b', 'agent': 'antigravity', 'enabled': True},
+        ], confirmed=True, home=self.home)
+        review = self.update_review('acme-a', 'acme-b')
+        import hashlib
+        merge_ids = {}
+        for row, body in ((review['skills'][0], '合并后的全新内容'),
+                          (review['skills'][1], (self.home / '.skill-pilot/store/acme-b/SKILL.md').read_text())):
+            merged_dir = Path(review['temporary']) / ('merge-' + row['name'])
+            merged_dir.mkdir(parents=True, exist_ok=True)
+            if row['name'] == 'acme-a':
+                (merged_dir / 'SKILL.md').write_text(f'---\nname: {row["name"]}\ndescription: 示例技能\n---\n{body}\n')
+            else:
+                (merged_dir / 'SKILL.md').write_text(body)
+            tree_sha = store.git_tree(merged_dir)
+            row['_merge'] = {'path': str(merged_dir), 'tree_sha': tree_sha}
+            merge_ids[row['name']] = hashlib.sha256((review['id'] + row['name'] + tree_sha).encode()).hexdigest()
+
+        self.submit('update', review_id=review['id'], skills=['acme-a'],
+                    choices={'acme-a': 'merge'}, merge_ids={'acme-a': merge_ids['acme-a']})
+        diff_merge_job = self.wait_jobs()[-1]
+        self.assertEqual(diff_merge_job['status'], 'done', diff_merge_job)
+        self.assertEqual([a['id'] for a in diff_merge_job.get('new_session_agents', [])], ['antigravity'])
+
+        self.submit('update', review_id=review['id'], skills=['acme-b'],
+                    choices={'acme-b': 'merge'}, merge_ids={'acme-b': merge_ids['acme-b']})
+        same_merge_job = self.wait_jobs()[-1]
+        self.assertEqual(same_merge_job['status'], 'done', same_merge_job)
+        self.assertEqual(same_merge_job.get('new_session_agents', []), [])
+
+        # 2. Config import via dashboard HTTP /api/config/apply genuinely enables acme-c on Claude + Antigravity.
+        config = sharing.export_config(self.home)
+        row_c = next(s for s in config['skills'] if s['name'] == 'acme-c')
+        row_c['assigned_agents'] = ['codex', 'claude', 'antigravity']
+        preview = self.ok('/api/config/preview', {'config': config})
+        imported = self.ok('/api/config/apply', {'config': config, 'revision': preview['revision'], 'confirmed': True})
+        self.assertEqual([a['id'] for a in imported.get('new_session_agents', [])], ['antigravity'])
+
+        # 3. Pure cleanup_delete job removing acme-c (enabled on Codex + Antigravity) must NOT remind.
+        plan = cleanup.delete_preview(['acme-c'], self.home)
+        self.submit('cleanup_delete', skills=['acme-c'],
+                    seen={k: plan[k] for k in ('dependency_warnings', 'path_warnings', 'irreplaceable')})
+        del_job = self.wait_jobs()[-1]
+        self.assertEqual(del_job['status'], 'done', del_job)
+        self.assertEqual(del_job.get('new_session_agents', []), [])
+
+    def test_generic_exception_rollback_unreadable_logs_and_concurrent_merge_order(self):
+        # 1. Multi-skill assignment: group 1 succeeds on Antigravity, group 2 raises generic RuntimeError.
+        operations.apply_assign([{'skill': 'acme-b', 'agent': 'codex', 'enabled': False}], confirmed=True, home=self.home)
+        orig_exec = self.server._execute_job
+        calls = {'count': 0}
+
+        def assign_boom(item):
+            calls['count'] += 1
+            if calls['count'] == 1:
+                raise ValueError('force group split')
+            if item['_parameters']['changes'][0]['skill'] == 'acme-b':
+                raise RuntimeError('unexpected failure on group 2')
+            return orig_exec(item)
+
+        changes = [
+            {'skill': 'acme-a', 'agent': 'antigravity', 'enabled': True},
+            {'skill': 'acme-b', 'agent': 'codex', 'enabled': True},
+        ]
+        params = self.assignment_params(changes)
+        with patch.object(self.server, '_execute_job', side_effect=assign_boom):
+            self.submit('assignment', **params)
+            failed_job = self.wait_jobs()[-1]
+        self.assertEqual(failed_job['status'], 'failed', failed_job)
+        self.assertEqual(failed_job['completed'], ['acme-a'])
+        self.assertEqual(len(failed_job['operations']), 1)
+        self.assertEqual([a['id'] for a in failed_job.get('new_session_agents', [])], ['antigravity'])
+        self.assertIn(failed_job['operations'][0], failed_job.get('operation_new_session_agents', {}))
+
+        # 2. Multi-skill update: group 1 succeeds on Antigravity, group 2 raises generic RuntimeError.
+        review = self.update_review('acme-a', 'acme-c')
+        orig_group = updates._apply_group
+
+        def update_boom(rev, group, *args, **kwargs):
+            if group == ['acme-c']:
+                raise RuntimeError('unexpected update boom')
+            return orig_group(rev, group, *args, **kwargs)
+
+        with patch.object(updates, '_apply_group', side_effect=update_boom):
+            self.submit('update', review_id=review['id'], skills=['acme-a', 'acme-c'],
+                        choices={'acme-a': 'upstream', 'acme-c': 'upstream'})
+            upd_failed = self.wait_jobs()[-1]
+        self.assertEqual(upd_failed['status'], 'failed', upd_failed)
+        self.assertEqual(upd_failed['updated'], ['acme-a'])
+        self.assertEqual(upd_failed.get('remaining'), ['acme-c'])
+        self.assertEqual([r['name'] for r in upd_failed.get('failed', [])], ['acme-c'])
+        self.assertEqual(len(upd_failed['operations']), 1)
+        self.assertEqual([a['id'] for a in upd_failed.get('new_session_agents', [])], ['codex', 'antigravity'])
+
+        # Retrying the failed batch update re-runs ONLY unexecuted acme-c, succeeds, and both ops can be undone!
+        retry_review = self.update_review('acme-c')
+        self.ok('/api/jobs/retry', {'id': upd_failed['id'], 'review_id': retry_review['id']})
+        upd_retried = self.wait_jobs()[-1]
+        self.assertEqual(upd_retried['status'], 'done', upd_retried)
+        self.assertEqual(sorted(upd_retried['updated']), ['acme-a', 'acme-c'])
+        self.assertEqual(len(upd_retried['operations']), 2)
+        for op_id in reversed(upd_retried['operations']):
+            table = self.ok('/api/table')
+            self.ok('/api/undo', {'id': op_id, 'revision': table['revision'], 'confirmed': True})
+
+        # 3. RollbackError on group 2 when operations.history() raises OSError -> in-memory reminder still preserved!
+        operations.apply_assign([{'skill': 'acme-a', 'agent': 'antigravity', 'enabled': False}], confirmed=True, home=self.home)
+        rb_calls = {'count': 0}
+
+        def assign_rollback(item):
+            rb_calls['count'] += 1
+            if rb_calls['count'] == 1:
+                raise ValueError('force group split')
+            if item['_parameters']['changes'][0]['skill'] == 'acme-b':
+                raise operations.RollbackError('这项操作没能完全恢复，后续更新已停止，请先用备份还原。')
+            return orig_exec(item)
+
+        params_rb = self.assignment_params(changes)
+        with patch.object(self.server, '_execute_job', side_effect=assign_rollback), \
+             patch.object(operations, 'history', side_effect=OSError('logs unreadable')):
+            self.submit('assignment', **params_rb)
+            rb_job = self.wait_jobs()[-1]
+        self.assertEqual(rb_job['status'], 'failed')
+        self.assertEqual(rb_job['completed'], ['acme-a'])
+        self.assertEqual(len(rb_job['operations']), 1)
+        self.assertEqual([a['id'] for a in rb_job.get('new_session_agents', [])], ['antigravity'])
+        self.server.jobs_blocked = ''
+
+        # 4. Concurrent duplicate retry merge during running job preserves chronological order & both reminders,
+        #    and partial undo filters operation_new_session_agents + sets undone_operations on /api/jobs!
+        op_old = operations.apply_assign([{'skill': 'acme-c', 'agent': 'antigravity', 'enabled': True}], confirmed=True, home=self.home)
+        entered, release = threading.Event(), threading.Event()
+        real_execute = self.server.execute_job
+
+        def slow_execute(item):
+            res = real_execute(item)
+            entered.set()
+            release.wait(5)
+            return res
+
+        params_new = self.assignment_params([{'skill': 'acme-b', 'agent': 'codex', 'enabled': True}])
+        with patch.object(self.server, 'execute_job', side_effect=slow_execute):
+            running = self.submit('assignment', **params_new)
+            self.assertTrue(entered.wait(5))
+            # While the running job has finished execute_job but not published yet, merge an earlier failed job into it.
+            prev_failed = {
+                'id': 'prev-old', 'kind': 'assignment', 'status': 'failed',
+                'skills': ['acme-c'], 'agents': ['antigravity'], 'operations': [op_old['id']],
+                'completed': ['acme-c'],
+                'new_session_agents': op_old['new_session_agents'],
+                'operation_new_session_agents': {op_old['id']: op_old['new_session_agents']},
+                '_parameters': {'kind': 'assignment', **params_new},
+                '_intent': 'prev-old-intent',
+            }
+            with self.server.jobs_lock:
+                self.server.jobs.append(prev_failed)
+            merged_dup = self.server._add_job({'kind': 'assignment', **params_new}, previous=prev_failed)
+            self.assertTrue(merged_dup['duplicate'])
+            self.assertEqual(merged_dup['job']['id'], running['id'])
+            release.set()
+            settled = self.wait_jobs()[-1]
+
+        self.assertEqual(settled['status'], 'done', settled)
+        self.assertEqual(len(settled['operations']), 2)
+        # Earlier op_old MUST come before newer op_new so reverse-order undo undoes op_new first!
+        self.assertEqual(settled['operations'][0], op_old['id'])
+        op_new_id = settled['operations'][1]
+        self.assertEqual([a['id'] for a in settled.get('new_session_agents', [])], ['codex', 'antigravity'])
+
+        # Undo newest op (op_new_id, codex): /api/jobs must filter op_new_id OUT of operation_new_session_agents too!
+        table = self.ok('/api/table')
+        self.ok('/api/undo', {'id': op_new_id, 'revision': table['revision'], 'confirmed': True})
+        polled = self.ok('/api/jobs')['items'][-1]
+        self.assertEqual([a['id'] for a in polled.get('new_session_agents', [])], ['antigravity'])
+        self.assertNotIn(op_new_id, polled.get('operation_new_session_agents', {}))
+        self.assertEqual(polled.get('undone_operations'), [op_new_id])
+
+        # Even if logs later become unreadable, persisted undone_operations prevents reverting to old agent list!
+        with patch.object(operations, 'history', side_effect=OSError('logs vanished')):
+            polled_again = self.ok('/api/jobs')['items'][-1]
+        self.assertEqual([a['id'] for a in polled_again.get('new_session_agents', [])], ['antigravity'])
+        self.assertEqual(polled_again.get('undone_operations'), [op_new_id])
+
+        # 5. Malformed log files (missing 'time' or non-dict JSON) must never crash jobs_work or stall the queue!
+        logs_dir = self.home / '.skill-pilot/logs'
+        bad_missing_time = logs_dir / 'malformed-missing-time.json'
+        bad_non_dict = logs_dir / 'malformed-list.json'
+        bad_missing_time.write_text(json.dumps({'id': 'no-time-record', 'skills': ['acme-a']}))
+        bad_non_dict.write_text('[1, 2, 3]')
+        try:
+            self.submit('assignment', **self.assignment_params([{'skill': 'acme-b', 'agent': 'antigravity', 'enabled': True}]))
+            malformed_job = self.wait_jobs()[-1]
+            self.assertEqual(malformed_job['status'], 'done', malformed_job)
+            self.assertEqual([a['id'] for a in malformed_job.get('new_session_agents', [])], ['antigravity'])
+        finally:
+            bad_missing_time.unlink(missing_ok=True)
+            bad_non_dict.unlink(missing_ok=True)
+
+        # 6. RollbackError blocks queue atomically under the same lock so concurrent retry cannot slip in.
+        self.server.jobs_blocked = ''
+        rb_entered = threading.Event()
+        real_stop_locked = self.server._stop_jobs_locked
+
+        def spy_stop_locked():
+            # Verify jobs_lock is ALREADY held by this worker thread (a second thread cannot acquire it!).
+            other_acquired = []
+            def probe():
+                got = self.server.jobs_lock.acquire(blocking=False)
+                other_acquired.append(got)
+                if got:
+                    self.server.jobs_lock.release()
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join(2)
+            if other_acquired != [False]:
+                raise AssertionError('_stop_jobs_locked called without holding jobs_lock')
+            rb_entered.set()
+            return real_stop_locked()
+
+        with patch.object(self.server, '_stop_jobs_locked', side_effect=spy_stop_locked), \
+             patch.object(self.server, 'execute_job', side_effect=operations.RollbackError('rollback failed')):
+            self.submit('assignment', **self.assignment_params([{'skill': 'acme-a', 'agent': 'claude', 'enabled': True}]))
+            self.assertTrue(rb_entered.wait(5))
+            self.wait_jobs()
+        self.assertTrue(self.server.jobs_blocked)
+        self.server.jobs_blocked = ''
+
+        # 7. Current job's own log record has corrupted field types (skills=5, agents=True, id=['bad']):
+        #    jobs_work must NOT crash and must preserve the valid in-memory reminder!
+        operations.apply_assign([{'skill': 'acme-b', 'agent': 'antigravity', 'enabled': False}], confirmed=True, home=self.home)
+        real_exec_corrupt = self.server.execute_job
+
+        def exec_and_corrupt_current_log(item):
+            res = real_exec_corrupt(item)
+            op_id = res['operations'][0]
+            log_file = self.home / '.skill-pilot/logs' / (op_id + '.json')
+            log_file.write_text(json.dumps({
+                'id': op_id, 'time': '2026-11-19T12:00:00+00:00',
+                'skills': 5, 'agents': True,
+                'new_session_agents': [{'id': ['bad'], 'name': 'Bad'}],
+            }))
+            return res
+
+        with patch.object(self.server, 'execute_job', side_effect=exec_and_corrupt_current_log):
+            self.submit('assignment', **self.assignment_params([{'skill': 'acme-b', 'agent': 'antigravity', 'enabled': True}]))
+            corrupt_job = self.wait_jobs()[-1]
+        self.assertEqual(corrupt_job['status'], 'done', corrupt_job)
+        self.assertEqual([a['id'] for a in corrupt_job.get('new_session_agents', [])], ['antigravity'])
+        # Clean up the corrupted log file so subsequent tests/teardown stay clean.
+        (self.home / '.skill-pilot/logs' / (corrupt_job['operations'][0] + '.json')).unlink(missing_ok=True)
+
+        # 8. Concurrent real retry_job() changes the job ID while jobs_status() is mid-flight:
+        #    confirmed undone_operations must be merged by operation ID onto the new retried job,
+        #    NOT dropped because the old job ID disappeared, AND must survive into completion!
+        operations.apply_assign([{'skill': 'acme-a', 'agent': 'codex', 'enabled': False}], confirmed=True, home=self.home)
+        op_a = {'id': 'antigravity', 'name': 'Antigravity', 'activation_note': '需新开对话生效'}
+        old_job = {
+            'id': 'race-old-job', 'kind': 'assignment', 'status': 'failed',
+            'skills': ['acme-a'], 'agents': ['antigravity', 'codex'],
+            'summary': '调整分配「示例甲」', 'message': '部分完成',
+            'completed': ['acme-a'],
+            'operations': ['op-undone-1'],
+            'new_session_agents': [op_a],
+            'operation_new_session_agents': {'op-undone-1': [op_a]},
+            'remaining_changes': [{'skill': 'acme-a', 'agent': 'codex', 'enabled': True}],
+            '_parameters': {'kind': 'assignment', **self.assignment_params([{'skill': 'acme-a', 'agent': 'codex', 'enabled': True}])},
+            '_intent': 'race-old-intent',
+        }
+        with self.server.jobs_lock:
+            self.server.jobs.append(old_job)
+        real_hc = self.server._history_and_catalog
+        real_exec_race = self.server.execute_job
+        allow_retry_exec = threading.Event()
+        retried_id_holder = []
+
+        def gated_exec(item):
+            allow_retry_exec.wait(5)
+            return real_exec_race(item)
+
+        def hc_with_real_concurrent_retry():
+            records, catalog, order = real_hc()
+            records['op-undone-1'] = {'id': 'op-undone-1', 'undone': True, 'new_session_agents': [op_a]}
+            if not retried_id_holder:
+                retried = self.server.retry_job({'id': 'race-old-job'})
+                retried_id_holder.append(retried['job']['id'])
+            return records, catalog, order
+
+        try:
+            with patch.object(self.server, 'execute_job', side_effect=gated_exec), \
+                 patch.object(self.server, '_history_and_catalog', side_effect=hc_with_real_concurrent_retry):
+                self.server.jobs_status()
+                self.assertEqual(len(retried_id_holder), 1)
+                new_job_id = retried_id_holder[0]
+                self.assertNotEqual(new_job_id, 'race-old-job')
+                with self.server.jobs_lock:
+                    new_raw = next(j for j in self.server.jobs if j['id'] == new_job_id)
+                    self.assertEqual(new_raw.get('undone_operations'), ['op-undone-1'])
+                    self.assertEqual(new_raw.get('new_session_agents'), [])
+                    self.assertNotIn('op-undone-1', new_raw.get('operation_new_session_agents', {}))
+                # Now let the retried Codex assignment complete!
+                allow_retry_exec.set()
+                settled_jobs = self.wait_jobs()
+            settled_new = next(j for j in settled_jobs if j['id'] == new_job_id)
+            self.assertEqual(settled_new['status'], 'done', settled_new)
+            # Even if logs are later unreadable, op-undone-1 stays undone and only Codex remains!
+            with patch.object(operations, 'history', side_effect=OSError('logs vanished')):
+                polled_after = next(j for j in self.server.jobs_status()['items'] if j['id'] == new_job_id)
+            self.assertEqual(polled_after.get('undone_operations'), ['op-undone-1'])
+            self.assertEqual([a['id'] for a in polled_after.get('new_session_agents', [])], ['codex'])
+            self.assertNotIn('op-undone-1', polled_after.get('operation_new_session_agents', {}))
+        finally:
+            allow_retry_exec.set()
+            with self.server.jobs_lock:
+                self.server.jobs = [j for j in self.server.jobs if j.get('id') not in {'race-old-job', *retried_id_holder}]
+
+
+class ActivationReminderStaticTests(unittest.TestCase):
+    def test_frontend_reminder_logic_uses_config_and_renders_toast_and_job_item(self):
+        app = (STATIC / 'app.js').read_text()
+        reminder_fns = '\n'.join([
+            extract_function(app, 'function agentProfileOf('),
+            extract_function(app, 'function newSessionAgentsFrom('),
+            extract_function(app, 'function newSessionReminderText('),
+            extract_function(app, 'function jobNewSessionAgents('),
+            extract_function(app, 'function jobReminderText('),
+            extract_function(app, 'function jobReminderHtml('),
+        ])
+        for tool_name in ('antigravity', 'codex', 'cursor', 'claude', 'dsh', 'doubaowork', 'workbuddy'):
+            self.assertNotIn(tool_name, reminder_fns.lower(), f'前端提醒逻辑不得硬编码 {tool_name}')
+
+        # Ensure absorb, agent join (direct & dialog), config import, and dependency add wire reminders.
+        self.assertIn("newSessionReminderText(written.new_session_agents || [], 'update')", extract_function(app, 'async function applyAbsorb('))
+        self.assertIn("newSessionReminderText(result.new_session_agents || [], 'update')", app)
+        self.assertIn("syncToastReminders();", extract_function(app, 'async function refreshLog('))
+
+        parts = [
+            "const JOB_ACTIVE = new Set(['waiting', 'running']);",
+            "const jobActive = job => JOB_ACTIVE.has(job.status);",
+            "const escape = s => String(s ?? '').replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));",
+            "const icon = name => `<svg class=\"ico\"><use href=\"#sp-${name}\"/></svg>`;",
+            "const nameOf = id => (state.agents.find(a => a.id === id) || {}).name || id;",
+            "const feedbackButton = () => '';",
+            "const jobConflictHtml = () => '';",
+            "const jobFailedHtml = () => '';",
+            "const jobImpactHtml = () => '';",
+            "const jobActions = () => [];",
+            "const jobStatusInfo = job => ({done: {tone: 'tag-ok', label: '已完成'}, failed: {tone: 'tag-danger', label: '没完成'}}[job.status] || {tone: 'tag-quiet', label: job.status});",
+            extract_function(app, 'function pastTense('),
+            extract_function(app, 'function undoneOpSet('),
+            extract_function(app, 'function rememberUndoneOps('),
+            extract_function(app, 'function jobActiveOperations('),
+            extract_function(app, 'function jobUndoAvailable('),
+            reminder_fns,
+            extract_function(app, 'function jobStatusLine('),
+            extract_function(app, 'function jobItemHtml('),
+            block(app, 'function applyJobs('),
+            block(app, 'async function undoJob('),
+            block(app, 'async function undoOperation('),
+            block(app, 'function setToastReminder('),
+            block(app, 'function syncToastReminders('),
+            block(app, 'function toast('),
+            block(app, 'function finishJobs('),
+        ]
+        script = '\n'.join(parts) + r'''
+const assert = require('node:assert/strict');
+const state = {
+  agents: [
+    {id: 'live-a', name: '即时工具', activation_mode: 'immediate', activation_text: '即时生效'},
+    {id: 'fresh-b', name: '新对话工具', activation_mode: 'new_session', activation_text: '需新开对话生效'},
+    {id: 'fresh-c', name: '扩展工具', activation_mode: 'new_session', activation_text: '需新开对话生效'},
+  ],
+  catalog: new Map(),
+  logs: [],
+  jobs: [],
+  jobsVersion: -1,
+  jobsBlocked: '',
+  undoneOps: new Set(),
+  table: {llm_configured: false},
+};
+
+// 1. Config-driven filtering by agent IDs and mixed profile objects
+assert.deepEqual(newSessionAgentsFrom(['live-a']), []);
+assert.deepEqual(newSessionAgentsFrom(['live-a', 'fresh-b', 'fresh-c']), ['新对话工具', '扩展工具']);
+assert.deepEqual(newSessionAgentsFrom(state.agents), ['新对话工具', '扩展工具']);
+assert.equal(newSessionReminderText(['live-a']), '');
+assert.equal(newSessionReminderText(['live-a', 'fresh-b']), '新对话工具 需新开对话才会加载新技能');
+assert.equal(newSessionReminderText(['fresh-b', 'fresh-c'], 'update'), '新对话工具、扩展工具 需新开对话才会加载新版技能');
+
+// 2. Job reminder: pure immediate vs new_session vs update vs partial undo vs full undo vs failed
+const immediateJob = {id: 'j1', kind: 'assignment', status: 'done', summary: '调整分配', message: '将给 即时工具 加 1 个', operations: ['op1'], new_session_agents: []};
+assert.equal(jobReminderText(immediateJob), '');
+assert.doesNotMatch(jobItemHtml(immediateJob), /job-reminder/);
+
+const multiOpJob = {
+  id: 'j2', kind: 'assignment', status: 'done', summary: '调整分配',
+  message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+  operations: ['op2a', 'op2b'],
+  new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  operation_new_session_agents: {
+    op2a: [{id: 'fresh-b', name: '新对话工具'}],
+    op2b: [{id: 'fresh-c', name: '扩展工具'}],
+  },
+};
+assert.equal(jobReminderText(multiOpJob), '新对话工具、扩展工具 需新开对话才会加载新技能');
+assert.match(jobItemHtml(multiOpJob), /class="job-reminder"[^>]*role="note".*新对话工具、扩展工具 需新开对话才会加载新技能/);
+
+// Partial undo: undo op2a -> only 扩展工具 remains!
+state.logs = [{id: 'op2a', undone: true}, {id: 'op2b', undone: false}];
+assert.equal(jobReminderText(multiOpJob), '扩展工具 需新开对话才会加载新技能');
+assert.match(jobItemHtml(multiOpJob), /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(jobItemHtml(multiOpJob), /新对话工具 需新开对话/);
+
+// Full undo: undo both -> reminder disappears completely!
+state.logs = [{id: 'op2a', undone: true}, {id: 'op2b', undone: true}];
+assert.equal(jobReminderText(multiOpJob), '');
+assert.doesNotMatch(jobItemHtml(multiOpJob), /job-reminder/);
+state.logs = [];
+
+const updateJob = {id: 'j3', kind: 'update', status: 'done', summary: '更新', message: '已更新：示例甲。', operations: ['op3'], new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}]};
+assert.equal(jobReminderText(updateJob), '新对话工具、扩展工具 需新开对话才会加载新版技能');
+
+const failedJob = {id: 'j4', kind: 'assignment', status: 'failed', summary: '调整分配', message: '冲突', completed: [], new_session_agents: [{id: 'fresh-b', name: '新对话工具'}]};
+assert.equal(jobReminderText(failedJob), '');
+
+const partialJob = {
+  id: 'j5', kind: 'assignment', status: 'failed', summary: '调整分配', message: '部分完成',
+  completed: ['acme-a'], operations: ['op5'],
+  new_session_agents: [{id: 'fresh-b', name: '新对话工具'}],
+  operation_new_session_agents: {op5: [{id: 'fresh-b', name: '新对话工具'}]},
+};
+assert.equal(jobReminderText(partialJob), '新对话工具 需新开对话才会加载新技能');
+
+// 3. Minimal DOM mock supporting classList, querySelector, replaceWith, remove
+function makeEl(tag) {
+  const el = {
+    tag, _classes: new Set(), _listeners: {}, textContent: '', innerHTML: '', children: [], attrs: {}, parent: null,
+    get className() { return [...this._classes].join(' '); },
+    set className(val) { this._classes = new Set(String(val || '').split(/\s+/).filter(Boolean)); },
+    classList: {
+      add(...cs) { for (const c of cs) el._classes.add(c); },
+      remove(...cs) { for (const c of cs) el._classes.delete(c); },
+      contains(c) { return el._classes.has(c); },
+    },
+    append(...nodes) { for (const n of nodes) { n.parent = this; this.children.push(n); } },
+    prepend(n) { n.parent = this; this.children.unshift(n); },
+    setAttribute(k, v) { this.attrs[k] = v; },
+    addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); },
+    async click() { for (const fn of (this._listeners.click || [])) await fn({target: this}); },
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); this.parent = null; },
+    replaceWith(other) {
+      if (!this.parent) return;
+      const idx = this.parent.children.indexOf(this);
+      other.parent = this.parent;
+      this.parent.children[idx] = other;
+      this.parent = null;
+    },
+    querySelector(sel) {
+      for (const child of this.children) {
+        if ((sel.startsWith('.') && child._classes.has(sel.slice(1))) || child.tag === sel) return child;
+        const found = child.querySelector(sel);
+        if (found) return found;
+      }
+      return null;
+    },
+  };
+  return el;
+}
+
+const toastsContainer = makeEl('div');
+const dismissDelays = [];
+const document = {createElement: makeEl};
+const $ = id => id === 'toasts' ? toastsContainer : makeEl('div');
+function autoDismiss(item, delay) { dismissDelays.push(delay); }
+function appendFeedback() {}
+
+toast({text: '普通完成'});
+assert.equal(toastsContainer.children[0].className, 'toast');
+assert.equal(dismissDelays.at(-1), 6000);
+
+// 4. finishJobs + live syncToastReminders on partial & full undo (for both done and sticky partial-failure toasts!)
+const packBatches = new Map();
+const refreshTable = () => Promise.resolve();
+const refreshLog = () => Promise.resolve();
+const loadCleanup = () => Promise.resolve();
+const renderJobs = () => {};
+const jobsHasActive = () => false;
+const assignmentSubmitting = false;
+state.assignmentIntents = new Map();
+state.jobs = [immediateJob, multiOpJob, partialJob];
+toastsContainer.children = [];
+
+finishJobs([immediateJob, multiOpJob, partialJob]);
+// Prepend order: [0] partialJob, [1] multiOpJob, [2] immediateJob
+const partialToast = toastsContainer.children[0];
+const multiToast = toastsContainer.children[1];
+const immediateToast = toastsContainer.children[2];
+assert.equal(immediateToast.querySelector('.toast-reminder'), null);
+assert.match(multiToast.querySelector('.toast-reminder').innerHTML, /新对话工具、扩展工具 需新开对话才会加载新技能/);
+assert.match(partialToast.querySelector('.toast-reminder').innerHTML, /新对话工具 需新开对话才会加载新技能/);
+
+// Undo op2a (partial) & op5 (partial-failure job's only completed op) -> syncToastReminders updates live toasts!
+state.logs = [{id: 'op2a', undone: true}, {id: 'op2b', undone: false}, {id: 'op5', undone: true}];
+syncToastReminders();
+assert.match(multiToast.querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(multiToast.querySelector('.toast-reminder').innerHTML, /新对话工具/);
+assert.equal(partialToast.querySelector('.toast-reminder'), null);
+assert.equal(partialToast.classList.contains('toast-remind'), false);
+
+// Undo op2b too -> multiToast loses reminder AND undo button!
+state.logs = [{id: 'op2a', undone: true}, {id: 'op2b', undone: true}, {id: 'op5', undone: true}];
+syncToastReminders();
+assert.equal(multiToast.querySelector('.toast-reminder'), null);
+assert.equal(multiToast.classList.contains('toast-remind'), false);
+assert.equal(multiToast._undoButton, null);
+
+// 5. /api/jobs arrives BEFORE /api/log refreshes (stale state.logs = []):
+//    server-filtered undone_operations + operation_new_session_agents must NOT re-add already-undone agents!
+state.logs = [];
+const jobAheadOfLog = {
+  id: 'j6', kind: 'assignment', status: 'done', summary: '调整分配',
+  message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+  operations: ['op6a', 'op6b'],
+  undone_operations: ['op6a'],
+  new_session_agents: [{id: 'fresh-c', name: '扩展工具'}],
+  operation_new_session_agents: {op6b: [{id: 'fresh-c', name: '扩展工具'}]},
+};
+state.jobs = [jobAheadOfLog];
+assert.equal(jobReminderText(jobAheadOfLog), '扩展工具 需新开对话才会加载新技能');
+assert.doesNotMatch(jobItemHtml(jobAheadOfLog), /新对话工具 需新开对话/);
+assert.equal(jobUndoAvailable(jobAheadOfLog), true);
+
+toastsContainer.children = [];
+toast({
+  text: '给 新对话工具 加了 1 个、给 扩展工具 加了 1 个',
+  reminder: '新对话工具、扩展工具 需新开对话才会加载新技能',
+  reminderSource: {jobId: 'j6', job: jobAheadOfLog},
+  undo: () => true,
+});
+syncToastReminders();
+assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
+
+// Clearing ended jobs AFTER the toast narrowed must NOT revert the toast back to the stale pre-undo list!
+state.jobs = [];
+syncToastReminders();
+assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
+
+const allUndoneAheadOfLog = {...jobAheadOfLog, undone_operations: ['op6a', 'op6b'], new_session_agents: [], operation_new_session_agents: {}};
+state.jobs = [allUndoneAheadOfLog];
+assert.equal(jobUndoAvailable(allUndoneAheadOfLog), false);
+assert.equal(jobReminderText(allUndoneAheadOfLog), '');
+syncToastReminders();
+assert.equal(toastsContainer.children[0].querySelector('.toast-reminder'), null);
+assert.equal(toastsContainer.children[0]._undoButton, null);
+// 6. Undo confirmed via state.logs first, then job card cleared AND state.logs no longer contains that record:
+//    toast must monotonically retain the narrowed reminder and NEVER revert to the undone agent!
+const jobLogFirst = {
+  id: 'j7', kind: 'assignment', status: 'done', summary: '调整分配',
+  message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+  operations: ['op7a', 'op7b'],
+  new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  operation_new_session_agents: {
+    op7a: [{id: 'fresh-b', name: '新对话工具'}],
+    op7b: [{id: 'fresh-c', name: '扩展工具'}],
+  },
+};
+state.jobs = [jobLogFirst];
+state.logs = [{id: 'op7a', undone: true}, {id: 'op7b', undone: false}];
+toastsContainer.children = [];
+toast({
+  text: '给 新对话工具 加了 1 个、给 扩展工具 加了 1 个',
+  reminder: '新对话工具、扩展工具 需新开对话才会加载新技能',
+  reminderSource: {jobId: 'j7', job: jobLogFirst},
+  undo: () => true,
+});
+syncToastReminders();
+assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
+
+// Clear job card AND drop op7a from state.logs -> toast must stay narrowed to 扩展工具 only!
+state.jobs = [];
+state.logs = [];
+syncToastReminders();
+assert.match(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /扩展工具 需新开对话才会加载新技能/);
+assert.doesNotMatch(toastsContainer.children[0].querySelector('.toast-reminder').innerHTML, /新对话工具/);
+
+// 7. Toast undo button & real undoJob + undoOperation share global monotonic state.undoneOps across all race windows!
+const undoApiCalls = [];
+let confirmHook = async () => true;
+let tableHook = null;
+async function confirmDialog(opts) { return await confirmHook(opts); }
+async function runWrite({work}) { return await work(); }
+async function refreshEverything() {}
+async function refreshUpdates() {}
+function renderJobBlocked() {}
+function renderJobState() {}
+function renderJobAvailability() {}
+function scheduleJobsPoll() {}
+function stopJobsPolling() {}
+async function api(path, body) {
+  if (path === '/api/log') return [];
+  if (path === '/api/table') {
+    if (tableHook) await tableHook();
+    return {revision: 'rev-1'};
+  }
+  if (path === '/api/undo') {
+    undoApiCalls.push(body.id);
+    return {ok: true};
+  }
+  return {};
+}
+(async () => {
+  const jobUndoTest = {
+    id: 'j8', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op8a', 'op8b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+    operation_new_session_agents: {
+      op8a: [{id: 'fresh-b', name: '新对话工具'}],
+      op8b: [{id: 'fresh-c', name: '扩展工具'}],
+    },
+  };
+  state.jobs = [jobUndoTest];
+  state.logs = [];
+  toastsContainer.children = [];
+  finishJobs([jobUndoTest]);
+  const undoToast = toastsContainer.children[0];
+  // 7a. Latest op (op8b) is undone via logs, then job card is cleared AND op8b's log disappears.
+  state.logs = [{id: 'op8b', undone: true}, {id: 'op8a', undone: false}];
+  syncToastReminders();
+  state.jobs = [];
+  state.logs = [];
+  syncToastReminders();
+  undoApiCalls.length = 0;
+  await undoToast._undoButton.click();
+  assert.deepEqual(undoApiCalls, ['op8a']);
+
+  // 7b. Calling undoJob with a stale job snapshot uses live state.jobs undone_operations!
+  const staleJobB = {
+    id: 'j8b', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op8c', 'op8d'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [{...staleJobB, undone_operations: ['op8d']}];
+  state.logs = [];
+  undoApiCalls.length = 0;
+  await undoJob(staleJobB);
+  assert.deepEqual(undoApiCalls, ['op8c']);
+
+  // 7c. Toast created when op9b is ALREADY undone in state.logs, then logs & jobs immediately clear without sync:
+  //     source.undoneOps initialized at toast creation still skips op9b and submits ONLY op9a!
+  const jobInitUndone = {
+    id: 'j9', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op9a', 'op9b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+    operation_new_session_agents: {
+      op9a: [{id: 'fresh-b', name: '新对话工具'}],
+      op9b: [{id: 'fresh-c', name: '扩展工具'}],
+    },
+  };
+  state.jobs = [jobInitUndone];
+  state.logs = [{id: 'op9b', undone: true}, {id: 'op9a', undone: false}];
+  toastsContainer.children = [];
+  finishJobs([jobInitUndone]);
+  const initUndoneToast = toastsContainer.children[0];
+  state.logs = [];
+  state.jobs = [];
+  undoApiCalls.length = 0;
+  await initUndoneToast._undoButton.click();
+  assert.deepEqual(undoApiCalls, ['op9a']);
+
+  // 7d. While undo confirmDialog is OPEN, op10b becomes undone (partial) -> after user confirms, ONLY op10a is submitted!
+  const jobDuringConfirm = {
+    id: 'j10', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op10a', 'op10b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+    operation_new_session_agents: {
+      op10a: [{id: 'fresh-b', name: '新对话工具'}],
+      op10b: [{id: 'fresh-c', name: '扩展工具'}],
+    },
+  };
+  state.jobs = [jobDuringConfirm];
+  state.logs = [];
+  toastsContainer.children = [];
+  finishJobs([jobDuringConfirm]);
+  const confirmRaceToast = toastsContainer.children[0];
+  let resolveConfirm;
+  confirmHook = () => new Promise(resolve => { resolveConfirm = resolve; });
+  undoApiCalls.length = 0;
+  const pendingClick = confirmRaceToast._undoButton.click();
+  state.jobs = [{...jobDuringConfirm, undone_operations: ['op10b']}];
+  syncToastReminders();
+  state.jobs = [];
+  state.logs = [];
+  resolveConfirm(true);
+  await pendingClick;
+  assert.deepEqual(undoApiCalls, ['op10a']);
+
+  // 7e. While undo confirmDialog is OPEN, ALL remaining ops become undone -> after user confirms, ZERO /api/undo calls!
+  const jobAllUndoneConfirm = {
+    id: 'j10e', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op10c', 'op10d'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [jobAllUndoneConfirm];
+  state.logs = [];
+  toastsContainer.children = [];
+  finishJobs([jobAllUndoneConfirm]);
+  const allUndoneRaceToast = toastsContainer.children[0];
+  confirmHook = () => new Promise(resolve => { resolveConfirm = resolve; });
+  undoApiCalls.length = 0;
+  const pendingAllUndone = allUndoneRaceToast._undoButton.click();
+  state.jobs = [{...jobAllUndoneConfirm, undone_operations: ['op10c', 'op10d']}];
+  syncToastReminders();
+  resolveConfirm(true);
+  await pendingAllUndone;
+  assert.deepEqual(undoApiCalls, []);
+
+  // 7f. Clicking Undo from a JOB CARD (no reminderSource): while confirmDialog is open,
+  //     applyJobs poll reports op11b undone, THEN card is cleared AND logs are empty -> global state.undoneOps
+  //     keeps op11b skipped and submits ONLY op11a!
+  const cardJob = {
+    id: 'j11', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op11a', 'op11b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [cardJob];
+  state.logs = [];
+  toastsContainer.children = [];
+  confirmHook = () => new Promise(resolve => { resolveConfirm = resolve; });
+  undoApiCalls.length = 0;
+  const pendingCardUndo = undoJob(cardJob);
+  applyJobs({items: [{...cardJob, undone_operations: ['op11b']}], version: 10, blocked: ''}, {force: true});
+  applyJobs({items: [], version: 11, blocked: ''}, {force: true});
+  state.logs = [];
+  resolveConfirm(true);
+  await pendingCardUndo;
+  assert.deepEqual(undoApiCalls, ['op11a']);
+  confirmHook = async () => true;
+
+  // 7g. Partial undo arrives WHILE awaiting /api/table (after confirm, right before /api/undo):
+  //     op12b becomes undone during /api/table -> skipped without error, loop continues to undo op12a!
+  const tableRacePartial = {
+    id: 'j12', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op12a', 'op12b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [tableRacePartial];
+  state.logs = [];
+  undoApiCalls.length = 0;
+  let tableCalls = 0;
+  tableHook = async () => {
+    tableCalls += 1;
+    if (tableCalls === 1) {
+      applyJobs({items: [{...tableRacePartial, undone_operations: ['op12b']}], version: 12, blocked: ''}, {force: true});
+      applyJobs({items: [], version: 13, blocked: ''}, {force: true});
+    }
+  };
+  const partialOk = await undoJob(tableRacePartial);
+  tableHook = null;
+  assert.equal(partialOk, true);
+  assert.deepEqual(undoApiCalls, ['op12a']);
+
+  // 7h. ALL remaining ops become undone WHILE awaiting /api/table -> skipped cleanly with ZERO /api/undo calls and no error!
+  const tableRaceAll = {
+    id: 'j13', kind: 'assignment', status: 'done', summary: '调整分配',
+    message: '将给 新对话工具 加 1 个、将给 扩展工具 加 1 个',
+    operations: ['op13a', 'op13b'],
+    new_session_agents: [{id: 'fresh-b', name: '新对话工具'}, {id: 'fresh-c', name: '扩展工具'}],
+  };
+  state.jobs = [tableRaceAll];
+  state.logs = [];
+  undoApiCalls.length = 0;
+  tableHook = async () => {
+    applyJobs({items: [{...tableRaceAll, undone_operations: ['op13a', 'op13b']}], version: 14, blocked: ''}, {force: true});
+    applyJobs({items: [], version: 15, blocked: ''}, {force: true});
+  };
+  const allOk = await undoJob(tableRaceAll);
+  tableHook = null;
+  assert.equal(allOk, false);
+  assert.deepEqual(undoApiCalls, []);
+
+  // 8. Direct-operation toast keeps API original new_session_agents (ignores corrupted logs) & malformed entries filtered.
+  assert.deepEqual(newSessionAgentsFrom([{id: ['broken'], name: 123}, {id: 'fresh-b', name: '新对话工具'}]), ['新对话工具']);
+  toastsContainer.children = [];
+  state.logs = [];
+  toast({
+    text: '已导入配置',
+    reminder: newSessionReminderText([{id: 'fresh-b', name: '新对话工具'}], 'enable'),
+    reminderSource: {operationIds: ['op-import-1'], agents: [{id: 'fresh-b', name: '新对话工具'}], kind: 'enable'},
+    undo: () => true,
+  });
+  const directToast = toastsContainer.children[0];
+  state.logs = [{id: 'op-import-1', undone: false, new_session_agents: [{id: 'fresh-c', name: '被损坏的日志名'}, {id: ['bad'], name: 999}]}];
+  syncToastReminders();
+  assert.match(directToast.querySelector('.toast-reminder').innerHTML, /新对话工具 需新开对话才会加载新技能/);
+  assert.doesNotMatch(directToast.querySelector('.toast-reminder').innerHTML, /被损坏的日志名/);
+
+  // Once marked undone in logs, reminder & undo button clear and stay cleared even after log rotates out.
+  state.logs = [{id: 'op-import-1', undone: true}];
+  syncToastReminders();
+  assert.equal(directToast.querySelector('.toast-reminder'), null);
+  assert.equal(directToast._undoButton, null);
+  state.logs = [];
+  syncToastReminders();
+  assert.equal(directToast.querySelector('.toast-reminder'), null);
+})().catch(err => { console.error(err); process.exit(1); });
+'''
+        result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+if __name__ == '__main__':
+    unittest.main()

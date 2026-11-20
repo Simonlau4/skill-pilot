@@ -1010,6 +1010,7 @@ const toasts = [];
 const toast = item => toasts.push(item);
 const pastTense = text => text;
 const jobStatusLine = job => '安装失败：' + (job.message || '原因未知');
+const jobReminderText = () => '';
 const jobUndoAvailable = () => false;
 const undoJob = async () => true;
 const refreshTable = async () => {};

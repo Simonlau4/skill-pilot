@@ -1468,8 +1468,11 @@ def install_named(home, name, author=None, agents=(), confirmed=False):
         assigned = operations.apply_assign([{'skill': plan['name'], 'agent': a, 'enabled': True} for a in agents],
                                            confirmed=True, home=home)
         result['message'] += '；' + assigned['message']
+        result['new_session_agents'] = assigned.get('new_session_agents', [])
         if 'id' in assigned:
             result['operations'].append(assigned['id'])
+    else:
+        result['new_session_agents'] = []
     return result
 
 

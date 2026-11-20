@@ -174,7 +174,8 @@ def table(home=None):
     return {'home': str(home), 'revision': revision(home, agents), 'write_allowed': write_allowed(home), 'skills': rows,
             'actual_assignments': {s['name']: [a for a in agents if s['name'] in actual[a]['available']] for s in rows},
             'agents': [{'id': a, 'name': catalog[a]['name'],
-                        'activation': '目录改变后会动态刷新' if catalog[a]['activation'] == 'immediate' else '新会话生效',
+                        'activation': profiles.activation_note(catalog[a]),
+                        'activation_mode': catalog[a]['activation'],
                         'activation_text': profiles.activation_text(catalog[a]),
                         'count': sum(a in s['assigned_agents'] for s in rows),
                         'description_tokens': sum(s['description_tokens'] for s in rows if a in s['assigned_agents'])}
@@ -545,6 +546,24 @@ def _validate(home, registry, agents, expected_visibility=None):
                     else set(current[agent]['available']) & managed != expected)
         if mismatch:
             raise ValueError(f'{profiles.by_id(home)[agent]["name"]} 的实际技能名单与勾选结果不一致，已经恢复原样。原有停用设置可能限制了这次分配。')
+    return current
+
+
+def _activated_agents(before_vis, after_vis, managed_agents):
+    """Return managed agent IDs that gained a newly available skill or changed version."""
+    affected = []
+    for agent in managed_agents:
+        after = after_vis.get(agent)
+        if not after:
+            continue
+        before = before_vis.get(agent) or {'available': [], 'versions': {}}
+        before_available = set(before.get('available', ()))
+        before_versions = before.get('versions', {})
+        after_versions = after.get('versions', {})
+        if any(name not in before_available or after_versions.get(name) != before_versions.get(name)
+               for name in after.get('available', ())):
+            affected.append(agent)
+    return affected
 
 
 def _commit(home, registry, names, content_names, message):
@@ -590,7 +609,8 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
                 expected_visibility = {a: sorted(
                     (set(snapshot['before'][a]['available']) - set(names)) |
                     {n for n in names if a in active.get(n, [])}) for a in agents}
-            _validate(home, registry, agents, expected_visibility)
+            before_vis = result.pop('_visibility_before', None) or snapshot['before']
+            after_vis = _validate(home, registry, agents, expected_visibility)
             original_registry = result.pop('_registry_bytes', None)
             if original_registry is None:
                 write_json(home / '.skill-pilot/registry.json', registry, checked)
@@ -606,8 +626,11 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
             if agents_changed:
                 involved = sorted(set(involved) | set(result.get('agents', [])) |
                                   ({result['agent']} if result.get('agent') else set()))
+            new_session = ([] if undo_of is not None else
+                           profiles.new_session_agents(_activated_agents(before_vis, after_vis, agents), home))
             record = {'id': commit, 'time': datetime.now(timezone.utc).isoformat(), 'message': message,
                       'agents': involved,
+                      'new_session_agents': new_session,
                       'backup_id': snapshot['backup_id'], 'skills': names, 'undo_of': undo_of,
                       'after_revision': revision(home, agents),
                       'extra_paths': extra_paths or [],
@@ -641,7 +664,8 @@ def _run(home, registry, agents, expected, message, mutation, undo_of=None, extr
             _prune_backups(home, checked)
         except Exception:
             logging.getLogger(__name__).warning('旧备份没能清理，将在下次操作后重试。')
-        return {**result, 'id': commit, 'message': message, 'backup_id': snapshot['backup_id']}
+        return {**result, 'id': commit, 'message': message, 'backup_id': snapshot['backup_id'],
+                'new_session_agents': new_session}
 
 
 def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=False, review_check=None):
@@ -667,7 +691,7 @@ def apply_assign(changes, expected=None, confirmed=False, home=None, recheck=Fal
         return {'needs_confirmation': True, **review}
     if not plan['changed']:
         return {'message': '这些改动已经完成，已与最新状态对齐。' if recheck else plan['message'],
-                'reasons': plan['reasons']}
+                'reasons': plan['reasons'], 'new_session_agents': []}
     had_drift = any((set(before[a]) & set(registry['skills'])) !=
         {n for n, s in registry['skills'].items() if a in s['assigned_agents']} for a in agents)
     def check_current():
@@ -967,7 +991,7 @@ def absorb(all_skills=False, selected=None, expected=None, home=None, choices=No
     if not candidates:
         if choices:
             raise ValueError('所选副本已经变化，请刷新后重新核对。')
-        return {'message': '没有需要收编的技能或外部副本。'}
+        return {'message': '没有需要收编的技能或外部副本。', 'new_session_agents': []}
     grouped, copies_by_name, collisions = {}, {}, []
     for item in candidates:
         copies_by_name.setdefault(item['name'], []).append(item)

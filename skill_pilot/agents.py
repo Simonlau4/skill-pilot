@@ -37,6 +37,8 @@ def overview(home=None, discovered=None):
     return {'revision': operations.revision(home, local['onboarded'])
             if discovered is None and (home / '.skill-pilot/registry.json').is_file() else None,
             'managed': [{'id': p['id'], 'name': p['name'], 'skill_roots': p['skill_roots'],
+                         'activation': profiles.activation_note(p),
+                         'activation_mode': p['activation'],
                          'activation_text': profiles.activation_text(p),
                          'shared_with': [q['id'] for q in managed if q != p and set(q['skill_roots']) & set(p['skill_roots'])],
                          'can_leave': len(managed) > 1} for p in managed],
@@ -230,6 +232,7 @@ def join(requests, plan_id, expected=None, choices=None, home=None, *, preserve_
                 if after[agent]['versions'][name] != expected_versions:
                     raise ValueError('接入后的内容与所选版本不一致，已经恢复原样。')
         return changed, content, {'agents': plan['agents'], 'after': after, '_agents_changed': True,
+                                  '_visibility_before': plan['before'],
                                   '_expected_visibility': {a: state['available'] for a, state in after.items()}}
     return operations._run(home, registry, managed, current, '接入了 ' + '、'.join(p['name'] for p in plan['profiles']), mutate, extra_paths=plan['roots'])
 
