@@ -54,8 +54,9 @@ def download(url, timeout=45):
         return response.read()
 
 
-def prepare(sources, temporary, version, deadline=None):
-    result, indexes = {}, {}
+def prepare(sources, temporary, version, deadline=None, *, cache=None, indexes=None):
+    result = cache if cache is not None else {}
+    indexes = indexes if indexes is not None else {}
     def get(url):
         if deadline is None: return download(url)
         left = deadline - time.monotonic()
@@ -63,6 +64,8 @@ def prepare(sources, temporary, version, deadline=None):
             raise ValueError('飞书检查超时，可以稍后重试。') from TimeoutError('飞书检查超过允许时间。')
         return download(url, timeout=min(45, left))
     for name, source in sources.items():
+        if name in result:
+            continue
         index_url = source['base_url'].rstrip('/') + '/.well-known/agent-skills/index.json'
         if index_url not in indexes:
             indexes[index_url] = {s['name']: s for s in json.loads(get(index_url))['skills']}
@@ -78,11 +81,12 @@ def prepare(sources, temporary, version, deadline=None):
         try:
             with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
                 bundle.extractall(destination, filter='data')
-        except tarfile.TarError as error:
+            safe_skill(destination)
+            if metadata((destination / 'SKILL.md').read_text()).get('name') != name:
+                raise ValueError('飞书技能包的名称与清单不一致，已停止更新。')
+        except (OSError, ValueError, tarfile.TarError) as error:
+            rmtree(destination, ignore_errors=True)
             raise ValueError('飞书技能包内容不安全或未读完整，已停止更新。') from error
-        safe_skill(destination)
-        if metadata((destination / 'SKILL.md').read_text()).get('name') != name:
-            raise ValueError('飞书技能包的名称与清单不一致，已停止更新。')
         result[name] = {'path': str(destination), 'digest': entry['digest'], 'url': url, 'cli_version': version}
     return result
 
@@ -115,7 +119,7 @@ def _npm_command(env, root):
     return [str(node.resolve()), str(entry.resolve())]
 
 
-def install_cli(home, version, checked):
+def prepare_cli(home, version, root):
     guard(home / '.skill-pilot', home)
     if os.name == 'nt':
         raise ValueError(MANUAL_UPDATE_REASON)
@@ -126,37 +130,45 @@ def install_cli(home, version, checked):
         raise ValueError('飞书更新需要 Node.js 和 npm，请按安装说明装好后重试。这组技能保持原样。')
     # Package lifecycle code can only see this isolated home and prefix. It
     # never receives an agent root or the user's npm configuration.
-    with tempfile.TemporaryDirectory(prefix='skill-pilot-lark-install-') as temporary:
-        root = Path(temporary)
-        env = {k: v for k, v in env.items() if not k.lower().startswith(('npm_config_', 'pnpm_'))}
-        env.update(npm_config_prefix=str(root / 'prefix'), npm_config_cache=str(root / 'cache'),
-                   npm_config_userconfig=str(root / 'user.npmrc'), npm_config_globalconfig=str(root / 'global.npmrc'),
-                   XDG_CONFIG_HOME=str(root / '.config'), XDG_STATE_HOME=str(root / '.state'))
-        command = _npm_command(env, root)
-        env.update(HOME=str(root), PATH=str(Path(command[0]).parent) + os.pathsep + env['PATH'])
-        try:
-            result = subprocess.run([*command, 'install', '-g', '@larksuite/cli@' + version],
-                                    cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise ValueError('飞书工具安装未能启动或等待超时，请检查安装环境后重试。这组技能保持原样。') from error
-        if result.returncode:
-            error = result.stderr.decode(errors='replace')
-            reason = ('安装设置互相冲突' if 'double-loading config' in error else
-                      '下载没有成功，请检查网络后重试' if any(code in error for code in
-                          ('ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED')) else
-                      '安装程序报错，请稍后重试')
-            raise ValueError('飞书工具' + reason + f'（退出状态 {result.returncode}）。这组技能保持原样。') from subprocess.CalledProcessError(
-                result.returncode, result.args, result.stdout, result.stderr)
-        package = root / 'prefix/lib/node_modules/@larksuite/cli'
-        if json.loads((package / 'package.json').read_text())['version'] != version:
-            raise ValueError('飞书工具版本没有核对通过，技能保持原样。')
-        target = checked(home / CLI_PATHS[0])
-        if target.exists():
-            rmtree(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        copytree(package, target, symlinks=True)
-        entry = checked(home / CLI_PATHS[1])
-        entry.parent.mkdir(parents=True, exist_ok=True)
-        if entry.exists() or entry.is_symlink():
-            entry.unlink()
-        entry.symlink_to('../lib/node_modules/@larksuite/cli/scripts/run.js')
+    env = {k: v for k, v in env.items() if not k.lower().startswith(('npm_config_', 'pnpm_'))}
+    env.update(npm_config_prefix=str(root / 'prefix'), npm_config_cache=str(root / 'cache'),
+               npm_config_userconfig=str(root / 'user.npmrc'), npm_config_globalconfig=str(root / 'global.npmrc'),
+               XDG_CONFIG_HOME=str(root / '.config'), XDG_STATE_HOME=str(root / '.state'))
+    command = _npm_command(env, root)
+    env.update(HOME=str(root), PATH=str(Path(command[0]).parent) + os.pathsep + env['PATH'])
+    try:
+        result = subprocess.run([*command, 'install', '-g', '@larksuite/cli@' + version],
+                                cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError('飞书工具安装未能启动或等待超时，请检查安装环境后重试。这组技能保持原样。') from error
+    if result.returncode:
+        error = result.stderr.decode(errors='replace')
+        reason = ('安装设置互相冲突' if 'double-loading config' in error else
+                  '下载没有成功，请检查网络后重试' if any(code in error for code in
+                      ('ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED')) else
+                  '安装程序报错，请稍后重试')
+        raise ValueError('飞书工具' + reason + f'（退出状态 {result.returncode}）。这组技能保持原样。') from subprocess.CalledProcessError(
+            result.returncode, result.args, result.stdout, result.stderr)
+    package = root / 'prefix/lib/node_modules/@larksuite/cli'
+    if (json.loads((package / 'package.json').read_text())['version'] != version
+            or not (package / 'scripts/run.js').is_file()):
+        raise ValueError('飞书工具版本没有核对通过，技能保持原样。')
+    return package
+
+
+def install_cli(home, version, checked, *, prepared=None):
+    guard(home / '.skill-pilot', home)
+    if prepared is None:
+        with tempfile.TemporaryDirectory(prefix='skill-pilot-lark-install-') as temporary:
+            return install_cli(home, version, checked, prepared=prepare_cli(home, version, Path(temporary)))
+    package = Path(prepared)
+    target = checked(home / CLI_PATHS[0])
+    if target.exists():
+        rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    copytree(package, target, symlinks=True)
+    entry = checked(home / CLI_PATHS[1])
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    if entry.exists() or entry.is_symlink():
+        entry.unlink()
+    entry.symlink_to('../lib/node_modules/@larksuite/cli/scripts/run.js')

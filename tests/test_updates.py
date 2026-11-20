@@ -232,7 +232,7 @@ class UpdateTests(unittest.TestCase):
             self.assertNotIn(str(self.home), str(fake.call_args))
 
     def test_source_failure_is_reported_not_latest(self):
-        with patch('skill_pilot.sources.update_github.Reader.current', side_effect=ValueError('查询失败')):
+        with patch('skill_pilot.sources.update_github.Reader.latest', side_effect=ValueError('查询失败')):
             result = updates.check(self.home)
             self.addCleanup(shutil.rmtree, result['temporary'], True)
         self.assertTrue(result['errors']); self.assertEqual(result['skills'][0]['status'], '没查清楚')

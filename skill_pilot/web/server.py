@@ -97,7 +97,7 @@ def job_parameters(body):
             raise JobInputError('请把所选 Agent 放在列表中。')
         result['agents'] = sorted(set(body['agents']))
     if kind == 'update':
-        for field in ('choices', 'merge_ids'):
+        for field in ('choices', 'merge_ids', 'reviewed'):
             value = body.get(field, {})
             if not isinstance(value, dict) or any(not text(k) or not text(v) for k, v in value.items()):
                 raise JobInputError('更新选择和合并编号需按技能名称逐项填写。')
@@ -542,6 +542,8 @@ class Dashboard(ThreadingHTTPServer):
                 parameters['skills'] = list(previous['remaining'])
             if parameters['kind'] == 'update' and previous.get('failed'):
                 parameters['skills'] = [r['name'] for r in previous['failed']]
+            if body.get('review_id', parameters.get('review_id')) != parameters.get('review_id'):
+                parameters.pop('reviewed', None)
             for field in ('seen', 'review_id', 'choices', 'merge_ids', 'confirm_lark_cli'):
                 if field in body: parameters[field] = body[field]
             parameters = job_parameters(parameters)
@@ -555,7 +557,10 @@ class Dashboard(ThreadingHTTPServer):
             if len(remaining) != len(self.jobs):
                 self.jobs = remaining
                 self.jobs_version += 1
-            return self.team_queue_status() if team_only else self.jobs_status()
+            result = self.team_queue_status() if team_only else self.jobs_status()
+        if not team_only:
+            self.prune_update_reviews()
+        return result
 
     def queue_team(self, key, pack_info=None):
         if not isinstance(key, str) or not key.strip():
@@ -689,7 +694,8 @@ class Dashboard(ThreadingHTTPServer):
         with self.update_lock, self.jobs_lock:
             latest = next(reversed(self.update_reviews), None)
             protected = {i['_parameters']['review_id'] for i in self.jobs
-                         if i['kind'] == 'update' and i['status'] in ACTIVE_JOBS}
+                         if i['kind'] == 'update' and (i['status'] in ACTIVE_JOBS or
+                            i['status'] == 'failed' and i.get('failed'))}
             obsolete = [self.update_reviews.pop(key) for key, review in list(self.update_reviews.items())
                         if key != latest and key not in protected and not review['running'] and not self.update_users.get(key)]
         for review in obsolete:
@@ -1161,30 +1167,33 @@ class Dashboard(ThreadingHTTPServer):
                 if review['running']:
                     raise ValueError('这次更新检查还没完成，请等检查完成后再提交。')
                 registry = operations.load(self.home)[1]['skills']
-                missing = [{'name': n, 'error': '这个技能已经删除，没有更新。'} for n in names if n not in registry]
-                remaining = [n for n in names if n in registry]
+                missing = [{'name': n, 'stage': 'install', 'error': '这个技能已经删除，没有更新。'} for n in names if n not in registry]
+                already_updated = {row['name'] for row in review['skills'] if row.get('_arrow')}
+                remaining = [n for n in names if n in registry and n not in already_updated]
                 try:
                     result = updates.apply(review, remaining, parameters['choices'], True,
                                            parameters['merge_ids'], parameters['confirm_lark_cli'],
-                                           progress=item.get('_progress')) if remaining else {
+                                           progress=item.get('_progress'), reviewed=parameters.get('reviewed')) if remaining else {
                                                'updated': [], 'failed': [], 'operations': []}
                 except operations.RollbackError:
                     raise
                 except (ValueError, OSError) as error:
                     reason = str(error) if isinstance(error, ValueError) else '文件没能读写，请重新检查更新后再试。'
                     captured = diagnostics.failure(self.home, 'job', '更新技能', error)
-                    result = {'updated': [], 'failed': [{'name': n, 'error': reason, **captured} for n in remaining], 'operations': []}
+                    result = {'updated': [], 'failed': [{'name': n, 'stage': 'install', 'error': reason, **captured} for n in remaining], 'operations': []}
                 failed = result.get('failed', []) + missing
                 ids = [r['id'] for r in result.get('operations', [])]
                 by_op = {r['id']: list(r.get('new_session_agents') or [])
                          for r in result.get('operations', []) if isinstance(r, dict) and r.get('id')}
-                message = '已更新：' + ('、'.join(result['updated']) or '无') + '。'
+                updated = result['updated']
+                message = '已更新：' + ('、'.join(updated) or '无') + '。'
                 if failed:
-                    message += '未更新：' + '；'.join(r['name'] + '：' + r['error'] for r in failed)
-                    message += ' 请重新检查更新后再试。'
+                    message += '未更新：' + '；'.join(r['name'] + '：' + r['error'] for r in failed) + '。'
                 return {'status': 'failed' if failed else 'done', 'message': self.job_message(self.skill_message(message)),
-                        'updated': result['updated'], 'failed': [
-                            {'name': r['name'], 'error': self.job_message(self.skill_message(r['error'])), **({'error_id': r['error_id']} if r.get('error_id') else {})} for r in failed],
+                        'updated': updated, 'failed': [
+                            {'name': r['name'], 'stage': r.get('stage', 'install'),
+                             'error': self.job_message(self.skill_message(r['error'])),
+                             **({'error_id': r['error_id']} if r.get('error_id') else {})} for r in failed],
                         'operations': ids,
                         **({'new_session_agents': result['new_session_agents']} if result.get('new_session_agents') else {}),
                         **({'operation_new_session_agents': by_op} if by_op else {})}
@@ -1969,7 +1978,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取团队分享，请稍后重试。'})
         elif path == '/api/updates/progress':
             with self.server.update_lock:
-                review = next(reversed(self.server.update_reviews.values()), None)
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                review_id = query.get('review_id', [''])[0]
+                review = (self.server.update_reviews.get(review_id) if review_id
+                          else next(reversed(self.server.update_reviews.values()), None))
                 self.reply(200, updates.public(review) if review else None)
         elif path in ('/api/table', '/api/log', '/api/agents', '/api/cleanup'):
             try:
@@ -2205,6 +2217,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         read_routes = {'/api/assignment/preview', '/api/absorb/preview', '/api/cleanup/preview', '/api/cleanup/delete/preview', '/api/install/inspect', '/api/incoming/compare',
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
+                       '/api/updates/prepare',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
                        '/api/agents/scan', '/api/team/listings/preview', '/api/program/auto-check'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
@@ -2337,6 +2350,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.prune_update_reviews()
                 self.reply(200, result)
                 return
+            if path == '/api/updates/prepare':
+                if not preview_allowed(self.server.home):
+                    self.reply(403, {'error': '当前处于只读模式，技能没有改动。'})
+                    return
+                with self.server.local_write(), self.server.update_review(body['review_id']) as review:
+                    if 'folder' in body and not isinstance(body['folder'], str):
+                        raise ValueError('请填写技能文件夹路径。')
+                    updates.prepare_download(review, body['name'], body.get('folder'))
+                    result = updates.public(review)
+                self.reply(200, result)
+                return
             if path in {'/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate'}:
                 with self.server.update_review(body['review_id']) as review:
                     action = updates.explain if path.endswith('explain') else updates.calibrate if path.endswith('calibrate') else updates.prepare_merge
@@ -2444,7 +2468,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == '/api/updates/apply':
                     with self.server.update_review(body['review_id']) as review:
                         result = updates.apply(review, body['skills'], body.get('choices'), True,
-                                               body.get('merge_ids'), body.get('confirm_lark_cli', False))
+                                               body.get('merge_ids'), body.get('confirm_lark_cli', False), reviewed=body.get('reviewed'))
                 elif path == '/api/external/release':
                     from .. import external
                     if not body.get('revision') or not body.get('plan_id'):
