@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ..scan import scan
 from ..store import apply, backups, guard, preview, restore, target_home
-from .. import diagnostics, operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization
+from .. import diagnostics, feedback, operations, updates, cleanup, labels, tags, sharing, team, self_update, extra_sources, github_digest, normalization
 from .. import agents as agent_management, agent_discovery
 from ..sources import github
 from ..environment import tool_environment
@@ -144,6 +144,10 @@ class Dashboard(ThreadingHTTPServer):
         self.team_upload_reviews = session.get('team_upload_reviews', {})
         self.feedback_previews = {}
         self.feedback_lock = threading.Lock()
+        self.feedback_prune_timer = None
+        self.feedback_preview_ttl = 600
+        self.feedback_preview_max_bytes = 20 * 1024 * 1024
+        self.feedback_preview_max_entries = 100
         self.jobs = []
         self.jobs_version = 0
         self.jobs_blocked = session.get('jobs_blocked', '')
@@ -233,6 +237,36 @@ class Dashboard(ThreadingHTTPServer):
         if self.reload_thread: self.reload_thread.join()
         if self.program_review:
             rmtree(self.program_review['temporary'], ignore_errors=True)
+        with self.feedback_lock:
+            if self.feedback_prune_timer:
+                self.feedback_prune_timer.cancel()
+                self.feedback_prune_timer = None
+            self.feedback_previews.clear()
+
+    def _schedule_feedback_prune_locked(self):
+        if self.feedback_prune_timer:
+            self.feedback_prune_timer.cancel()
+            self.feedback_prune_timer = None
+        if self.closing:
+            return
+        expiring = [entry['expires'] for entry in self.feedback_previews.values() if not entry.get('sending')]
+        if not expiring:
+            return
+        soonest = min(expiring)
+        delay = max(0.01, soonest - time.monotonic() + 0.01)
+        timer = threading.Timer(delay, self.prune_feedback_previews)
+        timer.daemon = True
+        self.feedback_prune_timer = timer
+        timer.start()
+
+    def prune_feedback_previews(self):
+        with self.feedback_lock:
+            now_mono = time.monotonic()
+            self.feedback_previews = {
+                k: v for k, v in self.feedback_previews.items()
+                if v.get('sending') or v['expires'] > now_mono
+            }
+            self._schedule_feedback_prune_locked()
 
     def _program_thread_blocks_exit(self):
         # 打开看板时的自动检查不挡住关看板和刷新应用新版；手动检查和升级仍要等。
@@ -1341,37 +1375,128 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urllib.parse.urlsplit(self.path).path
         if path in {'/api/diagnostics/bundle', '/api/diagnostics/client-error',
-                    '/api/diagnostics/preview', '/api/diagnostics/submit'}:
+                    '/api/diagnostics/preview', '/api/diagnostics/preview-discard',
+                    '/api/diagnostics/submit'}:
             try:
                 length = int(self.headers.get('Content-Length', '0'))
-                if not 0 < length <= 16384:
-                    self.reply(413, {'error': '诊断内容太长，请缩短后重试。'})
+                max_length = feedback.MAX_UPLOAD_BODY if path.endswith('/preview') else 16384
+                if not 0 < length <= max_length:
+                    self.reply(413, {'error': '截图总大小超过 5 MB，请减少截图数量或缩小图片后重试。'
+                                     if path.endswith('/preview') else '诊断内容太长，请缩短后重试。'})
                     return
                 body = json.loads(self.rfile.read(length))
-                if not isinstance(body, dict) or any(not isinstance(v, str) for v in body.values()):
+                if not isinstance(body, dict):
+                    raise ValueError('诊断内容格式不正确。')
+                if path.endswith('/preview'):
+                    text_fields = {k: v for k, v in body.items() if k != 'attachments'}
+                    if any(not isinstance(v, str) for v in text_fields.values()):
+                        raise ValueError('诊断内容格式不正确。')
+                    if len(json.dumps(text_fields, ensure_ascii=False).encode('utf-8')) > 16384:
+                        self.reply(413, {'error': '诊断内容太长，请缩短后重试。'})
+                        return
+                    if 'attachments' in body and body['attachments'] is not None and not isinstance(body['attachments'], list):
+                        raise feedback.AttachmentError('截图附件格式不正确，请重新选择图片。')
+                elif any(not isinstance(v, str) for v in body.values()):
                     raise ValueError('诊断内容格式不正确。')
                 if path.endswith('/submit') and not preview_allowed(self.server.home):
                     self.reply(403, {'error': '只读模式不能发送反馈，请复制或导出诊断信息。'})
                     return
                 if path.endswith('/bundle'):
                     self.reply(200, diagnostics.bundle(self.server.home, body.get('error_id'), body.get('note', '')))
+                elif path.endswith('/preview-discard'):
+                    ticket = body.get('ticket', '')
+                    with self.server.feedback_lock:
+                        entry = self.server.feedback_previews.get(ticket)
+                        if entry and not entry.get('sending'):
+                            self.server.feedback_previews.pop(ticket, None)
+                            self.server._schedule_feedback_prune_locked()
+                    self.reply(200, {'discarded': True})
                 elif path.endswith('/preview'):
-                    prepared = team.feedback_preview(self.server.home, body.get('error_id', ''), body.get('note', ''))
+                    previous = body.get('previous_ticket', '')
+                    if previous:
+                        with self.server.feedback_lock:
+                            prev_entry = self.server.feedback_previews.get(previous)
+                            if prev_entry and not prev_entry.get('sending'):
+                                self.server.feedback_previews.pop(previous, None)
+                    prepared = team.feedback_preview(
+                        self.server.home, body.get('error_id', ''), body.get('note', ''), body.get('attachments'))
                     ticket = secrets.token_urlsafe(24)
                     with self.server.feedback_lock:
-                        self.server.feedback_previews = {k: v for k, v in self.server.feedback_previews.items()
-                                                        if v['expires'] > time.monotonic()}
-                        if len(self.server.feedback_previews) >= 100:
-                            self.server.feedback_previews.pop(next(iter(self.server.feedback_previews)))
-                        self.server.feedback_previews[ticket] = {'expires': time.monotonic() + 600, 'prepared': prepared}
-                    self.reply(200, {k: v for k, v in prepared.items() if k != '_connection'} | {'ticket': ticket})
+                        now_mono = time.monotonic()
+                        self.server.feedback_previews = {
+                            k: v for k, v in self.server.feedback_previews.items()
+                            if v.get('sending') or v['expires'] > now_mono
+                        }
+                        new_bytes = sum(a['size'] for a in prepared.get('_attachments', ()))
+                        def cached_bytes():
+                            return sum(sum(a['size'] for a in entry['prepared'].get('_attachments', ()))
+                                       for entry in self.server.feedback_previews.values())
+                        while self.server.feedback_previews and (
+                                len(self.server.feedback_previews) >= self.server.feedback_preview_max_entries or
+                                cached_bytes() + new_bytes > self.server.feedback_preview_max_bytes):
+                            evict_key = next((k for k, v in self.server.feedback_previews.items()
+                                              if not v.get('sending')), None)
+                            if evict_key is None:
+                                break
+                            self.server.feedback_previews.pop(evict_key, None)
+                        over_entries = len(self.server.feedback_previews) >= self.server.feedback_preview_max_entries
+                        over_bytes = new_bytes > 0 and cached_bytes() + new_bytes > self.server.feedback_preview_max_bytes
+                        if over_entries or over_bytes:
+                            self.server._schedule_feedback_prune_locked()
+                            response = {k: v for k, v in prepared.items() if not k.startswith('_')}
+                            response['ticket'] = ''
+                            if response.get('can_send'):
+                                response['can_send'] = False
+                                response['reason'] = (
+                                    '当前有其他带图反馈正在发送，暂无法缓存新截图预览。请稍后重试，或移除截图后复制、导出下方纯文本诊断信息。'
+                                    if over_bytes else
+                                    '当前有较多反馈正在发送，暂无法直接提交。请稍后重试，或先复制、导出下方脱敏诊断信息。'
+                                )
+                            if response.get('can_attach'):
+                                response['can_attach'] = False
+                                response['attach_reason'] = (
+                                    '当前有其他带图反馈正在发送，暂无法附带新截图；可先复制或导出下方纯文本诊断信息，或稍后重试。'
+                                    if over_bytes else
+                                    '当前有较多反馈正在发送，暂无法附带新截图；可先复制或导出下方纯文本诊断信息。'
+                                )
+                        else:
+                            self.server.feedback_previews[ticket] = {
+                                'expires': now_mono + self.server.feedback_preview_ttl,
+                                'prepared': prepared,
+                                'sending': False,
+                            }
+                            self.server._schedule_feedback_prune_locked()
+                            response = {k: v for k, v in prepared.items() if not k.startswith('_')} | {'ticket': ticket}
+                    self.reply(200, response)
                 elif path.endswith('/submit'):
+                    ticket_key = body.get('ticket')
                     with self.server.feedback_lock:
-                        entry = self.server.feedback_previews.get(body.get('ticket'))
-                        if not entry or entry['expires'] <= time.monotonic():
+                        entry = self.server.feedback_previews.get(ticket_key)
+                        if not entry or (not entry.get('sending') and entry['expires'] <= time.monotonic()):
+                            if entry and not entry.get('sending'):
+                                self.server.feedback_previews.pop(ticket_key, None)
+                                self.server._schedule_feedback_prune_locked()
                             raise ValueError('预览已过期，请重新打开反馈窗口。')
-                        result = team.submit_feedback(self.server.home, entry['prepared'])
-                        del self.server.feedback_previews[body['ticket']]
+                        if entry.get('sending'):
+                            raise ValueError('这条反馈正在发送中，请稍候。')
+                        entry['sending'] = True
+                        prepared = entry['prepared']
+                        self.server._schedule_feedback_prune_locked()
+                    try:
+                        result = team.submit_feedback(self.server.home, prepared)
+                    except BaseException:
+                        with self.server.feedback_lock:
+                            current = self.server.feedback_previews.get(ticket_key)
+                            if current is entry:
+                                current['sending'] = False
+                                if current['expires'] <= time.monotonic():
+                                    self.server.feedback_previews.pop(ticket_key, None)
+                            self.server._schedule_feedback_prune_locked()
+                        raise
+                    with self.server.feedback_lock:
+                        if self.server.feedback_previews.get(ticket_key) is entry:
+                            del self.server.feedback_previews[ticket_key]
+                        self.server._schedule_feedback_prune_locked()
                     self.reply(200, result)
                 elif not preview_allowed(self.server.home):
                     self.reply(403, {'error': '当前处于只读模式，错误记录未写入。'})
@@ -1385,6 +1510,12 @@ class Handler(BaseHTTPRequestHandler):
                     row = diagnostics.record(self.server.home, 'frontend', '页面脚本',
                         error, '页面出了点问题，请刷新重试。', force=True)
                     self.reply(200, {'error_id': row.get('error_id', '')})
+            except feedback.AttachmentTooLargeError as error:
+                self.request_validation = True
+                self.reply(413, {'error': diagnostics.sanitize(str(error), self.server.home, 400)})
+            except feedback.AttachmentError as error:
+                self.request_validation = True
+                self.reply(400, {'error': diagnostics.sanitize(str(error), self.server.home, 400)})
             except (ValueError, OSError) as error:
                 message = (diagnostics.sanitize(str(error), self.server.home, 400)
                            if path.endswith('/submit') else '诊断内容格式不正确，或记录已过期。')

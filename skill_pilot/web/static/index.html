@@ -973,9 +973,25 @@
     <div id="feedback-summary" class="feedback-summary"></div>
     <label for="feedback-note">当时你在做什么？（可选，写一两句即可）</label>
     <textarea id="feedback-note" class="input" rows="2" maxlength="1500"></textarea>
+    <div id="feedback-shots-section" class="feedback-shots">
+      <div class="feedback-shots-head">
+        <span class="feedback-shots-title">截图附件（选填）</span>
+        <span id="feedback-shots-count" class="muted">最多 3 张，单张不超过 2 MB</span>
+      </div>
+      <p id="feedback-shots-notice" class="row-note" hidden></p>
+      <div id="feedback-shots-controls" class="feedback-shots-controls" hidden>
+        <input id="feedback-shot-input" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" multiple hidden>
+        <button id="feedback-shot-pick" class="btn btn-small" type="button">选择截图</button>
+        <span class="muted">支持 PNG、JPEG、WebP，可按 Ctrl+V / Cmd+V 直接粘贴，合计不超过 5 MB。</span>
+      </div>
+      <p id="feedback-shots-privacy" class="muted feedback-shots-privacy">仅上传图片内容，上传前会自动清除隐藏的拍摄和文件信息、不含本机路径；点击缩略图可查看完整原图，发送前请确认画面不含密码、密钥或私人信息。</p>
+      <span id="feedback-shots-status" class="sr-only" role="status" aria-live="polite"></span>
+      <p id="feedback-shots-error" class="row-note is-error" role="alert" hidden></p>
+      <ul id="feedback-shots-list" class="feedback-shots-list" aria-label="已选截图预览" hidden></ul>
+    </div>
     <details class="fold">
       <summary>核对完整待发送内容</summary>
-      <p class="muted">提交时间由分享站补充。发送前请核对，说明里不要填写密钥或私人资料。</p>
+      <p class="muted">提交时间与留底编号由分享站补充。发送前请核对，说明和截图中不要包含密钥或私人资料。</p>
       <textarea id="feedback-text" class="input" rows="10" readonly aria-label="完整待发送内容"></textarea>
     </details>
     <p id="feedback-message" class="row-note" role="status" aria-live="polite"></p>
@@ -985,6 +1001,19 @@
       <button id="feedback-export" class="btn" type="button">导出诊断文件</button>
       <button id="feedback-preview" class="btn btn-primary" type="button" hidden>更新预览</button>
       <button id="feedback-send" class="btn btn-primary" type="button" hidden>发送到飞书表格</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="feedback-shot-viewer" class="dialog dialog-wide feedback-shot-viewer" aria-labelledby="feedback-shot-viewer-title">
+  <div class="dialog-form">
+    <h2 id="feedback-shot-viewer-title">查看截图原图</h2>
+    <p id="feedback-shot-viewer-meta" class="muted"></p>
+    <div id="feedback-shot-viewer-stage" class="feedback-shot-viewer-stage">
+      <img id="feedback-shot-viewer-img" alt="">
+    </div>
+    <div class="dialog-actions">
+      <button id="feedback-shot-viewer-zoom" class="btn" type="button">查看实际大小</button>
+      <button id="feedback-shot-viewer-close" class="btn btn-primary" type="button">关闭预览</button>
     </div>
   </div>
 </dialog>

@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -508,6 +509,7 @@ class HubError(ValueError):
 class HubStore:
     def __init__(self, data):
         self.data = Path(data).expanduser().resolve()
+        self._in_flight_feedback = set()
 
     @contextmanager
     def locked(self):
@@ -518,6 +520,113 @@ class HubStore:
             fcntl.flock(stream, fcntl.LOCK_EX)
             yield
 
+    def _feedback_attachment_dir(self):
+        return self.data / 'feedback-attachments'
+
+    def _attachment_disk_sizes(self):
+        folder = self._feedback_attachment_dir()
+        sizes = {}
+        try:
+            entries = list(folder.iterdir())
+        except FileNotFoundError:
+            return sizes
+        except OSError:
+            raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
+        for entry in entries:
+            try:
+                st = entry.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
+            if stat.S_ISREG(st.st_mode):
+                sizes[entry.name] = st.st_size
+        return sizes
+
+    def _collect_feedback_attachments(self, rows):
+        folder = self._feedback_attachment_dir()
+        try:
+            if not folder.is_dir():
+                return
+            entries = list(folder.iterdir())
+        except OSError:
+            return
+        used = {
+            att['file']
+            for row in rows
+            for att in row.get('attachments', ())
+            if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str)
+        }
+        for entry in entries:
+            if entry.name not in used:
+                try:
+                    entry.unlink(missing_ok=True)
+                except OSError:
+                    pass  # Locked or temporarily unremovable; accounted for and retried later.
+
+    def _cleanup_feedback_orphans(self):
+        try:
+            rows = self._feedback()
+        except (HubError, OSError, ValueError):
+            return
+        # Mark any leftover 'pending' rows from a previously crashed hub process as interrupted ('failed')
+        # so they never permanently lock up the in-flight protection quota after restart.
+        changed = False
+        for row in rows:
+            if isinstance(row, dict) and row.get('state') == 'pending' and row.get('id') not in self._in_flight_feedback:
+                row['state'] = 'failed'
+                changed = True
+        if changed:
+            try:
+                atomic_write(self.data / 'feedback.json', rows)
+            except OSError:
+                return
+        self._collect_feedback_attachments(rows)
+
+    def _attachment_file_matches(self, path, item):
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
+        if not stat.S_ISREG(st.st_mode) or st.st_size != item['size']:
+            return False
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256']
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise HubError(507, '分享站暂时无法确认截图存储空间，本次未提交。请联系管理员检查数据目录，或复制、导出纯文本诊断信息。') from None
+
+    def _write_feedback_attachments(self, attachments, protected_files=()):
+        if not attachments:
+            return []
+        folder = self._feedback_attachment_dir()
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        protected = set(protected_files)
+        created = []
+        try:
+            for item in attachments:
+                target = folder / f"{item['sha256']}.{item['ext']}"
+                if self._attachment_file_matches(target, item):
+                    continue
+                fd, temporary = tempfile.mkstemp(prefix='.att-', dir=folder)
+                temp_path = Path(temporary)
+                try:
+                    with os.fdopen(fd, 'wb') as stream:
+                        stream.write(item['data'])
+                    os.replace(temp_path, target)
+                    created.append(target)
+                finally:
+                    temp_path.unlink(missing_ok=True)
+            return created
+        except OSError:
+            for path in created:
+                if path.name not in protected:
+                    path.unlink(missing_ok=True)
+            raise
+
     def _feedback(self):
         path = self.data / 'feedback.json'
         if not path.exists():
@@ -527,34 +636,177 @@ class HubStore:
             raise HubError(500, '反馈备份没能读懂，请联系管理员检查。')
         return rows
 
-    def _save_feedback(self, rows):
-        rows = rows[-feedback.MAX_RECORDS:]
-        while len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').replace('\n', os.linesep).encode()) > feedback.MAX_BYTES:
-            rows.pop(0)
-        atomic_write(self.data / 'feedback.json', rows)
+    def _trim_feedback_rows(self, rows, protected=(), reject_if_full=False):
+        rows = list(rows)
+        protected_ids = set(self._in_flight_feedback) | set(protected)
+        def over_limit():
+            return (len(rows) > feedback.MAX_RECORDS or
+                    len((json.dumps(rows, ensure_ascii=False, indent=2) + '\n').replace('\n', os.linesep).encode()) > feedback.MAX_BYTES)
+        while rows and over_limit():
+            idx = next((i for i, item in enumerate(rows) if item.get('id') not in protected_ids), None)
+            if idx is None:
+                if reject_if_full:
+                    raise HubError(507, '当前有其他反馈正在转发且反馈留底空间已满，请稍后重试，或复制、导出纯文本诊断信息。')
+                break
+            rows.pop(idx)
+        return rows
 
-    def _receive_feedback(self, member, data):
+    def _save_feedback(self, rows):
+        # Never delete attachment files before feedback.json is atomically committed.
+        rows = self._trim_feedback_rows(rows)
+        atomic_write(self.data / 'feedback.json', rows)
+        self._collect_feedback_attachments(rows)
+        return rows
+
+    def _evict_attachments_for_budget(self, committed_rows, attachments):
+        if not attachments:
+            return committed_rows
+        # First clean up only files already unreferenced by the committed feedback.json.
+        self._collect_feedback_attachments(committed_rows)
+        folder = self._feedback_attachment_dir()
+        unique_items = {f"{item['sha256']}.{item['ext']}": item for item in attachments}
+        in_flight_files = {
+            att['file']
+            for item in committed_rows
+            if item.get('id') in self._in_flight_feedback
+            for att in item.get('attachments', ())
+            if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str)
+        }
+        while True:
+            disk_sizes = self._attachment_disk_sizes()
+            # Reuse an on-disk file ONLY if its size and SHA-256 content match; otherwise account for
+            # the full peak bytes of the new temp file alongside existing on-disk bytes during replace.
+            added_bytes = sum(
+                item['size'] for name, item in unique_items.items()
+                if not (name in disk_sizes and self._attachment_file_matches(folder / name, item))
+            )
+            if sum(disk_sizes.values()) + added_bytes <= feedback.MAX_ATTACHMENT_STORE_BYTES:
+                return committed_rows
+            target = next((
+                item for item in committed_rows
+                if item.get('id') not in self._in_flight_feedback and any(
+                    isinstance(att, dict) and not att.get('evicted') and
+                    isinstance(att.get('file'), str) and att['file'] not in in_flight_files
+                    for att in item.get('attachments', ())
+                )
+            ), None)
+            if target is None:
+                if in_flight_files:
+                    raise HubError(507, '当前有其他带图反馈正在转发，截图存储空间紧张。请稍后重试，或复制、导出纯文本诊断信息。')
+                raise HubError(507, '分享站截图留底空间已满，无法保存新截图。请联系管理员清理磁盘后重试，或复制、导出纯文本诊断信息。')
+            for att in target.get('attachments', ()):
+                if isinstance(att, dict):
+                    att['evicted'] = True
+            # Commit eviction to feedback.json BEFORE deleting the unreferenced files,
+            # then re-measure real disk usage so failed deletes cannot bypass the quota.
+            atomic_write(self.data / 'feedback.json', committed_rows)
+            self._collect_feedback_attachments(committed_rows)
+
+    def _receive_feedback(self, member, data, attachments=None):
         payload = feedback.clean(data)
         if not payload['error_id'] or not payload['fingerprint']:
             raise HubError(400, '反馈缺少错误编号，请重新打开反馈窗口。')
+        if attachments is None:
+            try:
+                attachments = feedback.parse_attachments(data.get('attachments'))
+            except feedback.AttachmentTooLargeError as error:
+                raise HubError(413, str(error)) from None
+            except feedback.AttachmentError as error:
+                raise HubError(400, str(error)) from None
         rows = self._feedback()
         current = datetime.now(timezone.utc)
+        incoming_ids = [item['sha256'] for item in attachments]
+        # Exact error_id in-flight / idempotency / conflict checks hold regardless of elapsed time.
+        for row in reversed(rows):
+            if row['member_id'] != member['id'] or row['payload']['error_id'] != payload['error_id']:
+                continue
+            if row.get('id') in self._in_flight_feedback:
+                raise HubError(429, '这条反馈正在转发中，请稍候，不要重复提交。')
+            if row['state'] == 'sent':
+                # Compare against the original submitted attachment digests even if files were later evicted.
+                existing_ids = [
+                    att['sha256'] for att in row.get('attachments', ())
+                    if isinstance(att, dict) and isinstance(att.get('sha256'), str)
+                ]
+                if existing_ids == incoming_ids:
+                    return row, True
+                raise HubError(409, '这条错误编号之前已提交，且截图内容与本次不同，本次未保存新截图。请改用主动反馈补充截图，或复制、导出诊断信息发给维护者。')
+            if (current - datetime.fromisoformat(row['payload']['submitted_at'])).total_seconds() < feedback.COOLDOWN:
+                raise HubError(429, '刚刚提交过同类反馈，本次未再次提交。请五分钟后再试，或复制、导出诊断信息发给维护者。')
+        # Same-fingerprint rate limit (different error_id) applies within COOLDOWN.
         for row in reversed(rows):
             if (row['member_id'] == member['id'] and
-                    (row['payload']['error_id'] == payload['error_id'] or
-                     row['payload']['fingerprint'] == payload['fingerprint']) and
+                    row['payload']['fingerprint'] == payload['fingerprint'] and
                     (current - datetime.fromisoformat(row['payload']['submitted_at'])).total_seconds() < feedback.COOLDOWN):
-                if row['state'] == 'sent' and row['payload']['error_id'] == payload['error_id']:
-                    return row, True
                 raise HubError(429, '刚刚提交过同类反馈，本次未再次提交。请五分钟后再试，或复制、导出诊断信息发给维护者。')
+        row_id = secrets.token_hex(16)
+        stored_meta = [
+            {'id': item['sha256'], 'sha256': item['sha256'],
+             'file': f"{item['sha256']}.{item['ext']}",
+             'content_type': item['content_type'], 'ext': item['ext'],
+             'label': item['label'], 'size': item['size']}
+            for item in attachments
+        ]
+        payload['attachment_count'] = str(len(stored_meta))
+        payload['attachments_summary'] = feedback.summarize_attachments(stored_meta, row_id=row_id)
         payload.update(status='待排查', submitted_at=current.isoformat(), reporter=feedback.text(member['name'], 40))
-        row = {'id': secrets.token_hex(16), 'member_id': member['id'], 'member_name': payload['reporter'],
+        row = {'id': row_id, 'member_id': member['id'], 'member_name': payload['reporter'],
                'payload': payload, 'state': 'pending'}
-        self._save_feedback([*rows, row])
+        if stored_meta:
+            row['attachments'] = stored_meta
+        # Check text backup capacity BEFORE evicting screenshots or writing files, protecting in-flight rows.
+        self._trim_feedback_rows([*rows, row], protected=(row_id,), reject_if_full=True)
+        rows = self._evict_attachments_for_budget(rows, attachments)
+        next_rows = self._trim_feedback_rows([*rows, row], protected=(row_id,), reject_if_full=True)
+        existing_used = {
+            att['file']
+            for item in rows
+            for att in item.get('attachments', ())
+            if isinstance(att, dict) and not att.get('evicted') and isinstance(att.get('file'), str)
+        }
+        created = self._write_feedback_attachments(attachments, protected_files=existing_used)
+        try:
+            atomic_write(self.data / 'feedback.json', next_rows)
+        except OSError:
+            for path in created:
+                if path.name not in existing_used:
+                    path.unlink(missing_ok=True)
+            raise
+        self._in_flight_feedback.add(row_id)
+        # Commit succeeded; cleanup of obsolete files is best-effort and never rolls back new files.
+        self._collect_feedback_attachments(next_rows)
         return row, False
+
+    def _feedback_attachment_file(self, member_id, row_id, digest):
+        if not re.fullmatch(r'[0-9a-f]{32}', row_id) or not re.fullmatch(r'[0-9a-f]{64}', digest):
+            raise HubError(404, '没有找到这张反馈截图，或已被清理。')
+        row = next((item for item in self._feedback()
+                    if item.get('id') == row_id and item.get('member_id') == member_id), None)
+        if row is None:
+            raise HubError(404, '没有找到这张反馈截图，或已被清理。')
+        att = next((item for item in row.get('attachments', ())
+                    if isinstance(item, dict) and item.get('sha256') == digest and not item.get('evicted')), None)
+        if att is None:
+            raise HubError(404, '没有找到这张反馈截图，或已被清理。')
+        ext = att.get('ext', '')
+        kind = att.get('content_type', '')
+        if ext not in {'png', 'jpg'} or kind not in feedback.IMAGE_TYPES or feedback.IMAGE_TYPES[kind]['ext'] != ext:
+            raise HubError(404, '没有找到这张反馈截图，或已被清理。')
+        path = self._feedback_attachment_dir() / f'{digest}.{ext}'
+        if not path.is_file():
+            raise HubError(404, '没有找到这张反馈截图，或已被清理。')
+        try:
+            with path.open('rb') as stream:
+                raw = stream.read(feedback.MAX_ATTACHMENT_BYTES + 1)
+        except FileNotFoundError:
+            raise HubError(404, '没有找到这张反馈截图，或已被清理。') from None
+        if len(raw) > feedback.MAX_ATTACHMENT_BYTES:
+            raise HubError(500, '截图留底文件异常，请联系管理员检查。')
+        return raw, kind, f'feedback-{row_id[:8]}-{digest[:8]}.{ext}'
 
     def finish_feedback(self, row_id, state):
         with self.locked():
+            self._in_flight_feedback.discard(row_id)
             rows = self._feedback()
             for row in rows:
                 if row['id'] == row_id:
@@ -1112,7 +1364,26 @@ class Handler(BaseHTTPRequestHandler):
             stream, size = store._package_file(member_id, name, version, digest)
         self._send_file(stream, size, 'application/octet-stream', attachment=True)
 
-    def _send_file(self, stream, size, kind, range_header=None, attachment=False):
+    def _serve_feedback_attachment(self, row_id, digest):
+        store = self.server.store
+        with store.locked():
+            member = store._authenticate(self.headers.get('Authorization', ''))
+            raw, kind, filename = store._feedback_attachment_file(member['id'], row_id, digest)
+        # File handle is already closed before writing to the network so unlinked evicted files free disk immediately.
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', kind)
+            self.send_header('Content-Length', str(len(raw)))
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Content-Security-Policy', "default-src 'none'; sandbox")
+            self.end_headers()
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError, OSError):
+            return
+
+    def _send_file(self, stream, size, kind, range_header=None, attachment=False, filename=None, csp=None):
         # Stream outside the data lock; the version was checked when opening the file.
         with stream:
             span = byte_range(range_header, size)
@@ -1121,13 +1392,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', kind)
             self.send_header('Content-Length', str(end - start + 1))
             if attachment:
-                self.send_header('Content-Disposition', 'attachment')
+                disposition = f'attachment; filename="{filename}"' if filename else 'attachment'
+                self.send_header('Content-Disposition', disposition)
             else:
                 self.send_header('Accept-Ranges', 'bytes')
             if span:
                 self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
+            if csp:
+                self.send_header('Content-Security-Policy', csp)
             self.end_headers()
             stream.seek(start)
             remaining = end - start + 1
@@ -1161,6 +1435,31 @@ class Handler(BaseHTTPRequestHandler):
             raise HubError(400, '请求内容格式不正确。')
         return data
 
+    def _read_feedback_body(self):
+        length = self._length(feedback.MAX_UPLOAD_BODY, '反馈内容及截图超过上传上限，请减少截图数量或缩小图片后重试。')
+        try:
+            body = self.rfile.read(length)
+        except TimeoutError:
+            raise HubError(408, '上传等待太久，请重新上传。') from None
+        if len(body) != length:
+            raise HubError(400, '反馈内容没有传完整，请重新提交。')
+        def invalid_constant(value):
+            raise ValueError
+        try:
+            data = json.loads(body.decode('utf-8'), parse_constant=invalid_constant)
+        except (ValueError, UnicodeError, RecursionError):
+            raise HubError(400, '反馈内容格式不正确，请重试。') from None
+        if not isinstance(data, dict):
+            raise HubError(400, '请求内容格式不正确。')
+        if not data.get('attachments'):
+            if length > feedback.MAX_BODY:
+                raise HubError(413, '反馈内容超过 64 KB，请缩短后重试。')
+        else:
+            text_only = {k: v for k, v in data.items() if k != 'attachments'}
+            if len(json.dumps(text_only, ensure_ascii=False).encode('utf-8')) > feedback.MAX_BODY:
+                raise HubError(413, '反馈文字内容超过 64 KB，请缩短后重试。')
+        return data
+
     def _handle(self):
         try:
             address = urllib.parse.urlsplit(self.path)
@@ -1170,6 +1469,7 @@ class Handler(BaseHTTPRequestHandler):
             listing = re.fullmatch(r'/api/listings/me/(' + NAME + ')', path)
             package = re.fullmatch(r'/api/packages/([0-9a-f]{32})/(' + NAME + r')(?:/([0-9a-f]{64}))?', path)
             blob = re.fullmatch(r'/api/blobs/me/([0-9a-f]{64})', path)
+            feedback_att = re.fullmatch(r'/api/feedback/([0-9a-f]{32})/attachments/([0-9a-f]{64})', path)
             identity = '(' + DELIVERABLE_ID + ')'
             mine = re.fullmatch(r'/api/deliverables/me/' + identity, path)
             deliverable = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity, path)
@@ -1179,8 +1479,8 @@ class Handler(BaseHTTPRequestHandler):
                     not package or set(query) != {'version'} or len(query['version']) != 1 or
                     not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
-            allowed = ({'POST'} if path in {'/api/join', '/api/feedback'} else
-                       {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served else
+            allowed = ({'POST'} if path in {'/api/join', '/api/feedback', '/api/feedback/with-attachments'} else
+                       {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served or feedback_att else
                        {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} or blob else
                        {'DELETE'} if listing else
                        {'PUT', 'DELETE'} if path == '/api/ratings' or mine else set())
@@ -1197,6 +1497,9 @@ class Handler(BaseHTTPRequestHandler):
             if served:
                 self._serve_deliverable(served[1], served[2], served[3])
                 return
+            if feedback_att:
+                self._serve_feedback_attachment(feedback_att[1], feedback_att[2])
+                return
             if path == '/api/join':
                 if not self.server.open:
                     raise HubError(403, '这个分享站需要管理员发的口令。')
@@ -1211,8 +1514,9 @@ class Handler(BaseHTTPRequestHandler):
                                  'member': {key: member[key] for key in ('id', 'name')},
                                  'token': member['token']})
                 return
-            data = (self._read_body(feedback.MAX_BODY, '反馈内容超过 64 KB，请缩短后重试。')
-                    if path == '/api/feedback' else
+            is_feedback = path in {'/api/feedback', '/api/feedback/with-attachments'}
+            data = (self._read_feedback_body()
+                    if is_feedback else
                     self._read_body(MAX_INSTALL_BODY, '上报内容超过 64 KB，请缩短后重试。')
                     if path == '/api/installs/me' else
                     self._read_body(MAX_PACK_BODY, '技能包内容超过 64 KB，请缩短后重试。')
@@ -1221,6 +1525,19 @@ class Handler(BaseHTTPRequestHandler):
                     if mine and self.command == 'PUT' else None if mine else
                     self._read_body(MAX_BODY if path == '/api/listings/me' else MAX_RATING_BODY)
                     if self.command == 'PUT' or path == '/api/ratings' else None)
+            parsed_attachments = None
+            if is_feedback:
+                if not self.server.feedback_webhook:
+                    raise HubError(503, '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。')
+                if path == '/api/feedback/with-attachments' and not data.get('attachments'):
+                    raise HubError(400, '请附带至少一张有效截图。')
+                # Validate and sanitize screenshots before acquiring the store write lock.
+                try:
+                    parsed_attachments = feedback.parse_attachments(data.get('attachments'))
+                except feedback.AttachmentTooLargeError as error:
+                    raise HubError(413, str(error)) from None
+                except feedback.AttachmentError as error:
+                    raise HubError(400, str(error)) from None
             store = self.server.store
             skill_files = self.headers.get(SKILL_FILE_HEADER) == '1'
             with store.locked():
@@ -1229,12 +1546,19 @@ class Handler(BaseHTTPRequestHandler):
                 if path == '/api/me':
                     result = {'service': 'skill-pilot-team', 'api': 2, 'member': member,
                               'feedback_supported': True, 'feedback_configured': bool(self.server.feedback_webhook),
+                              'feedback_attachments_supported': True,
                               'skill_file_upload': True}
-                elif path == '/api/feedback':
+                elif is_feedback:
                     if not self.server.feedback_webhook:
                         raise HubError(503, '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。')
-                    row, duplicate = store._receive_feedback(member, data)
-                    result = {'submitted': True, 'duplicate': duplicate}
+                    row, duplicate = store._receive_feedback(member, data, attachments=parsed_attachments)
+                    result = {'submitted': True, 'duplicate': duplicate, 'feedback_id': row['id']}
+                    if row.get('attachments'):
+                        result['attachments'] = [
+                            {'id': att['id'], 'content_type': att['content_type'],
+                             'size': att['size'], 'evicted': bool(att.get('evicted'))}
+                            for att in row['attachments']
+                        ]
                 elif path == '/api/catalog':
                     result = store._catalog(member['id'], skill_files)
                 elif path == '/api/listings/me':
@@ -1256,13 +1580,16 @@ class Handler(BaseHTTPRequestHandler):
                                                   'file_count', 'size', 'updated_at')}
                 else:
                     result = store._rate(member, data, self.command == 'DELETE')
-            if path == '/api/feedback' and not duplicate:
+            if is_feedback and not duplicate:
                 # Do not hold the store lock across the external request.
                 try:
                     feedback.forward(self.server.feedback_webhook, row['payload'])
                 except ValueError as error:
                     store.finish_feedback(row['id'], 'failed')
                     raise HubError(502, str(error)) from None
+                except BaseException:
+                    store.finish_feedback(row['id'], 'failed')
+                    raise
                 store.finish_feedback(row['id'], 'sent')
             self._json(200, result)
         except HubError as error:
@@ -1284,6 +1611,7 @@ class HubServer(ThreadingHTTPServer):
         self.store = HubStore(data)
         with self.store.locked():
             self.store._members()
+            self.store._cleanup_feedback_orphans()
         super().__init__((host, port), Handler)
 
 
