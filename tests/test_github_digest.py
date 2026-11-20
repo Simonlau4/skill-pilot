@@ -809,7 +809,7 @@ class DigestRouteTests(unittest.TestCase):
                 applied.set()
                 return {'available': False, 'current': 'new', 'latest': 'new'}
             self.server.program_review = {'target': 'new', 'available': True,
-                                          'temporary': str(self.home / 'New program')}
+                                          'temporary': str(self.home / 'New program'), 'candidate': 'prepared update fixture'}
             with patch.object(self_update, 'apply', side_effect=apply):
                 try:
                     self.server.start_program('apply', target='new')

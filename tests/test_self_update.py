@@ -50,13 +50,23 @@ def make_fixture(case, checkout=False):
     private.mkdir()
     (private / 'settings.json').write_text('{"private_example": "do not replace"}')
     (private / 'registry.json').write_text('{"skills": {}, "private_example": "keep allocations"}')
-    case.personal_before = store.physical_state(private)
+    case.personal_before = personal_files(case.home)
 
 
 def commit(repository, message):
     git(repository, 'add', '.')
     git(repository, '-c', 'user.name=Test Publisher', '-c', 'user.email=test@example.invalid',
         'commit', '-q', '-m', message)
+
+
+def prepare_update(home, project):
+    review = self_update.check(home, project)
+    return self_update.download(review, home, project) if review['available'] else review
+
+
+def personal_files(home):
+    return {p.name: store.physical_state(p) for p in (home / '.skill-pilot').iterdir()
+            if p.name != 'program-update'}
 
 
 def downloaded_objects(candidate):
@@ -85,7 +95,7 @@ class UpdateChangesTests(unittest.TestCase):
         self_update.record_installation(self.code)
 
     def review(self):
-        result = self_update.check(self.home, self.code)
+        result = prepare_update(self.home, self.code)
         if result['temporary']:
             self.addCleanup(shutil.rmtree, result['temporary'], True)
         return result
@@ -150,11 +160,80 @@ class UpdateChangesTests(unittest.TestCase):
                     return output
                 return original(project, *args, **kwargs)
             with self.subTest(output=repr(output)), patch.object(self_update, 'git', side_effect=read_titles):
+                shutil.rmtree(self_update.cache_root(self.home, self.code) / 'package', ignore_errors=True)
                 review = self.review()
                 self.assertTrue(review['available'])
                 expected = [] if isinstance(output, Exception) else ['改进显示']
                 self.assertEqual(review['changes'], expected)
                 self.assertEqual(review['changes_total'], len(expected))
+
+
+class ProgramPackageTests(unittest.TestCase):
+    def prepare(self, checkout):
+        with patch.object(self_update, 'run_installer'):
+            make_fixture(self, checkout=checkout)
+        self_update.record_installation(self.code)
+        return publish(self)
+
+    def test_weak_network_check_and_cache_survive_restart(self):
+        target = self.prepare(checkout=True)
+        original = self_update.git
+        online_downloads = []
+
+        def transport(project, *args, **options):
+            if args[0] == 'fetch' and self_update.SOURCE in args:
+                online_downloads.append(args[-1])
+                if len(online_downloads) == 1:
+                    raise ValueError('模拟网络中断')
+            return original(project, *args, **options)
+
+        with patch.object(self_update, 'git', side_effect=transport):
+            review = self_update.check(self.home, self.code)
+            self.assertEqual(review['target'], target)
+            self.assertTrue(review['available'])
+            self.assertNotIn('candidate', review)
+            self.assertEqual(online_downloads, [])
+            with self.assertRaisesRegex(ValueError, '网络中断'):
+                self_update.download(review, self.home, self.code)
+            self.assertIsNone(self_update.restore_download(self.home, self.code))
+            prepared = self_update.download(review, self.home, self.code)
+            restored = self_update.restore_download(self.home, self.code)
+            self.assertEqual(restored['candidate'], prepared['candidate'])
+            self.assertEqual(self_update.download(review, self.home, self.code)['candidate'], prepared['candidate'])
+            with patch.object(self_update, 'run_installer', side_effect=ValueError('模拟安装失败')):
+                with self.assertRaisesRegex(ValueError, '已恢复原版'):
+                    self_update.apply(restored, self.home, self.code)
+            self.assertEqual(self_update.restore_download(self.home, self.code)['candidate'], prepared['candidate'])
+            with patch.object(self_update, 'run_installer'):
+                self_update.apply(restored, self.home, self.code)
+        self.assertEqual(online_downloads, [target, target])
+        self.assertEqual(git(self.code, 'rev-parse', 'HEAD'), target)
+        self.assertIsNone(self_update.restore_download(self.home, self.code))
+
+    def test_offline_import_exact_pinned_zip_or_bundle(self):
+        for checkout in (False, True):
+            with self.subTest(checkout=checkout):
+                target = self.prepare(checkout)
+                review = self_update.check(self.home, self.code)
+                archive = self.root / ('Official update.bundle' if checkout else 'Official update.zip')
+                if checkout:
+                    git(self.upstream, 'bundle', 'create', str(archive), 'main')
+                else:
+                    git(self.upstream, 'archive', '--format=zip', '--prefix=skill-pilot/', '-o', str(archive), target)
+                    wrong = self.root / 'Wrong edition.zip'
+                    git(self.upstream, 'archive', '--format=zip', '--prefix=skill-pilot/', '-o', str(wrong), target + '^')
+                    with patch.object(self_update, 'validate') as validate:
+                        with self.assertRaisesRegex(ValueError, '官方版本不一致'):
+                            self_update.download(review, self.home, self.code, package=wrong)
+                        validate.assert_not_called()
+                self.upstream.rename(self.root / 'Unavailable publisher')
+                prepared = self_update.download(None, self.home, self.code, package=archive)
+                self.assertEqual(prepared['target'], target)
+                before = self_update.installed(self.code)
+                with patch.object(self_update, 'run_installer'):
+                    self_update.apply(prepared, self.home, self.code)
+                self.assertNotEqual(self_update.installed(self.code), before)
+                self.assertTrue((self.code / 'skill_pilot/added.py').is_file())
 
 
 class InstallerFailureReasonTests(unittest.TestCase):
@@ -192,7 +271,7 @@ class SelfUpdateTests(unittest.TestCase):
         make_fixture(self)
 
     def review(self):
-        review = self_update.check(self.home, self.code)
+        review = prepare_update(self.home, self.code)
         self.addCleanup(shutil.rmtree, review['temporary'], True)
         return review
 
@@ -202,7 +281,7 @@ class SelfUpdateTests(unittest.TestCase):
             review = self.review()
         self.assertFalse(review['available'])
         self.assertEqual(before, store.physical_state(self.code))
-        self.assertEqual(self.personal_before, store.physical_state(self.home / '.skill-pilot'))
+        self.assertEqual(self.personal_before, personal_files(self.home))
 
     def test_zip_upgrade_keeps_unrelated_files_personal_data_and_works_again(self):
         extra = self.code / 'docs/My private note.md'
@@ -221,7 +300,7 @@ class SelfUpdateTests(unittest.TestCase):
         commit(self.upstream, 'Next public edition')
         self_update.apply(self.review(), self.home, self.code)
         self.assertEqual(extra.read_text(), 'leave this file alone')
-        self.assertEqual(self.personal_before, store.physical_state(self.home / '.skill-pilot'))
+        self.assertEqual(self.personal_before, personal_files(self.home))
         cli = self.home / '.local/bin/skill-pilot'
         result = subprocess.run([str(cli), 'scan', '--json'], cwd=self.root,
             env={**os.environ, 'HOME': str(self.home), 'PATH': '/usr/bin:/bin', 'SKILL_PILOT_READ_ONLY': '1'},
@@ -284,12 +363,12 @@ class SelfUpdateTests(unittest.TestCase):
         (self.upstream / 'skill_pilot/cli.py').write_text('this is not valid python!')
         commit(self.upstream, 'Broken public edition')
         with self.assertRaisesRegex(ValueError, '无法在这台电脑运行'):
-            self_update.check(self.home, self.code)
+            prepare_update(self.home, self.code)
         self.assertEqual(before, store.physical_state(self.code))
         (self.upstream / 'skill_pilot/cli.py').unlink()
         commit(self.upstream, 'Incomplete public edition')
         with self.assertRaisesRegex(ValueError, '不完整'):
-            self_update.check(self.home, self.code)
+            prepare_update(self.home, self.code)
         self.assertEqual(before, store.physical_state(self.code))
 
     def test_failed_installer_restores_program_marker_and_desktop_entries(self):
@@ -309,7 +388,7 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertEqual(before, store.physical_state(self.code))
         self.assertEqual(entries_before, store.physical_state(self.home / 'Applications'))
         self.assertEqual(cli_before, cli.read_bytes())
-        self.assertEqual(self.personal_before, store.physical_state(self.home / '.skill-pilot'))
+        self.assertEqual(self.personal_before, personal_files(self.home))
         # A failed attempt can be retried using the same complete download.
         self_update.apply(review, self.home, self.code)
 
@@ -327,7 +406,7 @@ class CheckoutSelfUpdateTests(unittest.TestCase):
         make_fixture(self, checkout=True)
 
     def review(self):
-        review = self_update.check(self.home, self.code)
+        review = prepare_update(self.home, self.code)
         self.addCleanup(shutil.rmtree, review['temporary'], True)
         return review
 
@@ -337,7 +416,7 @@ class CheckoutSelfUpdateTests(unittest.TestCase):
         self.assertEqual(git(self.code, 'rev-parse', 'HEAD'), target)
         self.assertEqual(git(self.code, 'status', '--porcelain'), '')
         self.assertFalse(self.review()['available'])
-        self.assertEqual(self.personal_before, store.physical_state(self.home / '.skill-pilot'))
+        self.assertEqual(self.personal_before, personal_files(self.home))
 
     def test_checkout_check_downloads_only_new_commits_and_still_upgrades(self):
         before = git(self.code, 'rev-parse', 'HEAD')
@@ -416,13 +495,11 @@ class SelfUpdateWebTests(unittest.TestCase):
     def setUp(self):
         make_fixture(self)
         publish(self)
-        original_check, original_apply = self_update.check, self_update.apply
-        for name, function in (('check', original_check), ('apply', original_apply)):
-            wrapped = (lambda home, f=function: f(home, self.code)) if name == 'check' else \
-                      (lambda review, home, f=function: f(review, home, self.code))
-            patcher = patch.object(self_update, name, side_effect=wrapped)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        original_check, original_download, original_apply = self_update.check, self_update.download, self_update.apply
+        self.enterContext(patch.object(self_update, 'check', side_effect=lambda home: original_check(home, self.code)))
+        self.enterContext(patch.object(self_update, 'download', side_effect=lambda review, home, **kw:
+                                      original_download(review, home, self.code, **kw)))
+        self.enterContext(patch.object(self_update, 'apply', side_effect=lambda review, home: original_apply(review, home, self.code)))
         original_read_build = app_version.read_build
         read_patcher = patch.object(app_version, 'read_build',
                                     side_effect=lambda project=self.code, **kw: original_read_build(project, **kw))
@@ -468,10 +545,13 @@ class SelfUpdateWebTests(unittest.TestCase):
         self.assertTrue(progress['available'], progress)
         self.assertNotIn('candidate', progress)
         self.assertNotIn('before', progress)
+        self.assertFalse(progress['downloaded'])
+        self.assertEqual(self.request('/api/program/download', {'target': progress['target']})[0], 200)
+        self.assertTrue(self.finished()['downloaded'])
         self.assertEqual(self.request('/api/program/apply', {'confirmed': True, 'target': progress['target']})[0], 200)
         progress = self.finished()
         self.assertEqual(progress['phase'], 'ready', progress)
-        self.assertEqual(self.personal_before, store.physical_state(self.home / '.skill-pilot'))
+        self.assertEqual(self.personal_before, personal_files(self.home))
         # A refresh that only needs static/script changes acknowledges completion too.
         self.request('/api/runtime/refresh', {})
         self.assertEqual(self.request('/api/program/progress')[1]['phase'], 'latest')
@@ -489,6 +569,8 @@ class SelfUpdateWebTests(unittest.TestCase):
     def test_upgrade_waits_for_current_work_and_blocks_new_writes(self):
         self.request('/api/program/check', {})
         progress = self.finished()
+        self.request('/api/program/download', {'target': progress['target']})
+        self.assertTrue(self.finished()['downloaded'])
         self.server.labels_progress['running'] = True
         try:
             self.request('/api/program/apply', {'confirmed': True, 'target': progress['target']})
@@ -565,7 +647,7 @@ class SelfUpdateProcessTests(unittest.TestCase):
         self.assertRegex(initial_version, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
         def saved_configuration():
             return {p.name: store.physical_state(p) for p in (self.home / '.skill-pilot').iterdir()
-                    if p.name != 'agent-discovery.json' and not p.name.startswith('.agent-discovery-')}
+                    if p.name not in {'agent-discovery.json', 'program-update'} and not p.name.startswith('.agent-discovery-')}
         before = saved_configuration()
         target = publish(self)
         request('/api/program/check', {})
@@ -573,6 +655,10 @@ class SelfUpdateProcessTests(unittest.TestCase):
         self.assertTrue(progress['available'], progress)
         self.assertEqual(progress['target'], target)
         self.assertEqual(progress['current_version'], initial_version)
+        self.assertFalse(progress['downloaded'])
+        request('/api/program/download', {'target': target})
+        progress = until('/api/program/progress', lambda p: not p['running'])
+        self.assertTrue(progress['downloaded'], progress)
         expected_new = progress['latest_version']
         self.assertRegex(expected_new, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
         self.assertNotEqual(expected_new, initial_version)

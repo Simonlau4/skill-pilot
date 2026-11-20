@@ -185,6 +185,11 @@ class Dashboard(ThreadingHTTPServer):
         self.program_progress.setdefault('pending_version', '')
         self.program_progress.setdefault('failed_action', '')
         self.program_progress.setdefault('can_retry_apply', False)
+        if not resume and raw_progress is None and preview_allowed(self.home):
+            cached = self_update.restore_download(self.home)
+            if cached:
+                self.program_review = cached
+                self.program_progress.update(self._program_package_progress(cached))
         # 换进程/重载时先清理上一会话被中断的运行中状态与过时检查结论，再执行本次启动同步，避免覆盖新错误。
         interrupted_auto_check = False
         if resume and self.program_progress.get('running'):
@@ -194,7 +199,7 @@ class Dashboard(ThreadingHTTPServer):
                 rmtree(self.program_review['temporary'], ignore_errors=True)
             self.program_review = None
             self.program_progress.update(
-                running=False, phase='idle', available=False, error='', error_id='', failed_action='',
+                running=False, phase='idle', available=False, downloaded=False, error='', error_id='', failed_action='',
                 latest='', current_version=self.running_version, latest_version='', pending_version='',
                 changes=[], changes_total=0, changes_partial=False,
                 message='还没查到新版信息' if interrupted_auto_check else '从 GitHub 官方项目获取新版',
@@ -1271,7 +1276,7 @@ class Dashboard(ThreadingHTTPServer):
             progress = self.program_progress.copy()
             checked_at = progress.get('checked_at')
             elapsed = time.time() - checked_at if checked_at is not None else PROGRAM_AUTO_CHECK_INTERVAL
-            if (not preview_allowed(self.home) or progress['running'] or progress['phase'] in {'available', 'ready'}
+            if (not preview_allowed(self.home) or progress['running'] or (progress['available'] or progress['phase'] == 'ready')
                     or 0 <= elapsed < PROGRAM_AUTO_CHECK_INTERVAL):
                 return progress
         return self.start_program('check', automatic=True)
@@ -1290,17 +1295,31 @@ class Dashboard(ThreadingHTTPServer):
         with self.program_lock:
             return copy.deepcopy(self.program_progress)
 
-    def start_program(self, action, target=None, automatic=False):
+    def _program_package_progress(self, review):
+        downloaded = bool(review.get('candidate') and review['available'])
+        return {**{key: review[key] for key in ('target', 'available', 'current', 'latest', 'latest_version',
+                                                'changes', 'changes_total', 'changes_partial')},
+                'current_version': self.running_version, 'downloaded': downloaded,
+                'phase': 'available' if review['available'] else 'latest',
+                'message': '更新包已校验，可以安装' if downloaded else
+                           '有新版，可以下载更新包' if review['available'] else 'SP 已是最新版本'}
+
+    def start_program(self, action, target=None, automatic=False, package=None):
         with self.program_lock:
             if self.program_progress['running']:
+                if package is not None:
+                    raise ValueError('正在处理更新，请稍后再选择本地更新包。')
                 return copy.deepcopy(self.program_progress)
             if self.program_progress['phase'] == 'ready':
                 if automatic:
                     return copy.deepcopy(self.program_progress)
                 raise ValueError('新版已安装，请先刷新页面使新版生效，再检查更新。')
-            if action == 'apply' and (not self.program_review or target != self.program_review['target'] or
-                                      not self.program_review['available']):
-                raise ValueError('请先检查 SP 更新，再升级。')
+            if action in {'download', 'apply'} and (
+                    not self.program_review or target != self.program_review['target'] or
+                    not self.program_review['available']):
+                raise ValueError('请先检查 Skill Pilot 更新。')
+            if action == 'apply' and not self.program_review.get('candidate'):
+                raise ValueError('请先下载或导入更新包。')
             self.program_run_id += 1
             run_id = self.program_run_id
             start_refresh_seq = self.static_refresh_seq
@@ -1308,10 +1327,11 @@ class Dashboard(ThreadingHTTPServer):
             progress = self._set_program_progress({
                 'running': True, 'phase': action, 'error': '', 'error_id': '',
                 'automatic': automatic, 'failed_action': '', 'can_retry_apply': False,
-                'message': '正在下载并检查新版…' if action == 'check' else '正在升级，等当前操作完成…',
+                'message': {'check': '正在检查新版…', 'download': '正在下载并校验更新包…',
+                            'import': '正在校验本地更新包…', 'apply': '正在升级，等当前操作完成…'}[action],
             })
             self.program_thread = threading.Thread(
-                target=self.program_work, args=(action, automatic, run_id, start_refresh_seq), daemon=True)
+                target=self.program_work, args=(action, automatic, run_id, start_refresh_seq, package), daemon=True)
             self.program_thread.start()
             return copy.deepcopy(progress)
 
@@ -1322,7 +1342,7 @@ class Dashboard(ThreadingHTTPServer):
         self.program_review = None
         self._set_program_progress(
             {
-                'running': False, 'phase': 'idle', 'available': False, 'error': '', 'error_id': '',
+                'running': False, 'phase': 'idle', 'available': False, 'downloaded': False, 'error': '', 'error_id': '',
                 'failed_action': '', 'can_retry_apply': False, 'latest': '', 'current_version': self.running_version,
                 'latest_version': '', 'pending_version': '',
                 'changes': [], 'changes_total': 0, 'changes_partial': False,
@@ -1343,7 +1363,7 @@ class Dashboard(ThreadingHTTPServer):
         self.program_review = None
         self._set_program_progress(
             {
-                'running': False, 'phase': 'idle', 'available': False, 'error': '', 'error_id': '',
+                'running': False, 'phase': 'idle', 'available': False, 'downloaded': False, 'error': '', 'error_id': '',
                 'failed_action': '', 'can_retry_apply': False, 'current': date, 'latest': '',
                 'current_version': version, 'latest_version': '', 'pending_version': '',
                 'changes': [], 'changes_total': 0, 'changes_partial': False,
@@ -1352,7 +1372,7 @@ class Dashboard(ThreadingHTTPServer):
             pop_keys=('checked_at', 'target'),
         )
 
-    def program_work(self, action, automatic=False, run_id=None, start_refresh_seq=None):
+    def program_work(self, action, automatic=False, run_id=None, start_refresh_seq=None, package=None):
         with self.program_lock:
             if run_id is None:
                 self.program_run_id += 1
@@ -1361,10 +1381,8 @@ class Dashboard(ThreadingHTTPServer):
                 return
             if start_refresh_seq is None:
                 start_refresh_seq = self.static_refresh_seq
-            old_review = self.program_review if action == 'check' else None
-            if action == 'check':
-                self.program_review = None
-            apply_review = self.program_review if action == 'apply' else None
+            old_review = self.program_review
+            apply_review = old_review if action == 'apply' else None
         update_payload = {}
         new_review = None
         checked_disk_version = ''
@@ -1373,8 +1391,6 @@ class Dashboard(ThreadingHTTPServer):
         try:
             try:
                 if action == 'check':
-                    if old_review and old_review.get('temporary'):
-                        rmtree(old_review['temporary'], ignore_errors=True)
                     new_review = self_update.check(self.home)
                     disk_version = new_review.get('current_version') or ''
                     checked_disk_version = disk_version
@@ -1382,7 +1398,7 @@ class Dashboard(ThreadingHTTPServer):
                     latest_version = new_review.get('latest_version') or ''
                     if new_review['available']:
                         phase = 'available'
-                        message = '有新版，可以一键升级'
+                        message = '更新包已校验，可以安装' if new_review.get('candidate') else '有新版，可以下载更新包'
                         pending_version = ''
                         error_text = ''
                         failed_action = ''
@@ -1419,6 +1435,7 @@ class Dashboard(ThreadingHTTPServer):
                     update_payload = dict(
                         phase=phase,
                         target=new_review['target'], available=new_review['available'],
+                        downloaded=bool(new_review.get('candidate') and new_review['available']),
                         current=new_review['current'], latest=new_review['latest'],
                         current_version=current_version, latest_version=latest_version,
                         pending_version=pending_version,
@@ -1430,6 +1447,9 @@ class Dashboard(ThreadingHTTPServer):
                         changes_partial=new_review.get('changes_partial', False) if new_review['available'] else False,
                         message=message,
                     )
+                elif action in {'download', 'import'}:
+                    new_review = self_update.download(old_review, self.home, package=package)
+                    update_payload = self._program_package_progress(new_review)
                 else:
                     while not self.closing:
                         with self.runtime_lock:
@@ -1471,7 +1491,7 @@ class Dashboard(ThreadingHTTPServer):
                             'current_version': self.running_version,
                             'latest_version': pending_version,
                             'pending_version': '',
-                            'failed_action': 'apply',
+                            'failed_action': 'apply', 'downloaded': False,
                             'can_retry_apply': False,
                             'changes': [], 'changes_total': 0, 'changes_partial': False,
                         }
@@ -1482,26 +1502,31 @@ class Dashboard(ThreadingHTTPServer):
                             'current_version': self.running_version,
                             'latest_version': pending_version,
                             'pending_version': pending_version,
-                            'failed_action': '',
+                            'failed_action': '', 'downloaded': False,
                             'can_retry_apply': False,
                             'changes': [], 'changes_total': 0, 'changes_partial': False,
                         }
             except Exception as error:
                 captured = self_update.record_failure(self.home, action, error) or {}
-                update_payload = {'changes': [], 'changes_total': 0, 'changes_partial': False,
-                                  'pending_version': '', 'current_version': self.running_version,
-                                  'can_retry_apply': bool(action == 'apply' and apply_review and apply_review.get('available'))}
-                if action == 'check':
+                cached = bool(old_review and old_review.get('candidate') and old_review.get('available'))
+                retry_apply = bool(action == 'apply' and cached)
+                update_payload = {'pending_version': '', 'current_version': self.running_version,
+                                  'downloaded': cached, 'can_retry_apply': retry_apply}
+                if action == 'check' and not cached:
                     update_payload['latest_version'] = ''
+                if action in {'check', 'apply'}:
+                    update_payload.update(changes=[], changes_total=0, changes_partial=False)
                 if captured:
                     update_payload['error_id'] = captured['error_id']
                 if automatic:
-                    update_payload.update(phase='idle', available=False, error='', failed_action='', message='还没查到新版信息')
+                    update_payload.update(phase='idle', available=cached, error='', failed_action='', message='还没查到新版信息')
                 else:
+                    label = {'check': '检查新版', 'download': '下载更新包', 'import': '导入更新包', 'apply': '安装新版'}[action]
+                    reason = (diagnostics.sanitize(str(error), self.home, 450) if isinstance(error, ValueError)
+                              else '原因未知，请稍后重试，或点击「反馈问题」查看诊断。')
                     update_payload.update(
-                        phase='error', available=False, failed_action=action,
-                        error=str(error) if isinstance(error, ValueError) else 'Skill Pilot 更新没有完成，原因未知。请稍后重试，或点击「反馈问题」查看诊断。',
-                        message='SP 更新没有完成',
+                        phase='error', available=bool(old_review and old_review.get('available') and (action != 'check' or cached)),
+                        failed_action=action, error=reason, message=label + '未完成',
                     )
             seen_seq = start_refresh_seq
             refreshed = None
@@ -1524,7 +1549,9 @@ class Dashboard(ThreadingHTTPServer):
                         elif refreshed is not None and checked_disk_version and refreshed.get('version') != checked_disk_version:
                             self._invalidate_stale_program_check()
                         else:
-                            if action == 'check':
+                            if new_review is not None or (action == 'check' and not update_payload.get('downloaded')):
+                                if old_review and old_review.get('temporary'):
+                                    rmtree(old_review['temporary'], ignore_errors=True)
                                 self.program_review = new_review
                                 new_review = None
                             if applied_review and self.program_review:
@@ -1557,6 +1584,8 @@ class Dashboard(ThreadingHTTPServer):
                     refresh_failed = True
                 seen_seq = target_seq
         finally:
+            if package is not None:
+                package.unlink(missing_ok=True)
             if new_review and new_review.get('temporary'):
                 rmtree(new_review['temporary'], ignore_errors=True)
             if not committed:
@@ -2189,12 +2218,15 @@ class Handler(BaseHTTPRequestHandler):
         write_routes.add('/api/external/release')
         settings_routes = {'/api/settings/llm', '/api/settings/llm/test', '/api/labels/run',
                            '/api/settings/extra-sources', '/api/tags', '/api/team/settings'}
-        program_routes = {'/api/program/check', '/api/program/apply'}
+        program_routes = {'/api/program/check', '/api/program/download', '/api/program/import', '/api/program/apply'}
         if path.startswith(('/api/team/shares', '/api/team/upload/', '/api/team/import/')) or path == '/api/team/withdraw':
             self.reply(404, {'error': '没有这个团队商店操作。'})
             return
         if path not in {"/api/migration/apply", "/api/restore"} | read_routes | write_routes | settings_routes | program_routes:
             self.reply(405, {"error": "当前阶段没有这个操作。"})
+            return
+        if path == '/api/program/import':
+            self.import_program_package()
             return
         try:
             self.request_validation = True
@@ -2443,6 +2475,34 @@ class Handler(BaseHTTPRequestHandler):
                 "error": message or "操作没能完成，请重新预览。",
                 **({'blocked': True} if path in job_routes and self.server.jobs_blocked else {}),
                 **({'recheck': True} if isinstance(error, operations.AssignmentChanged) else {})})
+
+    def import_program_package(self):
+        if not preview_allowed(self.server.home):
+            self.reply(403, {'error': '当前处于只读模式，程序没有改动。'})
+            return
+        package = None
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+            if self.headers.get('Content-Type') != 'application/octet-stream' or not 0 < length <= self_update.PACKAGE_LIMIT:
+                raise ValueError('请选择大小在 64 MB 以内的官方更新包。')
+            with tempfile.NamedTemporaryFile(prefix='skill-pilot-import-', delete=False) as output:
+                package = Path(output.name)
+                while length:
+                    data = self.rfile.read(min(length, 256 * 1024))
+                    if not data:
+                        raise ValueError('更新包未读取完整，请重新选择。')
+                    output.write(data)
+                    length -= len(data)
+            result = self.server.start_program('import', package=package)
+            package = None  # The update worker owns the temporary upload.
+            self.reply(200, result)
+        except (ValueError, OSError) as error:
+            self.request_validation = True
+            message = str(error) if isinstance(error, ValueError) else '没能读取本地更新包，请重新选择。'
+            self.reply(400, {'error': message})
+        finally:
+            if package is not None:
+                package.unlink(missing_ok=True)
 
     def team_post(self, path, body):
         home = self.server.home

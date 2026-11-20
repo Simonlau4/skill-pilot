@@ -159,7 +159,7 @@ if ($('program-message').textContent !== '从 Skill Pilot 官方项目获取新�
         source = (STATIC / 'app.js').read_text()
         functions = '\n'.join(extract_function(source, signature) for signature in (
             'function programText(', 'function programVersionLabel(', 'function programChangesHtml(',
-            'function programPopupPhase(', 'function positionProgramPopup(', 'function renderProgramPopup(',
+            'function programPopupPhase(', 'function positionProgramPopup(', 'function renderProgramPopup(', 'function programNextAction(',
             'function dismissProgramPopup(', 'function renderProgram('))
         events = source[source.index("$('program-popup-close').addEventListener"):source.index('setInterval(() => { if (programUpdate.running')]
         script = r'''
@@ -203,6 +203,15 @@ assert.equal(popup.hidden, false);
 assert.equal(focused, false, '自动打开不能抢焦点');
 assert.equal($('program-popup-title').textContent, 'Skill Pilot 发现新版本');
 assert($('program-popup-body').innerHTML.includes('2026'));
+assert.equal($('program-popup-action').textContent, '下载更新包');
+assert.equal($('program-download').hidden, false);
+assert.equal($('program-apply').hidden, true);
+$('program-popup-action').events.click({currentTarget: $('program-popup-action')});
+assert.equal(applied.action, 'download');
+programUpdate.downloaded = true; renderProgram();
+assert.equal($('program-popup-title').textContent, '更新包已下载');
+assert.equal($('program-download').hidden, true);
+assert.equal($('program-apply').hidden, false);
 assert($('program-popup-body').innerHTML.includes('另有更早的 10 项改进'));
 assert($('program-popup-body').innerHTML.includes('改进显示 &lt;script&gt;'));
 assert($('program-popup-body').innerHTML.includes($('program-changes').innerHTML));
@@ -228,7 +237,7 @@ programUpdate = {...programUpdate, write_allowed: true, phase: 'apply', running:
 assert.equal(popup.hidden, false);
 assert.equal($('program-popup-action').disabled, true);
 assert.equal($('program-apply').disabled, true);
-assert.equal($('program-popup-action').textContent, '正在升级…');
+assert.equal($('program-popup-action').textContent, '请稍候…');
 $('program-popup-later').events.click();
 programUpdate = {...programUpdate, phase: 'ready', running: false, available: false}; renderProgram();
 assert.equal(popup.hidden, false, '关闭升级中提醒后，完成仍应提醒');
@@ -242,12 +251,13 @@ $('program-popup-action').events.click({currentTarget: $('program-popup-action')
 assert.equal(reloaded, 1);
 $('program-popup-later').events.click(); renderProgram();
 assert.equal(popup.hidden, true, '稍后刷新应记住关闭状态');
-programUpdate = {...programUpdate, phase: 'error', error: 'SP 无法连接更新服务器', error_id: 'failure'};
-programFailedAction = 'check'; renderProgram(); assert.equal(popup.hidden, true);
-programFailedAction = 'apply'; renderProgram(); assert.equal(popup.hidden, false);
+programUpdate = {...programUpdate, phase: 'error', downloaded: false, error: 'SP 无法连接更新服务器', error_id: 'failure'};
+programUpdate.failed_action = 'check'; renderProgram(); assert.equal(popup.hidden, true);
+programUpdate.failed_action = 'apply'; programUpdate.downloaded = true; programUpdate.can_retry_apply = true;
+renderProgram(); assert.equal(popup.hidden, false);
 assert($('program-popup-body').innerHTML.includes('Skill Pilot 无法连接更新服务器'));
 assert($('program-popup-body').innerHTML.includes('data-feedback="failure"'));
-assert.equal($('program-popup-action').textContent, '重试升级');
+assert.equal($('program-popup-action').textContent, '重试安装');
 assert.equal($('program-changes').hidden, true);
 programUpdate.write_allowed = false; renderProgram(); assert.equal(popup.hidden, true);
 assert(programChangesHtml({}).includes('包含功能改进与问题修复'));
@@ -266,7 +276,7 @@ programUpdate.target = 'newer'; renderProgram();
 for (const callback of timers.values()) callback();
 assert.equal(popup.hidden, false, '收起动画不能藏掉更新的提醒');
 reduced = true; dismissProgramPopup();
-programUpdate = {...programUpdate, phase: 'available', available: true}; renderProgram();
+programUpdate = {...programUpdate, phase: 'available', available: true, downloaded: false}; renderProgram();
 assert.equal(popup.hidden, true, '关闭失败提醒后重查同一版本不能再弹出');
 programUpdate = {...programUpdate, phase: 'ready', available: false}; renderProgram();
 assert.equal(popup.hidden, false, '忽略版本不能隐藏升级完成提醒');
@@ -290,7 +300,7 @@ programUpdate = {write_allowed: true, phase: 'available', available: true, targe
   current_version: 'v1.0.0-1111111', latest_version: 'v1.0.0-2222222',
   changes: ['展示明确版本号'], changes_total: 1, changes_partial: false};
 renderProgram();
-assert.equal($('program-version').textContent, '当前版本：v1.0.0-1111111 · 最新版本：v1.0.0-2222222');
+assert.equal($('program-version').textContent, '当前版本：v1.0.0-1111111 · 目标版本：v1.0.0-2222222');
 assert($('program-popup-body').innerHTML.includes('当前 v1.0.0-1111111 → 新版 v1.0.0-2222222'));
 assert(!jargon.test($('program-popup-body').innerHTML));
 

@@ -706,7 +706,10 @@
           <div id="program-changes" class="program-changes" hidden></div>
           <p class="row-wrap">
             <button id="program-check" class="btn"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-updates"/></svg><span>检查更新</span></button>
-            <button id="program-apply" class="btn btn-primary" hidden>一键升级</button>
+            <button id="program-download" class="btn btn-primary" hidden>下载更新包</button>
+            <button id="program-apply" class="btn btn-primary" hidden>安装新版</button>
+            <button id="program-import" class="btn" hidden>选择本地更新包</button>
+            <input id="program-package" type="file" accept=".zip,.bundle" hidden>
             <button id="program-refresh" class="btn btn-primary" hidden>刷新生效</button>
           </p>
         </section>
@@ -801,7 +804,8 @@
   <div id="program-popup-body" class="program-popup-body" aria-live="polite"></div>
   <div class="program-popup-actions">
     <button id="program-popup-later" class="btn">稍后再说</button>
-    <button id="program-popup-action" class="btn btn-primary">立即升级</button>
+    <button id="program-popup-import" class="btn" hidden>选择本地包</button>
+    <button id="program-popup-action" class="btn btn-primary">下载更新包</button>
   </div>
 </aside>
 

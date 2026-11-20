@@ -1306,7 +1306,7 @@ class TeamTests(unittest.TestCase):
         def apply(*args):
             applied.set()
             return {'available': False, 'current': 'new', 'latest': 'new'}
-        self.b.program_review = {'target': 'new', 'available': True, 'temporary': ''}
+        self.b.program_review = {'target': 'new', 'available': True, 'temporary': '', 'candidate': 'prepared update fixture'}
         with patch.object(team, 'install', side_effect=delayed), patch.object(self_update, 'apply', side_effect=apply):
             self.enqueue()
             try:
