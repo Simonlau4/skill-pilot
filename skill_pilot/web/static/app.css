@@ -307,6 +307,22 @@ dl, dd, dt { margin: 0; }
 .job-head { display: flex; align-items: flex-start; gap: var(--sp-3); }
 .job-summary { flex: 1; margin: 0; font-weight: 600; overflow-wrap: anywhere; }
 .job-status { margin: 2px 0 0; color: var(--ink-2); font-size: var(--fs-small); overflow-wrap: anywhere; }
+.job-reminder {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: var(--sp-2) 0 0;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--info-bg);
+  border: 1px solid var(--info-line);
+  color: var(--info-ink);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.job-reminder .ico { width: 15px; height: 15px; margin-top: 2px; flex-shrink: 0; }
 .job-details { margin: var(--sp-2) 0 0; padding-left: 18px; list-style: disc; color: var(--muted); font-size: var(--fs-small); }
 .job-details li { margin: 2px 0; overflow-wrap: anywhere; }
 .job-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-2); }
@@ -1583,12 +1599,32 @@ pre {
   animation: toast-in 200ms var(--ease);
 }
 .toast p { flex: 1; margin: 0; overflow-wrap: anywhere; }
-.toast .btn { background: transparent; color: var(--shell-ink); border-color: #5A6478; }
+.toast-remind { align-items: flex-start; }
+.toast-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.toast-body p { flex: none; }
+.toast-reminder {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--shell-2);
+  border: 1px solid rgba(242, 244, 248, 0.14);
+  color: var(--shell-ink);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  line-height: 1.45;
+}
+.toast-reminder .ico { width: 15px; height: 15px; margin-top: 2px; flex-shrink: 0; }
+.toast .btn { flex-shrink: 0; white-space: nowrap; background: transparent; color: var(--shell-ink); border-color: #5A6478; }
 .toast .btn:hover { background: var(--shell-2); }
 .toast-error { background: var(--danger-bg); color: var(--danger-ink); border: 1px solid #F1C4BF; }
+.toast-error .toast-reminder { background: rgba(255, 255, 255, 0.65); border-color: #E3A9A2; color: var(--danger-ink); }
 .toast-error .btn { color: var(--danger-ink); border-color: #E3A9A2; }
 .toast-error .btn:hover { background: #FAD9D5; }
 .toast-close {
+  flex-shrink: 0;
+  white-space: nowrap;
   font: inherit;
   font-size: var(--fs-small);
   color: inherit;

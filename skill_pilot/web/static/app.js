@@ -172,13 +172,94 @@ $('confirm-body').addEventListener('click', event => {
 });
 
 /* 提示条：成功会自己消失，出错留着让用户看清。
-   带撤销的提示，撤销自己也会先弹确认框，用户取消时提示条留着。 */
-function toast({text, tone = 'ok', undo = null, sticky = false, error_id = ''}) {
+   带撤销或新开对话提醒的提示至少停 20 秒，撤销自己也会先弹确认框，用户取消时提示条留着。 */
+function setToastReminder(item, reminder) {
+  const text = String(reminder || '').trim();
+  const body = item.querySelector('.toast-body');
+  const note = item.querySelector('.toast-reminder');
+  if (!text) {
+    item.classList.remove('toast-remind');
+    note?.remove();
+    return;
+  }
+  item.classList.add('toast-remind');
+  if (note) {
+    note.innerHTML = `${icon('info')}<span>${escape(text)}</span>`;
+    return;
+  }
+  const next = document.createElement('p');
+  next.className = 'toast-reminder';
+  next.innerHTML = `${icon('info')}<span>${escape(text)}</span>`;
+  if (body) {
+    body.append(next);
+    return;
+  }
+  const message = item.querySelector('p');
+  if (!message) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'toast-body';
+  message.className = 'toast-text';
+  message.replaceWith(wrap);
+  wrap.append(message, next);
+}
+
+function syncToastReminders() {
+  const container = $('toasts');
+  if (!container) return;
+  const knownUndone = rememberUndoneOps();
+  const logsById = new Map((state.logs || []).map(record => [record.id, record]));
+  for (const item of [...container.children]) {
+    const source = item._reminderSource;
+    if (!source) continue;
+    let nextReminder = '';
+    let allUndone = false;
+    if (source.jobId) {
+      const liveJob = (state.jobs || []).find(entry => entry.id === source.jobId);
+      const prevUndone = source.undoneOps || (source.undoneOps = new Set(source.job?.undone_operations || []));
+      if (liveJob) {
+        for (const id of liveJob.undone_operations || []) prevUndone.add(id);
+        source.job = liveJob;
+      }
+      if (source.job) {
+        for (const id of source.job.operations || []) {
+          if (knownUndone.has(id) || logsById.get(id)?.undone) prevUndone.add(id);
+        }
+        if (prevUndone.size) {
+          rememberUndoneOps(prevUndone);
+          source.job = {...source.job, undone_operations: [...prevUndone]};
+        }
+      }
+      const job = source.job;
+      nextReminder = job ? jobReminderText(job) : '';
+      allUndone = Boolean(job?.operations?.length) && !jobUndoAvailable(job);
+    } else if (source.operationIds?.length) {
+      const prevUndone = source.undoneOps || (source.undoneOps = new Set());
+      for (const id of source.operationIds) {
+        if (knownUndone.has(id) || logsById.get(id)?.undone) prevUndone.add(id);
+      }
+      if (prevUndone.size) rememberUndoneOps(prevUndone);
+      const active = source.operationIds.filter(id => !prevUndone.has(id));
+      allUndone = active.length === 0;
+      if (!allUndone) {
+        nextReminder = newSessionReminderText(source.agents || [], source.kind || 'enable');
+      }
+    }
+    setToastReminder(item, nextReminder);
+    if (allUndone && item._undoButton) {
+      item._undoButton.remove();
+      item._undoButton = null;
+    }
+  }
+}
+
+function toast({text, reminder = '', tone = 'ok', undo = null, sticky = false, error_id = '', reminderSource = null}) {
   const item = document.createElement('div');
   item.className = 'toast' + (tone === 'error' ? ' toast-error' : '');
   const message = document.createElement('p');
   message.textContent = text;
   item.append(message);
+  if (reminder) setToastReminder(item, reminder);
+  if (reminderSource) item._reminderSource = reminderSource;
   if (tone === 'error') appendFeedback(item, error_id);
   if (undo) {
     const button = document.createElement('button');
@@ -195,6 +276,7 @@ function toast({text, tone = 'ok', undo = null, sticky = false, error_id = ''}) 
         toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
       }
     });
+    item._undoButton = button;
     item.append(button);
   }
   const close = document.createElement('button');
@@ -204,7 +286,7 @@ function toast({text, tone = 'ok', undo = null, sticky = false, error_id = ''}) 
   close.addEventListener('click', () => item.remove());
   item.append(close);
   $('toasts').prepend(item);
-  if (!sticky && tone !== 'error') autoDismiss(item, undo ? 20000 : 6000);
+  if (!sticky && tone !== 'error') autoDismiss(item, undo || reminder ? 20000 : 6000);
 }
 
 /* 自动消失：带撤销的提示至少留 20 秒，鼠标移上去或键盘聚焦时暂停。 */
@@ -487,6 +569,118 @@ const jobStatusInfo = job => (job.completed?.length || job.updated?.length) && [
   attention: {tone: 'tag-warn', label: '需要处理'},
 }[job.status] || {tone: 'tag-quiet', label: '未知状态'});
 
+function agentProfileOf(id) {
+  return (state.agents || []).find(agent => agent.id === id)
+    || state.catalog?.get(id)
+    || null;
+}
+
+/* 按 Agent 档案的 activation_mode 筛选需要新开对话才生效的名称，不硬编码工具名。 */
+function newSessionAgentsFrom(list) {
+  if (!Array.isArray(list)) return [];
+  const names = [];
+  const seen = new Set();
+  for (const item of list) {
+    if (!item) continue;
+    if (typeof item === 'string') {
+      const agent = agentProfileOf(item);
+      if (agent?.activation_mode === 'new_session' && !seen.has(agent.id)) {
+        seen.add(agent.id);
+        names.push(agent.name || agent.id);
+      }
+      continue;
+    }
+    if (typeof item !== 'object') continue;
+    if (item.activation_mode && item.activation_mode !== 'new_session') continue;
+    const rawId = typeof item.id === 'string' ? item.id.trim() : '';
+    const rawName = typeof item.name === 'string' ? item.name.trim() : '';
+    const id = rawId || rawName;
+    const name = rawName || (rawId ? nameOf(rawId) : '');
+    if (id && name && !seen.has(id)) {
+      seen.add(id);
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+function newSessionReminderText(agents, kind = 'enable') {
+  const names = newSessionAgentsFrom(agents);
+  if (!names.length) return '';
+  const suffix = kind === 'update' ? '需新开对话才会加载新版技能' : '需新开对话才会加载新技能';
+  return `${names.join('、')} ${suffix}`;
+}
+
+/* 本页会话单调累积已确认撤销的操作编号，供任务卡片、提示条和撤销动作共用。 */
+function undoneOpSet() {
+  return state.undoneOps instanceof Set ? state.undoneOps : (state.undoneOps = new Set());
+}
+
+function rememberUndoneOps(ids = []) {
+  const set = undoneOpSet();
+  for (const id of ids || []) {
+    if (typeof id === 'string' && id) set.add(id);
+  }
+  for (const record of state.logs || []) {
+    if (record?.undone && typeof record.id === 'string' && record.id) set.add(record.id);
+  }
+  for (const job of state.jobs || []) {
+    for (const id of job?.undone_operations || []) {
+      if (typeof id === 'string' && id) set.add(id);
+    }
+  }
+  return set;
+}
+
+/* 跳过服务端已确认撤销或操作记录里已撤销的编号，供任务卡片、提示条和撤销动作共用。 */
+function jobActiveOperations(job) {
+  const ops = job?.operations || [];
+  if (!ops.length) return [];
+  const knownUndone = state.undoneOps instanceof Set ? state.undoneOps : null;
+  const serverUndone = new Set(job.undone_operations || []);
+  const logsById = new Map((state.logs || []).map(record => [record.id, record]));
+  return ops.filter(id => !knownUndone?.has(id) && !serverUndone.has(id) && !logsById.get(id)?.undone);
+}
+
+function jobNewSessionAgents(job) {
+  if (!job || jobActive(job)) return [];
+  if (job.status !== 'done' && !(job.completed?.length || job.updated?.length)) return [];
+  const ops = job.operations || [];
+  if (!ops.length) return job.new_session_agents || [];
+  const logsById = new Map((state.logs || []).map(record => [record.id, record]));
+  const activeOps = jobActiveOperations(job);
+  if (!activeOps.length) return [];
+  const opMap = job.operation_new_session_agents || null;
+  const hasPerOp = activeOps.every(id => (opMap && Object.prototype.hasOwnProperty.call(opMap, id))
+    || Array.isArray(logsById.get(id)?.new_session_agents));
+  if (!hasPerOp) return job.new_session_agents || [];
+  const seen = new Set();
+  const active = [];
+  for (const id of activeOps) {
+    const list = (opMap && Object.prototype.hasOwnProperty.call(opMap, id) ? opMap[id] : null)
+      || logsById.get(id)?.new_session_agents || [];
+    for (const agent of list) {
+      if (typeof agent?.id === 'string' && agent.id.trim() && !seen.has(agent.id)) {
+        seen.add(agent.id);
+        active.push(agent);
+      }
+    }
+  }
+  const order = new Map((state.agents || []).map((agent, index) => [agent.id, index]));
+  active.sort((a, b) => (order.get(a.id) ?? 999) - (order.get(b.id) ?? 999));
+  return active;
+}
+
+function jobReminderText(job) {
+  return newSessionReminderText(jobNewSessionAgents(job), job?.kind === 'update' ? 'update' : 'enable');
+}
+
+function jobReminderHtml(job) {
+  const text = jobReminderText(job);
+  if (!text) return '';
+  return `<p class="job-reminder" role="note">${icon('info')}<span>${escape(text)}</span></p>`;
+}
+
 function jobStatusLine(job) {
   const message = job.message || '';
   if ((job.completed?.length || job.updated?.length) && ['failed', 'attention'].includes(job.status)) return `部分完成：${message}`;
@@ -498,11 +692,7 @@ function jobStatusLine(job) {
 
 /* 操作记录里已经撤销过的条目不再给「撤销」，免得重复点。 */
 function jobUndoAvailable(job) {
-  if (!(job.operations || []).length) return false;
-  return job.operations.some(id => {
-    const record = (state.logs || []).find(item => item.id === id);
-    return !record || !record.undone;
-  });
+  return jobActiveOperations(job).length > 0;
 }
 
 function jobActions(job) {
@@ -600,6 +790,7 @@ function jobItemHtml(job) {
       <span class="tag ${status.tone}">${escape(status.label)}</span>
     </div>
     <p class="job-status">${escape(jobStatusLine(job))}</p>
+    ${jobReminderHtml(job)}
     ${['failed', 'attention'].includes(job.status) ? feedbackButton(job.error_id) : ''}
     ${jobConflictHtml(job)}${jobFailedHtml(job)}${jobImpactHtml(job)}
     ${actions.length ? `<div class="job-actions">${actions.map(action => jobActionButton(job, action)).join('')}</div>` : ''}
@@ -648,9 +839,12 @@ function renderJobs({force = false} = {}) {
   const ended = items.filter(job => !jobActive(job)).length;
   $('jobs-clear').hidden = !ended;
   $('jobs-clear').disabled = !jobsWritable();
-  // 状态变化用读屏读出来；数量和每个条目的当前状态都写在同一处。
+  // 状态变化用读屏读出来；数量、状态和需新开对话提醒都写在同一处。
   $('jobs-live').textContent = items.length
-    ? items.map(job => `${job.summary || '后台任务'}：${jobStatusInfo(job).label}`).join('；')
+    ? items.map(job => {
+      const reminder = jobReminderText(job);
+      return `${job.summary || '后台任务'}：${jobStatusInfo(job).label}${reminder ? `，${reminder}` : ''}`;
+    }).join('；')
     : '后台任务列表为空。';
 
   if (jobsPanelOpen && focusInList) {
@@ -840,7 +1034,9 @@ function applyJobs(result, {force = false} = {}) {
   state.jobs = items;
   state.jobsVersion = version;
   state.jobsBlocked = blocked;
+  rememberUndoneOps();
   renderJobs();
+  syncToastReminders();
   renderJobBlocked();
   renderJobState();
   if (blockedChanged) renderJobAvailability();
@@ -848,10 +1044,31 @@ function applyJobs(result, {force = false} = {}) {
   if (jobsHasActive(items)) scheduleJobsPoll(); else stopJobsPolling();
 }
 
-async function undoJob(job, button = null) {
-  const ids = [...(job.operations || [])].reverse();
+async function undoJob(job, button = null, reminderSource = null) {
+  const resolveCurrent = () => {
+    const knownUndone = rememberUndoneOps();
+    const base = reminderSource?.job || job;
+    const live = (state.jobs || []).find(entry => entry.id === base?.id);
+    const target = live || base;
+    if (!target) return target;
+    const mergedUndone = [...new Set([
+      ...(job?.undone_operations || []),
+      ...(reminderSource?.job?.undone_operations || []),
+      ...(reminderSource?.undoneOps || []),
+      ...(live?.undone_operations || []),
+      ...(target.operations || []).filter(id => knownUndone.has(id)),
+    ])];
+    return mergedUndone.length ? {...target, undone_operations: mergedUndone} : target;
+  };
+  const current = resolveCurrent();
+  const ids = jobActiveOperations(current).reverse();
   if (!ids.length) return false;
-  const done = await undoOperation(ids, {skills: job.skills || [], message: job.summary || pastTense(job.message || ''), button});
+  const done = await undoOperation(ids, {
+    skills: current.skills || [],
+    message: current.summary || pastTense(current.message || ''),
+    button,
+    resolveIds: () => jobActiveOperations(resolveCurrent()).reverse(),
+  });
   if (done) renderJobs();
   return done;
 }
@@ -1027,15 +1244,29 @@ function finishJobs(finished) {
         continue;
       }
     }
+    const initialUndone = new Set(job.undone_operations || []);
+    const knownUndone = state.undoneOps instanceof Set ? state.undoneOps : null;
+    for (const id of job.operations || []) {
+      if (knownUndone?.has(id) || (state.logs || []).some(record => record.id === id && record.undone)) {
+        initialUndone.add(id);
+      }
+    }
+    if (initialUndone.size && typeof rememberUndoneOps === 'function') rememberUndoneOps(initialUndone);
+    const initialJob = initialUndone.size ? {...job, undone_operations: [...initialUndone]} : job;
+    const reminderSource = {jobId: job.id, job: initialJob, undoneOps: initialUndone};
     if (job.status === 'done') {
       toast({
         text: pastTense(job.message || '任务已完成'),
-        undo: job.operations?.length && jobUndoAvailable(job) ? button => undoJob(job, button) : null,
+        reminder: jobReminderText(initialJob),
+        reminderSource,
+        undo: initialJob.operations?.length && jobUndoAvailable(initialJob)
+          ? button => undoJob(reminderSource.job || initialJob, button, reminderSource)
+          : null,
       });
     } else if (job.status === 'failed') {
-      toast({text: jobStatusLine(job), error_id: job.error_id, tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), reminder: jobReminderText(initialJob), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});
     } else if (job.status === 'attention') {
-      toast({text: jobStatusLine(job), error_id: job.error_id, tone: 'error', sticky: true});
+      toast({text: jobStatusLine(job), reminder: jobReminderText(initialJob), reminderSource, error_id: job.error_id, tone: 'error', sticky: true});
     }
   }
   for (const key of packKeys) announcePackBatch(key, state.jobs);
@@ -1124,8 +1355,16 @@ async function heartbeat() {
 /* 撤销：先确认，再取最新状态，避免用过期版本号。
    button 是触发这次撤销的那个按钮（提示条上的或操作记录里的），由 runWrite 负责忙碌态。
    返回 false 表示用户取消了。 */
-async function undoOperation(id, {skills = [], message = '', button = null} = {}) {
+async function undoOperation(id, {skills = [], message = '', button = null, resolveIds = null} = {}) {
   const ids = Array.isArray(id) ? id : [id];
+  const resolveLatestIds = () => {
+    const knownUndone = rememberUndoneOps();
+    const raw = typeof resolveIds === 'function' ? resolveIds() : ids;
+    const logsById = new Map((state.logs || []).map(record => [record.id, record]));
+    return (Array.isArray(raw) ? raw : [raw]).filter(
+      opId => opId && !knownUndone.has(opId) && !logsById.get(opId)?.undone
+    );
+  };
   const ok = await confirmDialog({
     title: '撤销这次操作',
     lines: [message ? `要撤销的是：${message}` : '会恢复相应的技能内容、分配入口和工具添加的停用设置。'],
@@ -1134,17 +1373,28 @@ async function undoOperation(id, {skills = [], message = '', button = null} = {}
     okText: '撤销',
   });
   if (!ok) return false;
+  if (!resolveLatestIds().length) {
+    renderJobs();
+    syncToastReminders();
+    return false;
+  }
   const result = await runWrite({
     button,
     busyText: '正在撤销…',
     work: async () => {
-      const history = ids.length > 1 ? await api('/api/log') : [];
+      const targetIds = resolveLatestIds();
+      if (!targetIds.length) return false;
+      const history = targetIds.length > 1 ? await api('/api/log') : [];
+      rememberUndoneOps(history.filter(record => record?.undone).map(record => record.id));
       let done = 0;
       try {
-        for (const operationId of ids) {
-          if (history.some(record => record.id === operationId && record.undone)) continue;
+        for (const operationId of targetIds) {
+          if (!resolveLatestIds().includes(operationId)) continue;
           const table = await api('/api/table');
+          // 等待版本号返回期间可能刚收到新的撤销状态，真正提交前再按最新状态过滤一次。
+          if (!resolveLatestIds().includes(operationId)) continue;
           await api('/api/undo', {id: operationId, revision: table.revision, confirmed: true});
+          rememberUndoneOps([operationId]);
           done++;
         }
       } catch (error) {
@@ -1154,11 +1404,11 @@ async function undoOperation(id, {skills = [], message = '', button = null} = {}
         await refreshEverything();
         await refreshUpdates();
       }
-      return true;
+      return done > 0;
     },
-    success: () => ({text: '已经撤销这次操作'}),
+    success: done => (done ? {text: '已经撤销这次操作'} : null),
   });
-  return result !== null;
+  return result === true;
 }
 
 /* ==================== 页头与导航：摘要条、页面切换、模式徽标 ==================== */
@@ -1181,6 +1431,7 @@ const state = {
   jobs: [],          // 后台任务：技能、清理、更新和团队安装共用一份队列
   jobsVersion: -1,
   jobsBlocked: '',
+  undoneOps: new Set(), // 本页会话已确认撤销的操作编号，单调累积
   skillSelected: new Set(),
   assignmentIntents: new Map(), // 只记用户亲手选的改动，依赖始终根据最新状态重算。
   autoAdded: new Map(),   // 「技能|agent」→ 需要它的那个技能（预览的 auto_added）
@@ -2657,6 +2908,8 @@ async function applyAbsorb(review, choices, button) {
     onError: error => { $('absorb-message').innerHTML = escape(error.message) + feedbackButton(error.error_id); },
     success: written => ({
       text: '技能副本已经纳入统一管理',
+      reminder: newSessionReminderText(written.new_session_agents || [], 'update'),
+      reminderSource: written.id ? {operationIds: [written.id], agents: written.new_session_agents || [], kind: 'update'} : null,
       undo: undoButton => undoOperation(written.id, {skills: review.skills, message: written.message, button: undoButton}),
     }),
   });
@@ -3243,14 +3496,21 @@ $('config-import-apply').addEventListener('click', async event => {
     work: async () => {
       const result = await api('/api/config/apply', {config: configImportData, agents: configImportAgents(), revision: plan.revision, confirmed: true});
       configImportResult = result;
+      const reminder = newSessionReminderText(result.new_session_agents || []);
       $('config-import-title').textContent = '导入结果';
-      $('config-import-message').textContent = result.message + (result.complete ? '。' : '。未完成项见下方明细。');
+      $('config-import-message').textContent = result.message
+        + (result.complete ? '。' : '。未完成项见下方明细。')
+        + (reminder ? ` ${reminder}。` : '');
       renderConfigImportReview({...plan, ...result}, true);
       await refreshEverything();
       return result;
     },
-    success: result => ({text: result.complete ? result.message : '可用部分已处理，未完成项见导入结果。',
-      undo: result.id ? button => undoConfigImport(result, button) : null}),
+    success: result => ({
+      text: result.complete ? result.message : '可用部分已处理，未完成项见导入结果。',
+      reminder: newSessionReminderText(result.new_session_agents || []),
+      reminderSource: result.id ? {operationIds: [result.id], agents: result.new_session_agents || [], kind: 'enable'} : null,
+      undo: result.id ? button => undoConfigImport(result, button) : null,
+    }),
   });
 });
 
@@ -6251,8 +6511,10 @@ $('labels-all').addEventListener('click', async () => {
 async function refreshLog() {
   try {
     state.logs = await api('/api/log');
+    rememberUndoneOps();
     renderLog();
     renderJobs();   // 已撤销的记录不再给任务列表里的「撤销」
+    syncToastReminders();
   } catch (error) {
     toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
   }
@@ -6434,6 +6696,8 @@ async function joinAgent(id, button) {
       const text = result.message || '新 Agent 已接入';
       return {
         text: missing.length ? `${text}，一并接入 ${missing.join('、')}` : text,
+        reminder: newSessionReminderText(result.new_session_agents || [], 'update'),
+        reminderSource: result.id ? {operationIds: [result.id], agents: result.new_session_agents || [], kind: 'update'} : null,
         undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
       };
     },
@@ -6561,6 +6825,8 @@ $('join-apply').addEventListener('click', async event => {
     },
     success: result => ({
       text: result.message || '新 Agent 已接入',
+      reminder: newSessionReminderText(result.new_session_agents || [], 'update'),
+      reminderSource: result.id ? {operationIds: [result.id], agents: result.new_session_agents || [], kind: 'update'} : null,
       undo: undoButton => undoOperation(result.id, {message: result.message, button: undoButton}),
     }),
   });
@@ -6978,11 +7244,15 @@ async function decideDependency(skill, requires, confirmed, button) {
     button,
     busyText: '正在处理…',
     work: async () => {
-      await api('/api/dependencies', {decisions: [{skill, requires, confirmed}], revision: state.table.revision, confirmed: true});
+      const result = await api('/api/dependencies', {decisions: [{skill, requires, confirmed}], revision: state.table.revision, confirmed: true});
       await refreshEverything();
-      return true;
+      return result;
     },
-    success: () => ({text: confirmed ? '已添加前置依赖' : '已移除前置依赖'}),
+    success: result => ({
+      text: confirmed ? '已添加前置依赖' : '已移除前置依赖',
+      reminder: confirmed ? newSessionReminderText(result?.new_session_agents || []) : '',
+      reminderSource: confirmed && result?.id ? {operationIds: [result.id], agents: result.new_session_agents || [], kind: 'enable'} : null,
+    }),
   });
 }
 

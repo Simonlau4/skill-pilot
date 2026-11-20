@@ -257,6 +257,7 @@ const context = vm.createContext({
   renderAgents() {}, setTask() {},
   refreshEverything: async () => refreshes++, refreshAgents: async () => refreshes++,
   renderJoin: value => { renderedPlan = value; },
+  newSessionReminderText: () => '',
   undoOperation: (...args) => args,
   runWrite: async options => {
     assert.ok(options.taskText.includes(agent.name));
@@ -339,7 +340,7 @@ const context = vm.createContext({
   renderRailNotes() {}, renderAgents() {},
   setTask: (id, task) => { if (task && task.text) tasks.push(task.text); },
   refreshEverything: async () => {}, refreshAgents: async () => {},
-  renderJoin() {}, undoOperation() {},
+  renderJoin() {}, newSessionReminderText: () => '', undoOperation() {},
   runWrite: async options => {
     const result = await options.work();
     const notice = options.success(result);

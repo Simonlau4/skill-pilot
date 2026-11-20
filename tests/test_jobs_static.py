@@ -69,6 +69,7 @@ assert.deepEqual(cleanupTabSkills().map(s => s.name), ['ordinary']);
             line(app, 'const JOB_ACTIVE = '),
             line(app, 'const jobActive = '),
             extract_function(app, 'function jobStatusLine('),
+            extract_function(app, 'function jobActiveOperations('),
             extract_function(app, 'function jobUndoAvailable('),
             extract_function(app, 'function jobActions('),
             extract_function(app, 'function pastTense('),
@@ -254,7 +255,7 @@ function fail(message) { console.error(message); process.exit(1); }
         self.assertIn('applyJobs(result, {force: true})', clear)
 
         undo = extract_function(app, 'async function undoJob(')
-        self.assertIn('[...(job.operations || [])].reverse()', undo)
+        self.assertIn('jobActiveOperations(current).reverse()', undo)
         self.assertIn('undoOperation(ids', undo)
 
     def test_skills_tray_does_not_replace_cleanup_bar_on_cleanup_page(self):

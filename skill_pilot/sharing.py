@@ -247,7 +247,7 @@ def import_config(data, assigned=None, home=None, expected=None, member_name=Non
     if not plan['install'] and not plan['dependencies'] and not operations.assignment_plan(registry, agents, changes, home)['changed']:
         message = ('配置里没有在用技能，文件没有改动。' if not rows else
                    '本机已有可用部分，分配没有变化。' if changes else '没有可导入的技能，请先补齐清单里的待处理项。')
-        return {**result, 'message': message}
+        return {**result, 'message': message, 'new_session_agents': []}
     reviews, incoming = {}, []
     try:
         for name in plan['install']:

@@ -93,7 +93,7 @@ def managed(home, agent_ids=None):
 def custom(identifier, name, root):
     return validate({'id': identifier, 'name': name.strip(), 'detect': {'config_dirs': [str(Path(root).parent)], 'apps': [], 'cli': None},
                      'skill_roots': [root], 'link_root': root, 'nested': False, 'readonly_roots': [],
-                     'activation': 'new_session', 'activation_note': '新会话生效', 'manual_only': [],
+                     'activation': 'new_session', 'activation_note': '需新开对话生效', 'manual_only': [],
                      'disable': None, 'disable_note': '没有独立停用设置',
                      'visibility_note': '按技能目录直属条目盘点。'})
 
@@ -175,4 +175,29 @@ def require_shared(selected, profiles, already=(), home=None):
 
 
 def activation_text(profile):
-    return '马上生效' if profile['activation'] == 'immediate' else '新会话生效'
+    return '即时生效' if profile['activation'] == 'immediate' else '需新开对话生效'
+
+
+def activation_note(profile):
+    note = str(profile.get('activation_note') or '').strip()
+    return note or activation_text(profile)
+
+
+def new_session_agents(agent_ids, home=None, catalog=None):
+    known = catalog if catalog is not None else by_id(home)
+    ordered = [p['id'] for p in managed(home)] if home is not None else list(known)
+    targets = set(agent_ids or ())
+    ids = [a for a in ordered if a in targets] + [a for a in (agent_ids or ()) if a not in ordered]
+    seen, result = set(), []
+    for agent_id in ids:
+        if agent_id in seen or agent_id not in known:
+            continue
+        seen.add(agent_id)
+        profile = known[agent_id]
+        if profile.get('activation') == 'new_session':
+            result.append({
+                'id': agent_id,
+                'name': profile['name'],
+                'activation_note': activation_note(profile),
+            })
+    return result
