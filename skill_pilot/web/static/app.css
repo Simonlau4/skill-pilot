@@ -2461,7 +2461,7 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .home-section-head h2 { margin: 0; font-size: var(--fs-section); }
 .home-section-head p { margin: 0; font-size: var(--fs-small); color: var(--muted); }
 
-.home-agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: 14px; }
+.home-agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(268px, 100%), 1fr)); gap: 14px; }
 .home-agent {
   position: relative;
   display: flex;
@@ -2493,9 +2493,10 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .home-agent:hover, .home-agent:focus-visible { box-shadow: var(--shadow-2); outline: none; }
 .home-agent:hover::before, .home-agent:focus-visible::before { opacity: 1; }
 .home-agent:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-.home-agent-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-width: 0; }
-.home-agent-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 600; }
-.home-agent-act { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-tiny); color: var(--muted); }
+.home-agent-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; min-width: 0; }
+.home-agent-name { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; font-weight: 600; }
+.home-agent-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-agent-act { flex: 0 0 auto; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-tiny); color: var(--muted); }
 .home-agent-n { margin-top: 6px; font-family: var(--font-display); font-size: 34px; line-height: 1; font-weight: 700; letter-spacing: -0.03em; }
 .home-agent-n small { margin-left: 4px; font-size: var(--fs-small); font-weight: 500; color: var(--muted); letter-spacing: 0; }
 .home-bar { display: block; height: 6px; margin-top: 10px; border-radius: 999px; background: var(--panel-deep); overflow: hidden; }

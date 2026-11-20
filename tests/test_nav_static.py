@@ -604,3 +604,46 @@ if (JSON.stringify(LLM_DEFAULTS.deepseek) !== JSON.stringify(['https://api.deeps
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_home_agent_cards_prevent_header_overlap(self):
+        css = (STATIC / 'app.css').read_text()
+        self.assertIn(
+            '.home-agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(268px, 100%), 1fr)); gap: 14px; }',
+            css,
+        )
+        self.assertIn('.home-agent-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; min-width: 0; }', css)
+        self.assertIn('.home-agent-name { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; font-weight: 600; }', css)
+        self.assertIn('.home-agent-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }', css)
+        self.assertIn('.home-agent-act { flex: 0 0 auto; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;', css)
+
+        source = (STATIC / 'app.js').read_text()
+        render = extract_function(source, 'function renderHomeAgents(')
+        script = render + r'''
+const box = {
+  innerHTML: '',
+  querySelectorAll() { return []; },
+};
+let homeAgents = [];
+let homeAgentCards = [];
+let homeFocusedAgent = 'x';
+const $ = id => { if (id !== 'home-agents') throw new Error(id); return box; };
+const escape = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const homeNumber = n => String(n);
+const tokenText = n => String(n);
+const homeAgentInfo = () => [
+  {id: 'antigravity', name: 'Antigravity', activation: '需新开对话生效', count: 93, tokens: 9800, color: '#6D4BC2', shared: []},
+  {id: 'custom', name: '豆包工作', activation: '', count: 1, tokens: 176, color: '#3D7A1F', shared: []},
+];
+renderHomeAgents();
+if (!box.innerHTML.includes('<span class="home-agent-label">Antigravity</span>')) {
+  throw new Error('Agent 名称缺少独立单行截断容器');
+}
+if (!box.innerHTML.includes('<span class="home-agent-act" title="需新开对话生效">需新开对话生效</span>')) {
+  throw new Error('生效提示未完整渲染');
+}
+if (box.innerHTML.split('data-home-agent="custom"')[1].includes('home-agent-act')) {
+  throw new Error('空生效提示不应渲染占位标签');
+}
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
