@@ -449,12 +449,19 @@ def envelope(report, attachments=()):
     row = next(iter(report['errors']), {})
     snapshot = row.get('environment', {})
     runtime = {**env, **snapshot}
+    pending = env.get('pending_app_version', '')
+    pending = pending.strip() if isinstance(pending, str) else ''
+    has_pending = bool(pending and pending != runtime.get('app_version', ''))
     timing = ('系统、Python 和程序版本采集于出错时。' if snapshot else
               '此记录未保存出错时的版本信息，版本取自本次反馈。') if row else '主动反馈，环境取自本次反馈。'
+    if has_pending:
+        timing += f' 已安装待刷新生效版本：{pending}。'
     timing += ' 工具与助手摘要采集于本次反馈：' + report.get('environment_captured_at', '未记录时间')
+    detail = (timing + '\n\n' + row.get('detail', '') if row
+              else f'主动反馈，当前运行版本：{runtime.get("app_version", "")}；已安装待刷新生效版本：{pending}。' if has_pending else '')
     return clean({**row, 'occurred_at': row.get('time', ''),
                   **{k: runtime.get(k, '') for k in ('app_version', 'install_mode', 'os', 'python_version')},
-                  'detail': timing + '\n\n' + row.get('detail', '') if row else '',
+                  'detail': detail,
                   'tools_summary': '; '.join(f"{name}: {tool['version'] if tool['available'] else '未安装'}"
                                             for name, tool in env['tools'].items()),
                   'agents_summary': ', '.join(env['agent_types']) + f"；技能数：{env['skill_count']}",
