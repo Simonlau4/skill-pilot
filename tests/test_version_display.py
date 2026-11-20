@@ -1086,22 +1086,25 @@ assert.equal($('program-popup-action').textContent, '重试升级');
 
         git(self.code, 'update-index', '--skip-worktree', 'README.md')
         readme_path = self.code / 'README.md'
-        original_readme = readme_path.read_text(encoding='utf-8')
+        # Keep the original bytes. Text-mode write_text on Windows rewrites LF as
+        # CRLF, which is a real local change and must not leak into the next check.
+        original_readme = readme_path.read_bytes()
         try:
-            readme_path.write_text(original_readme + '\nskip-worktree local edit\n', encoding='utf-8')
+            readme_path.write_bytes(original_readme + b'\nskip-worktree local edit\n')
             self.assertEqual(git(self.code, 'status', '--porcelain', '--untracked-files=normal'), '')
             skip_check = self_update.check(self.home, self.code)
             self.assertEqual(skip_check['latest_version'], official_checkout_version)
             self.assertNotEqual(skip_check['current_version'], skip_check['latest_version'])
         finally:
-            readme_path.write_text(original_readme, encoding='utf-8')
+            readme_path.write_bytes(original_readme)
             git(self.code, 'update-index', '--no-skip-worktree', 'README.md')
+        self.assertEqual(git(self.code, 'status', '--porcelain', '--untracked-files=normal'), '')
 
         original_read_tree = self_update.read_git_tree_version
 
         def mutate_during_read_tree(project, revision):
             version = original_read_tree(project, revision)
-            readme_path.write_text(original_readme + '\nlocal edit during tree read\n', encoding='utf-8')
+            readme_path.write_bytes(original_readme + b'\nlocal edit during tree read\n')
             return version
 
         try:
@@ -1109,19 +1112,60 @@ assert.equal($('program-popup-action').textContent, '重试升级');
                 with self.assertRaisesRegex(ValueError, '检查期间发生了改动'):
                     self_update.check(self.home, self.code)
         finally:
-            readme_path.write_text(original_readme, encoding='utf-8')
+            readme_path.write_bytes(original_readme)
 
         original_git = self_update.git
 
         def mutate_during_ls_remote(project, *args, **kwargs):
             output = original_git(project, *args, **kwargs)
             if args and args[0] == 'ls-remote':
-                readme_path.write_text(readme_path.read_text(encoding='utf-8') + '\nlocal edit mid-check\n', encoding='utf-8')
+                readme_path.write_bytes(readme_path.read_bytes() + b'\nlocal edit mid-check\n')
             return output
 
-        with patch.object(self_update, 'git', side_effect=mutate_during_ls_remote):
-            with self.assertRaisesRegex(ValueError, '检查期间发生了改动'):
-                self_update.check(self.home, self.code)
+        try:
+            with patch.object(self_update, 'git', side_effect=mutate_during_ls_remote):
+                with self.assertRaisesRegex(ValueError, '检查期间发生了改动'):
+                    self_update.check(self.home, self.code)
+        finally:
+            readme_path.write_bytes(original_readme)
+
+    def test_crlf_residue_is_preexisting_and_tree_read_edit_is_mid_check(self):
+        """A Windows text-mode round trip leaves CRLF in an LF checkout.
+
+        That residue is already on disk when check() starts, so it is a local
+        change. After the original bytes are put back, an edit made only while
+        reading the official tree is a change during the check.
+        """
+        with patch.object(self_update, 'run_installer'):
+            make_fixture(self, checkout=True)
+        readme_path = self.code / 'README.md'
+        original = readme_path.read_bytes()
+        self.assertNotIn(b'\r\n', original)
+        self.assertEqual(git(self.code, 'status', '--porcelain', '--untracked-files=normal'), '')
+
+        text = readme_path.read_text(encoding='utf-8')
+        readme_path.write_text(text, encoding='utf-8', newline='\r\n')
+        self.assertNotEqual(readme_path.read_bytes(), original)
+        self.assertIn(b'\r\n', readme_path.read_bytes())
+        with self.assertRaisesRegex(ValueError, '有本地改动') as preexisting:
+            self_update.check(self.home, self.code)
+        self.assertNotIn('检查期间发生了改动', str(preexisting.exception))
+
+        readme_path.write_bytes(original)
+        self.assertEqual(git(self.code, 'status', '--porcelain', '--untracked-files=normal'), '')
+
+        def mutate_during_read_tree(project, revision):
+            version = app_version.read_git_tree_version(project, revision)
+            readme_path.write_bytes(original + b'\nlocal edit during tree read\n')
+            return version
+
+        try:
+            with patch.object(self_update, 'read_git_tree_version', side_effect=mutate_during_read_tree):
+                with self.assertRaisesRegex(ValueError, '检查期间发生了改动') as during:
+                    self_update.check(self.home, self.code)
+            self.assertNotIn('有本地改动，已保留当前版本', str(during.exception))
+        finally:
+            readme_path.write_bytes(original)
 
     def test_program_work_run_id_atomic_dict_and_snapshot_isolation(self):
         with patch.dict(os.environ, {'SKILL_PILOT_HOME': str(self.home), 'SKILL_PILOT_READ_ONLY': '0'}):
