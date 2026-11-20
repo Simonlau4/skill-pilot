@@ -62,31 +62,31 @@ class Reader:
         cache.write_text(json.dumps(result))
         return result
 
-    def repository(self, source):
-        key = source['repository'] + '\n' + source.get('branch', '')
+    def repository(self, source, commit=None):
+        key = source['repository'] + '\n' + (commit or source.get('branch', ''))
         if key in self.repo_errors:
             raise ValueError(str(self.repo_errors[key])) from self.repo_errors[key]
         try:
-            return self._repository(source, key)
+            return self._repository(source, key, commit)
         except ValueError as error:
             self.repo_errors[key] = error
             raise
 
-    def _repository(self, source, key):
+    def _repository(self, source, key, commit):
         repo = source['repository']
         if key in self.repos:
             return self.repos[key]
         checkout = self.root / ('repo-' + hashlib.sha256(key.encode()).hexdigest()[:16])
         local = repo.startswith('file:///')
-        if local:
+        if local and commit is None:
             branch = ['--branch', source['branch']] if source.get('branch') else []
             self.git(self.root, 'clone', '--depth', '1', '--no-checkout', *branch, '--', repo, str(checkout))
             commit = self.git(checkout, 'rev-parse', 'HEAD')
         else:
-            commit = self.api(self.head(source))[0]['sha']
+            commit = commit or self.api(self.head(source))[0]['sha']
             checkout.mkdir()
             self.git(checkout, 'init', '-q')
-            self.git(checkout, 'remote', 'add', 'origin', 'https://github.com/' + repo + '.git')
+            self.git(checkout, 'remote', 'add', 'origin', repo if local else 'https://github.com/' + repo + '.git')
             self.git(checkout, 'fetch', '--depth', '1', 'origin', commit)
         self.repos[key] = checkout, commit
         return checkout, commit
@@ -161,9 +161,14 @@ class Reader:
         return destination
 
     def current(self, source, commit=None, tree=None):
-        checkout, latest = self.repository(source)
-        commit = commit or latest
-        tree = tree or self.tree(source, commit)
+        # The review pins the exact commit. A retry must work even if the
+        # repository's default branch advances between check and download.
+        checkout, commit = self.repository(source, commit)
+        path = source['path']
+        actual_tree = self.git(checkout, 'rev-parse', commit + ('^{tree}' if path == '.' else ':' + path))
+        if tree and tree != actual_tree:
+            raise ValueError('下载内容与已核对的上游版本不一致，请重新检查。')
+        tree = actual_tree
         upstream = self.snapshot(checkout, tree)
         return {'commit': commit, 'tree_sha': tree, '_upstream_path': str(upstream),
                 'updated_at': self.git(checkout, 'log', '-1', '--format=%cI', commit, '--', source['path']),

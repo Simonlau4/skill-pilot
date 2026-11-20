@@ -156,10 +156,11 @@ class UpdateBatchTests(unittest.TestCase):
         before = self.fingerprint()
         old_lark = {name: operations.load(self.home)[1]['skills'][name] for name in ['lark-doc', 'lark-wiki']}
         review = self.review(old_lark)
-        def failed_install(*args):
+        def failed_install(*args, **kwargs):
             (package / 'old').write_text('incomplete replacement')
             raise ValueError('飞书工具下载失败。这组技能保持原样。')
-        with patch.object(lark, 'install_cli', side_effect=failed_install) as install:
+        with patch.object(lark, 'prepare_cli', return_value=package), \
+                patch.object(lark, 'install_cli', side_effect=failed_install) as install:
             result = updates.apply(review, ['sample', 'lark-doc', 'lark-wiki', 'zlast'], confirmed=True, confirm_lark=True)
         install.assert_called_once()
         self.assertEqual(result['updated'], ['sample', 'zlast'])
@@ -236,7 +237,77 @@ class UpdateBatchTests(unittest.TestCase):
         result = updates.apply(review, ['sample', 'zlast'], confirmed=True)
         self.assertEqual(result['updated'], ['zlast'])
         self.assertTrue(result['failed'][0].pop('error_id'))
-        self.assertEqual(result['failed'], [{'name': 'sample', 'error': '这项更新的文件没能读写，请重新检查更新后再试。'}])
+        self.assertEqual(result['failed'], [{'name': 'sample', 'stage': 'download',
+                                             'error': '文件未能完整下载，请检查网络后重试。'}])
+
+    def test_failed_download_and_install_retry_only_missing_content(self):
+        relative = Path('scripts/task.py')
+        (self.fixture.folder / relative).write_bytes((self.fixture.local() / relative).read_bytes())
+        self.fixture.commit('change only the skill description')
+        for name in ('zinstall', 'zlast'):
+            self.add_skill(name)
+        fetch = updates._fetch_update
+        pulls = []
+
+        def fetch_interrupted(row, *args, **kwargs):
+            pulls.append(row['name'])
+            if row['name'] == 'sample' and pulls.count('sample') < 3:
+                raise ValueError('模拟下载中断')
+            return fetch(row, *args, **kwargs)
+
+        with patch.object(updates, '_fetch_update', side_effect=fetch_interrupted):
+            review = self.review()
+            rows = {row['name']: row for row in review['skills']}
+            self.assertTrue(rows['sample']['has_update'])
+            self.assertEqual(rows['sample']['status'], '下载失败')
+            self.assertNotIn('_upstream_path', rows['sample'])
+            self.assertFalse(review['errors'])
+            attempts = []
+
+            def install_interrupted(current_review, names, *args):
+                attempts.extend(names)
+                if names == ['zinstall'] and attempts.count('zinstall') == 1:
+                    with patch.object(operations, '_run', side_effect=OSError('模拟安装失败')):
+                        return install(current_review, names, *args)
+                return install(current_review, names, *args)
+
+            install = updates._apply_group
+            with patch.object(updates, '_apply_group', side_effect=install_interrupted):
+                result = updates.apply(review, ['sample', 'zinstall', 'zlast'], confirmed=True)
+                self.assertEqual(result['updated'], ['zlast'])
+                self.assertEqual([(row['name'], row['stage']) for row in result['failed']],
+                                 [('sample', 'download'), ('zinstall', 'install')])
+                retried = updates.apply(review, [row['name'] for row in result['failed']], confirmed=True)
+                self.assertEqual(retried['updated'], ['sample', 'zinstall'])
+                self.assertEqual(attempts, ['zinstall', 'zlast', 'sample', 'zinstall'])
+        self.assertEqual(pulls.count('sample'), 3)
+        self.assertEqual(pulls.count('zinstall'), 1)
+        self.assertEqual(pulls.count('zlast'), 1)
+
+    def test_offline_folder_is_pinned_previewed_and_undoable(self):
+        before = self.fingerprint()
+        with patch.object(updates, '_fetch_update', side_effect=ValueError('模拟离线')) as fetch:
+            review = self.review()
+            row = next(r for r in review['skills'] if r['name'] == 'sample')
+            wrong = Path(review['temporary']) / 'Wrong Skill Folder'
+            shutil.copytree(self.fixture.folder, wrong)
+            (wrong / 'SKILL.md').write_text(self.fixture.original)
+            with self.assertRaisesRegex(ValueError, '上游版本不同'):
+                updates.prepare_download(review, 'sample', str(wrong))
+            with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
+                with self.assertRaisesRegex(ValueError, '只读'):
+                    updates.prepare_download(review, 'sample', str(self.fixture.folder))
+            prepared = updates.prepare_download(review, 'sample', str(self.fixture.folder))
+            self.assertTrue(prepared['needs_review'])
+            self.assertIn('new upstream', prepared['comparison'])
+            with self.assertRaisesRegex(ValueError, '核对已下载的内容'):
+                updates.apply(review, ['sample'], confirmed=True)
+            result = updates.apply(review, ['sample'], confirmed=True,
+                                   reviewed={'sample': row['normalized_tree_sha']})
+            self.assertEqual(result['updated'], ['sample'])
+            self.assertEqual(fetch.call_count, 1)
+        self.undo(result)
+        self.assertEqual(before, self.fingerprint())
 
     def test_unconfirmed_merge_does_not_block_other_skills(self):
         self.add_skill('zlast')
@@ -260,7 +331,7 @@ class UpdateBatchTests(unittest.TestCase):
         status, result = test_updates.UpdateWebTests.request(self, '/api/updates/apply', body)
         self.assertEqual(status, 200)
         self.assertEqual(result['updated'], ['sample'])
-        self.assertEqual(result['failed'], [{'name': 'zbad', 'error': 'zbad：需要先核对内容。'}])
+        self.assertEqual(result['failed'], [{'name': 'zbad', 'stage': 'install', 'error': 'zbad：需要先核对内容。'}])
         _, public = test_updates.UpdateWebTests.request(self, '/api/updates/progress')
         failed = next(r for r in public['skills'] if r['name'] == 'zbad')
         self.assertTrue(failed['has_update'])

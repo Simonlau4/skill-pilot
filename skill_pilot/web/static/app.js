@@ -756,7 +756,9 @@ function jobConflictHtml(job) {
 
 function jobFailedHtml(job) {
   if (!['failed', 'attention'].includes(job.status) || !(job.failed || []).length) return '';
-  return `<ul class="job-details">${job.failed.map(item => `<li>${escape(titleOf(item.name))}：${escape(item.error || '原因未知')}${feedbackButton(item.error_id)}</li>`).join('')}</ul>`;
+  const labels = {download: '下载失败', install: '安装失败', review: '等你核对'};
+  return `<ul class="job-details">${job.failed.map(item => `<li>${escape(titleOf(item.name))}${labels[item.stage] ? ' · ' + labels[item.stage] : ''}：${escape(item.error || '原因未知')}${feedbackButton(item.error_id)}
+    ${job.kind === 'update' && ['download', 'review'].includes(item.stage) ? `<button type="button" class="link-btn" data-job-update-detail="${escape(item.name)}" data-job-review="${escape(job.review_id)}">查看技能</button>` : ''}</li>`).join('')}</ul>`;
 }
 
 function jobImpactHtml(job) {
@@ -1079,14 +1081,15 @@ async function retryJob(job, button = null) {
     try {
       const body = {id: job.id};
       if (job.kind === 'update') {
-        // 先把页面上记得的检查结果更新到最新，再判断那个预览编号是不是还有效。
-        await refreshUpdates();
-        if (!updateState.review || updateState.review.id !== job.review_id) {
+        const saved = await api('/api/updates/progress?review_id=' + encodeURIComponent(job.review_id));
+        if (saved) {
+          body.review_id = saved.id;
+        } else {
           if (button) button.textContent = '正在重新检查更新…';
           await checkUpdatesForRetry();
+          if (!updateState.review) throw new Error('更新检查没有完成，请稍后再试。');
+          body.review_id = updateState.review.id;
         }
-        if (!updateState.review) throw new Error('更新检查没有完成，请稍后再试。');
-        body.review_id = updateState.review.id;
         if (button) button.textContent = '正在重试…';
       }
       const result = await api('/api/jobs/retry', body);
@@ -1187,6 +1190,19 @@ async function clearEndedJobs(button) {
 }
 
 $('jobs-list').addEventListener('click', event => {
+  const detail = event.target.closest('[data-job-update-detail]');
+  if (detail) {
+    withBusy(detail, '正在打开…', async () => {
+      try {
+        const review = await api('/api/updates/progress?review_id=' + encodeURIComponent(detail.dataset.jobReview));
+        if (review) showReview(review);
+        openDetail(detail.dataset.jobUpdateDetail);
+      } catch (error) {
+        toast({text: error.message, error_id: error.error_id, tone: 'error', sticky: true});
+      }
+    });
+    return;
+  }
   const button = event.target.closest('[data-job-action]');
   if (!button) return;
   const job = (state.jobs || []).find(item => item.id === button.dataset.jobId);
@@ -7687,7 +7703,7 @@ const updateRow = name => {
 /* 简单的更新：本机没改过、没有脚本变化、不是飞书、没被卡住。
    拿不准你改没改过时 local_modified 是空值，也不算简单。 */
 const isSimpleUpdate = row => row.local_modified === false && !row.script_files?.length
-  && row.source?.kind !== 'lark' && !row.blocked_reason;
+  && row.source?.kind !== 'lark' && !row.blocked_reason && !row.download_error && !row.needs_review;
 
 const updatesWritable = () => Boolean(state.table?.write_allowed && updateState.review?.write_allowed) && !jobsBlocked();
 
@@ -7817,10 +7833,12 @@ function renderUpdateBar() {
   const waiting = rows.filter(row => row.has_update);
   const batch = waiting.filter(row => !row.blocked_reason && !updateJobFor(row.name));
   const failed = rows.filter(row => row.error);
-  const notUpdated = rows.filter(row => row.update_error || (row.has_update && row.blocked_reason));
-  const problems = [...failed, ...notUpdated];
+  const downloads = rows.filter(row => row.has_update && (row.download_error || row.update_stage === 'download'));
+  const notUpdated = rows.filter(row => row.update_stage !== 'download' && (row.update_error || (row.has_update && row.blocked_reason)));
+  const problems = [...failed, ...downloads, ...notUpdated];
   const failureCounts = [failed.length ? `${failed.length} 个检查失败` : '',
-    notUpdated.length ? `${notUpdated.length} 个更新未完成` : ''].filter(Boolean).join('，');
+    downloads.length ? `${downloads.length} 个下载失败` : '',
+    notUpdated.length ? `${notUpdated.length} 个安装未完成` : ''].filter(Boolean).join('，');
 
   const check = $('updates-check');
   check.disabled = checking || Boolean(writeBusy);
@@ -7843,13 +7861,19 @@ function renderUpdateBar() {
   renderUncheckedSkills(review, checking);
   const panel = $('updates-failed');
   panel.hidden = !problems.length || checking || !updateState.failedOpen;
-  panel.innerHTML = problems.map(row => `<p><strong>${nameHtml(row.name)}</strong>：${escape(row.error || row.update_error || row.blocked_reason)}${feedbackButton(row.error_id)}</p>`).join('');
+  panel.innerHTML = problems.map(row => `<p><strong>${nameHtml(row.name)}</strong>：${escape(row.error || row.download_error || row.update_error || row.blocked_reason)}${feedbackButton(row.error_id)}
+    ${row.download_error ? `<button class="link-btn" data-update-problem="${escape(row.name)}">查看技能</button>` : ''}</p>`).join('');
 }
 
 $('updates-status').addEventListener('click', event => {
   if (!event.target.closest('[data-failed-toggle]')) return;
   updateState.failedOpen = !updateState.failedOpen;
   renderUpdateBar();
+});
+
+$('updates-failed').addEventListener('click', event => {
+  const button = event.target.closest('[data-update-problem]');
+  if (button) openDetail(button.dataset.updateProblem);
 });
 
 async function checkUpdates() {
@@ -7894,12 +7918,29 @@ function detailUpdateHtml(row) {
   const explanation = updateState.explanations.get(row.name);
   const job = updateJobFor(row.name);
   const canAct = updatesWritable() && !row.blocked_reason && !updateState.busy && !writeBusy && !job;
+  if (row.download_error) {
+    const github = row.source?.kind === 'github';
+    const paired = row.source?.kind === 'lark';
+    return `<section class="detail-update" aria-labelledby="detail-update-title">
+      <h3 id="detail-update-title">下载失败</h3>
+      <p class="item-note">${escape(row.download_error)}${feedbackButton(row.error_id)}</p>
+      <button type="button" class="btn btn-small" ${paired ? 'data-update-one' : 'data-update-fetch'}="${escape(row.name)}" ${canAct ? '' : 'disabled'}>重试下载</button>
+      ${github ? `<details class="fold fold-inner">
+        <summary>使用本地技能文件夹</summary>
+        <p class="item-note">从原来源取得这次查到的版本，解压后粘贴包含技能说明文件的完整文件夹路径。${row.commit ? ' 版本标识 ' + escape(row.commit.slice(0, 7)) + '。' : ''}</p>
+        <label>技能文件夹路径 <input class="input" data-update-folder></label>
+        <button type="button" class="btn btn-small" data-update-offline="${escape(row.name)}" ${canAct ? '' : 'disabled'}>核对文件夹</button>
+      </details>` : `<p class="item-note">${paired ? '也可在飞书工具中按官方步骤手动升级整组技能。' : '也可请上架人通过团队分享站重新提供这份技能。'}</p>`}
+    </section>`;
+  }
   const asks = row.local_modified !== false;   // 改过、或拿不准时，让用户选这份怎么处理
   return `<section class="detail-update" aria-labelledby="detail-update-title">
     <h3 id="detail-update-title"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg>有新版</h3>
     <p class="update-summary">${row.file_count ? `${number(row.file_count)} 个文件有变化，新增 ${number(row.added_lines)} 行，删除 ${number(row.removed_lines)} 行` : escape(row.status)}${row.updated_at ? ' · 上游 ' + escape(friendlyDate(row.updated_at)) + '更新' : ''}</p>
     ${job ? `<p class="item-note is-job">这项更新已加入队列，${job.status === 'running' ? '处理中。' : '排队中。'}</p>` : ''}
     ${row.blocked_reason ? `<div class="risk-block"><p>${escape(row.blocked_reason)}</p></div>` : ''}
+    ${row.update_error ? `<p class="item-note">${row.update_stage === 'download' ? '下载失败' : '安装失败'}：${escape(row.update_error)}${feedbackButton(row.error_id)}</p>` : ''}
+    ${row.needs_review ? '<p class="item-note">更新包已核对完整，请查看下方内容变化再更新。</p>' : ''}
     ${row.script_files?.length ? `<div class="risk-block">
       <p><strong>脚本或执行权限发生变化，请先核对</strong></p>
       <p>${row.script_files.map(escape).join('、')}</p>
@@ -7974,10 +8015,21 @@ async function withDetailWork(button, label, work) {
 
 /* 详情里“有新版”区的按钮。处理了返回 true。 */
 async function handleUpdateButton(button) {
-  const {updateDiff, updateExplain, updateMerge, updateAccept, updateOne} = button.dataset;
+  const {updateDiff, updateExplain, updateMerge, updateAccept, updateOne, updateFetch, updateOffline} = button.dataset;
   if (updateDiff) {
     if (updateState.open.has(updateDiff)) updateState.open.delete(updateDiff); else updateState.open.add(updateDiff);
     renderDetail();
+  } else if (updateFetch || updateOffline) {
+    const folder = updateOffline ? button.closest('details').querySelector('[data-update-folder]').value : undefined;
+    await withBusy(button, '正在核对…', async () => {
+      try {
+        showReview(await api('/api/updates/prepare', {review_id: updateState.review.id, name: updateFetch || updateOffline, folder}));
+        if (updateOffline) updateState.open.add(updateOffline);
+        renderDetail();
+      } catch (error) {
+        toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
+      }
+    });
   } else if (updateOne) {
     await applyUpdates([updateOne], button);
   } else if (updateExplain) {
@@ -8017,7 +8069,10 @@ async function applyUpdates(names, button = null) {
   }
   const choices = {};
   const mergeIds = {};
+  const reviewed = {};
   for (const name of names) {
+    const row = updateState.rows.get(name);
+    if (row?.needs_review) reviewed[name] = row.normalized_tree_sha || row.tree_sha;
     const choice = updateState.choices.get(name) || 'upstream';
     choices[name] = choice;
     if (choice === 'merge') {
@@ -8038,6 +8093,7 @@ async function applyUpdates(names, button = null) {
           ? mergeIds[name] ? '用已核对的合并结果' : '合并结果尚未确认，本次会跳过'
           : row.local_modified ? '已有本地修改，将替换为新版' : row.baseline_uncertain ? '本地修改状态未确认，将替换为新版' : '',
         row.script_files?.length ? '脚本有变化' : '',
+        row.download_error ? '会先重试下载，有脚本或本地改动的技能需另行核对' : '',
         row.source?.kind === 'lark' ? '飞书技能，整组一起更新' : '',
       ].filter(Boolean);
       return {name, note: notes.join('；')};
@@ -8056,6 +8112,7 @@ async function applyUpdates(names, button = null) {
     skills: names,
     choices,
     merge_ids: mergeIds,
+    reviewed,
     confirm_lark_cli: lark,
   }, {button, busyText: '正在提交…'});
   renderUpdateBar();

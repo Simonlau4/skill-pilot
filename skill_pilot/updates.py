@@ -19,7 +19,7 @@ from . import operations, research, normalization, profiles
 from .scan import SKIP_CONTENT, metadata, is_disabled
 from .sources import normalize, lark
 from .sources.update_github import Reader, files
-from .store import git_tree, physical_state
+from .store import git_tree, guard, physical_state
 from .sync import reconcile_assignments
 
 SCRIPT_SUFFIXES = {'.sh', '.bash', '.zsh', '.py', '.js', '.ts', '.mjs', '.cjs', '.rb', '.pl', '.ps1', '.fish'}
@@ -122,6 +122,126 @@ def create(home=None):
     return result
 
 
+class UpdateStageError(ValueError):
+    def __init__(self, stage, message):
+        super().__init__(message)
+        self.stage = stage
+
+
+def _download_failed(row, home, error):
+    captured = diagnostics.failure(home, 'backend', '下载技能更新', error)
+    reason = diagnostics.sanitize(str(error), home, 450) if isinstance(error, ValueError) else '文件未能完整下载，请检查网络后重试。'
+    row.update(download_error=reason, status='下载失败', **captured)
+    return UpdateStageError('download', reason)
+
+
+def _describe_download(row, home, skill, package):
+    local = home / '.skill-pilot/store' / row['name']
+    incoming = Path(package['_upstream_path'])
+    raw = {**row, **package}
+    raw.update(comparison(raw['_base_path'], incoming), your_changes=comparison(raw['_base_path'], local))
+    if raw.get('baseline_uncertain') and normalization.tree(local) == raw['normalized_tree_sha']:
+        raw.update(has_update=False, status='已是最新')
+    else:
+        raw['status'] = '有更新'
+    if raw['has_update']:
+        from .sources.github import safe_skill
+        try:
+            safe_skill(incoming)
+        except ValueError:
+            raw.update(blocked_reason='新版引用了技能文件夹外的文件，已停止安装；请先核对来源位置。',
+                       status='有更新，需先核对来源')
+    raw.pop('download_error', None)
+    _apply_watch(raw, skill, home)
+    was_failed = 'download_error' in row
+    row.update(raw)
+    row.pop('download_error', None)
+    if was_failed:
+        row.pop('error_id', None)
+
+
+def _fetch_update(row, home, temporary, reader=None, team_config=None):
+    source = row['source']
+    if source['kind'] == 'team':
+        from . import team
+        config = team_config if team_config is not None else team._fetch(home)[0]
+        incoming = team.package(config, source['member'], source['name'], row['version'], temporary / 'package')
+        processing = normalization.apply(incoming)
+        digest = git_tree(incoming)
+        return {'_upstream_path': str(incoming), 'tree_sha': digest,
+                'normalized_tree_sha': digest, 'normalization': processing}
+    if reader is None:
+        reader = Reader(temporary, time.monotonic() + REPOSITORY_TIMEOUT)
+    return reader.current(source, row['commit'], row['tree_sha'])
+
+
+def prepare_download(review, name, folder=None):
+    home, registry, _ = operations.load(review['home'])
+    guard(home / '.skill-pilot', home)
+    if review['running']:
+        raise ValueError('请等这次检查完成后再操作。')
+    row = selected_row(review, name)
+    skill = registry['skills'][name]
+    if skill_state(home, name, skill) != row['_state']:
+        raise ValueError('这个技能的内容或分配已经变了，请重新检查更新。')
+    if folder is None and row.get('_upstream_path'):
+        return row
+    if row['source']['kind'] not in {'github', 'team'} or not row.get('_base_path'):
+        raise ValueError('此技能需要通过原来源获取更新，请查看更新提示。')
+    temporary = Path(tempfile.mkdtemp(prefix='download-', dir=review['temporary']))
+    try:
+        if folder is None:
+            package = _fetch_update(row, home, temporary)
+        else:
+            if row['source']['kind'] != 'github' or not row.get('download_error'):
+                raise ValueError('只能为下载失败的 GitHub 技能选择已下载的上游文件夹。')
+            if not isinstance(folder, str) or not folder.strip():
+                raise ValueError('请粘贴已下载的技能文件夹路径。')
+            incoming = Path(os.path.expanduser(folder.strip()))
+            if not incoming.is_absolute() or not incoming.is_dir():
+                raise ValueError('请填写包含技能说明文件的完整文件夹路径。')
+            incoming = incoming.resolve()
+            _validate_name(incoming, home / '.skill-pilot/store' / name)
+            staged = temporary / 'package'
+            copytree(incoming, staged, symlinks=True, ignore=shutil.ignore_patterns(*SKIP_CONTENT))
+            _validate_name(staged, home / '.skill-pilot/store' / name)
+            if git_tree(staged) != row['tree_sha']:
+                raise ValueError('文件夹内容与已查到的上游版本不同，请选择同一版本的完整技能文件夹。')
+            processing = normalization.apply(staged)
+            package = {'_upstream_path': str(staged), 'normalized_tree_sha': git_tree(staged),
+                       'normalization': processing}
+        _describe_download(row, home, skill, package)
+    except (ValueError, OSError) as error:
+        rmtree(temporary, ignore_errors=True)
+        if folder is not None:
+            raise
+        raise _download_failed(row, home, error) from error
+    if row['has_update'] and (folder is not None or row['local_modified'] is not False or row['script_files']):
+        row['needs_review'] = True
+    review['update_count'] = sum(r['has_update'] for r in review['skills'])
+    return row
+
+
+def _prepare_lark(review, items, deadline):
+    version = review['lark']['latest_version']
+    packages = review.setdefault('_lark_packages', {})
+    indexes = review.setdefault('_lark_indexes', {})
+    found = lark.prepare({name: source for name, _, source in items}, review['temporary'], version,
+                         deadline, cache=packages, indexes=indexes)
+    packages.update(found)
+    return packages
+
+
+def _describe_lark(row, home, package):
+    local = home / '.skill-pilot/store' / row['name']
+    base = home / '.skill-pilot/bases' / row['name']
+    incoming = package['path']
+    row.update(_base_path=str(base), _upstream_path=incoming, package=package,
+               tree_sha=git_tree(Path(incoming)), local_modified=normalization.tree(local) != normalization.tree(base),
+               **comparison(base, incoming), your_changes=comparison(base, local))
+    row.pop('download_error', None)
+
+
 def check(home=None, review=None, lock=None):
     result = review if review is not None else create(home)
     home, temporary = Path(result['home']), result['temporary']
@@ -137,14 +257,19 @@ def check(home=None, review=None, lock=None):
         with lock: result['current'].append('飞书工具' if group == 'lark' else group)
         reader = Reader(Path(temporary) / hashlib.sha256(group.encode()).hexdigest()[:16], time.monotonic() + REPOSITORY_TIMEOUT)
         packages, failure, failure_id = {}, None, {}
+        download_failure = None
         if group == 'lark':
             try:
                 result['lark'] = {**lark.check(timeout=reader.remaining(), home=home), 'skill_count': len(items)}
-                if result['lark']['available']:
-                    packages = lark.prepare({n: s for n, _, s in items}, temporary, result['lark']['latest_version'], reader.deadline)
             except (ValueError, OSError, KeyError, TypeError) as error:
                 failure_id = diagnostics.failure(home, 'backend', '检查飞书更新', error)
                 failure = str(error); result['lark'] = {'available': False, 'message': '飞书更新没查清楚', 'error': failure}
+            if result['lark']['available'] and os.name != 'nt':
+                try:
+                    packages = _prepare_lark(result, items, reader.deadline)
+                except (ValueError, OSError, KeyError, TypeError) as error:
+                    packages = result.get('_lark_packages', {})
+                    download_failure = error
         if group == 'team':
             from . import team
             try:
@@ -165,11 +290,14 @@ def check(home=None, review=None, lock=None):
                     row['local_tree_sha'] = git_tree(local)
                     if group == 'lark':
                         if failure: raise ValueError(failure)
-                        if name in packages:
-                            row.update(_base_path=str(base), _upstream_path=packages[name]['path'], package=packages[name],
-                                       tree_sha=git_tree(Path(packages[name]['path'])), has_update=True, status=result['lark']['message'])
+                        if result['lark']['available']:
+                            row.update(has_update=True, status=result['lark']['message'])
                             if os.name == 'nt':
                                 row.update(blocked_reason=lark.MANUAL_UPDATE_REASON, status='需手动升级飞书工具')
+                            elif name in packages:
+                                _describe_lark(row, home, packages[name])
+                            elif download_failure is not None:
+                                _download_failed(row, home, download_failure)
                     elif group == 'team':
                         if failure: raise ValueError(failure)
                         listing = listings.get((source['member'], source['name']))
@@ -180,33 +308,29 @@ def check(home=None, review=None, lock=None):
                             row.update(version=version, has_update=version != source['version'],
                                        status='有更新' if version != source['version'] else '已是最新')
                             if row['has_update']:
-                                incoming = team.package(team_config, source['member'], source['name'], version,
-                                                        Path(temporary) / 'team' / name)
-                                processing = normalization.apply(incoming)
-                                row.update(_base_path=str(base), _upstream_path=str(incoming),
-                                           tree_sha=git_tree(incoming), normalized_tree_sha=git_tree(incoming),
-                                           normalization=processing)
+                                row.update(_base_path=str(base), local_modified=normalization.tree(local) != normalization.tree(base))
+                                try:
+                                    package = _fetch_update(row, home, Path(temporary) / 'team' / name, team_config=team_config)
+                                    _describe_download(row, home, skill, package)
+                                except (ValueError, OSError) as error:
+                                    _download_failed(row, home, error)
                     else:
                         reader.remaining()
                         record = skill['source'].get('record', skill['source'])
                         baseline = skill.get('base_tree_sha') or skill['source'].get('tree_sha') or record.get('skillFolderHash')
                         reliable = bool(baseline and git_tree(base) == skill.get('base_normalized_tree_sha', baseline))
                         commit, tree = reader.latest(source)
-                        row.update(commit=commit, tree_sha=tree, base_tree_sha=baseline, baseline_uncertain=not reliable)
-                        if not reliable or tree != baseline:
-                            row.update(reader.current(source, commit, tree), _base_path=str(base if reliable else local))
-                        row['has_update'] = tree != baseline and tree != skill.get('reviewed_tree_sha') if reliable else normalization.tree(local) != row['normalized_tree_sha']
-                        row['status'] = '有更新' if row['has_update'] else '这一版已看过' if reliable and tree == skill.get('reviewed_tree_sha') and skill.get('last_update_choice') == 'keep' else '已是最新'
-                    row['local_modified'] = None if row.get('baseline_uncertain') else normalization.tree(local) != normalization.tree(base)
-                    if row.get('_upstream_path'):
-                        row.update(comparison(row['_base_path'], row['_upstream_path']))
-                        row['your_changes'] = comparison(row['_base_path'], local)
+                        row.update(commit=commit, tree_sha=tree, base_tree_sha=baseline, baseline_uncertain=not reliable,
+                                   local_modified=normalization.tree(local) != normalization.tree(base) if reliable else None,
+                                   _base_path=str(base if reliable else local))
+                        row['has_update'] = not reliable or tree != baseline and tree != skill.get('reviewed_tree_sha')
                         if row['has_update']:
-                            from .sources.github import safe_skill
-                            try: safe_skill(Path(row['_upstream_path']))
-                            except ValueError:
-                                row['blocked_reason'] = '新版引用了技能文件夹外的文件，已停止安装；请先核对来源位置。'
-                                row['status'] = '有更新，需先核对来源'
+                            try:
+                                _describe_download(row, home, skill, _fetch_update(row, home, Path(temporary), reader))
+                            except (ValueError, OSError) as error:
+                                _download_failed(row, home, error)
+                        elif reliable and tree == skill.get('reviewed_tree_sha') and skill.get('last_update_choice') == 'keep':
+                            row['status'] = '这一版已看过'
                 _apply_watch(row, skill, home)
             except Exception as error:
                 row.update(status='没查清楚', error=str(error), has_update=False)
@@ -304,6 +428,8 @@ def selected_row(review, name):
 
 def explain(review, name):
     row = selected_row(review, name)
+    if not row.get('_upstream_path'):
+        raise ValueError('请先下载技能内容。')
     return {'explanation': research.explain({'upstream': row['comparison'],
                                             'your_changes': row['your_changes']['comparison'],
                                             'scripts': row['script_files']})}
@@ -311,6 +437,8 @@ def explain(review, name):
 
 def calibrate(review, name):
     row, home = selected_row(review, name), Path(review['home'])
+    if not row.get('_upstream_path'):
+        raise ValueError('请先下载技能内容。')
     if skill_state(home, name, operations.load(home)[1]['skills'][name]) != row['_state']:
         raise ValueError('这个技能的内容或分配已经变了，请重新检查更新。')
     if row.get('baseline_uncertain'):
@@ -378,12 +506,11 @@ def _validate_name(incoming, local):
         raise ValueError('新版技能的名称与本机不同，请先核对。')
 
 
-def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_lark=False, progress=None):
+def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_lark=False, progress=None, reviewed=None):
     if not confirmed:
         raise ValueError('请先核对选中的更新，再确认执行。')
     home, registry, _ = operations.load(review['home'])
     # Check before any preparation or CLI subprocess can write.
-    from .store import guard
     guard(home / '.skill-pilot', home)
     names = sorted(set(names) & registry['skills'].keys()); choices, merge_ids = choices or {}, merge_ids or {}
     if not names:
@@ -399,11 +526,40 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
     groups = [[name] for name in names if name not in lark_names]
     if lark_names:
         groups.append(sorted(lark_names))
-    completed, failed, updated, normalization_results = [], [], [], {}
+    completed, failed, updated, unchanged, normalization_results = [], [], [], [], {}
     batch = uuid.uuid4().hex
     for index, group in enumerate(groups):
         try:
-            result = _apply_group(review, group, choices, merge_ids, batch)
+            if group[0] in lark_names and any(
+                    not by_name[name].get('_upstream_path') and not by_name[name].get('blocked_reason') for name in group):
+                try:
+                    packages = _prepare_lark(review, review['_groups']['lark'], time.monotonic() + REPOSITORY_TIMEOUT)
+                except (ValueError, OSError, KeyError, TypeError) as error:
+                    for name in group:
+                        if not by_name[name].get('_upstream_path'):
+                            failure = _download_failed(by_name[name], home, error)
+                    raise failure from error
+                for name in group:
+                    row = by_name[name]
+                    if not row.get('_upstream_path') and not row.get('blocked_reason'):
+                        _describe_lark(row, home, packages[name])
+                        if row['local_modified'] is not False or row['script_files']:
+                            row['needs_review'] = True
+            for name in group:
+                row = selected_row(review, name)
+                if row.get('blocked_reason'):
+                    raise ValueError(name + '：' + row['blocked_reason'])
+                if row.get('download_error') and not row.get('_upstream_path'):
+                    row = prepare_download(review, name)
+                if not row['has_update']:
+                    unchanged.append(name)
+                    break
+                if row.get('needs_review') and (reviewed or {}).get(name) != row.get('normalized_tree_sha', row['tree_sha']):
+                    raise UpdateStageError('review', '请打开技能详情，核对已下载的内容后再更新。')
+            else:
+                result = _apply_group(review, group, choices, merge_ids, batch)
+            if group[-1] in unchanged:
+                continue
         except operations.RollbackError as error:
             error.operations = completed
             error.updated = updated
@@ -413,14 +569,17 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
             }
             raise
         except (ValueError, OSError) as error:
-            if len(names) == 1:
+            if len(names) == 1 and progress is None:
                 raise
+            stage = error.stage if isinstance(error, UpdateStageError) else 'install'
             reason = str(error) if isinstance(error, ValueError) else '这项更新的文件没能读写，请重新检查更新后再试。'
-            captured = diagnostics.failure(review['home'], 'job', '更新技能', error)
+            captured = diagnostics.failure(review['home'], 'job', '更新技能', error) if stage == 'install' else {}
             for name in group:
-                failed.append({'name': name, 'error': reason, **captured})
-                if name in by_name:
-                    by_name[name].update(update_error=reason, status='没更新')
+                error_id = captured.get('error_id') or by_name.get(name, {}).get('error_id')
+                failed.append({'name': name, 'stage': stage, 'error': reason,
+                               **({'error_id': error_id} if error_id else {})})
+                if name in by_name and stage == 'install':
+                    by_name[name].update(update_error=reason, update_stage='install', status='安装失败', **captured)
         except Exception as error:
             unexecuted = [name for pending_group in groups[index:] for name in pending_group]
             if completed or unexecuted:
@@ -449,7 +608,7 @@ def apply(review, names, choices=None, confirmed=False, merge_ids=None, confirm_
     )
     message = f'已更新 {len(updated)} 个技能' + (f'，{len(failed)} 个没更新，请查看原因。' if failed else '。')
     return {**(completed[0] if len(completed) == 1 else {}),
-            'updated': updated, 'failed': failed, 'operations': completed, 'complete': not failed,
+            'updated': updated, 'unchanged': unchanged, 'failed': failed, 'operations': completed, 'complete': not failed,
             'new_session_agents': new_session,
             'normalization': normalization_results, 'message': message}
 
@@ -467,8 +626,14 @@ def _apply_group(review, names, choices, merge_ids, batch):
             raise ValueError(name + '：你改过，请选择保留我的、用上游的或交给 Codex 合并。')
         row['_choice'] = choice
         if choice == 'keep': calibrate(review, name)
-        if git_tree(Path(row['_upstream_path'])) != row.get('normalized_tree_sha', row['tree_sha']):
-            raise ValueError('下载内容已经变了，请重新检查。')
+        try:
+            if git_tree(Path(row['_upstream_path'])) != row.get('normalized_tree_sha', row['tree_sha']):
+                raise ValueError('下载内容已经变了，请重新下载。')
+        except (ValueError, OSError) as error:
+            if row['source']['kind'] in {'github', 'team'}:
+                row.pop('_upstream_path', None)
+                raise _download_failed(row, home, error) from error
+            raise
         incoming = Path(row['_upstream_path'])
         if choice == 'merge':
             merge = row.get('_merge')
@@ -481,9 +646,24 @@ def _apply_group(review, names, choices, merge_ids, batch):
         if choice != 'keep':
             _validate_name(incoming, home / '.skill-pilot/store' / name)
             content.append(name)
+    if lark_rows and not review.get('_prepared_lark_cli'):
+        folder = Path(tempfile.mkdtemp(prefix='lark-cli-', dir=review['temporary']))
+        try:
+            package = lark.prepare_cli(home, review['lark']['latest_version'], folder)
+            review['_prepared_lark_cli'] = str(package)
+        except (OSError, ValueError, KeyError) as error:
+            rmtree(folder, ignore_errors=True)
+            captured = diagnostics.failure(home, 'backend', '准备飞书工具更新', error)
+            reason = diagnostics.sanitize(str(error), home, 450) if isinstance(error, ValueError) else '飞书工具未准备完成，请重试。'
+            # Skill files remain available. Retrying only prepares the missing CLI.
+            for row in lark_rows:
+                row.update(update_error=reason, update_stage='download', status='飞书工具准备失败', **captured)
+            failure = UpdateStageError('download', reason)
+            raise failure from error
+
     def mutate(current, checked):
         if lark_rows:
-            lark.install_cli(home, review['lark']['latest_version'], checked)
+            lark.install_cli(home, review['lark']['latest_version'], checked, prepared=review['_prepared_lark_cli'])
         for row in rows:
             name = row['name']; skill = current['skills'][name]
             incoming = Path(row['_merge']['path']) if row['_choice'] == 'merge' else Path(row['_upstream_path'])
@@ -516,12 +696,14 @@ def _apply_group(review, names, choices, merge_ids, batch):
         current = operations.load(home)[1]
         if any(row['name'] not in current['skills'] or
                skill_state(home, row['name'], current['skills'][row['name']]) != row['_state'] for row in rows):
-            raise ValueError('这个技能的内容或分配已经变了，请刷新后重新检查。')
+            raise ValueError('这个技能的内容或分配已经变了，请刷新后重新检查更新。')
         return current
     result = operations._run(home, registry, agents, current_registry, f'核对并更新了 {len(names)} 个技能', mutate,
                              extra_paths=lark.CLI_PATHS if lark_rows else None, batch=batch)
     for row in rows:
         row.pop('update_error', None)
+        row.pop('update_stage', None)
+        row.pop('needs_review', None)
         row['_arrow'] = {'has_update': row.get('has_update'), 'status': row.get('status'),
                          'operation_id': result['id']}
         row.update(has_update=False, status='已保留我的' if row['_choice'] == 'keep' else '已更新')
