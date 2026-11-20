@@ -93,6 +93,10 @@ async function api(path, body, extra) {
   const options = body === undefined
     ? {headers}
     : {method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify(body)};
+  if (extra?.file) {
+    options.headers['Content-Type'] = 'application/octet-stream';
+    options.body = extra.file;
+  }
   if (extra?.signal) options.signal = extra.signal;
   const response = await fetch(path, options);
   let result = null;
@@ -439,7 +443,7 @@ const WRITE_LOCK_SELECTORS = [
   '#install-url', '#install-rail button:not(.hint)',
   '#cleanup-rows input[data-cleanup]', '#cleanup-select-all', '#cleanup-filters select', '#cleanup-clear-filters', '#cleanup-tabs button',
   '#updates-check', '#updates-all',
-  '#program-check', '#program-apply', '#program-refresh', '#program-popup-action', '#rail-notes button',
+  '#program-check', '#program-download', '#program-apply', '#program-import', '#program-refresh', '#program-popup-action', '#program-popup-import', '#rail-notes button',
   '#config-export', '#config-agent', '#config-import', '#config-import-dialog input', '#config-import-dialog select', '#config-import-dialog button',
   '#log-list button', '#log-refresh', '#log-export', '#detail-body button:not(.hint)', '#detail-body select',
   '#new-absorb', '#new-toggle', '#install-dialog button:not(.hint)',
@@ -3095,8 +3099,9 @@ function programChangesHtml(progress) {
 function programPopupPhase() {
   if (!programUpdate.write_allowed) return '';
   if (programUpdate.phase === 'ready') return 'ready';
-  if (programUpdate.running && programUpdate.phase === 'apply') return 'apply';
-  if (programUpdate.phase === 'error' && (programFailedAction === 'apply' || programUpdate.failed_action === 'apply')) return 'error';
+  if (programUpdate.running && ['download', 'import', 'apply'].includes(programUpdate.phase)) return programUpdate.phase;
+  if (programUpdate.phase === 'error' && (programUpdate.available || ['download', 'import', 'apply'].includes(programUpdate.failed_action))) return 'error';
+  if (programUpdate.downloaded) return 'downloaded';
   return programUpdate.available && !programUpdate.running ? 'available' : '';
 }
 
@@ -3110,7 +3115,8 @@ function renderProgramPopup() {
   const popup = $('program-update-popup');
   const progress = programUpdate;
   const phase = programPopupPhase();
-  const show = phase && !programPopupDismissed.has(`${phase}:${progress.target || ''}`);
+  const key = phase === 'error' ? `${phase}:${progress.failed_action}` : phase;
+  const show = phase && !programPopupDismissed.has(`${key}:${progress.target || ''}`);
   clearTimeout(programPopupHideTimer);
   if (!show) {
     popup.classList.remove('is-open');
@@ -3119,9 +3125,9 @@ function renderProgramPopup() {
     else programPopupHideTimer = setTimeout(() => { popup.hidden = true; }, 220);
     return;
   }
-  const ready = phase === 'ready', applying = phase === 'apply', failed = phase === 'error';
-  $('program-popup-title').textContent = ready ? 'Skill Pilot 升级完成' : applying ? '正在升级 Skill Pilot…'
-    : failed ? '升级未完成' : 'Skill Pilot 发现新版本';
+  const ready = phase === 'ready', failed = phase === 'error', preparing = ['download', 'import', 'apply'].includes(phase);
+  $('program-popup-title').textContent = ready ? 'Skill Pilot 升级完成' : preparing || failed
+    ? programText(progress.message) : phase === 'downloaded' ? '更新包已下载' : 'Skill Pilot 发现新版本';
   const current = String(progress.current_version || '').trim();
   const currentText = current || '暂未读到版本';
   const latest = programVersionLabel(progress.latest_version, progress.latest);
@@ -3133,17 +3139,21 @@ function renderProgramPopup() {
     : (latest ? `当前 ${currentText} → 新版 ${latest}` : `当前 ${currentText}`);
   const versionHtml = versionLine ? `<p class="muted program-popup-version">${escape(versionLine)}</p>` : '';
   const body = ready ? `${versionHtml}<p>刷新页面即可启用新版，技能、分配和个人设置都会保留。</p>`
-    : applying ? `${versionHtml}<p>${escape(programText(progress.message || '正在安装新版，请稍候…'))}</p>`
+    : preparing ? versionHtml
     : failed ? `${versionHtml}<p class="program-error">${escape(programText(progress.error || '请稍后重试'))}</p>${feedbackButton(progress.error_id)}`
-    : `${versionHtml}${programChangesHtml(progress)}`;
+    : `${versionHtml}${progress.downloaded ? programChangesHtml(progress) : '<p>下载并校验更新包后即可安装。</p>'}`;
   // 轮询时保留相同内容的节点，避免打断阅读、滚动或键盘焦点。
   if ($('program-popup-body').innerHTML !== body) $('program-popup-body').innerHTML = body;
-  $('program-popup-later').textContent = ready ? '稍后刷新' : failed || applying ? '关闭' : '稍后再说';
-  const canRetryApply = failed && progress.can_retry_apply !== false;
+  $('program-popup-later').textContent = ready ? '稍后刷新' : failed || preparing ? '关闭' : '稍后再说';
   const button = $('program-popup-action');
-  button.textContent = ready ? '刷新生效' : applying ? '正在升级…' : failed ? (canRetryApply ? '重试升级' : '重新检查') : '立即升级';
-  button.disabled = applying || Boolean(writeBusy) || progress.running;
-  button.setAttribute('aria-busy', String(applying));
+  const next = programNextAction(progress);
+  button.textContent = ready ? '刷新生效' : preparing ? '请稍候…' : next === 'apply'
+    ? (failed && progress.can_retry_apply ? '重试安装' : '安装新版')
+    : next === 'download' ? (failed ? '重试下载' : '下载更新包') : '重新检查';
+  button.disabled = preparing || Boolean(writeBusy) || progress.running;
+  button.setAttribute('aria-busy', String(preparing));
+  $('program-popup-import').hidden = !failed;
+  $('program-popup-import').disabled = button.disabled;
   popup.inert = false;
   if (popup.hidden) {
     popup.hidden = false;
@@ -3152,9 +3162,16 @@ function renderProgramPopup() {
   positionProgramPopup();
 }
 
+function programNextAction(progress) {
+  if (progress.downloaded && (progress.failed_action !== 'apply' || progress.can_retry_apply)) return 'apply';
+  return progress.available ? 'download' : 'check';
+}
+
 function dismissProgramPopup() {
   programPopupDismissed.add(`available:${programUpdate.target || ''}`);
-  programPopupDismissed.add(`${programPopupPhase()}:${programUpdate.target || ''}`);
+  const phase = programPopupPhase();
+  const key = phase === 'error' ? `${phase}:${programUpdate.failed_action}` : phase;
+  programPopupDismissed.add(`${key}:${programUpdate.target || ''}`);
   if ($('program-update-popup').contains(document.activeElement)) {
     document.querySelector('.nav-item[aria-current="page"]')?.focus();
   }
@@ -3184,7 +3201,7 @@ function renderProgram() {
     if (latest) parts.push(`本次尝试升级至：${latest}`);
   } else if (progress.available && !readOnly) {
     if (currentText) parts.push(`当前版本：${currentText}`);
-    if (latest) parts.push(`最新版本：${latest}`);
+    if (latest) parts.push(`${progress.downloaded ? '最新版本' : '目标版本'}：${latest}`);
   } else {
     if (currentText) parts.push(`当前版本：${currentText}`);
     if (!readOnly && progress.phase === 'latest' && latest && latest !== current) parts.push(`最新版本：${latest}`);
@@ -3193,18 +3210,26 @@ function renderProgram() {
   $('program-version').textContent = parts.join(' · ');
   $('program-message').textContent = message;
   $('program-error').textContent = programText(progress.error || '');
-  $('program-changes').hidden = !progress.available || readOnly;
-  $('program-changes').innerHTML = progress.available && !readOnly ? programChangesHtml(progress) : '';
+  const showChanges = progress.downloaded && progress.phase !== 'error' && !readOnly;
+  $('program-changes').hidden = !showChanges;
+  $('program-changes').innerHTML = showChanges ? programChangesHtml(progress) : '';
   $('program-error').hidden = !progress.error;
   if (progress.error) appendFeedback($('program-error'), progress.error_id);
   $('program-check').disabled = progress.running || Boolean(writeBusy) || progress.phase === 'ready' || readOnly;
   $('program-check').setAttribute('aria-busy', String(progress.running && progress.phase === 'check'));
   $('program-check').querySelector('span').textContent = progress.running && progress.phase === 'check'
     ? '正在检查…' : progress.phase === 'error' ? '重新检查' : '检查更新';
-  $('program-apply').hidden = readOnly || (!progress.available && progress.phase !== 'apply');
+  $('program-download').hidden = readOnly || (!progress.available && progress.phase !== 'download') || Boolean(progress.downloaded);
+  $('program-download').disabled = progress.running || Boolean(writeBusy) || !progress.write_allowed;
+  $('program-download').textContent = progress.phase === 'download' ? '正在下载…' :
+    progress.failed_action === 'download' ? '重试下载' : '下载更新包';
+  $('program-apply').hidden = readOnly || (!progress.downloaded && progress.phase !== 'apply');
   $('program-apply').disabled = progress.running || Boolean(writeBusy) || !progress.write_allowed;
   $('program-apply').setAttribute('aria-busy', String(progress.running && progress.phase === 'apply'));
-  $('program-apply').textContent = progress.phase === 'apply' ? '正在升级…' : '一键升级';
+  $('program-apply').textContent = progress.phase === 'apply' ? '正在安装…' :
+    progress.can_retry_apply ? '重试安装' : '安装新版';
+  $('program-import').hidden = readOnly || progress.phase === 'ready';
+  $('program-import').disabled = progress.running || Boolean(writeBusy);
   $('program-refresh').hidden = progress.phase !== 'ready';
   $('program-refresh').disabled = Boolean(writeBusy);
   // 自动检查不占页头任务条；查到新版后由小弹窗提醒。
@@ -3237,26 +3262,28 @@ async function autoCheckProgram() {
   }
 }
 
-async function programAction(action, button = $('program-apply')) {
+async function programAction(action, button = $('program-apply'), file = null) {
   if (programUpdate.running || writeBusy || programUpdate.write_allowed === false
-      || (action === 'check' && programUpdate.phase === 'ready')) return;
+      || programUpdate.phase === 'ready') return;
   programFailedAction = '';
   const previous = programUpdate;
   programUpdate = {...programUpdate, running: true, phase: action, error: '', failed_action: '',
-    message: action === 'check' ? '正在下载并检查新版…' : '正在升级，等待当前操作完成…'};
+    message: {check: '正在检查新版…', download: '正在下载并校验更新包…', import: '正在校验本地更新包…', apply: '正在升级，等待当前操作完成…'}[action]};
   programActionRunning = true;
   renderProgram();
   const fail = error => {
     programFailedAction = action;
-    programUpdate = {...programUpdate, running: false, phase: 'error', available: false, failed_action: action,
+    if (programUpdate.phase === 'error' && programUpdate.failed_action === action) return;
+    programUpdate = {...previous, running: false, phase: 'error', failed_action: action,
+      message: {check: '检查新版未完成', download: '下载更新包未完成', import: '导入更新包未完成', apply: '安装新版未完成'}[action],
       error: programText(error.message), error_id: error.error_id,
-      latest_version: action === 'apply' ? programUpdate.latest_version : '',
-      changes: [], changes_total: 0, changes_partial: false};
+      can_retry_apply: action === 'apply' && previous.downloaded};
   };
   const work = async () => {
     try {
       const result = await api('/api/program/' + action,
-        action === 'apply' ? {target: programUpdate.target, confirmed: true} : {});
+        action === 'apply' ? {target: programUpdate.target, confirmed: true}
+          : action === 'download' ? {target: programUpdate.target} : {}, file ? {file} : undefined);
       programUpdate = {...programUpdate, ...result};
     } catch (error) {
       if (error.program && error.program.phase === 'ready') {
@@ -3300,15 +3327,23 @@ async function programAction(action, button = $('program-apply')) {
 }
 
 $('program-check').addEventListener('click', () => programAction('check'));
+$('program-download').addEventListener('click', event => programAction('download', event.currentTarget));
 $('program-apply').addEventListener('click', () => programAction('apply'));
+for (const id of ['program-import', 'program-popup-import']) {
+  $(id).addEventListener('click', () => $('program-package').click());
+}
+$('program-package').addEventListener('change', event => {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (file) programAction('import', $('program-import'), file);
+});
 $('program-refresh').addEventListener('click', () => location.reload());
 $('program-popup-close').addEventListener('click', dismissProgramPopup);
 $('program-popup-later').addEventListener('click', dismissProgramPopup);
 $('program-popup-action').addEventListener('click', event => {
   if (event.currentTarget.disabled) return;
   if (programUpdate.phase === 'ready') location.reload();
-  else if (programPopupPhase() === 'error' && programUpdate.can_retry_apply === false) programAction('check', event.currentTarget);
-  else programAction('apply', event.currentTarget);
+  else programAction(programNextAction(programUpdate), event.currentTarget);
 });
 $('program-update-popup').addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
@@ -9016,8 +9051,8 @@ function homeTodos(input) {
               ? `本次尝试升级至 ${latestVersion}${currentVersion ? `（当前 ${currentVersion}）` : ''} 未完成，可前往版本设置查看原因并重试。`
               : '升级遇到问题，可前往版本设置查看原因并重试。')
           : latestVersion
-            ? `发现新版 ${latestVersion}${currentVersion ? `（当前 ${currentVersion}）` : ''}，支持在看板内一键升级。`
-            : '发现新版 Skill Pilot，支持在看板内一键升级。',
+            ? `发现新版 ${latestVersion}${currentVersion ? `（当前 ${currentVersion}）` : ''}，可在版本设置下载更新包并安装。`
+            : '发现新版 Skill Pilot，可在版本设置下载更新包并安装。',
       label: ready ? '前往刷新' : '查看版本',
       target: 'settings/version',
     });

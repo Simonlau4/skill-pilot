@@ -671,6 +671,7 @@ class VersionFormatAndReadTests(unittest.TestCase):
 
             dashboard.program_review = {'temporary': '', 'target': 't' * 40, 'available': True,
                                         'latest': '2026-11-19', 'latest_version': 'v1.0.0-9999999'}
+            dashboard.program_review['candidate'] = 'prepared update fixture'
             with patch.object(self_update, 'apply', side_effect=ValueError('升级没有完成，已恢复原版')):
                 dashboard.program_work('apply', automatic=False)
             self.assertEqual(dashboard.program_progress['phase'], 'error')
@@ -914,6 +915,7 @@ const api = async (path) => {
             'function programVersionLabel(',
             'function programChangesHtml(',
             'function programPopupPhase(',
+            'function programNextAction(',
             'function renderProgramPopup(',
             'function renderProgram(',
         ))
@@ -959,8 +961,9 @@ assert.ok(!$('program-popup-body').innerHTML.includes('v2026.11.19'), $('program
 
 // 2. Retryable apply failure (can_retry_apply=true) still offers 「重试升级」.
 programUpdate.can_retry_apply = true;
+programUpdate.downloaded = true;
 renderProgramPopup();
-assert.equal($('program-popup-action').textContent, '重试升级');
+assert.equal($('program-popup-action').textContent, '重试安装');
 '''
         ui_result = subprocess.run(['node', '-'], input=ui_script, capture_output=True, text=True, encoding='utf-8', timeout=15)
         self.assertEqual(ui_result.returncode, 0, ui_result.stdout + ui_result.stderr)
@@ -1070,7 +1073,7 @@ assert.equal($('program-popup-action').textContent, '重试升级');
         readme = self.upstream / 'README.md'
         readme.write_text(readme.read_text(encoding='utf-8') + '\nnext official release\n', encoding='utf-8')
         commit(self.upstream, 'Next official release')
-        upgrade_review = self_update.check(self.home, self.code)
+        upgrade_review = self_update.download(self_update.check(self.home, self.code), self.home, self.code)
         if upgrade_review['temporary']:
             self.addCleanup(shutil.rmtree, upgrade_review['temporary'], True)
         self.assertTrue(upgrade_review['available'])
@@ -1090,7 +1093,7 @@ assert.equal($('program-popup-action').textContent, '重试升级');
         extra_code.write_text('# unmanaged local file\n', encoding='utf-8')
         readme.write_text(readme.read_text(encoding='utf-8') + '\nanother official release\n', encoding='utf-8')
         commit(self.upstream, 'Another official release')
-        unmanaged_review = self_update.check(self.home, self.code)
+        unmanaged_review = self_update.download(self_update.check(self.home, self.code), self.home, self.code)
         if unmanaged_review['temporary']:
             self.addCleanup(shutil.rmtree, unmanaged_review['temporary'], True)
         self.assertTrue(unmanaged_review['available'])
@@ -1110,7 +1113,7 @@ assert.equal($('program-popup-action').textContent, '重试升级');
             with self.subTest(post_write_exc=label):
                 readme.write_text(readme.read_text(encoding='utf-8') + f'\npost-write {label}\n', encoding='utf-8')
                 commit(self.upstream, f'Post-write {label}')
-                post_err_review = self_update.check(self.home, self.code)
+                post_err_review = self_update.download(self_update.check(self.home, self.code), self.home, self.code)
                 if post_err_review['temporary']:
                     self.addCleanup(shutil.rmtree, post_err_review['temporary'], True)
                 self.assertTrue(post_err_review['available'])

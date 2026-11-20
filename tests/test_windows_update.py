@@ -62,7 +62,7 @@ class WindowsUpdateTests(unittest.TestCase):
         path = self.official / 'skill_pilot/web/server.py'
         path.write_text(path.read_text(encoding='utf-8') + '\n# ' + text + '\n', encoding='utf-8')
         self.commit(text)
-        review = self_update.check(self.home, self.project)
+        review = self_update.download(self_update.check(self.home, self.project), self.home, self.project)
         self.addCleanup(lambda: rmtree(review['temporary'], ignore_errors=True) if review.get('temporary') else None)
         return review
 
@@ -140,8 +140,11 @@ class WindowsUpdateTests(unittest.TestCase):
         content = path.read_text(encoding='utf-8') + '\nimport incompatible_locking\n'
         path.write_text(content, encoding='utf-8')
         self.commit('conflict')
+        review = self_update.check(self.home, self.project)
+        self.assertTrue(review['available'])
+        self.assertNotIn('candidate', review)
         with self.assertRaisesRegex(ValueError, '新版暂时无法'):
-            self_update.check(self.home, self.project)
+            self_update.download(review, self.home, self.project)
         self.assertEqual(self_update.installed(self.project), original)
 
     def test_local_edit_blocks_update(self):
@@ -298,6 +301,8 @@ server.run(True)
         request('/api/program/check', {})
         available = wait_progress(lambda p: not p['running'] and p['phase'] == 'available')
         self.assertEqual(available['current_version'], before_version)
+        request('/api/program/download', {'target': available['target']})
+        available = wait_progress(lambda p: not p['running'] and p['downloaded'])
         after_version = available['latest_version']
         self.assertRegex(after_version, r'^v\d+\.\d+\.\d+-[0-9a-f]{7}$')
         self.assertNotEqual(after_version, before_version)

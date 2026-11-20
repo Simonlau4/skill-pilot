@@ -105,6 +105,7 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.assertEqual(progress['changes_partial'], partial)
 
     def test_changes_pass_through_both_endpoints_and_clear_after_upgrade_and_refresh(self):
+        self.review['candidate'] = 'prepared update fixture'
         saved_running = server.app_version.running_build()
         def restore_running():
             server.app_version.set_running_version(saved_running['version'], date=saved_running['date'])
@@ -152,6 +153,7 @@ class AutoUpdateCheckTests(unittest.TestCase):
                 self.assert_changes(self.request('/api/program/auto-check', {}))
 
     def test_failed_apply_clears_changes(self):
+        self.review['candidate'] = 'prepared update fixture'
         self.review.update(changes=['改进提醒'], changes_total=1, changes_partial=False)
         self.start()
         self.finished()
@@ -395,6 +397,7 @@ class AutoUpdateCheckTests(unittest.TestCase):
         self.finished()
 
     def test_auto_check_during_upgrade_returns_progress_and_preserves_check_time(self):
+        self.review['candidate'] = 'prepared update fixture'
         self.start()
         checked_at = self.finished()['checked_at']
         entered = threading.Event()

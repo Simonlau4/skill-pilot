@@ -717,7 +717,7 @@ class JobTests(unittest.TestCase):
         self.server.reload_pending = False
         with patch.object(self_update, 'apply', side_effect=lambda *a: upgraded.set() or {'available': False}):
             with self.blocked_first():
-                self.server.program_review = {'target': 'new', 'available': True, 'temporary': ''}
+                self.server.program_review = {'target': 'new', 'available': True, 'temporary': '', 'candidate': 'prepared update fixture'}
                 self.server.start_program('apply', 'new')
                 self.assertFalse(upgraded.wait(.05))
             self.assertTrue(upgraded.wait(2))

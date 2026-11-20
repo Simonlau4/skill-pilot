@@ -7,12 +7,15 @@ import re
 import shutil
 import subprocess
 import sys
+import stat
+import urllib.request
+import zipfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .environment import tool_environment
-from .platform_support import rmtree
+from .platform_support import is_junction, rmtree
 from .sources.github import git as repository_git
 from .store import PROJECT, guard, write_allowed
 from .version import (OFFICIAL_DIRS, OFFICIAL_FILES, REQUIRED_FILES, format_version,
@@ -20,6 +23,9 @@ from .version import (OFFICIAL_DIRS, OFFICIAL_FILES, REQUIRED_FILES, format_vers
 
 SOURCE = 'https://github.com/Simonlau4/skill-pilot.git'
 BRANCH = 'main'
+OFFICIAL_API = 'https://api.github.com/repos/Simonlau4/skill-pilot/'
+PACKAGE_LIMIT = 64 * 1024 * 1024
+REVISION = re.compile(r'[0-9a-f]{40}')
 RECORD = '.skill-pilot-install.json'
 BUNDLE_DIRS = ('skill_pilot', 'scripts', 'assets', 'docs', 'skill', 'tests', '.github')
 
@@ -203,62 +209,234 @@ def installed(project):
     return {**data, 'files': official_files, 'checkout': False}
 
 
+def official_metadata(endpoint):
+    request = urllib.request.Request(OFFICIAL_API + endpoint,
+                                     headers={'User-Agent': 'Skill-Pilot', 'Accept': 'application/vnd.github+json'})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            if response.url != request.full_url:
+                raise ValueError()
+            return json.loads(response.read(4 * 1024 * 1024))
+    except (OSError, ValueError) as error:
+        raise ValueError('没能读取 Skill Pilot 的新版信息，请检查网络后重试。') from error
+
+
+def cache_root(home, project):
+    key = hashlib.sha256(os.fsencode(str(project))).hexdigest()[:24]
+    directory = guard(Path(home) / '.skill-pilot/program-update' / key, home)
+    if any(p.is_symlink() or is_junction(p) for p in (directory, directory.parent)):
+        raise ValueError('更新包保存位置发生冲突，请检查本机设置。')
+    return directory
+
+
 def check(home, project=PROJECT):
     project = Path(project).resolve()
     before = installed(project)
     start_build = read_build(project)
-    remote = git(project, 'ls-remote', SOURCE, 'refs/heads/' + BRANCH, timeout=60).split()
-    if len(remote) != 2 or len(remote[0]) != 40 or any(c not in '0123456789abcdef' for c in remote[0]):
-        raise ValueError('没能读取 SP 的最新版本，请检查网络后重试。')
-    target = remote[0]
-    if before['checkout'] and target == before.get('revision'):
-        official_latest = read_git_tree_version(project, target)
+    if SOURCE.startswith('file:'):
+        target = git(project, 'ls-remote', SOURCE, 'refs/heads/' + BRANCH, timeout=20).split()[0]
+        from urllib.request import url2pathname
+        upstream = Path(url2pathname(SOURCE.removeprefix('file://')))
+        tree = git(upstream, 'rev-parse', target + '^{tree}')
+        date = git(upstream, 'show', '-s', '--format=%cI', target)
+    else:
+        result = official_metadata('commits?sha=' + BRANCH + '&per_page=1')[0]
+        target, tree, date = result['sha'], result['commit']['tree']['sha'], result['commit']['committer']['date']
+    if not REVISION.fullmatch(target) or not REVISION.fullmatch(tree):
+        raise ValueError('没能读取 Skill Pilot 的最新版本，请检查网络后重试。')
+    latest_version = format_version(date, target)
+    if before['checkout'] and target == before['revision']:
+        available = False
+        latest_version = read_git_tree_version(project, target)
         end_build = read_build(project)
         if (git(project, 'status', '--porcelain', '--untracked-files=normal')
                 or git(project, 'rev-parse', 'HEAD') != before['revision']
                 or end_build['version'] != start_build['version']):
             raise ValueError('SP 程序文件在检查期间发生了改动，已保留当前版本。请先确认本地文件后再重新检查更新。')
-        return {'before': before, 'target': target, 'current': before.get('date', ''),
-                'latest': before.get('date', ''), 'current_version': end_build['version'],
-                'latest_version': official_latest, 'available': False, 'temporary': '',
-                'changes': [], 'changes_total': 0, 'changes_partial': False}
-    build = read_build(project)
-    current_version = build['version']
-    review = {'before': before, 'target': target, 'current': before.get('date', ''),
-              'latest': before.get('date', ''), 'current_version': current_version,
-              'latest_version': current_version, 'available': False, 'temporary': '',
+    elif not before['checkout']:
+        # A ZIP installed for the first time has no recorded revision. Compare
+        # the official file list and blob identities without downloading content.
+        if SOURCE.startswith('file:'):
+            entries = (line.split('\t', 1) for line in git(upstream, 'ls-tree', '-rz', tree).split('\0') if line)
+            remote = {name: (parts[2], parts[0]) for header, name in entries
+                      if is_official_path(name) and (parts := header.split())[1] == 'blob'}
+        else:
+            listing = official_metadata('git/trees/' + tree + '?recursive=1')
+            if listing.get('truncated'):
+                raise ValueError('官方文件清单没有读完整，请重新检查。')
+            remote = {e['path']: (e['sha'], e['mode']) for e in listing['tree']
+                      if e['type'] == 'blob' and is_official_path(e['path'])}
+        available = set(remote) != set(before['files']) or any(
+            blob_id((project / name).read_bytes()) != expected or
+            (os.name != 'nt' and bool(before['files'][name][1]) != (mode == '100755'))
+            for name, (expected, mode) in remote.items())
+        if not available:
+            latest_version = start_build['version']
+    else:
+        available = True
+    review = {'before': before, 'target': target, 'tree': tree, 'current': before.get('date', ''),
+              'latest': date, 'current_version': start_build['version'],
+              'latest_version': latest_version, 'available': available, 'temporary': '',
               'changes': [], 'changes_total': 0, 'changes_partial': False}
-    temporary = Path(tempfile.mkdtemp(prefix='skill-pilot-self-update-')).resolve()
+    if available and write_allowed(home):
+        directory = cache_root(home, project)
+        directory.mkdir(parents=True, exist_ok=True)
+        pin = {name: review[name] for name in ('target', 'tree', 'latest', 'current_version')}
+        fd, name = tempfile.mkstemp(prefix='official-', dir=directory)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as output:
+                json.dump(pin, output)
+            temporary.replace(directory / 'official.json')
+        finally:
+            temporary.unlink(missing_ok=True)
+        review = cached_package(review, directory) or review
+    return review
+
+
+def blob_id(data):
+    return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+
+def cached_package(review, directory):
+    candidate = directory / 'package' / 'candidate'
+    try:
+        record = json.loads((candidate.parent / 'package.json').read_text(encoding='utf-8'))
+        if (candidate.is_symlink() or candidate.parent.is_symlink() or
+                record['target'] != review['target'] or record['before'] != review['before'] or
+                bundle_files(candidate) != record['files']):
+            return None
+        return {**review, **record['details'], 'files': record['files'], 'candidate': str(candidate)}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def import_zip(source, candidate, expected_tree):
+    # Hash the entire archive as a Git tree before any candidate code is loaded.
+    # GitHub ZIPs preserve Git's file modes but omit repository metadata.
+    with zipfile.ZipFile(source) as package:
+        entries = package.infolist()
+        if len(entries) > 5000 or sum(entry.file_size for entry in entries) > PACKAGE_LIMIT * 4:
+            raise ValueError('更新包超出大小限制，请重新获取官方压缩包。')
+        roots = {entry.filename.partition('/')[0] for entry in entries}
+        if len(roots) != 1:
+            raise ValueError('请选择完整的官方源码压缩包。')
+        folders = {(): {}}
+        names = set()
+        for entry in entries:
+            if entry.is_dir():
+                continue
+            _, _, name = entry.filename.partition('/')
+            parts = name.split('/')
+            mode = entry.external_attr >> 16
+            if (not is_safe_manifest_path(name) or any(
+                    not part or part in {'.', '..'} or part.casefold() == '.git'
+                    or part[-1] in '. ' or re.search(r'[\\:*?"<>|\x00-\x1f]', part) for part in parts)
+                    or name.casefold() in names or stat.S_IFMT(mode) not in (0, stat.S_IFREG)):
+                raise ValueError('压缩包含有不支持的文件，请重新获取官方压缩包。')
+            names.add(name.casefold())
+            data = package.read(entry)
+            file_mode = '100755' if mode & 0o111 else '100644'
+            key = tuple(parts)
+            folders.setdefault(key[:-1], {})[key[-1]] = (file_mode, blob_id(data))
+            for index in range(len(key) - 1):
+                folders.setdefault(key[:index], {})
+            if is_official_path(name):
+                path = safe_path(candidate, name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                path.chmod(0o755 if mode & 0o111 else 0o644)
+        for key in sorted(folders, key=len, reverse=True):
+            rows = sorted(folders[key].items(), key=lambda row: (row[0] + ('/' if row[1][0] == '40000' else '')).encode())
+            data = b''.join(mode.encode() + b' ' + name.encode() + b'\0' + bytes.fromhex(oid)
+                            for name, (mode, oid) in rows)
+            tree = hashlib.sha1(b'tree ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+            if key:
+                folders[key[:-1]][key[-1]] = ('40000', tree)
+        if tree != expected_tree:
+            raise ValueError('压缩包与查到的官方版本不一致，请选择同一版本的完整压缩包。')
+
+
+def pinned_review(home, project=PROJECT):
+    project = Path(project).resolve()
+    try:
+        pin = json.loads((cache_root(home, project) / 'official.json').read_text(encoding='utf-8'))
+        if not all(REVISION.fullmatch(pin[key]) for key in ('target', 'tree')):
+            raise ValueError()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ValueError('请先联网检查一次新版，再选择对应的官方更新包。') from error
+    before = installed(project)
+    if read_build(project)['version'] != pin.get('current_version'):
+        raise ValueError('当前程序版本已经变了，请重新检查后再选择本地更新包。')
+    return {**pin, 'before': before, 'available': True, 'temporary': '', 'current': before.get('date', '')}
+
+
+def restore_download(home, project=PROJECT):
+    project = Path(project).resolve()
+    try:
+        directory = cache_root(home, project)
+        if not (directory / 'package' / 'package.json').is_file():
+            return None
+        review = cached_package(pinned_review(home, project), directory)
+        return review if review and review['available'] else None
+    except (OSError, ValueError):
+        return None
+
+
+def download(review, home, project=PROJECT, *, package=None):
+    project = Path(project).resolve()
+    home = Path(home).resolve()
+    directory = cache_root(home, project)
+    if package is not None:
+        review = pinned_review(home, project)
+    if not review or not review['available']:
+        raise ValueError('请先检查 Skill Pilot 更新。')
+    before, target = review['before'], review['target']
+    if installed(project) != before:
+        raise ValueError('程序文件已经变了，请重新检查更新。')
+    directory.mkdir(parents=True, exist_ok=True)
+    if package is None and (cached := cached_package(review, directory)):
+        return cached
+    temporary = Path(tempfile.mkdtemp(prefix='partial-', dir=directory))
     candidate = temporary / 'candidate'
     candidate.mkdir()
     try:
-        git(candidate, 'init', '-q')
-        if before['checkout']:
-            # Borrow the history already on this computer; only new commits are downloaded.
-            objects = (project / git(project, 'rev-parse', '--git-path', 'objects')).resolve()
-            (candidate / '.git/objects/info/alternates').write_text(str(objects) + '\n')
-            # A recent-history-only install also lends where its history stops.
-            shallow = project / git(project, 'rev-parse', '--git-path', 'shallow')
-            if shallow.is_file():
-                shutil.copyfile(shallow, candidate / '.git/shallow')
-            depth = ()
+        if package is not None and zipfile.is_zipfile(package):
+            if before['checkout']:
+                raise ValueError('此安装需要带版本历史的更新包，请选择官方仓库的 .bundle 文件。')
+            import_zip(package, candidate, review['tree'])
         else:
-            depth = ('--depth', '1')
-        git(candidate, 'fetch', '--no-tags', *depth, SOURCE, target, timeout=120)
-        git(candidate, 'checkout', '--detach', target)
+            git(candidate, 'init', '-q')
+            if before['checkout']:
+                # Borrow the history already on this computer; only new commits are downloaded.
+                objects = (project / git(project, 'rev-parse', '--git-path', 'objects')).resolve()
+                (candidate / '.git/objects/info/alternates').write_text(str(objects) + '\n')
+                # A recent-history-only install also lends where its history stops.
+                shallow = project / git(project, 'rev-parse', '--git-path', 'shallow')
+                if shallow.is_file():
+                    shutil.copyfile(shallow, candidate / '.git/shallow')
+                depth = ()
+            else:
+                depth = ('--depth', '1')
+            if package is not None:
+                git(candidate, 'bundle', 'verify', str(package))
+                depth = ()
+            git(candidate, 'fetch', '--no-tags', *depth, str(package) if package is not None else SOURCE, target, timeout=120)
+            if git(candidate, 'rev-parse', target + '^{tree}') != review['tree']:
+                raise ValueError('更新包与查到的官方版本不一致。')
+            git(candidate, 'checkout', '--detach', target)
         if before['checkout']:
             try:
                 git(candidate, 'merge-base', '--is-ancestor', before['revision'], target)
             except ValueError as error:
-                raise ValueError('当前 SP 含有与公开版本不同的改动，已保留当前版本。请先另存后重新下载安装。') from error
+                raise ValueError('当前程序含有与公开版本不同的改动，请先另存后重新下载安装。') from error
         files = bundle_files(candidate)
-        for name in ('skill_pilot/cli.py', 'skill_pilot/web/server.py', 'scripts/install.py', 'assets/SkillPilot.icns'):
-            if name not in files:
-                raise ValueError('下载的新版不完整，当前程序保持原样，请稍后重试。')
+        if not all(name in files for name in REQUIRED_FILES):
+            raise ValueError('下载的新版不完整，请重新获取更新包。')
         validate(candidate, home)
-        available = before['checkout'] or files != before['files']
+        available = target != before['revision'] if before['checkout'] else files != before['files']
         changes = []
-        if available:
+        if available and is_checkout(candidate):
             try:
                 titles = (git(candidate, 'log', '--format=%s', before['revision'] + '..' + target)
                           if before['checkout'] else git(candidate, 'show', '-s', '--format=%s', target))
@@ -267,20 +445,20 @@ def check(home, project=PROJECT):
             except Exception:
                 # Release notes are optional; a missing title must not block an upgrade.
                 pass
-        latest_date = git(candidate, 'show', '-s', '--format=%cI', target)
-        latest_version = read_build(candidate)['version']
-        if not available:
-            rmtree(temporary, ignore_errors=True)
-            return {**review, 'temporary': '', 'files': files,
-                    'latest': latest_date, 'latest_version': latest_version,
-                    'available': False, 'changes': [], 'changes_total': 0, 'changes_partial': False}
-        return {**review, 'temporary': str(temporary), 'candidate': str(candidate), 'files': files,
-                'latest': latest_date, 'latest_version': latest_version,
-                'available': available, 'changes': changes[:10], 'changes_total': len(changes),
-                'changes_partial': bool(available and not before['checkout'])}
-    except BaseException:
+        details = {'latest_version': read_build(candidate)['version'], 'available': available,
+                   'changes': changes[:10], 'changes_total': len(changes),
+                   'changes_partial': bool(changes and not before['checkout'])}
+        (temporary / 'package.json').write_text(json.dumps(
+            {'before': before, 'target': target, 'files': files, 'details': details}), encoding='utf-8')
+        saved = directory / 'package'
+        if saved.exists():
+            rmtree(saved)
+        temporary.rename(saved)
+        return {**review, **details, 'files': files, 'candidate': str(saved / 'candidate')}
+    except (zipfile.BadZipFile, NotImplementedError) as error:
+        raise ValueError('压缩包不完整或格式不受支持，请重新获取官方压缩包。') from error
+    finally:
         rmtree(temporary, ignore_errors=True)
-        raise
 
 
 def validate(project, home):
@@ -328,14 +506,14 @@ def apply(review, home, project=PROJECT):
     project, home = Path(project).resolve(), Path(home).resolve()
     if not write_allowed(home):
         raise ValueError('当前处于只读模式，程序没有改动。')
-    if not review or not review.get('available'):
-        raise ValueError('请先检查 SP 更新。')
+    if not review or not review.get('available') or not review.get('candidate'):
+        raise ValueError('请先下载或导入更新包。')
     before = installed(project)
     if before != review['before']:
         raise ValueError('SP 程序文件已经变了，请重新检查更新。')
     candidate = Path(review['candidate'])
     if bundle_files(candidate) != review['files']:
-        raise ValueError('下载的文件已经变了，请重新检查更新。')
+        raise ValueError('下载的文件已经变了，请重新下载或导入更新包。')
     validate(candidate, home)
     names = before['files'].keys() | review['files'].keys()
     for name in names:
