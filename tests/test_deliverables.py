@@ -477,8 +477,11 @@ if (!html.includes('只限团队内部')) fail('要标明只限团队内部');
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         shelves = extract_function(source, 'function renderStoreShelves(')
-        for start in ('box.innerHTML = storeDeliverablesShelfHtml() +', 'box.innerHTML = deliverableShelf + packShelf + githubShelf;',
-                      'box.innerHTML = deliverableShelf + packShelf + STORE_SHELVES'):
+        for start in (
+            'box.innerHTML = deliverableSection + emptyTeam + storeGithubOverviewHtml();',
+            'box.innerHTML = deliverableSection + packSection + githubSection;',
+            'box.innerHTML = deliverableSection + packSection + storeDuoBoardHtml(cards) + githubSection;',
+        ):
             self.assertIn(start, shelves, '成品要排在技能包和推荐前面')
 
 

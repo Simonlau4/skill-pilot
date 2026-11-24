@@ -51,7 +51,7 @@ function glideSelection(container) {
     });
     observer.observe(container);
   }
-  const selected = container.querySelector('button[aria-current="page"], button[aria-current="true"], button[aria-pressed="true"]');
+  const selected = container.querySelector('button[aria-current="page"], button[aria-current="true"], button[aria-pressed="true"], button[aria-selected="true"]');
   const {plate} = motion;
   if (!selected || !selected.offsetWidth || !container.offsetWidth) {
     motion.animation?.cancel();
@@ -1475,6 +1475,10 @@ const state = {
   storeSort: 'latest', // 全部技能的排序：latest / rating / installs
   storeGroup: '',      // 选中的分组；'-' 是没分组
   storeMine: false,    // 只看我上架的
+  storeView: 'overview',        // 左侧目录分区：overview / deliverables / packs / skills / github
+  storeSpotDeliverable: '',     // 精选总览中当前展示的成品 key
+  storeBoardTab: '',            // 双列精选榜右列切换：'' 自动 / rating / latest
+  storeGithubFilter: 'all',     // GitHub 热门独立视图筛选：all / installable / installed
   storeDetail: null,   // 详情面板里正在看的卡片编号或技能包编号（pack: 开头）
   storeGithubExpanded: false,   // 「GitHub 最近热门」是否展开全部
   queue: null,         // /api/team/queue：安装队列；null 是还没读
@@ -4163,7 +4167,10 @@ function renderStoreQueue() {
     const next = focusKey && [...box.querySelectorAll('[data-store-goto-tag], [data-store-goto], [data-store-queue-retry], [data-store-queue-pack]')]
       .find(button => (button.dataset.storeGotoTag || button.dataset.storeGoto
         || button.dataset.storeQueueRetry || button.dataset.storeQueuePack) === focusKey);
-    (next || (box.hidden ? $('store-all-title') : $('store-queue-title'))).focus();
+    const fallback = box.hidden
+      ? ($('store-all').hidden ? ($('store-views').querySelector('[aria-selected="true"]') || $('store-search')) : $('store-all-title'))
+      : $('store-queue-title');
+    (next || fallback).focus();
   }
 }
 
@@ -4315,9 +4322,35 @@ function githubApplyEntry(repository, entry) {
   return before !== JSON.stringify([repo.digest_status, repo.digest, repo.digest_error]);
 }
 
-/* 轮询结果只换变了的卡片；卡片里的按钮正在被键盘操作时，焦点留在原来的位置。 */
+/* 精选总览里的 GitHub 热门紧凑行：点击整行或标题看详情，安装直接排队。 */
+function githubCompactRowHtml(repo) {
+  const repository = String(repo.repository || '');
+  const digest = repo.digest_status === 'ready' && repo.digest && String(repo.digest.title || '').trim()
+    ? repo.digest : null;
+  const title = digest ? String(digest.title).trim() : repository;
+  const created = githubCreatedText(repo.created_at);
+  const skillCount = Number.isInteger(repo.skill_count) ? `<span>含 ${number(repo.skill_count)} 个技能</span>` : '';
+  return `<div class="store-gh-row" data-github-card="${escape(repository)}">
+    <div class="store-gh-main">
+      <button class="github-card-title" type="button" data-github-open="${escape(repository)}" title="${escape(title)}" aria-label="${escape(`查看「${title}」的详情`)}">${escape(title)}</button>
+      <span class="github-card-repo" title="${escape(repository)}">${escape(repository)}</span>
+    </div>
+    <div class="store-gh-meta">
+      <span>${number(repo.stars)} 星</span>
+      ${created ? `<span>${created}</span>` : ''}
+      ${skillCount}
+    </div>
+    <div class="store-gh-actions">
+      ${githubStatusTag(repo)}
+      ${githubInstallHtml(repo)}
+      <a class="link-btn" href="${escape(repo.url)}" target="_blank" rel="noopener noreferrer" aria-label="${escape(`在新窗口打开 ${repo.repository} 的 GitHub 页面`)}">打开 GitHub</a>
+    </div>
+  </div>`;
+}
+
+/* 轮询结果只换变了的卡片或紧凑行；内部按钮正在被键盘操作时，焦点留在原来的位置。 */
 function updateGithubCard(repository) {
-  if (state.page !== 'team' || !storeBrowsing()) return;
+  if (state.page !== 'team' || state.storeMine || storeQuery()) return;
   const card = $('store-shelves').querySelector(`[data-github-card="${CSS.escape(repository)}"]`);
   const repo = githubRepo(repository);
   if (!card || !repo) return;
@@ -4325,8 +4358,9 @@ function updateGithubCard(repository) {
   const focusKey = card.contains(active)
     ? active.dataset.githubOpen ? 'open' : active.dataset.githubInstall ? 'install' : ''
     : '';
+  const compact = card.classList.contains('store-gh-row');
   const template = document.createElement('template');
-  template.innerHTML = githubCardHtml(repo);
+  template.innerHTML = compact ? githubCompactRowHtml(repo) : githubCardHtml(repo);
   const next = template.content.firstElementChild;
   card.replaceWith(next);
   if (focusKey === 'open') next.querySelector('[data-github-open]')?.focus({preventScroll: true});
@@ -4532,6 +4566,234 @@ async function retryGithubDigest(repository, button) {
   });
 }
 
+/* ---------- 团队页分区视图：精选总览、成品、技能包、GitHub 热门 ---------- */
+
+function storePackStripHtml(pack) {
+  const titles = storePackTitles(pack);
+  const shown = titles.slice(0, 4).map(title => `<span class="store-pack-strip-chip">${escape(title)}</span>`).join('');
+  const more = titles.length > 4 ? `<span class="store-pack-strip-chip">+${number(titles.length - 4)} 个</span>` : '';
+  const tokens = !pack.mine && pack.tokens > 0 && (pack.local?.installable || 0) > 0
+    ? `<span>每个 Agent 约 +${tokenText(pack.tokens)} Token</span>` : '';
+  return `<button class="store-pack-strip" type="button" data-store-open="${escape(pack.key)}">
+    <span class="store-pack-strip-head">
+      <span class="store-pack-strip-title">${icon('stack', 'store-pack-icon')}${escape(pack.title)}</span>
+      ${storePackTag(pack)}
+    </span>
+    ${pack.note ? `<span class="store-pack-strip-sum">“${escape(pack.note)}”</span>` : ''}
+    ${titles.length ? `<span class="store-pack-strip-chips">${shown}${more}</span>` : ''}
+    <span class="store-pack-strip-foot">
+      <span>${escape(pack.member.name)} 整理</span>
+      <span>共 ${number((pack.cards || []).length)} 个技能</span>
+      ${tokens}
+    </span>
+  </button>`;
+}
+
+function storeBoardRowHtml(card, rank) {
+  return `<button class="store-board-row" type="button" data-store-open="${escape(card.key)}">
+    <span class="store-board-num">${number(rank)}</span>
+    <span class="store-board-main">
+      <span class="store-board-name"><span class="t">${escape(storeTitle(card))}</span>${storeNeedsHtml(card)}</span>
+      <span class="store-board-sub">${escape(storeSummary(card) || storeRecommenders(card))}</span>
+    </span>
+    <span class="store-board-end">
+      ${storeStatusTag(card)}
+      <span class="store-board-meta">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}</span>
+    </span>
+  </button>`;
+}
+
+function storeDeliverablesOverviewHtml() {
+  const rows = state.store?.deliverables || [];
+  if (!rows.length) return '';
+  const quick = rows.slice(0, 4);
+  const active = quick.find(row => row.key === state.storeSpotDeliverable) || quick[0];
+  state.storeSpotDeliverable = active.key;
+  const switcher = rows.length > 1 ? `<div class="shelf-head-end">
+    <div class="segmented shelf-spot-tabs" role="group" aria-label="切换展示的成品">${quick.map(row => {
+      const label = row.title.length > 14 ? row.title.slice(0, 14) + '…' : row.title;
+      return `<button class="seg" type="button" data-deliverable-spot="${escape(row.key)}" aria-pressed="${row.key === active.key}" title="${escape(row.title)}">${escape(label)}</button>`;
+    }).join('')}</div>
+    <button class="link-btn" type="button" data-store-goto-view="deliverables">查看全部 ${number(rows.length)} 份</button>
+  </div>` : '';
+  return `<section class="shelf" aria-labelledby="shelf-deliverables">
+    <div class="shelf-head">
+      <div class="shelf-head-group">
+        <h2 id="shelf-deliverables">成品</h2>
+        <p class="shelf-note">先看同事做出来的东西，再看它用了哪些技能</p>
+      </div>
+      ${switcher}
+    </div>
+    ${deliverableCardHtml(active)}
+  </section>`;
+}
+
+function storePacksOverviewHtml() {
+  const packs = [...(state.store?.packs || [])].sort((a, b) => storePackTime(b) - storePackTime(a));
+  if (!packs.length) return '';
+  return `<section class="shelf" aria-labelledby="shelf-packs">
+    <div class="shelf-head">
+      <h2 id="shelf-packs">技能包</h2>
+      <button class="link-btn" type="button" data-store-goto-view="packs">查看全部 ${number(packs.length)} 个</button>
+    </div>
+    <div class="store-pack-strips">${packs.slice(0, SHELF_SIZE).map(storePackStripHtml).join('')}</div>
+  </section>`;
+}
+
+function storeDuoBoardHtml(cards) {
+  const standalone = cards.filter(card => !card.packs?.length);
+  const pool = standalone.length ? standalone : cards;
+  const installs = pool.filter(card => storeInstalls(card) > 1).sort(STORE_SORTS.installs).slice(0, 5);
+  const left = installs.length ? installs : pool.filter(card => storeInstalls(card) > 0).sort(STORE_SORTS.installs).slice(0, 5);
+  const hasRated = pool.some(card => card.rating?.count);
+  const tab = state.storeBoardTab || (hasRated ? 'rating' : 'latest');
+  const right = (tab === 'rating'
+    ? pool.filter(card => card.rating?.count).sort(STORE_SORTS.rating)
+    : [...pool].sort(STORE_SORTS.latest)).slice(0, 5);
+  return `<section class="shelf" aria-labelledby="shelf-featured">
+    <div class="shelf-head">
+      <h2 id="shelf-featured">精选技能</h2>
+      <button class="link-btn" type="button" data-store-goto-view="skills">查看全部 ${number(cards.length)} 个技能</button>
+    </div>
+    <div class="store-duo-board">
+      <div class="store-duo-col">
+        <div class="store-duo-head"><span>安装最多</span></div>
+        ${left.length ? left.map((card, index) => storeBoardRowHtml(card, index + 1)).join('') : '<p class="store-board-empty">暂时还没有多人安装记录</p>'}
+      </div>
+      <div class="store-duo-col">
+        <div class="store-duo-head">
+          <span>${tab === 'rating' ? '最受好评' : '最新上架'}</span>
+          <div class="segmented" role="group" aria-label="切换右侧榜单">
+            <button class="seg" type="button" data-board-tab="rating" aria-pressed="${tab === 'rating'}">最受好评</button>
+            <button class="seg" type="button" data-board-tab="latest" aria-pressed="${tab === 'latest'}">最新上架</button>
+          </div>
+        </div>
+        ${right.length ? right.map((card, index) => storeBoardRowHtml(card, index + 1)).join('') : '<p class="store-board-empty">暂时还没有同事评价</p>'}
+      </div>
+    </div>
+  </section>`;
+}
+
+function storeGithubOverviewHtml() {
+  const repos = githubRepos();
+  if (!repos.length) return '';
+  return `<section class="shelf shelf-github" aria-labelledby="shelf-github">
+    <div class="shelf-head">
+      <h2 id="shelf-github">GitHub 最近热门</h2>
+      <button class="link-btn" type="button" data-store-goto-view="github">展开全部 ${number(repos.length)} 个</button>
+    </div>
+    <p class="shelf-note">最近 30 天新建、星数最多的 GitHub 技能仓库，团队里还没人上架。</p>
+    <div id="shelf-github-cards" class="store-gh-feed">${repos.slice(0, 3).map(githubCompactRowHtml).join('')}</div>
+  </section>`;
+}
+
+function storePacksViewHtml() {
+  const packs = [...(state.store?.packs || [])].sort((a, b) => storePackTime(b) - storePackTime(a));
+  if (!packs.length) return '';
+  return `<section class="shelf" aria-labelledby="shelf-packs">
+    <div class="shelf-head">
+      <h2 id="shelf-packs">技能包</h2>
+      <span class="store-count">${number(packs.length)} 个</span>
+    </div>
+    <p class="shelf-note">按场景成套整理好的技能，点开可查看包含的技能并一键安装。</p>
+    <div class="store-pack-strips">${packs.map(storePackStripHtml).join('')}</div>
+  </section>`;
+}
+
+function storeGithubViewHtml() {
+  const repos = githubRepos();
+  if (!repos.length) return '';
+  const counts = {
+    all: repos.length,
+    installable: repos.filter(repo => repo.local?.status === 'installable').length,
+    installed: repos.filter(repo => repo.local?.status === 'installed').length,
+  };
+  const filter = counts[state.storeGithubFilter] !== undefined ? state.storeGithubFilter : 'all';
+  const shown = filter === 'all' ? repos : repos.filter(repo => repo.local?.status === filter);
+  const filters = [['all', '全部'], ['installable', '可安装'], ['installed', '已安装']].map(([id, label]) =>
+    `<button class="seg" type="button" data-github-filter="${id}" aria-pressed="${filter === id}">${label} ${number(counts[id])}</button>`).join('');
+  return `<section class="shelf shelf-github" aria-labelledby="shelf-github">
+    <div class="shelf-head">
+      <h2 id="shelf-github">GitHub 最近热门</h2>
+      <div class="shelf-head-end">
+        <div class="segmented" role="group" aria-label="按本机状态筛选">${filters}</div>
+      </div>
+    </div>
+    <p class="shelf-note">最近 30 天新建、星数最多的 GitHub 技能仓库，团队里还没人上架。</p>
+    <div id="shelf-github-cards" class="store-gh-grid">${shown.length
+      ? shown.map(githubCardHtml).join('')
+      : `<div class="empty">${emptyInner('search', filter === 'installed' ? '还没有已安装的 GitHub 仓库' : '没有可安装的 GitHub 仓库')}</div>`}</div>
+  </section>`;
+}
+
+function storeDeliverableMatches(query) {
+  const words = query.trim().toLowerCase();
+  if (!words) return [];
+  return (state.store?.deliverables || []).filter(row => [
+    row.title, row.summary, row.member?.name, ...(row.skills || []).map(skill => skill.name),
+  ].some(value => String(value || '').toLowerCase().includes(words)));
+}
+
+function storeDeliverablesSearchHtml(rows) {
+  if (!rows.length) return '';
+  return `<section class="shelf" aria-labelledby="shelf-deliverables-search">
+    <div class="shelf-head">
+      <h2 id="shelf-deliverables-search">匹配的成品</h2>
+      <span class="store-count">${number(rows.length)} 份</span>
+    </div>
+    <div class="deliverable-list">${rows.map(deliverableCardHtml).join('')}</div>
+  </section>`;
+}
+
+function primeDeliverableCovers(rows) {
+  for (const row of rows || []) {
+    if (row?.has_teardown) loadDeliverableCover(row);
+  }
+}
+
+function renderTeamRail(cards) {
+  const deliverables = state.store?.deliverables || [];
+  const packs = state.store?.packs || [];
+  const repos = githubRepos();
+  const visible = {
+    overview: true,
+    deliverables: deliverables.length > 0,
+    packs: packs.length > 0,
+    skills: true,
+    github: repos.length > 0,
+  };
+  if (!visible[state.storeView]) state.storeView = 'overview';
+  const counts = {
+    deliverables: deliverables.length,
+    packs: packs.length,
+    skills: (cards || []).length,
+    github: repos.length,
+  };
+  const activeView = !state.storeMine && !storeQuery() ? state.storeView : '';
+  for (const button of $('store-views').querySelectorAll('[data-store-view]')) {
+    const view = button.dataset.storeView;
+    button.hidden = !visible[view];
+    const selected = view === activeView;
+    button.setAttribute('aria-selected', String(selected));
+    button.tabIndex = (activeView ? selected : view === state.storeView) ? 0 : -1;
+  }
+  $('store-nav-deliverables-n').textContent = counts.deliverables ? number(counts.deliverables) : '';
+  $('store-nav-packs-n').textContent = counts.packs ? number(counts.packs) : '';
+  $('store-nav-skills-n').textContent = counts.skills ? number(counts.skills) : '';
+  $('store-nav-github-n').textContent = counts.github ? number(counts.github) : '';
+  glideSelection($('store-views'));
+  const groups = cards?.length ? storeGroups(cards) : [];
+  $('team-rail-groups-wrap').hidden = groups.length < 2;
+  if (groups.length >= 2) {
+    renderButtons($('team-rail-groups'), groups.map(([name, count]) =>
+      `<button class="team-rail-group" type="button" data-rail-group="${escape(name)}" aria-pressed="${
+        !state.storeMine && !storeQuery() && state.storeView === 'skills' && state.storeGroup === name}">
+        <span class="team-rail-label">${escape(name === '-' ? '未分组' : name)}</span>
+        <span class="team-rail-count">${number(count)}</span>
+      </button>`).join(''), 'data-rail-group');
+  }
+}
+
 function renderTeam() {
   if (state.page !== 'team') return;
   const team = state.team;
@@ -4551,6 +4813,7 @@ function renderTeam() {
   $('store-mine').disabled = !cards;
   $('store-mine').setAttribute('aria-pressed', String(state.storeMine));
   $('store-mine-count').textContent = mineCount ? number(mineCount) : '';
+  renderTeamRail(cards);
   renderStoreUpdateButton();
   renderStoreQueue();
   renderStoreShelves(cards);
@@ -4566,44 +4829,154 @@ function renderStoreShelves(cards) {
     </section>`;
     return;
   }
+  const query = storeQuery();
+  if (query) {
+    if (state.storeMine) { box.innerHTML = ''; return; }
+    const matched = storeDeliverableMatches(query);
+    box.innerHTML = storeDeliverablesSearchHtml(matched);
+    primeDeliverableCovers(matched);
+    return;
+  }
+  if (state.storeMine) { box.innerHTML = ''; return; }
+  const deliverables = state.store?.deliverables || [];
+  if (state.storeView === 'deliverables') {
+    box.innerHTML = storeDeliverablesShelfHtml();
+    primeDeliverableCovers(deliverables);
+    return;
+  }
+  if (state.storeView === 'packs') { box.innerHTML = storePacksViewHtml(); return; }
+  if (state.storeView === 'github') { box.innerHTML = storeGithubViewHtml(); return; }
+  const emptyTeam = `<div class="empty store-empty">${emptyInner('team', '暂无团队技能')}
+    <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>`;
+  if (state.storeView === 'skills') { box.innerHTML = cards.length ? '' : emptyTeam; return; }
+  const deliverableSection = storeDeliverablesOverviewHtml();
+  const activeDeliverable = deliverables.filter(row => row.key === state.storeSpotDeliverable);
   if (!cards.length) {
-    box.innerHTML = storeDeliverablesShelfHtml() + `<div class="empty store-empty">${emptyInner('team', '暂无团队技能')}
-      <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>` + (storeBrowsing() ? storeGithubShelfHtml() : '');
+    box.innerHTML = deliverableSection + emptyTeam + storeGithubOverviewHtml();
+    primeDeliverableCovers(activeDeliverable);
     return;
   }
-  if (!storeBrowsing()) {
-    box.innerHTML = '';
-    return;
-  }
-  const githubShelf = storeGithubShelfHtml();
-  const deliverableShelf = storeDeliverablesShelfHtml();
-  const shown = new Set();
-  const packs = [...(state.store?.packs || [])].sort((a, b) => storePackTime(b) - storePackTime(a));
-  const packShelf = packs.length ? `<section class="shelf" aria-labelledby="shelf-packs">
-      <div class="shelf-head">
-        <h2 id="shelf-packs">技能包</h2>
-        <button class="link-btn" type="button" data-store-more="packs">查看全部</button>
-      </div>
-      <div class="shelf-cards">${packs.slice(0, SHELF_SIZE).map(storePackCardHtml).join('')}</div>
-    </section>` : '';
-  // 三排推荐仍按原来的门槛；技能包少的时候也能单独出现在前面。
+  const packSection = storePacksOverviewHtml();
+  const githubSection = storeGithubOverviewHtml();
   if (cards.length < SHELF_MIN) {
-    box.innerHTML = deliverableShelf + packShelf + githubShelf;
+    box.innerHTML = deliverableSection + packSection + githubSection;
+    primeDeliverableCovers(activeDeliverable);
     return;
   }
-  box.innerHTML = deliverableShelf + packShelf + STORE_SHELVES.map(shelf => {
-    // 包里的技能由包卡片代表，不再单独占一排推荐。
-    const picked = shelf.pick(cards).filter(card => !card.packs?.length && !shown.has(card.key))
-      .sort(STORE_SORTS[shelf.sort]).slice(0, SHELF_SIZE);
-    for (const card of picked) shown.add(card.key);
-    return picked.length ? `<section class="shelf" aria-labelledby="shelf-${shelf.sort}">
-      <div class="shelf-head">
-        <h2 id="shelf-${shelf.sort}">${shelf.title}</h2>
-        <button class="link-btn" type="button" data-store-more="${shelf.sort}">查看全部</button>
-      </div>
-      <div class="shelf-cards">${picked.map(storeCardHtml).join('')}</div>
-    </section>` : '';
-  }).join('') + githubShelf;
+  box.innerHTML = deliverableSection + packSection + storeDuoBoardHtml(cards) + githubSection;
+  primeDeliverableCovers(activeDeliverable);
+}
+
+/* 成品封面缓存：只读本机同源代理的拆解首屏截图，没有拆解或读不到时回退结构化预览面板。 */
+const deliverableCovers = new Map();
+function deliverableBaseUrl(row) {
+  return typeof row?.open_url === 'string'
+    && /^\/d\/[^/?#\\]+\/[^/?#\\]+\/[^/?#\\]+\/$/.test(row.open_url)
+    && !/\/\.\.(?:\/|$)/.test(row.open_url) ? `${row.open_url}f/` : '';
+}
+const deliverableCoverKey = row => `${row?.key || ''}@${row?.updated_at || ''}`;
+
+function deliverableFallbackHtml(row) {
+  const skills = Array.isArray(row?.skills) ? row.skills : [];
+  const tags = [
+    skills.length ? `共 ${number(skills.length)} 个技能` : '',
+    row?.has_teardown ? '含逐屏拆解' : '',
+    row?.has_recipe ? '含复刻配方' : '',
+  ].filter(Boolean).map(text => `<span class="tag tag-quiet">${escape(text)}</span>`).join('');
+  return `<div class="deliverable-fallback">
+    <div class="deliverable-fallback-top">
+      <span class="tag tag-quiet">成品演示</span>
+      ${row?.version ? `<span class="deliverable-count">${escape(row.version)}</span>` : ''}
+    </div>
+    <p class="deliverable-fallback-title">${escape(row?.title || '')}</p>
+    ${tags ? `<div class="deliverable-fallback-meta">${tags}</div>` : ''}
+  </div>`;
+}
+
+function deliverableCoverHtml(row) {
+  const entry = deliverableCovers.get(deliverableCoverKey(row));
+  if (entry?.status === 'ready' && entry.url) {
+    return `<img class="deliverable-cover-img" src="${escape(entry.url)}" alt="${escape(entry.alt || row.title || '')}" loading="lazy">`;
+  }
+  return deliverableFallbackHtml(row);
+}
+
+async function loadDeliverableCover(row) {
+  if (!row?.has_teardown) return;
+  const base = deliverableBaseUrl(row);
+  if (!base) return;
+  const cacheKey = deliverableCoverKey(row);
+  if (deliverableCovers.has(cacheKey)) return;
+  deliverableCovers.set(cacheKey, {status: 'loading', url: '', alt: ''});
+  try {
+    const response = await fetch(`${base}_teardown/teardown.json`, {cache: 'no-store'});
+    if (!response.ok) { deliverableCovers.set(cacheKey, {status: 'none', url: '', alt: ''}); return; }
+    const teardown = cleanTeardown(await response.json());
+    const first = teardown.screens.find(screen => screen.image);
+    if (!first) { deliverableCovers.set(cacheKey, {status: 'none', url: '', alt: ''}); return; }
+    const entry = {status: 'ready', url: base + first.image, alt: first.title || row.title || ''};
+    deliverableCovers.set(cacheKey, entry);
+    if (state.page !== 'team') return;
+    for (const box of $('store-shelves').querySelectorAll(`[data-deliverable-cover="${CSS.escape(row.key)}"]`)) {
+      if (box.dataset.deliverableUpdated !== String(row.updated_at || '')) continue;
+      box.innerHTML = `<img class="deliverable-cover-img" src="${escape(entry.url)}" alt="${escape(entry.alt)}" loading="lazy">`;
+    }
+  } catch {
+    deliverableCovers.set(cacheKey, {status: 'none', url: '', alt: ''});
+  }
+}
+
+const deliverableStoreCard = name => (state.store?.cards || []).find(card => card.name === name) || null;
+
+function deliverableInstallableMissing(row) {
+  const seen = new Set();
+  const out = [];
+  for (const skill of row?.skills || []) {
+    if (skill.installed || !skill.in_store) continue;
+    const card = deliverableStoreCard(skill.name);
+    if (!card || card.local?.status !== 'installable' || seen.has(card.key)) continue;
+    const queued = storeQueueItem(card.key);
+    if (queued && queueActive(queued)) continue;
+    seen.add(card.key);
+    out.push(card);
+  }
+  return out;
+}
+
+function deliverableQueueingMissing(row) {
+  return (row?.skills || []).some(skill => {
+    if (skill.installed || !skill.in_store) return false;
+    const card = deliverableStoreCard(skill.name);
+    const queued = card && storeQueueItem(card.key);
+    return Boolean(queued && queueActive(queued));
+  });
+}
+
+async function queueDeliverableMissing(key, button) {
+  const row = (state.store?.deliverables || []).find(item => item.key === key);
+  if (!row || teamReadOnly() || jobsBlocked()) return;
+  const targets = deliverableInstallableMissing(row);
+  if (!targets.length) return;
+  await withBusy(button, '正在加入…', async () => {
+    let lastResult = null, added = 0, lastError = null;
+    for (const card of targets) {
+      try {
+        lastResult = await addToStoreQueue({key: card.key});
+        added += 1;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastResult) applyQueue(lastResult, {force: true});
+    if (lastError) {
+      toast({error_id: lastError.error_id, text: lastError.message || '部分缺失技能没能加入安装队列。', tone: 'error', sticky: true});
+    } else if (added) {
+      toast({text: `已将 ${number(added)} 个缺失技能加入安装队列。`});
+    }
+  });
+  if (!button.isConnected) {
+    $('store-shelves').querySelector(`[data-deliverable-card="${CSS.escape(key)}"] .deliverable-actions a, [data-deliverable-card="${CSS.escape(key)}"] .deliverable-actions button`)?.focus({preventScroll: true});
+  }
 }
 
 /* 成品：同事做出来的东西和它用了哪些技能。演示在新标签页的隔离环境里打开，碰不到看板。 */
@@ -4620,26 +4993,50 @@ function storeDeliverablesShelfHtml() {
 }
 
 function deliverableCardHtml(row) {
-  const have = row.skills.filter(skill => skill.installed).length;
-  const missing = row.skills.length - have;
+  const skillRows = Array.isArray(row.skills) ? row.skills : [];
+  const have = skillRows.filter(skill => skill.installed).length;
+  const missing = skillRows.length - have;
   const meta = [`${row.member.name} 上架`, row.version, new Date(row.updated_at).toLocaleDateString('zh-CN'), sizeText(row.size)]
     .filter(Boolean).join(' · ');
-  const skills = row.skills.map(skill => `<li class="deliverable-skill${skill.installed ? ' is-installed' : ''}">
-      ${skill.installed ? icon('check-circle') : '<span class="deliverable-dot" aria-hidden="true"></span>'}
-      <span class="mono">${escape(skill.name)}</span><span class="sr-only">${skill.installed ? '已安装' : '未安装'}</span></li>`).join('');
-  return `<article class="deliverable-card">
-    <div class="deliverable-head"><h3>${escape(row.title)}</h3><span class="tag tag-quiet">只限团队内部</span></div>
-    <p class="deliverable-meta">${escape(meta)}</p>
-    ${row.summary ? `<p class="deliverable-sum">${escape(row.summary)}</p>` : ''}
-    ${row.skills.length ? `<div class="deliverable-skills">
-      <div class="deliverable-skills-head"><span>用了这些技能</span>
-        <span class="deliverable-count">你的电脑：已安装 ${number(have)} 个${missing ? `，缺 ${number(missing)} 个` : ''}</span></div>
-      <ul>${skills}</ul>
-    </div>` : ''}
-    <div class="deliverable-actions">
-      <a class="btn btn-primary" href="${escape(row.open_url)}" target="_blank" rel="noopener noreferrer">打开演示</a>
-      ${row.has_teardown ? `<button class="btn" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="screens">看拆解</button>` : ''}
-      ${row.has_recipe ? `<button class="btn" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="recipe">照着做一份</button>` : ''}
+  const installable = typeof deliverableInstallableMissing === 'function' ? deliverableInstallableMissing(row) : [];
+  const queueing = typeof deliverableQueueingMissing === 'function' && deliverableQueueingMissing(row);
+  const readOnly = typeof teamReadOnly === 'function' && teamReadOnly();
+  const blocked = typeof jobsBlocked === 'function' && jobsBlocked();
+  const cover = typeof deliverableCoverHtml === 'function'
+    ? deliverableCoverHtml(row)
+    : `<div class="deliverable-fallback"><div class="deliverable-fallback-top"><span class="tag tag-quiet">成品演示</span></div><p class="deliverable-fallback-title">${escape(row.title)}</p></div>`;
+  const skills = skillRows.map(skill => {
+    const card = typeof deliverableStoreCard === 'function' ? deliverableStoreCard(skill.name) : null;
+    const inner = `${skill.installed ? icon('check-circle') : '<span class="deliverable-dot" aria-hidden="true"></span>'}<span class="mono">${escape(skill.name)}</span><span class="sr-only">${skill.installed ? '已安装' : '未安装'}</span>`;
+    return card
+      ? `<li><button class="deliverable-skill deliverable-skill-btn${skill.installed ? ' is-installed' : ''}" type="button" data-store-open="${escape(card.key)}" title="${escape(`查看「${skill.name}」详情`)}">${inner}</button></li>`
+      : `<li class="deliverable-skill${skill.installed ? ' is-installed' : ''}">${inner}</li>`;
+  }).join('');
+  const quickInstall = installable.length
+    ? `<button class="btn btn-small" type="button" data-deliverable-install-missing="${escape(row.key)}"${
+      readOnly || blocked ? ` disabled title="${readOnly ? '只读预览，无法安装技能。' : '当前有后台任务正在运行，请稍候。'}"` : ''}>补齐缺的 ${number(installable.length)} 个</button>`
+    : queueing ? '<span class="tag">正在补齐中</span>' : '';
+  return `<article class="deliverable-card" data-deliverable-card="${escape(row.key)}">
+    <div class="deliverable-cover" data-deliverable-cover="${escape(row.key)}" data-deliverable-updated="${escape(row.updated_at || '')}">${cover}</div>
+    <div class="deliverable-body">
+      <div class="deliverable-head"><h3>${escape(row.title)}</h3><span class="tag tag-quiet">只限团队内部</span></div>
+      <p class="deliverable-meta">${escape(meta)}</p>
+      ${row.summary ? `<p class="deliverable-sum">${escape(row.summary)}</p>` : ''}
+      ${skillRows.length ? `<div class="deliverable-skills">
+        <div class="deliverable-skills-head">
+          <span>用了这些技能</span>
+          <span class="deliverable-skills-head-end">
+            <span class="deliverable-count">你的电脑：已安装 ${number(have)} 个${missing ? `，缺 ${number(missing)} 个` : ''}</span>
+            ${quickInstall}
+          </span>
+        </div>
+        <ul>${skills}</ul>
+      </div>` : ''}
+      <div class="deliverable-actions">
+        <a class="btn btn-primary" href="${escape(row.open_url)}" target="_blank" rel="noopener noreferrer">打开演示</a>
+        ${row.has_teardown ? `<button class="btn" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="screens">看拆解</button>` : ''}
+        ${row.has_recipe ? `<button class="btn" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="recipe">照着做一份</button>` : ''}
+      </div>
     </div>
   </article>`;
 }
@@ -5049,11 +5446,19 @@ function storeHintsHtml() {
 }
 
 function renderStoreAll(cards) {
-  $('store-all').hidden = !cards?.length;
-  $('store-hints').innerHTML = cards?.length && state.storeMine ? storeHintsHtml() : '';
-  if (!cards?.length) return;
   const query = storeQuery();
-  const base = storeFilter(cards, {query, mine: state.storeMine});
+  const base = cards?.length ? storeFilter(cards, {query, mine: state.storeMine}) : [];
+  const onlyDeliverableHits = Boolean(query && !state.storeMine && !state.storeGroup
+    && !base.length && storeDeliverableMatches(query).length);
+  const showAll = Boolean(cards?.length) && (
+    state.storeMine
+    || (Boolean(query) && !onlyDeliverableHits)
+    || state.storeView === 'skills'
+    || (state.storeView === 'overview' && cards.length < SHELF_MIN)
+  );
+  $('store-all').hidden = !showAll;
+  $('store-hints').innerHTML = showAll && state.storeMine ? storeHintsHtml() : '';
+  if (!showAll) return;
   const groups = storeGroups(base);
   // 选中的分组搜不到时也留着，数量写 0，免得筛选条件悄悄消失。
   if (state.storeGroup && !groups.some(([name]) => name === state.storeGroup)) groups.push([state.storeGroup, 0]);
@@ -5091,6 +5496,60 @@ function renderStoreAll(cards) {
     : `<div class="empty">${empty}</div>`;
 }
 
+function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTop = false} = {}) {
+  state.storeView = view || 'overview';
+  state.storeMine = false;
+  if (clearSearch) $('store-search').value = '';
+  if (sort) state.storeSort = sort;
+  if (group !== null) state.storeGroup = group;
+  renderTeam();
+  if (scrollTop && window.scrollY > 96) {
+    window.scrollTo({top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
+  }
+}
+
+$('store-views').addEventListener('click', event => {
+  const button = event.target.closest('[data-store-view]');
+  if (!button || button.hidden) return;
+  setStoreView(button.dataset.storeView, {group: '', scrollTop: true});
+  button.scrollIntoView({block: 'nearest', inline: 'nearest'});
+});
+
+$('store-views').addEventListener('keydown', event => {
+  const keys = ['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'];
+  if (!keys.includes(event.key)) return;
+  const tabs = [...$('store-views').querySelectorAll('[role="tab"]:not([hidden])')];
+  if (!tabs.length) return;
+  const current = tabs.indexOf(event.target.closest('[role="tab"]'));
+  if (current < 0) return;
+  event.preventDefault();
+  const nextIndex = event.key === 'Home' ? 0
+    : event.key === 'End' ? tabs.length - 1
+    : (current + (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  const next = tabs[nextIndex];
+  setStoreView(next.dataset.storeView, {group: ''});
+  next.focus({preventScroll: true});
+  next.scrollIntoView({block: 'nearest', inline: 'nearest'});
+});
+
+$('team-rail-groups').addEventListener('click', event => {
+  const button = event.target.closest('[data-rail-group]');
+  if (!button) return;
+  const group = button.dataset.railGroup;
+  const same = !state.storeMine && !storeQuery() && state.storeView === 'skills' && state.storeGroup === group;
+  setStoreView('skills', {group: same ? '' : group, scrollTop: true});
+});
+
+$('store-shelves').addEventListener('error', event => {
+  const img = event.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('deliverable-cover-img')) return;
+  const box = img.closest('[data-deliverable-cover]');
+  if (!box) return;
+  const row = (state.store?.deliverables || []).find(item => item.key === box.dataset.deliverableCover);
+  if (row) deliverableCovers.set(deliverableCoverKey(row), {status: 'none', url: '', alt: ''});
+  box.innerHTML = row ? deliverableFallbackHtml(row) : '';
+}, true);
+
 $('store-search').addEventListener('input', renderTeam);
 
 $('store-sort').addEventListener('click', event => {
@@ -5111,6 +5570,7 @@ $('store-groups').addEventListener('click', event => {
 $('store-mine').addEventListener('click', async () => {
   state.storeMine = !state.storeMine;
   state.storeGroup = '';
+  if (state.storeMine) $('store-search').value = '';
   renderTeam();
   if (!state.storeMine || storeCandidates) return;
   try {
@@ -5164,8 +5624,29 @@ $('store-update-all').addEventListener('click', updateStoreListings);
 
 /* 卡片、列表行、安装队列和空状态里的按钮都在团队页里，统一在这里分派。 */
 $('page-team').addEventListener('click', event => {
+  const githubInstall = event.target.closest('[data-github-install]');
+  const githubOpen = event.target.closest('[data-github-open]');
+  const githubCard = event.target.closest('[data-github-card]');
+  const githubMore = event.target.closest('[data-github-more]');
+  if (githubInstall) { queueGithubInstall(githubInstall.dataset.githubInstall, githubInstall); return; }
+  else if (githubOpen) { openGithubDetail(githubOpen.dataset.githubOpen, githubOpen); return; }
+  else if (githubCard && !event.target.closest('a, button')) {
+    // 卡片空白处也能打开详情；安装和 GitHub 链接照旧单独响应。
+    openGithubDetail(githubCard.dataset.githubCard, githubCard.querySelector('[data-github-open]'));
+    return;
+  } else if (githubMore) {
+    state.storeGithubExpanded = !state.storeGithubExpanded;
+    renderTeam();
+    $('store-shelves').querySelector('[data-github-more]')?.focus({preventScroll: true});
+    return;
+  }
   const goto = event.target.closest('[data-store-goto]');
   const gotoTags = event.target.closest('[data-store-goto-tag]');
+  const gotoView = event.target.closest('[data-store-goto-view]');
+  const spotDeliverable = event.target.closest('[data-deliverable-spot]');
+  const installMissing = event.target.closest('[data-deliverable-install-missing]');
+  const boardTab = event.target.closest('[data-board-tab]');
+  const githubFilter = event.target.closest('[data-github-filter]');
   const retry = event.target.closest('[data-store-queue-retry]');
   const clear = event.target.closest('[data-store-queue-clear]');
   const open = event.target.closest('[data-store-open]');
@@ -5178,19 +5659,25 @@ $('page-team').addEventListener('click', event => {
   const packEdit = event.target.closest('[data-store-pack-edit]');
   const packToggle = event.target.closest('[data-store-pack-toggle]');
   const queuePack = event.target.closest('[data-store-queue-pack]');
-  const githubInstall = event.target.closest('[data-github-install]');
-  const githubOpen = event.target.closest('[data-github-open]');
-  const githubCard = event.target.closest('[data-github-card]');
-  const githubMore = event.target.closest('[data-github-more]');
-  if (githubInstall) queueGithubInstall(githubInstall.dataset.githubInstall, githubInstall);
-  else if (githubOpen) openGithubDetail(githubOpen.dataset.githubOpen, githubOpen);
-  else if (githubCard && !event.target.closest('a, button')) {
-    // 卡片空白处也能打开详情；安装和 GitHub 链接照旧单独响应。
-    openGithubDetail(githubCard.dataset.githubCard, githubCard.querySelector('[data-github-open]'));
-  } else if (githubMore) {
-    state.storeGithubExpanded = !state.storeGithubExpanded;
+  if (spotDeliverable) {
+    const key = spotDeliverable.dataset.deliverableSpot;
+    state.storeSpotDeliverable = key;
     renderTeam();
-    $('store-shelves').querySelector('[data-github-more]')?.focus({preventScroll: true});
+    $('store-shelves').querySelector(`[data-deliverable-spot="${CSS.escape(key)}"]`)?.focus({preventScroll: true});
+  } else if (installMissing) {
+    queueDeliverableMissing(installMissing.dataset.deliverableInstallMissing, installMissing);
+  } else if (boardTab) {
+    const tab = boardTab.dataset.boardTab;
+    state.storeBoardTab = tab;
+    renderTeam();
+    $('store-shelves').querySelector(`[data-board-tab="${CSS.escape(tab)}"]`)?.focus({preventScroll: true});
+  } else if (githubFilter) {
+    const filter = githubFilter.dataset.githubFilter;
+    state.storeGithubFilter = filter;
+    renderTeam();
+    $('store-shelves').querySelector(`[data-github-filter="${CSS.escape(filter)}"]`)?.focus({preventScroll: true});
+  } else if (gotoView) {
+    setStoreView(gotoView.dataset.storeGotoView, {group: '', scrollTop: true});
   } else if (goto) gotoStoreSkill(goto);
   else if (gotoTags) gotoStoreTag(gotoTags.dataset.storeGotoTag);
   else if (retry) retryStoreQueue(retry.dataset.storeQueueRetry, retry);
@@ -5207,14 +5694,9 @@ $('page-team').addEventListener('click', event => {
     renderStoreQueue();
     $('store-queue').querySelector(`[data-store-queue-pack="${CSS.escape(key)}"]`)?.focus();
   } else if (more?.dataset.storeMore === 'packs') {
-    const target = $('store-list').querySelector('[data-store-pack-group]') || $('store-all-title');
-    target.scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start'});
-    if (target.matches('[data-store-pack-group]')) target.querySelector('[data-store-open]')?.focus({preventScroll: true});
-    else target.focus();
+    setStoreView('packs', {group: '', scrollTop: true});
   } else if (more) {
-    state.storeSort = more.dataset.storeMore;
-    renderTeam();
-    $('store-all').scrollIntoView({behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start'});
+    setStoreView('skills', {sort: more.dataset.storeMore, group: '', scrollTop: true});
     $('store-all-title').focus({preventScroll: true});
   } else if (publish) openPublish();
   else if (missing) openPublish((storeCandidateData?.skills || [])
