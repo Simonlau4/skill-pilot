@@ -1249,18 +1249,30 @@ if (storePackIntroHtml({...pack, mine: true}) !== '') fail('自己的包没写�
 
     def test_team_workspace_rail_views_and_deliverable_actions(self):
         html = (STATIC / 'index.html').read_text()
+        css = (STATIC / 'app.css').read_text()
         source = (STATIC / 'app.js').read_text()
         for marker in (
             'id="team-rail"', 'id="store-views"', 'role="tablist"', 'aria-orientation="vertical"',
+            'id="team-tabpanel"', 'role="tabpanel"', 'aria-controls="team-tabpanel"',
+            'id="store-tab-overview"', 'id="store-tab-deliverables"', 'id="store-tab-packs"',
+            'id="store-tab-skills"', 'id="store-tab-github"',
             'data-store-view="overview"', 'data-store-view="deliverables"', 'data-store-view="packs"',
             'data-store-view="skills"', 'data-store-view="github"', 'id="team-rail-groups-wrap"',
             'id="team-rail-groups"',
         ):
             self.assertIn(marker, html, f'团队页左侧分区目录缺少 {marker}')
+        self.assertIn('container: team-main / inline-size;', css, '容器查询应挂在 .team-main 上')
+        self.assertNotIn('container: deliverable-card', css, '卡片不能查询自身')
+        self.assertLess(css.index('.store-gh-grid {'), css.index('@container team-main (inline-size < 680px)'),
+                        '容器查询规则必须在基础网格定义之后生效')
+        render_team = extract_function(source, 'function renderTeam(')
+        self.assertLess(render_team.index('renderStoreAll(cards);'), render_team.index('renderStoreQueue();'),
+                        '安装队列焦点回落前应先更新列表可见性')
         for marker in (
             'function renderTeamRail(', 'function setStoreView(', 'function loadDeliverableCover(',
             'function queueDeliverableMissing(', "addEventListener('error'", "addEventListener('keydown'",
-            "card.classList.contains('store-gh-row')",
+            "card.classList.contains('store-gh-row')", 'deliverableCovers.clear();',
+            'syncTeamRailOrientation()', 'Object.hasOwn(KIND_LABEL, raw.kind)',
         ):
             self.assertIn(marker, source, f'团队页工作台逻辑缺少 {marker}')
 
@@ -1283,9 +1295,12 @@ if (storePackIntroHtml({...pack, mine: true}) !== '') fail('自己的包没写�
             line(source, 'const githubQueueKey = '),
             line(source, 'const githubRepos = '),
             line(source, 'const deliverableCovers = '),
+            line(source, 'const DELIVERABLE_COVER_RETRY_MS = '),
             extract_function(source, 'function deliverableBaseUrl('),
             line(source, 'const deliverableCoverKey = '),
-            line(source, 'const deliverableStoreCard = '),
+            line(source, 'const deliverableSkillCandidates = '),
+            extract_function(source, 'function deliverableStoreCard('),
+            line(source, 'const deliverableQueueingKeys = '),
             line(source, 'const SHELF_SIZE = '),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             extract_function(source, 'const STORE_SORTS = {') + ';',
@@ -1324,9 +1339,10 @@ const teamReadOnly = () => readOnly;
 const jobsBlocked = () => blocked;
 const state = {store: null, queue: {items: []}, storeSpotDeliverable: '', storeBoardTab: '', storeGithubFilter: 'all'};
 
-if (deliverableBaseUrl({open_url: '/d/abc/def/demo/'}) !== '/d/abc/def/demo/f/') fail('合法同源成品路径应解析成功');
-for (const bad of ['https://evil.test/d/a/b/c/', '/d/../etc/passwd/', '/d/a/b/c/?x=1', '/d/a/b/c/#x', '/api/team']) {
-  if (deliverableBaseUrl({open_url: bad}) !== '') fail('不安全成品地址应被拒绝：' + bad);
+const validUrl = `/d/${'a'.repeat(32)}/${'b'.repeat(32)}/demo-1/`;
+if (deliverableBaseUrl({open_url: validUrl}) !== validUrl + 'f/') fail('合法同源成品路径应解析成功');
+for (const bad of ['/d/abc/def/demo/', 'https://evil.test/d/a/b/c/', `/d/${'a'.repeat(32)}/../etc/`, validUrl + '?x=1', validUrl + '#x', '/api/team']) {
+  if (deliverableBaseUrl({open_url: bad}) !== '') fail('不安全或非服务端格式的成品地址应被拒绝：' + bad);
 }
 
 const mkCard = (n, extra = {}) => ({
@@ -1394,6 +1410,174 @@ if ((ghFiltered.match(/class="store-card github-card"/g) || []).length !== 1) fa
 if (storeDeliverableMatches('提案').length !== 1 || storeDeliverableMatches('outside-only').length !== 1) {
   fail('搜索应同时匹配成品标题、简介与技能名');
 }
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_team_workspace_edge_cases_queue_focus_and_cover_retry(self):
+        source = (STATIC / 'app.js').read_text()
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const icon = (name'),
+            line(source, 'const number = value => '),
+            line(source, 'const emptyInner = '),
+            line(source, 'const sizeText = '),
+            line(source, 'const storeTitle = '),
+            line(source, 'const storeTime = '),
+            line(source, 'const storeScore = '),
+            line(source, 'const storeInstalls = '),
+            line(source, 'const queueActive = '),
+            line(source, 'const storeQueueItem = '),
+            line(source, 'const githubQueueKey = '),
+            line(source, 'const githubRepos = '),
+            line(source, 'const githubRepo = '),
+            line(source, 'const deliverableCovers = '),
+            line(source, 'const DELIVERABLE_COVER_RETRY_MS = '),
+            extract_function(source, 'function deliverableBaseUrl('),
+            line(source, 'const deliverableCoverKey = '),
+            line(source, 'const deliverableSkillCandidates = '),
+            extract_function(source, 'function deliverableStoreCard('),
+            line(source, 'const deliverableQueueingKeys = '),
+            line(source, 'const KIND_LABEL = '),
+            line(source, 'const COMMAND_NAME = '),
+            line(source, 'const clip = '),
+            line(source, 'const SHELF_SIZE = '),
+            line(source, 'const SHELF_MIN = '),
+            extract_function(source, 'const STORE_STATUS = {') + ';',
+            extract_function(source, 'const STORE_SORTS = {') + ';',
+            extract_function(source, 'function cleanTeardown('),
+            extract_function(source, 'async function loadDeliverableCover('),
+            extract_function(source, 'function deliverableInstallableMissing('),
+            extract_function(source, 'function deliverableQueueingMissing('),
+            extract_function(source, 'async function queueDeliverableMissing('),
+            extract_function(source, 'function deliverableCardHtml('),
+            extract_function(source, 'function storeDeliverableMatches('),
+            extract_function(source, 'function storeDeliverablesSearchHtml('),
+            block(source, 'function storeFilter('),
+            extract_function(source, 'function storeGroups('),
+            extract_function(source, 'function renderStoreShelves('),
+            extract_function(source, 'function renderStoreAll('),
+            extract_function(source, 'function githubCreatedText('),
+            extract_function(source, 'function githubStatusTag('),
+            extract_function(source, 'function githubInstallHtml('),
+            extract_function(source, 'function githubCardHtml('),
+            extract_function(source, 'function githubCompactRowHtml('),
+            extract_function(source, 'function updateGithubCard('),
+        ]
+        script = '\n'.join(parts) + r'''
+const assert = require('node:assert/strict');
+const els = Object.fromEntries(['store-shelves', 'store-all', 'store-hints', 'store-groups', 'store-all-title',
+  'store-count', 'store-sort', 'store-list', 'store-search'].map(id => [id, {
+    id, hidden: false, innerHTML: '', textContent: '', value: '',
+    querySelectorAll: () => [], querySelector: () => null,
+  }]));
+const $ = id => els[id];
+const CSS = {escape: s => s};
+const teamReadOnly = () => false, jobsBlocked = () => false, teamCanWrite = () => true;
+const renderButtons = () => {}, storeBrowsing = () => false, storePackOf = () => null;
+const storeRowHtml = c => `<row>${c.key}</row>`, storeHintsHtml = () => '';
+const storeDeliverablesShelfHtml = () => '', storePacksViewHtml = () => '', storeGithubViewHtml = () => '';
+const storeDeliverablesOverviewHtml = () => '', storePacksOverviewHtml = () => '', storeDuoBoardHtml = () => '';
+const storeGithubOverviewHtml = () => '', primeDeliverableCovers = () => {}, renderTeam = () => {};
+const storeQuery = () => els['store-search'].value.trim();
+const withBusy = async (_btn, _txt, fn) => fn();
+const state = {page: 'team', storeView: 'overview', storeMine: false, storeGroup: '', storeSort: 'latest',
+  store: {cards: [], deliverables: [], packs: [], github: {repos: []}}, queue: {items: []}};
+
+// 1. 同名技能优先精确命中成品作者，多来源且非作者时不盲选而转去搜索挑选
+const aliceCard = {key: 'team:alice:dup', name: 'dup', title: 'Alice版', local: {status: 'blocked'}, listings: [{member: {id: 'alice', name: 'Alice'}}]};
+const bobCard = {key: 'team:bob:dup', name: 'dup', title: 'Bob版', local: {status: 'installable'}, listings: [{member: {id: 'bob', name: 'Bob'}}]};
+const extraCard = {key: 'team:bob:two', name: 'two', title: '二号', local: {status: 'installable'}, listings: [{member: {id: 'bob', name: 'Bob'}}]};
+const thirdCard = {key: 'team:bob:three', name: 'three', title: '三号', local: {status: 'installable'}, listings: [{member: {id: 'bob', name: 'Bob'}}]};
+state.store.cards = [aliceCard, bobCard, extraCard, thirdCard];
+const bobDel = {key: 'd:bob', member: {id: 'bob', name: 'Bob'}, title: 'Bob成品', version: 'v1', size: 10, updated_at: '2026-11-20T00:00:00Z',
+  open_url: `/d/${'a'.repeat(32)}/${'b'.repeat(32)}/bob-1/`, has_teardown: true,
+  skills: [{name: 'dup', installed: false, in_store: true}, {name: 'two', installed: false, in_store: true}, {name: 'three', installed: false, in_store: true}]};
+const carolDel = {...bobDel, key: 'd:carol', member: {id: 'carol', name: 'Carol'}, skills: [{name: 'dup', installed: false, in_store: true}]};
+state.store.deliverables = [bobDel, carolDel];
+assert.equal(deliverableStoreCard(bobDel, 'dup')?.key, 'team:bob:dup', '作者的同名技能应精确命中作者版本');
+assert.equal(deliverableStoreCard(carolDel, 'dup'), null, '第三方成品遇多个同名候选不该盲选');
+assert.equal(deliverableInstallableMissing(carolDel).length, 0, '不明确来源时不该一键自动安装');
+assert.ok(deliverableCardHtml(carolDel).includes('data-deliverable-find="dup"'), '多候选技能应允许搜索挑选');
+
+// 2. 批量补齐逐项即时同步队列、已 done 不重复排、多项失败完整汇报
+state.queue.items = [{key: 'team:bob:three', status: 'done'}];
+assert.deepEqual(deliverableInstallableMissing(bobDel).map(c => c.key), ['team:bob:dup', 'team:bob:two'], '队列已 done 的不应再重复补齐');
+state.queue.items = [];
+const applied = [], toasts = [];
+const applyQueue = (r) => { applied.push(r.seq); state.queue = r; };
+const toast = t => toasts.push(t);
+let releaseSecond;
+const addToStoreQueue = ({key}) => {
+  if (key === 'team:bob:dup') return Promise.resolve({seq: 1, items: [{key, status: 'waiting'}]});
+  return new Promise((_, reject) => { releaseSecond = () => reject(new Error('第二项失败')); });
+};
+(async () => {
+  const pending = queueDeliverableMissing('d:bob', {isConnected: true});
+  await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(applied, [1], '第一项成功后应立刻同步队列，不能等第二项');
+  releaseSecond();
+  await pending;
+  assert.ok(toasts.at(-1)?.text.includes('已加入 1 个') && toasts.at(-1)?.text.includes('第二项失败'), '部分失败应报告成功数和失败原因');
+
+  // 3. 空商店搜索与「我的上架」不空白；带分组筛选的仅成品命中不误报未找到技能
+  state.store.cards = [];
+  els['store-search'].value = '不存在的词';
+  renderStoreShelves([]); renderStoreAll([]);
+  assert.equal(els['store-all'].hidden, false, '空商店搜索无命中应显示未找到匹配技能而非空白');
+  els['store-search'].value = '';
+  state.storeMine = true;
+  renderStoreShelves([]); renderStoreAll([]);
+  assert.equal(els['store-all'].hidden, false, '空商店打开我的上架应显示空状态而非空白');
+  state.storeMine = false;
+  state.store.cards = [bobCard];
+  state.storeGroup = '文案';
+  els['store-search'].value = 'Bob成品';
+  renderStoreShelves(state.store.cards); renderStoreAll(state.store.cards);
+  assert.ok(els['store-shelves'].innerHTML.includes('匹配的成品'));
+  assert.equal(els['store-all'].hidden, true, '仅命中成品时即使曾选过分组也不该误报未找到技能');
+  els['store-search'].value = ''; state.storeGroup = '';
+
+  // 4. 封面失败后手动清空缓存或过有效期可重试；cleanTeardown 拒绝原型属性 kind
+  assert.equal(cleanTeardown({items: [{id: 'x', kind: 'toString'}]}).items.size, 0, '原型键不能通过类别校验');
+  let fetches = 0;
+  global.fetch = async () => {
+    fetches += 1;
+    if (fetches === 1) return {ok: false};
+    return {ok: true, json: async () => ({items: [], screens: [{image: '_teardown/s1.png', title: '首屏'}]})};
+  };
+  await loadDeliverableCover(bobDel);
+  assert.equal(deliverableCovers.get(deliverableCoverKey(bobDel)).status, 'failed');
+  await loadDeliverableCover(bobDel);
+  assert.equal(fetches, 1, '失败有效期内不重复刷接口');
+  deliverableCovers.clear();
+  await loadDeliverableCover(bobDel);
+  assert.equal(fetches, 2, '刷新清空缓存后应重试封面');
+  assert.equal(deliverableCovers.get(deliverableCoverKey(bobDel)).status, 'ready');
+
+  // 5. 实际执行 updateGithubCard：紧凑行与完整卡焦点停在「打开 GitHub」外链时均能恢复
+  state.store.github = {repos: [{repository: 'acme/x', url: 'https://github.com/acme/x', stars: 9,
+    created_at: '2026-11-20T00:00:00Z', description: 'd', skill_count: 1, local: {status: 'installable'}}]};
+  for (const compact of [true, false]) {
+    let focused = '';
+    const linkEl = {dataset: {}, closest: sel => sel === 'a[href]' ? linkEl : null};
+    const nextEl = {querySelector: sel => ({focus: () => { focused = sel; }})};
+    let replacedWith = null;
+    const oldCard = {
+      contains: el => el === linkEl,
+      classList: {contains: c => compact && c === 'store-gh-row'},
+      replaceWith: el => { replacedWith = el; },
+    };
+    global.document = {
+      activeElement: linkEl,
+      createElement: () => ({content: {firstElementChild: nextEl}, set innerHTML(v) { this._html = v; }}),
+    };
+    els['store-shelves'].querySelector = () => oldCard;
+    updateGithubCard('acme/x');
+    assert.equal(replacedWith, nextEl);
+    assert.equal(focused, 'a[href]', (compact ? '紧凑行' : '完整卡') + '轮询替换后外链应保留焦点');
+  }
+})().catch(error => { console.error(error); process.exit(1); });
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

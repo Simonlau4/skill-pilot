@@ -4168,7 +4168,7 @@ function renderStoreQueue() {
       .find(button => (button.dataset.storeGotoTag || button.dataset.storeGoto
         || button.dataset.storeQueueRetry || button.dataset.storeQueuePack) === focusKey);
     const fallback = box.hidden
-      ? ($('store-all').hidden ? ($('store-views').querySelector('[aria-selected="true"]') || $('store-search')) : $('store-all-title'))
+      ? (!($('store-all').hidden) ? $('store-all-title') : ($('store-views').querySelector('[aria-selected="true"]:not([hidden])') || $('store-search')))
       : $('store-queue-title');
     (next || fallback).focus();
   }
@@ -4356,7 +4356,7 @@ function updateGithubCard(repository) {
   if (!card || !repo) return;
   const active = document.activeElement;
   const focusKey = card.contains(active)
-    ? active.dataset.githubOpen ? 'open' : active.dataset.githubInstall ? 'install' : ''
+    ? active.dataset.githubOpen ? 'open' : active.dataset.githubInstall ? 'install' : active.closest('a[href]') ? 'link' : ''
     : '';
   const compact = card.classList.contains('store-gh-row');
   const template = document.createElement('template');
@@ -4365,6 +4365,7 @@ function updateGithubCard(repository) {
   card.replaceWith(next);
   if (focusKey === 'open') next.querySelector('[data-github-open]')?.focus({preventScroll: true});
   else if (focusKey === 'install') next.querySelector('[data-github-install]')?.focus({preventScroll: true});
+  else if (focusKey === 'link') next.querySelector('a[href]')?.focus({preventScroll: true});
 }
 
 function applyGithubDigests(result) {
@@ -4619,7 +4620,7 @@ function storeDeliverablesOverviewHtml() {
   return `<section class="shelf" aria-labelledby="shelf-deliverables">
     <div class="shelf-head">
       <div class="shelf-head-group">
-        <h2 id="shelf-deliverables">成品</h2>
+        <h2 id="shelf-deliverables" tabindex="-1">成品</h2>
         <p class="shelf-note">先看同事做出来的东西，再看它用了哪些技能</p>
       </div>
       ${switcher}
@@ -4633,7 +4634,7 @@ function storePacksOverviewHtml() {
   if (!packs.length) return '';
   return `<section class="shelf" aria-labelledby="shelf-packs">
     <div class="shelf-head">
-      <h2 id="shelf-packs">技能包</h2>
+      <h2 id="shelf-packs" tabindex="-1">技能包</h2>
       <button class="link-btn" type="button" data-store-goto-view="packs">查看全部 ${number(packs.length)} 个</button>
     </div>
     <div class="store-pack-strips">${packs.slice(0, SHELF_SIZE).map(storePackStripHtml).join('')}</div>
@@ -4652,7 +4653,7 @@ function storeDuoBoardHtml(cards) {
     : [...pool].sort(STORE_SORTS.latest)).slice(0, 5);
   return `<section class="shelf" aria-labelledby="shelf-featured">
     <div class="shelf-head">
-      <h2 id="shelf-featured">精选技能</h2>
+      <h2 id="shelf-featured" tabindex="-1">精选技能</h2>
       <button class="link-btn" type="button" data-store-goto-view="skills">查看全部 ${number(cards.length)} 个技能</button>
     </div>
     <div class="store-duo-board">
@@ -4679,7 +4680,7 @@ function storeGithubOverviewHtml() {
   if (!repos.length) return '';
   return `<section class="shelf shelf-github" aria-labelledby="shelf-github">
     <div class="shelf-head">
-      <h2 id="shelf-github">GitHub 最近热门</h2>
+      <h2 id="shelf-github" tabindex="-1">GitHub 最近热门</h2>
       <button class="link-btn" type="button" data-store-goto-view="github">展开全部 ${number(repos.length)} 个</button>
     </div>
     <p class="shelf-note">最近 30 天新建、星数最多的 GitHub 技能仓库，团队里还没人上架。</p>
@@ -4692,7 +4693,7 @@ function storePacksViewHtml() {
   if (!packs.length) return '';
   return `<section class="shelf" aria-labelledby="shelf-packs">
     <div class="shelf-head">
-      <h2 id="shelf-packs">技能包</h2>
+      <h2 id="shelf-packs" tabindex="-1">技能包</h2>
       <span class="store-count">${number(packs.length)} 个</span>
     </div>
     <p class="shelf-note">按场景成套整理好的技能，点开可查看包含的技能并一键安装。</p>
@@ -4714,7 +4715,7 @@ function storeGithubViewHtml() {
     `<button class="seg" type="button" data-github-filter="${id}" aria-pressed="${filter === id}">${label} ${number(counts[id])}</button>`).join('');
   return `<section class="shelf shelf-github" aria-labelledby="shelf-github">
     <div class="shelf-head">
-      <h2 id="shelf-github">GitHub 最近热门</h2>
+      <h2 id="shelf-github" tabindex="-1">GitHub 最近热门</h2>
       <div class="shelf-head-end">
         <div class="segmented" role="group" aria-label="按本机状态筛选">${filters}</div>
       </div>
@@ -4751,7 +4752,16 @@ function primeDeliverableCovers(rows) {
   }
 }
 
+const teamNarrowMedia = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  ? window.matchMedia('(max-width: 1023px)') : null;
+function syncTeamRailOrientation() {
+  const views = $('store-views');
+  if (views && teamNarrowMedia) views.setAttribute('aria-orientation', teamNarrowMedia.matches ? 'horizontal' : 'vertical');
+}
+teamNarrowMedia?.addEventListener?.('change', syncTeamRailOrientation);
+
 function renderTeamRail(cards) {
+  syncTeamRailOrientation();
   const deliverables = state.store?.deliverables || [];
   const packs = state.store?.packs || [];
   const repos = githubRepos();
@@ -4776,6 +4786,10 @@ function renderTeamRail(cards) {
     const selected = view === activeView;
     button.setAttribute('aria-selected', String(selected));
     button.tabIndex = (activeView ? selected : view === state.storeView) ? 0 : -1;
+  }
+  const panel = $('team-tabpanel');
+  if (panel) {
+    panel.setAttribute('aria-labelledby', state.storeMine ? 'store-mine' : storeQuery() ? 'store-all-title' : `store-tab-${state.storeView}`);
   }
   $('store-nav-deliverables-n').textContent = counts.deliverables ? number(counts.deliverables) : '';
   $('store-nav-packs-n').textContent = counts.packs ? number(counts.packs) : '';
@@ -4815,9 +4829,9 @@ function renderTeam() {
   $('store-mine-count').textContent = mineCount ? number(mineCount) : '';
   renderTeamRail(cards);
   renderStoreUpdateButton();
-  renderStoreQueue();
   renderStoreShelves(cards);
   renderStoreAll(cards);
+  renderStoreQueue();
 }
 
 function renderStoreShelves(cards) {
@@ -4869,9 +4883,10 @@ function renderStoreShelves(cards) {
 
 /* 成品封面缓存：只读本机同源代理的拆解首屏截图，没有拆解或读不到时回退结构化预览面板。 */
 const deliverableCovers = new Map();
+const DELIVERABLE_COVER_RETRY_MS = 60000;
 function deliverableBaseUrl(row) {
   return typeof row?.open_url === 'string'
-    && /^\/d\/[^/?#\\]+\/[^/?#\\]+\/[^/?#\\]+\/$/.test(row.open_url)
+    && /^\/d\/[0-9a-f]{32}\/[0-9a-f]{32}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\/$/.test(row.open_url)
     && !/\/\.\.(?:\/|$)/.test(row.open_url) ? `${row.open_url}f/` : '';
 }
 const deliverableCoverKey = row => `${row?.key || ''}@${row?.updated_at || ''}`;
@@ -4906,15 +4921,17 @@ async function loadDeliverableCover(row) {
   const base = deliverableBaseUrl(row);
   if (!base) return;
   const cacheKey = deliverableCoverKey(row);
-  if (deliverableCovers.has(cacheKey)) return;
-  deliverableCovers.set(cacheKey, {status: 'loading', url: '', alt: ''});
+  const cached = deliverableCovers.get(cacheKey);
+  if (cached && (cached.status === 'loading' || cached.status === 'ready' || cached.status === 'empty'
+    || (cached.status === 'failed' && Date.now() - (cached.at || 0) < DELIVERABLE_COVER_RETRY_MS))) return;
+  deliverableCovers.set(cacheKey, {status: 'loading', url: '', alt: '', at: Date.now()});
   try {
     const response = await fetch(`${base}_teardown/teardown.json`, {cache: 'no-store'});
-    if (!response.ok) { deliverableCovers.set(cacheKey, {status: 'none', url: '', alt: ''}); return; }
+    if (!response.ok) { deliverableCovers.set(cacheKey, {status: 'failed', url: '', alt: '', at: Date.now()}); return; }
     const teardown = cleanTeardown(await response.json());
     const first = teardown.screens.find(screen => screen.image);
-    if (!first) { deliverableCovers.set(cacheKey, {status: 'none', url: '', alt: ''}); return; }
-    const entry = {status: 'ready', url: base + first.image, alt: first.title || row.title || ''};
+    if (!first) { deliverableCovers.set(cacheKey, {status: 'empty', url: '', alt: '', at: Date.now()}); return; }
+    const entry = {status: 'ready', url: base + first.image, alt: first.title || row.title || '', at: Date.now()};
     deliverableCovers.set(cacheKey, entry);
     if (state.page !== 'team') return;
     for (const box of $('store-shelves').querySelectorAll(`[data-deliverable-cover="${CSS.escape(row.key)}"]`)) {
@@ -4922,21 +4939,35 @@ async function loadDeliverableCover(row) {
       box.innerHTML = `<img class="deliverable-cover-img" src="${escape(entry.url)}" alt="${escape(entry.alt)}" loading="lazy">`;
     }
   } catch {
-    deliverableCovers.set(cacheKey, {status: 'none', url: '', alt: ''});
+    deliverableCovers.set(cacheKey, {status: 'failed', url: '', alt: '', at: Date.now()});
   }
 }
 
-const deliverableStoreCard = name => (state.store?.cards || []).find(card => card.name === name) || null;
+/* 同名技能可能来自不同同事：仅在唯一命中，或唯一命中成品作者自己的上架时直接关联；
+   有多个其他同事的同名候选时不猜测来源，让用户点击搜索自行挑选。 */
+const deliverableSkillCandidates = name => (state.store?.cards || []).filter(card => card.name === name);
+function deliverableStoreCard(row, name) {
+  const candidates = deliverableSkillCandidates(name);
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length > 1 && row?.member?.id) {
+    const byAuthor = candidates.filter(card => (card.listings || []).some(item => item.member?.id === row.member.id));
+    if (byAuthor.length === 1) return byAuthor[0];
+  }
+  return null;
+}
+
+const deliverableQueueingKeys = new Set();
 
 function deliverableInstallableMissing(row) {
   const seen = new Set();
   const out = [];
   for (const skill of row?.skills || []) {
     if (skill.installed || !skill.in_store) continue;
-    const card = deliverableStoreCard(skill.name);
+    const card = deliverableStoreCard(row, skill.name);
     if (!card || card.local?.status !== 'installable' || seen.has(card.key)) continue;
+    if (deliverableQueueingKeys.has(card.key)) continue;
     const queued = storeQueueItem(card.key);
-    if (queued && queueActive(queued)) continue;
+    if (queued && (queueActive(queued) || queued.status === 'done')) continue;
     seen.add(card.key);
     out.push(card);
   }
@@ -4946,8 +4977,10 @@ function deliverableInstallableMissing(row) {
 function deliverableQueueingMissing(row) {
   return (row?.skills || []).some(skill => {
     if (skill.installed || !skill.in_store) return false;
-    const card = deliverableStoreCard(skill.name);
-    const queued = card && storeQueueItem(card.key);
+    const card = deliverableStoreCard(row, skill.name);
+    if (!card) return false;
+    if (deliverableQueueingKeys.has(card.key)) return true;
+    const queued = storeQueueItem(card.key);
     return Boolean(queued && queueActive(queued));
   });
 }
@@ -4957,23 +4990,32 @@ async function queueDeliverableMissing(key, button) {
   if (!row || teamReadOnly() || jobsBlocked()) return;
   const targets = deliverableInstallableMissing(row);
   if (!targets.length) return;
+  for (const card of targets) deliverableQueueingKeys.add(card.key);
   await withBusy(button, '正在加入…', async () => {
-    let lastResult = null, added = 0, lastError = null;
+    let added = 0;
+    const failures = [];
     for (const card of targets) {
       try {
-        lastResult = await addToStoreQueue({key: card.key});
+        const result = await addToStoreQueue({key: card.key});
         added += 1;
+        applyQueue(result, {force: true});
       } catch (error) {
-        lastError = error;
+        failures.push({title: storeTitle(card), message: error.message || '未能加入安装队列', error_id: error.error_id});
+      } finally {
+        deliverableQueueingKeys.delete(card.key);
       }
     }
-    if (lastResult) applyQueue(lastResult, {force: true});
-    if (lastError) {
-      toast({error_id: lastError.error_id, text: lastError.message || '部分缺失技能没能加入安装队列。', tone: 'error', sticky: true});
+    if (failures.length) {
+      const detail = failures.length === 1
+        ? failures[0].message
+        : failures.map(item => `${item.title}（${item.message}）`).join('；');
+      const prefix = added ? `已加入 ${number(added)} 个，另有 ${number(failures.length)} 个没能加入：` : '';
+      toast({error_id: failures[0].error_id, text: `${prefix}${detail}`, tone: 'error', sticky: true});
     } else if (added) {
       toast({text: `已将 ${number(added)} 个缺失技能加入安装队列。`});
     }
   });
+  renderTeam();
   if (!button.isConnected) {
     $('store-shelves').querySelector(`[data-deliverable-card="${CSS.escape(key)}"] .deliverable-actions a, [data-deliverable-card="${CSS.escape(key)}"] .deliverable-actions button`)?.focus({preventScroll: true});
   }
@@ -5006,11 +5048,16 @@ function deliverableCardHtml(row) {
     ? deliverableCoverHtml(row)
     : `<div class="deliverable-fallback"><div class="deliverable-fallback-top"><span class="tag tag-quiet">成品演示</span></div><p class="deliverable-fallback-title">${escape(row.title)}</p></div>`;
   const skills = skillRows.map(skill => {
-    const card = typeof deliverableStoreCard === 'function' ? deliverableStoreCard(skill.name) : null;
+    const card = typeof deliverableStoreCard === 'function' ? deliverableStoreCard(row, skill.name) : null;
+    const candidates = !card && typeof deliverableSkillCandidates === 'function' ? deliverableSkillCandidates(skill.name) : [];
     const inner = `${skill.installed ? icon('check-circle') : '<span class="deliverable-dot" aria-hidden="true"></span>'}<span class="mono">${escape(skill.name)}</span><span class="sr-only">${skill.installed ? '已安装' : '未安装'}</span>`;
-    return card
-      ? `<li><button class="deliverable-skill deliverable-skill-btn${skill.installed ? ' is-installed' : ''}" type="button" data-store-open="${escape(card.key)}" title="${escape(`查看「${skill.name}」详情`)}">${inner}</button></li>`
-      : `<li class="deliverable-skill${skill.installed ? ' is-installed' : ''}">${inner}</li>`;
+    if (card) {
+      return `<li><button class="deliverable-skill deliverable-skill-btn${skill.installed ? ' is-installed' : ''}" type="button" data-store-open="${escape(card.key)}" title="${escape(`查看「${skill.name}」详情`)}">${inner}</button></li>`;
+    }
+    if (candidates.length > 1) {
+      return `<li><button class="deliverable-skill deliverable-skill-btn${skill.installed ? ' is-installed' : ''}" type="button" data-deliverable-find="${escape(skill.name)}" title="${escape(`商店里有 ${candidates.length} 个同名技能，点此搜索选择来源`)}">${inner}</button></li>`;
+    }
+    return `<li class="deliverable-skill${skill.installed ? ' is-installed' : ''}">${inner}</li>`;
   }).join('');
   const quickInstall = installable.length
     ? `<button class="btn btn-small" type="button" data-deliverable-install-missing="${escape(row.key)}"${
@@ -5053,7 +5100,7 @@ function cleanTeardown(data) {
   const items = new Map();
   for (const raw of Array.isArray(data?.items) ? data.items.slice(0, 200) : []) {
     const id = typeof raw?.id === 'string' && COMMAND_NAME.test(raw.id) ? raw.id : '';
-    if (!id || items.has(id) || !KIND_LABEL[raw.kind]) continue;
+    if (!id || items.has(id) || !Object.hasOwn(KIND_LABEL, raw.kind)) continue;
     items.set(id, {id, kind: raw.kind, name: clip(raw.name, 80) || id, summary: clip(raw.summary, 400),
       process: clip(raw.process, 400), check: typeof raw.check === 'string' && COMMAND_NAME.test(raw.check) ? raw.check : '',
       mac: clip(raw.install?.mac, 300), win: clip(raw.install?.win, 300), without: clip(raw.without, 300)});
@@ -5446,16 +5493,17 @@ function storeHintsHtml() {
 }
 
 function renderStoreAll(cards) {
+  if (!cards) {
+    $('store-all').hidden = true;
+    $('store-hints').innerHTML = '';
+    return;
+  }
   const query = storeQuery();
-  const base = cards?.length ? storeFilter(cards, {query, mine: state.storeMine}) : [];
-  const onlyDeliverableHits = Boolean(query && !state.storeMine && !state.storeGroup
-    && !base.length && storeDeliverableMatches(query).length);
-  const showAll = Boolean(cards?.length) && (
-    state.storeMine
-    || (Boolean(query) && !onlyDeliverableHits)
-    || state.storeView === 'skills'
-    || (state.storeView === 'overview' && cards.length < SHELF_MIN)
-  );
+  const base = storeFilter(cards, {query, mine: state.storeMine});
+  const deliverableHits = query && !state.storeMine ? storeDeliverableMatches(query).length : 0;
+  const showAll = state.storeMine
+    || (Boolean(query) && (base.length > 0 || !deliverableHits))
+    || (Boolean(cards.length) && (state.storeView === 'skills' || (state.storeView === 'overview' && cards.length < SHELF_MIN)));
   $('store-all').hidden = !showAll;
   $('store-hints').innerHTML = showAll && state.storeMine ? storeHintsHtml() : '';
   if (!showAll) return;
@@ -5496,7 +5544,7 @@ function renderStoreAll(cards) {
     : `<div class="empty">${empty}</div>`;
 }
 
-function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTop = false} = {}) {
+function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTop = false, focusTarget = false} = {}) {
   state.storeView = view || 'overview';
   state.storeMine = false;
   if (clearSearch) $('store-search').value = '';
@@ -5505,6 +5553,16 @@ function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTo
   renderTeam();
   if (scrollTop && window.scrollY > 96) {
     window.scrollTo({top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
+  }
+  if (focusTarget) {
+    const heading = state.storeView === 'skills' && !$('store-all').hidden
+      ? $('store-all-title')
+      : $('store-shelves').querySelector('h2')
+        || $('store-views').querySelector(`[data-store-view="${CSS.escape(state.storeView)}"]:not([hidden])`);
+    if (heading) {
+      if (!heading.hasAttribute('tabindex') && heading.tagName === 'H2') heading.setAttribute('tabindex', '-1');
+      heading.focus({preventScroll: true});
+    }
   }
 }
 
@@ -5546,7 +5604,7 @@ $('store-shelves').addEventListener('error', event => {
   const box = img.closest('[data-deliverable-cover]');
   if (!box) return;
   const row = (state.store?.deliverables || []).find(item => item.key === box.dataset.deliverableCover);
-  if (row) deliverableCovers.set(deliverableCoverKey(row), {status: 'none', url: '', alt: ''});
+  if (row) deliverableCovers.set(deliverableCoverKey(row), {status: 'failed', url: '', alt: '', at: Date.now()});
   box.innerHTML = row ? deliverableFallbackHtml(row) : '';
 }, true);
 
@@ -5583,6 +5641,7 @@ $('store-mine').addEventListener('click', async () => {
 
 async function reloadStorePage(button) {
   await withBusy(button, '', async () => {
+    deliverableCovers.clear();
     await enterTeam();
     if (state.storeMine || storeCandidates) await loadCandidates().catch(() => { forgetCandidates(); });
     renderTeam();
@@ -5645,6 +5704,7 @@ $('page-team').addEventListener('click', event => {
   const gotoView = event.target.closest('[data-store-goto-view]');
   const spotDeliverable = event.target.closest('[data-deliverable-spot]');
   const installMissing = event.target.closest('[data-deliverable-install-missing]');
+  const findSkill = event.target.closest('[data-deliverable-find]');
   const boardTab = event.target.closest('[data-board-tab]');
   const githubFilter = event.target.closest('[data-github-filter]');
   const retry = event.target.closest('[data-store-queue-retry]');
@@ -5666,6 +5726,12 @@ $('page-team').addEventListener('click', event => {
     $('store-shelves').querySelector(`[data-deliverable-spot="${CSS.escape(key)}"]`)?.focus({preventScroll: true});
   } else if (installMissing) {
     queueDeliverableMissing(installMissing.dataset.deliverableInstallMissing, installMissing);
+  } else if (findSkill) {
+    state.storeMine = false;
+    state.storeGroup = '';
+    $('store-search').value = findSkill.dataset.deliverableFind;
+    renderTeam();
+    $('store-search').focus({preventScroll: true});
   } else if (boardTab) {
     const tab = boardTab.dataset.boardTab;
     state.storeBoardTab = tab;
@@ -5677,7 +5743,7 @@ $('page-team').addEventListener('click', event => {
     renderTeam();
     $('store-shelves').querySelector(`[data-github-filter="${CSS.escape(filter)}"]`)?.focus({preventScroll: true});
   } else if (gotoView) {
-    setStoreView(gotoView.dataset.storeGotoView, {group: '', scrollTop: true});
+    setStoreView(gotoView.dataset.storeGotoView, {group: '', scrollTop: true, focusTarget: true});
   } else if (goto) gotoStoreSkill(goto);
   else if (gotoTags) gotoStoreTag(gotoTags.dataset.storeGotoTag);
   else if (retry) retryStoreQueue(retry.dataset.storeQueueRetry, retry);
@@ -5694,10 +5760,9 @@ $('page-team').addEventListener('click', event => {
     renderStoreQueue();
     $('store-queue').querySelector(`[data-store-queue-pack="${CSS.escape(key)}"]`)?.focus();
   } else if (more?.dataset.storeMore === 'packs') {
-    setStoreView('packs', {group: '', scrollTop: true});
+    setStoreView('packs', {group: '', scrollTop: true, focusTarget: true});
   } else if (more) {
-    setStoreView('skills', {sort: more.dataset.storeMore, group: '', scrollTop: true});
-    $('store-all-title').focus({preventScroll: true});
+    setStoreView('skills', {sort: more.dataset.storeMore, group: '', scrollTop: true, focusTarget: true});
   } else if (publish) openPublish();
   else if (missing) openPublish((storeCandidateData?.skills || [])
     .filter(item => item.listed && item.missing_requires?.length).map(item => item.name));

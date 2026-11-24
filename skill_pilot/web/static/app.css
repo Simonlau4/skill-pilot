@@ -1770,7 +1770,7 @@ pre {
 }
 .team-rail-group:hover { background: var(--panel); color: var(--ink); }
 .team-rail-group[aria-pressed="true"] { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-1); }
-.team-main { min-width: 0; }
+.team-main { min-width: 0; container: team-main / inline-size; }
 
 .store-bar { margin-top: 0; }
 .store-bar .search-field { max-width: 560px; }
@@ -1817,9 +1817,8 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .shelf-note { font-size: var(--fs-small); color: var(--muted); }
 .deliverable-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }
 .deliverable-card {
-  container: deliverable-card / inline-size;
   display: grid;
-  grid-template-columns: minmax(250px, 1fr) minmax(0, 1.35fr);
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 1.35fr);
   gap: var(--sp-5);
   padding: var(--sp-5);
   background: var(--panel);
@@ -1867,9 +1866,8 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .deliverable-skill .ico { width: 13px; height: 13px; color: #0F7C6E; }
 .deliverable-dot { width: 9px; height: 9px; border-radius: 999px; border: 1.5px dashed var(--line-strong); box-sizing: border-box; flex: none; }
 .deliverable-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: auto; padding-top: var(--sp-2); }
-@container deliverable-card (inline-size < 600px) {
-  .deliverable-card { grid-template-columns: minmax(0, 1fr); }
-}
+.deliverable-skill { max-width: 100%; }
+.deliverable-skill .mono { min-width: 0; overflow-wrap: anywhere; }
 
 /* 方案 B 工作台区块：技能包双列宽条、双列精选榜、GitHub 快讯与筛选网格 */
 .shelf-head-group { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -1921,6 +1919,16 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .store-gh-meta { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-small); color: var(--muted); }
 .store-gh-actions { display: flex; align-items: center; gap: var(--sp-2); justify-content: flex-end; flex: none; }
 .store-gh-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-4); }
+@container team-main (inline-size < 760px) {
+  .store-duo-board { grid-template-columns: minmax(0, 1fr); }
+  .store-duo-col + .store-duo-col { border-left: 0; border-top: 1px solid var(--line); }
+}
+@container team-main (inline-size < 680px) {
+  .deliverable-card { grid-template-columns: minmax(0, 1fr); }
+  .store-pack-strips, .store-gh-grid { grid-template-columns: minmax(0, 1fr); }
+  .store-gh-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .store-gh-meta { grid-column: 1 / -1; grid-row: 2; }
+}
 @media (max-width: 720px) { .deliverable-list { grid-template-columns: 1fr; } }
 
 /* 成品对话框：按屏看 / 按技能和工具看 / 照着做一份 */
@@ -2381,10 +2389,6 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
   .store-pack-by { display: none; }
   .store-list-inner.is-mine .store-row { grid-template-columns: minmax(0, 1fr) var(--store-rating-col) 240px; }
   .store-row-by { display: none; }
-  .store-pack-strips, .store-duo-board, .store-gh-grid { grid-template-columns: minmax(0, 1fr); }
-  .store-duo-col + .store-duo-col { border-left: 0; border-top: 1px solid var(--line); }
-  .store-gh-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .store-gh-meta { grid-column: 1 / -1; grid-row: 2; }
 }
 @media (max-width: 1023px) {
   .team-split { grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }

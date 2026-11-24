@@ -724,19 +724,19 @@
     <div id="team-ready" class="team-split">
       <aside id="team-rail" class="rail team-rail" aria-label="团队商店目录">
         <div id="store-views" class="rail-list" role="tablist" aria-label="团队商店分区" aria-orientation="vertical">
-          <button class="rail-item team-rail-item" type="button" role="tab" data-store-view="overview" aria-selected="true">
+          <button id="store-tab-overview" class="rail-item team-rail-item" type="button" role="tab" data-store-view="overview" aria-controls="team-tabpanel" aria-selected="true">
             <span class="team-rail-label">精选总览</span>
           </button>
-          <button class="rail-item team-rail-item" type="button" role="tab" data-store-view="deliverables" aria-selected="false" hidden>
+          <button id="store-tab-deliverables" class="rail-item team-rail-item" type="button" role="tab" data-store-view="deliverables" aria-controls="team-tabpanel" aria-selected="false" hidden>
             <span class="team-rail-label">成品案例</span><span id="store-nav-deliverables-n" class="team-rail-count"></span>
           </button>
-          <button class="rail-item team-rail-item" type="button" role="tab" data-store-view="packs" aria-selected="false" hidden>
+          <button id="store-tab-packs" class="rail-item team-rail-item" type="button" role="tab" data-store-view="packs" aria-controls="team-tabpanel" aria-selected="false" hidden>
             <span class="team-rail-label">技能包</span><span id="store-nav-packs-n" class="team-rail-count"></span>
           </button>
-          <button class="rail-item team-rail-item" type="button" role="tab" data-store-view="skills" aria-selected="false">
+          <button id="store-tab-skills" class="rail-item team-rail-item" type="button" role="tab" data-store-view="skills" aria-controls="team-tabpanel" aria-selected="false">
             <span class="team-rail-label">全部技能</span><span id="store-nav-skills-n" class="team-rail-count"></span>
           </button>
-          <button class="rail-item team-rail-item" type="button" role="tab" data-store-view="github" aria-selected="false" hidden>
+          <button id="store-tab-github" class="rail-item team-rail-item" type="button" role="tab" data-store-view="github" aria-controls="team-tabpanel" aria-selected="false" hidden>
             <span class="team-rail-label">GitHub 热门</span><span id="store-nav-github-n" class="team-rail-count"></span>
           </button>
         </div>
@@ -775,21 +775,23 @@
           </div>
           <div id="store-queue-items" class="list" aria-live="polite"></div>
         </div>
-        <div id="store-shelves"></div>
-        <section id="store-all" class="store-all" aria-labelledby="store-all-title">
-          <div class="store-all-head">
-            <h2 id="store-all-title" tabindex="-1">全部技能</h2>
-            <span id="store-count" class="store-count"></span>
-            <div id="store-sort" class="segmented" role="group" aria-label="排序">
-              <button class="seg" type="button" data-store-sort="latest" aria-pressed="true">最新上架</button>
-              <button class="seg" type="button" data-store-sort="rating" aria-pressed="false">最受好评</button>
-              <button class="seg" type="button" data-store-sort="installs" aria-pressed="false">安装最多</button>
+        <div id="team-tabpanel" role="tabpanel" aria-labelledby="store-tab-overview">
+          <div id="store-shelves"></div>
+          <section id="store-all" class="store-all" aria-labelledby="store-all-title">
+            <div class="store-all-head">
+              <h2 id="store-all-title" tabindex="-1">全部技能</h2>
+              <span id="store-count" class="store-count"></span>
+              <div id="store-sort" class="segmented" role="group" aria-label="排序">
+                <button class="seg" type="button" data-store-sort="latest" aria-pressed="true">最新上架</button>
+                <button class="seg" type="button" data-store-sort="rating" aria-pressed="false">最受好评</button>
+                <button class="seg" type="button" data-store-sort="installs" aria-pressed="false">安装最多</button>
+              </div>
             </div>
-          </div>
-          <div id="store-groups" class="store-groups" role="group" aria-label="按分组筛选"></div>
-          <div id="store-hints"></div>
-          <div id="store-list" class="store-list"></div>
-        </section>
+            <div id="store-groups" class="store-groups" role="group" aria-label="按分组筛选"></div>
+            <div id="store-hints"></div>
+            <div id="store-list" class="store-list"></div>
+          </section>
+        </div>
       </div>
     </div>
   </section>
