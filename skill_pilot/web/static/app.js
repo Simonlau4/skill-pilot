@@ -4787,10 +4787,6 @@ function renderTeamRail(cards) {
     button.setAttribute('aria-selected', String(selected));
     button.tabIndex = (activeView ? selected : view === state.storeView) ? 0 : -1;
   }
-  const panel = $('team-tabpanel');
-  if (panel) {
-    panel.setAttribute('aria-labelledby', state.storeMine ? 'store-mine' : storeQuery() ? 'store-all-title' : `store-tab-${state.storeView}`);
-  }
   $('store-nav-deliverables-n').textContent = counts.deliverables ? number(counts.deliverables) : '';
   $('store-nav-packs-n').textContent = counts.packs ? number(counts.packs) : '';
   $('store-nav-skills-n').textContent = counts.skills ? number(counts.skills) : '';
@@ -4831,6 +4827,14 @@ function renderTeam() {
   renderStoreUpdateButton();
   renderStoreShelves(cards);
   renderStoreAll(cards);
+  const panel = $('team-tabpanel');
+  if (panel) {
+    panel.setAttribute('aria-labelledby', state.storeMine
+      ? 'store-mine'
+      : storeQuery()
+        ? (!$('store-all').hidden ? 'store-all-title' : ($('store-shelves').querySelector('h2[id]')?.id || 'store-all-title'))
+        : `store-tab-${state.storeView}`);
+  }
   renderStoreQueue();
 }
 
@@ -4884,6 +4888,7 @@ function renderStoreShelves(cards) {
 /* 成品封面缓存：只读本机同源代理的拆解首屏截图，没有拆解或读不到时回退结构化预览面板。 */
 const deliverableCovers = new Map();
 const DELIVERABLE_COVER_RETRY_MS = 60000;
+let deliverableCoverSequence = 0;
 function deliverableBaseUrl(row) {
   return typeof row?.open_url === 'string'
     && /^\/d\/[0-9a-f]{32}\/[0-9a-f]{32}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\/$/.test(row.open_url)
@@ -4924,14 +4929,17 @@ async function loadDeliverableCover(row) {
   const cached = deliverableCovers.get(cacheKey);
   if (cached && (cached.status === 'loading' || cached.status === 'ready' || cached.status === 'empty'
     || (cached.status === 'failed' && Date.now() - (cached.at || 0) < DELIVERABLE_COVER_RETRY_MS))) return;
-  deliverableCovers.set(cacheKey, {status: 'loading', url: '', alt: '', at: Date.now()});
+  const seq = ++deliverableCoverSequence;
+  deliverableCovers.set(cacheKey, {status: 'loading', seq, url: '', alt: '', at: Date.now()});
   try {
     const response = await fetch(`${base}_teardown/teardown.json`, {cache: 'no-store'});
-    if (!response.ok) { deliverableCovers.set(cacheKey, {status: 'failed', url: '', alt: '', at: Date.now()}); return; }
+    if (deliverableCovers.get(cacheKey)?.seq !== seq) return;
+    if (!response.ok) { deliverableCovers.set(cacheKey, {status: 'failed', seq, url: '', alt: '', at: Date.now()}); return; }
     const teardown = cleanTeardown(await response.json());
+    if (deliverableCovers.get(cacheKey)?.seq !== seq) return;
     const first = teardown.screens.find(screen => screen.image);
-    if (!first) { deliverableCovers.set(cacheKey, {status: 'empty', url: '', alt: '', at: Date.now()}); return; }
-    const entry = {status: 'ready', url: base + first.image, alt: first.title || row.title || '', at: Date.now()};
+    if (!first) { deliverableCovers.set(cacheKey, {status: 'empty', seq, url: '', alt: '', at: Date.now()}); return; }
+    const entry = {status: 'ready', seq, url: base + first.image, alt: first.title || row.title || '', at: Date.now()};
     deliverableCovers.set(cacheKey, entry);
     if (state.page !== 'team') return;
     for (const box of $('store-shelves').querySelectorAll(`[data-deliverable-cover="${CSS.escape(row.key)}"]`)) {
@@ -4939,7 +4947,8 @@ async function loadDeliverableCover(row) {
       box.innerHTML = `<img class="deliverable-cover-img" src="${escape(entry.url)}" alt="${escape(entry.alt)}" loading="lazy">`;
     }
   } catch {
-    deliverableCovers.set(cacheKey, {status: 'failed', url: '', alt: '', at: Date.now()});
+    if (deliverableCovers.get(cacheKey)?.seq !== seq) return;
+    deliverableCovers.set(cacheKey, {status: 'failed', seq, url: '', alt: '', at: Date.now()});
   }
 }
 
@@ -4996,6 +5005,10 @@ async function queueDeliverableMissing(key, button) {
     const failures = [];
     for (const card of targets) {
       try {
+        const latest = (state.store?.cards || []).find(item => item.key === card.key);
+        const queued = storeQueueItem(card.key);
+        if ((latest && latest.local?.status !== 'installable')
+          || (queued && (queueActive(queued) || queued.status === 'done'))) continue;
         const result = await addToStoreQueue({key: card.key});
         added += 1;
         applyQueue(result, {force: true});
@@ -5100,7 +5113,7 @@ function cleanTeardown(data) {
   const items = new Map();
   for (const raw of Array.isArray(data?.items) ? data.items.slice(0, 200) : []) {
     const id = typeof raw?.id === 'string' && COMMAND_NAME.test(raw.id) ? raw.id : '';
-    if (!id || items.has(id) || !Object.hasOwn(KIND_LABEL, raw.kind)) continue;
+    if (!id || items.has(id) || typeof raw?.kind !== 'string' || !Object.hasOwn(KIND_LABEL, raw.kind)) continue;
     items.set(id, {id, kind: raw.kind, name: clip(raw.name, 80) || id, summary: clip(raw.summary, 400),
       process: clip(raw.process, 400), check: typeof raw.check === 'string' && COMMAND_NAME.test(raw.check) ? raw.check : '',
       mac: clip(raw.install?.mac, 300), win: clip(raw.install?.win, 300), without: clip(raw.without, 300)});
@@ -5500,10 +5513,13 @@ function renderStoreAll(cards) {
   }
   const query = storeQuery();
   const base = storeFilter(cards, {query, mine: state.storeMine});
+  const rows = storeFilter(base, {group: state.storeGroup}).sort(STORE_SORTS[state.storeSort] || STORE_SORTS.latest);
   const deliverableHits = query && !state.storeMine ? storeDeliverableMatches(query).length : 0;
   const showAll = state.storeMine
-    || (Boolean(query) && (base.length > 0 || !deliverableHits))
-    || (Boolean(cards.length) && (state.storeView === 'skills' || (state.storeView === 'overview' && cards.length < SHELF_MIN)));
+    ? true
+    : query
+      ? (rows.length > 0 || !deliverableHits)
+      : Boolean(cards.length) && (state.storeView === 'skills' || (state.storeView === 'overview' && cards.length < SHELF_MIN));
   $('store-all').hidden = !showAll;
   $('store-hints').innerHTML = showAll && state.storeMine ? storeHintsHtml() : '';
   if (!showAll) return;
@@ -5514,7 +5530,6 @@ function renderStoreAll(cards) {
     `<button class="store-group" type="button" data-store-group="${escape(name)}" aria-pressed="${name === state.storeGroup}">${
       escape(name === '' ? '全部' : name === '-' ? '未分组' : name)}<span class="n">${number(count)}</span></button>`).join(''), 'data-store-group');
   $('store-groups').hidden = groups.length < 2 && !state.storeGroup;
-  const rows = storeFilter(base, {group: state.storeGroup}).sort(STORE_SORTS[state.storeSort] || STORE_SORTS.latest);
   $('store-all-title').textContent = state.storeMine ? '我的上架' : query ? '搜索结果' : '全部技能';
   $('store-count').textContent = `${number(rows.length)} 个`;
   for (const button of $('store-sort').querySelectorAll('[data-store-sort]')) {
@@ -5641,6 +5656,7 @@ $('store-mine').addEventListener('click', async () => {
 
 async function reloadStorePage(button) {
   await withBusy(button, '', async () => {
+    deliverableCoverSequence += 1;
     deliverableCovers.clear();
     await enterTeam();
     if (state.storeMine || storeCandidates) await loadCandidates().catch(() => { forgetCandidates(); });

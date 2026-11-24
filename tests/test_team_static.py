@@ -1296,6 +1296,7 @@ if (storePackIntroHtml({...pack, mine: true}) !== '') fail('自己的包没写�
             line(source, 'const githubRepos = '),
             line(source, 'const deliverableCovers = '),
             line(source, 'const DELIVERABLE_COVER_RETRY_MS = '),
+            line(source, 'let deliverableCoverSequence = '),
             extract_function(source, 'function deliverableBaseUrl('),
             line(source, 'const deliverableCoverKey = '),
             line(source, 'const deliverableSkillCandidates = '),
@@ -1433,6 +1434,7 @@ if (storeDeliverableMatches('提案').length !== 1 || storeDeliverableMatches('o
             line(source, 'const githubRepo = '),
             line(source, 'const deliverableCovers = '),
             line(source, 'const DELIVERABLE_COVER_RETRY_MS = '),
+            line(source, 'let deliverableCoverSequence = '),
             extract_function(source, 'function deliverableBaseUrl('),
             line(source, 'const deliverableCoverKey = '),
             line(source, 'const deliverableSkillCandidates = '),
@@ -1500,27 +1502,35 @@ assert.equal(deliverableStoreCard(carolDel, 'dup'), null, '第三方成品遇多
 assert.equal(deliverableInstallableMissing(carolDel).length, 0, '不明确来源时不该一键自动安装');
 assert.ok(deliverableCardHtml(carolDel).includes('data-deliverable-find="dup"'), '多候选技能应允许搜索挑选');
 
-// 2. 批量补齐逐项即时同步队列、已 done 不重复排、多项失败完整汇报
+// 2. 批量补齐逐项即时同步队列、提交前重查已完成项、多项失败完整汇报
 state.queue.items = [{key: 'team:bob:three', status: 'done'}];
 assert.deepEqual(deliverableInstallableMissing(bobDel).map(c => c.key), ['team:bob:dup', 'team:bob:two'], '队列已 done 的不应再重复补齐');
 state.queue.items = [];
-const applied = [], toasts = [];
+const applied = [], queuedCalls = [], toasts = [];
 const applyQueue = (r) => { applied.push(r.seq); state.queue = r; };
 const toast = t => toasts.push(t);
 let releaseSecond;
 const addToStoreQueue = ({key}) => {
-  if (key === 'team:bob:dup') return Promise.resolve({seq: 1, items: [{key, status: 'waiting'}]});
-  return new Promise((_, reject) => { releaseSecond = () => reject(new Error('第二项失败')); });
+  queuedCalls.push(key);
+  if (key === 'team:bob:dup') {
+    // 第一项返回时，三号技能已被别处装完：循环走到三号时必须跳过，不能再发请求
+    return Promise.resolve({seq: 1, items: [{key: 'team:bob:dup', status: 'waiting'}, {key: 'team:bob:three', status: 'done'}]});
+  }
+  if (key === 'team:bob:two') return new Promise((_, reject) => { releaseSecond = () => reject(new Error('第二项失败')); });
+  return Promise.reject(new Error('不应再为已完成的 ' + key + ' 发起请求'));
 };
+let finished = false;
+process.on('beforeExit', () => { if (!finished) { console.error('ASYNC TEST DID NOT COMPLETE'); process.exit(1); } });
 (async () => {
   const pending = queueDeliverableMissing('d:bob', {isConnected: true});
   await new Promise(r => setTimeout(r, 10));
   assert.deepEqual(applied, [1], '第一项成功后应立刻同步队列，不能等第二项');
   releaseSecond();
   await pending;
+  assert.deepEqual(queuedCalls, ['team:bob:dup', 'team:bob:two'], '提交前重查最新队列应跳过已完成的第三项');
   assert.ok(toasts.at(-1)?.text.includes('已加入 1 个') && toasts.at(-1)?.text.includes('第二项失败'), '部分失败应报告成功数和失败原因');
 
-  // 3. 空商店搜索与「我的上架」不空白；带分组筛选的仅成品命中不误报未找到技能
+  // 3. 空商店搜索与「我的上架」不空白；从全部技能/小商店/带分组筛选搜索仅命中成品不误报未找到技能
   state.store.cards = [];
   els['store-search'].value = '不存在的词';
   renderStoreShelves([]); renderStoreAll([]);
@@ -1531,29 +1541,33 @@ const addToStoreQueue = ({key}) => {
   assert.equal(els['store-all'].hidden, false, '空商店打开我的上架应显示空状态而非空白');
   state.storeMine = false;
   state.store.cards = [bobCard];
-  state.storeGroup = '文案';
-  els['store-search'].value = 'Bob成品';
-  renderStoreShelves(state.store.cards); renderStoreAll(state.store.cards);
-  assert.ok(els['store-shelves'].innerHTML.includes('匹配的成品'));
-  assert.equal(els['store-all'].hidden, true, '仅命中成品时即使曾选过分组也不该误报未找到技能');
-  els['store-search'].value = ''; state.storeGroup = '';
+  for (const view of ['skills', 'overview']) {
+    state.storeView = view;
+    state.storeGroup = '文案';
+    els['store-search'].value = 'Bob成品';
+    renderStoreShelves(state.store.cards); renderStoreAll(state.store.cards);
+    assert.ok(els['store-shelves'].innerHTML.includes('匹配的成品'));
+    assert.equal(els['store-all'].hidden, true, view + ' 视图带分组筛选仅命中成品时不该显示未找到匹配技能');
+  }
+  els['store-search'].value = ''; state.storeGroup = ''; state.storeView = 'overview';
 
-  // 4. 封面失败后手动清空缓存或过有效期可重试；cleanTeardown 拒绝原型属性 kind
-  assert.equal(cleanTeardown({items: [{id: 'x', kind: 'toString'}]}).items.size, 0, '原型键不能通过类别校验');
-  let fetches = 0;
-  global.fetch = async () => {
-    fetches += 1;
-    if (fetches === 1) return {ok: false};
-    return {ok: true, json: async () => ({items: [], screens: [{image: '_teardown/s1.png', title: '首屏'}]})};
+  // 4. 封面失败可重试、刷新后旧慢请求失败不能覆盖新 ready 缓存；cleanTeardown 拒绝原型键与非字符串数组
+  assert.equal(cleanTeardown({items: [{id: 'x', kind: 'toString'}, {id: 'y', kind: ['skill']}]}).items.size, 0, '非字符串或原型键不能通过类别校验');
+  let resolveSlowFail;
+  let fetchCount = 0;
+  global.fetch = () => {
+    fetchCount += 1;
+    if (fetchCount === 1) return new Promise(resolve => { resolveSlowFail = () => resolve({ok: false}); });
+    return Promise.resolve({ok: true, json: async () => ({items: [], screens: [{image: '_teardown/s1.png', title: '首屏'}]})});
   };
-  await loadDeliverableCover(bobDel);
-  assert.equal(deliverableCovers.get(deliverableCoverKey(bobDel)).status, 'failed');
-  await loadDeliverableCover(bobDel);
-  assert.equal(fetches, 1, '失败有效期内不重复刷接口');
+  const slowReq = loadDeliverableCover(bobDel);
+  deliverableCoverSequence += 1;
   deliverableCovers.clear();
   await loadDeliverableCover(bobDel);
-  assert.equal(fetches, 2, '刷新清空缓存后应重试封面');
-  assert.equal(deliverableCovers.get(deliverableCoverKey(bobDel)).status, 'ready');
+  assert.equal(deliverableCovers.get(deliverableCoverKey(bobDel)).status, 'ready', '刷新后的新请求应写入 ready');
+  resolveSlowFail();
+  await slowReq;
+  assert.equal(deliverableCovers.get(deliverableCoverKey(bobDel)).status, 'ready', '旧请求晚到失败不能覆盖新 ready 封面');
 
   // 5. 实际执行 updateGithubCard：紧凑行与完整卡焦点停在「打开 GitHub」外链时均能恢复
   state.store.github = {repos: [{repository: 'acme/x', url: 'https://github.com/acme/x', stars: 9,
@@ -1577,6 +1591,7 @@ const addToStoreQueue = ({key}) => {
     assert.equal(replacedWith, nextEl);
     assert.equal(focused, 'a[href]', (compact ? '紧凑行' : '完整卡') + '轮询替换后外链应保留焦点');
   }
+  finished = true;
 })().catch(error => { console.error(error); process.exit(1); });
 '''
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
