@@ -716,51 +716,83 @@
       </div>
     </div>
   </section>
-  <!-- ========== 团队页：团队技能商店。上面几排推荐，下面是全部技能；点开在右侧详情里装上、评价 ========== -->
+  <!-- ========== 团队页：左侧分区目录 + 右侧专注工作台；点开在右侧详情里安装、评价 ========== -->
   <section id="page-team" class="page-section" hidden>
     <div id="team-unset" hidden>
       <div class="empty"><svg class="ico ico-lg" aria-hidden="true" focusable="false"><use href="#sp-team"/></svg><span>尚未连接团队分享站</span><button id="team-setup" type="button" class="link-btn">去设置</button></div>
     </div>
-    <div id="team-ready">
-      <div class="toolbar store-bar">
-        <label class="search-field">
-          <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
-          <input id="store-search" type="search" class="input input-search" placeholder="搜索技能名称、用途或推荐语" aria-label="搜索团队技能" autocomplete="off" spellcheck="false">
-        </label>
-        <span class="toolbar-end">
-          <button id="store-refresh" class="btn btn-iconic btn-quiet" type="button" aria-label="刷新" title="刷新"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg></button>
-          <button id="store-mine" class="btn" type="button" aria-pressed="false"><span>我的上架</span><span id="store-mine-count" class="n"></span></button>
-          <button id="store-update-all" class="btn btn-update" type="button" hidden><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg><span>一键更新</span></button>
-          <button id="store-publish" class="btn btn-primary" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-plus"/></svg><span>上架技能</span></button>
-        </span>
-      </div>
-      <div id="store-error" class="banner banner-danger banner-row" role="alert" hidden>
-        <span id="store-error-text"></span>
-        <span class="banner-actions"><button id="store-retry" class="btn btn-small" type="button">重试</button></span>
-      </div>
-      <div id="store-queue" role="region" aria-labelledby="store-queue-title" hidden>
-        <div class="store-queue-head">
-          <h2 id="store-queue-title" tabindex="-1">安装队列</h2>
-          <span id="store-queue-left" class="store-count"></span>
-          <button id="store-queue-clear" class="btn btn-small btn-quiet" type="button" data-store-queue-clear hidden>清除已完成</button>
+    <div id="team-ready" class="team-split">
+      <aside id="team-rail" class="rail team-rail" aria-label="团队商店目录">
+        <div id="store-views" class="rail-list" role="tablist" aria-label="团队商店分区" aria-orientation="vertical">
+          <button id="store-tab-overview" class="rail-item team-rail-item" type="button" role="tab" data-store-view="overview" aria-controls="team-tabpanel" aria-selected="true">
+            <span class="team-rail-label">精选总览</span>
+          </button>
+          <button id="store-tab-deliverables" class="rail-item team-rail-item" type="button" role="tab" data-store-view="deliverables" aria-controls="team-tabpanel" aria-selected="false" hidden>
+            <span class="team-rail-label">成品案例</span><span id="store-nav-deliverables-n" class="team-rail-count"></span>
+          </button>
+          <button id="store-tab-packs" class="rail-item team-rail-item" type="button" role="tab" data-store-view="packs" aria-controls="team-tabpanel" aria-selected="false" hidden>
+            <span class="team-rail-label">技能包</span><span id="store-nav-packs-n" class="team-rail-count"></span>
+          </button>
+          <button id="store-tab-skills" class="rail-item team-rail-item" type="button" role="tab" data-store-view="skills" aria-controls="team-tabpanel" aria-selected="false">
+            <span class="team-rail-label">全部技能</span><span id="store-nav-skills-n" class="team-rail-count"></span>
+          </button>
+          <button id="store-tab-github" class="rail-item team-rail-item" type="button" role="tab" data-store-view="github" aria-controls="team-tabpanel" aria-selected="false" hidden>
+            <span class="team-rail-label">GitHub 热门</span><span id="store-nav-github-n" class="team-rail-count"></span>
+          </button>
         </div>
-        <div id="store-queue-items" class="list" aria-live="polite"></div>
-      </div>
-      <div id="store-shelves"></div>
-      <section id="store-all" class="store-all" aria-labelledby="store-all-title">
-        <div class="store-all-head">
-          <h2 id="store-all-title" tabindex="-1">全部技能</h2>
-          <span id="store-count" class="store-count"></span>
-          <div id="store-sort" class="segmented" role="group" aria-label="排序">
-            <button class="seg" type="button" data-store-sort="latest" aria-pressed="true">最新上架</button>
-            <button class="seg" type="button" data-store-sort="rating" aria-pressed="false">最受好评</button>
-            <button class="seg" type="button" data-store-sort="installs" aria-pressed="false">安装最多</button>
+        <div class="rail-list team-rail-mine">
+          <button id="store-mine" class="rail-item team-rail-item" type="button" aria-pressed="false">
+            <span class="team-rail-label">我的上架</span><span id="store-mine-count" class="team-rail-count n"></span>
+          </button>
+        </div>
+        <div id="team-rail-groups-wrap" class="team-rail-groups" hidden>
+          <p class="set-nav-title">按分组直达</p>
+          <div id="team-rail-groups" class="team-rail-group-list" role="group" aria-label="按分组直达"></div>
+        </div>
+      </aside>
+
+      <div class="team-main">
+        <div class="toolbar store-bar">
+          <label class="search-field">
+            <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
+            <input id="store-search" type="search" class="input input-search" placeholder="搜索成品、技能名称、用途或推荐语" aria-label="搜索团队技能" autocomplete="off" spellcheck="false">
+          </label>
+          <span class="toolbar-end">
+            <button id="store-refresh" class="btn btn-iconic btn-quiet" type="button" aria-label="刷新" title="刷新"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg></button>
+            <button id="store-update-all" class="btn btn-update" type="button" hidden><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg><span>一键更新</span></button>
+            <button id="store-publish" class="btn btn-primary" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-plus"/></svg><span>上架技能</span></button>
+          </span>
+        </div>
+        <div id="store-error" class="banner banner-danger banner-row" role="alert" hidden>
+          <span id="store-error-text"></span>
+          <span class="banner-actions"><button id="store-retry" class="btn btn-small" type="button">重试</button></span>
+        </div>
+        <div id="store-queue" role="region" aria-labelledby="store-queue-title" hidden>
+          <div class="store-queue-head">
+            <h2 id="store-queue-title" tabindex="-1">安装队列</h2>
+            <span id="store-queue-left" class="store-count"></span>
+            <button id="store-queue-clear" class="btn btn-small btn-quiet" type="button" data-store-queue-clear hidden>清除已完成</button>
           </div>
+          <div id="store-queue-items" class="list" aria-live="polite"></div>
         </div>
-        <div id="store-groups" class="store-groups" role="group" aria-label="按分组筛选"></div>
-        <div id="store-hints"></div>
-        <div id="store-list" class="store-list"></div>
-      </section>
+        <div id="team-tabpanel" role="tabpanel" aria-labelledby="store-tab-overview">
+          <div id="store-shelves"></div>
+          <section id="store-all" class="store-all" aria-labelledby="store-all-title">
+            <div class="store-all-head">
+              <h2 id="store-all-title" tabindex="-1">全部技能</h2>
+              <span id="store-count" class="store-count"></span>
+              <div id="store-sort" class="segmented" role="group" aria-label="排序">
+                <button class="seg" type="button" data-store-sort="latest" aria-pressed="true">最新上架</button>
+                <button class="seg" type="button" data-store-sort="rating" aria-pressed="false">最受好评</button>
+                <button class="seg" type="button" data-store-sort="installs" aria-pressed="false">安装最多</button>
+              </div>
+            </div>
+            <div id="store-groups" class="store-groups" role="group" aria-label="按分组筛选"></div>
+            <div id="store-hints"></div>
+            <div id="store-list" class="store-list"></div>
+          </section>
+        </div>
+      </div>
     </div>
   </section>
 
