@@ -572,8 +572,6 @@ def _counted_local(card, row, state, local_name, registry):
 
 
 def parse_replaces(value, own_name=None):
-    if value is None:
-        return []
     if isinstance(value, str):
         parts = [part for part in re.split(r'[,，、\s]+', value.strip()) if part]
         return team_hub.clean_replaces(parts, own_name=own_name)
@@ -717,7 +715,9 @@ def preview_card_replace(home, card_key):
     root = card['listings'][0]
     state, local_name = _local(root, registry)
     mine = any(r['member']['id'] == member['id'] for r in card['listings']) and root['name'] in registry['skills']
-    if not (mine or state in {'installed', 'update'}):
+    if not mine and state == 'update':
+        raise ValueError('本机仍是旧版，请先更新到新版后再清理被替代的旧技能。')
+    if not (mine or state == 'installed'):
         raise ValueError('请先安装这个新版技能，再清理本机旧版。')
     installed_name = root['name'] if mine else local_name
     replaces, replacement_note = _plan_replaces([root], exclude={installed_name, root['name']})
@@ -735,7 +735,8 @@ def _check_replace_live(home, registry, acting, *, allowed=None, required_presen
         if disallowed:
             raise ValueError('以下技能不在本次已核对的替代清理名单中：' + '、'.join(disallowed) + '。')
     if required_present:
-        missing_new = [n for n in required_present if n not in skills or n in acting]
+        store_dir = Path(home) / '.skill-pilot/store'
+        missing_new = [n for n in required_present if n not in skills or n in acting or not (store_dir / n).is_dir()]
         if missing_new:
             raise ValueError('新版技能尚未独立保存在本机技能库中，已停止清理旧版以免误删唯一副本。')
     if titles is None:
@@ -824,13 +825,22 @@ def cleanup_replaced(home, actions, confirmed=False, expected=None, *, allowed=N
                             locked_check=check_withdraw_live)
         if 'id' in res:
             op_ids.append(res['id'])
+            log_path = home / '.skill-pilot/logs' / (res['id'] + '.json')
+            if log_path.is_file():
+                next_expected = json.loads(log_path.read_text(encoding='utf-8')).get('after_revision', next_expected)
         new_session_agents.extend(res.get('new_session_agents', []))
-        next_expected = operations.revision(home, operations.load(home)[2])
     if delete_names:
         def check_delete_live(current, _agents):
             _check_replace_live(home, current, set(delete_names), allowed=allowed, required_present=required_present)
-        res = cleanup.delete(delete_names, confirmed=True, home=home, expected=next_expected,
-                             locked_check=check_delete_live)
+        try:
+            res = cleanup.delete(delete_names, confirmed=True, home=home, expected=next_expected,
+                                 locked_check=check_delete_live)
+        except ValueError as error:
+            if op_ids:
+                raise ValueError(
+                    f'已先撤下 {len(withdraw_names)} 个旧版技能（可在操作记录中撤销，编号 {op_ids[0]}），'
+                    f'但删除其余旧版未完成：{error}') from None
+            raise
         if 'id' in res:
             op_ids.append(res['id'])
         new_session_agents.extend(res.get('new_session_agents', []))
@@ -1210,14 +1220,20 @@ def package(config, member, name, version, destination):
     return destination
 
 
-def install(home, key):
+def install(home, key, member_id=None):
     home, registry, agents = operations.load(home)
     guard(home / '.skill-pilot', home)
     config, _, cards = _fetch(home)
     card = next((c for c in cards if c['key'] == key), None)
     if card is None:
         raise ValueError('这个技能已经下架。')
-    root = card['listings'][0]
+    if member_id is not None:
+        root = next((r for r in card['listings'] if r['member']['id'] == member_id), None)
+        if root is None:
+            raise ValueError('这位上架人的技能已经下架。')
+        card = {**card, 'listings': [root, *(r for r in card['listings'] if r is not root)]}
+    else:
+        root = card['listings'][0]
     existing = {'installed': [], 'reuse': [], 'message': '本机已经有了。'}
     if _local(root, registry)[0] in {'installed', 'update'}:
         return existing
@@ -1432,9 +1448,11 @@ def listings_preview(home, skills, rejected=None, packs=None):
         raise ValueError('请从本机在用的技能里选择要上架的技能。')
     notes = {s['name']: team_hub.short_text(s.get('note', ''), '推荐语') for s in skills}
     shared = _owned(cards, member['id'])
-    replaces_map, rnotes_map, explicit_clear = {}, {}, set()
+    replaces_map, rnotes_map, explicit_clear, replaces_explicit = {}, {}, set(), set()
     for s in skills:
         name = s['name']
+        if 'replaces' in s or 'replacement_note' in s:
+            replaces_explicit.add(name)
         if 'replaces' in s:
             replaces_map[name] = parse_replaces(s['replaces'], own_name=name)
             if not replaces_map[name]:
@@ -1522,7 +1540,12 @@ def listings_preview(home, skills, rejected=None, packs=None):
                     if version is None:
                         download_note = '同事装的时候从 GitHub 下载。'
             listing = team_hub.clean_listing(listing)
-            payload[name] = {**listing, 'replaces': []} if (name in explicit_clear and info['replaces_supported']) else listing
+            if name in replaces_explicit:
+                payload[name] = ({**listing, 'replaces': []}
+                                 if (name in explicit_clear and info['replaces_supported']) else listing)
+            else:
+                # Omit replaces/replacement_note when not edited so the hub preserves latest server values.
+                payload[name] = {k: v for k, v in listing.items() if k not in {'replaces', 'replacement_note'}}
             public[name] = {**{k: v for k, v in listing.items() if k != 'source'},
                             'title': listing.get('title', name), 'kind': row['kind'],
                             'auto': sorted(auto.get(name, set())), 'files': files_info, 'version': version,
@@ -1801,7 +1824,8 @@ def publish(home, names, notes=None, rejected=None, skip_packs=(), confirmed=Fal
     shared = _owned(cards, member['id'])
     missing = [row['name'] for row in result['listings'] if row['name'] not in shared or
                (row['version'] and shared[row['name']]['source'].get('version') != row['version']) or
-               shared[row['name']].get('replaces', []) != row.get('replaces', [])]
+               ((row['name'] in replaces or row['name'] in clear_replaces) and
+                shared[row['name']].get('replaces', []) != row.get('replaces', []))]
     if missing:
         raise ValueError('上架后分享站没有读到这些技能的新版本：' + '、'.join(missing) + '，请稍后重试。')
     return {**result, 'published': [row['name'] for row in result['listings']],
@@ -1841,11 +1865,15 @@ def find(home, name, author=None):
     title = next((r['title'] for r in card['listings'] if 'title' in r), root['name'])
     state, local_name = _local(root, registry)
     mine = any(r['member']['id'] == member['id'] for r in card['listings']) and root['name'] in registry['skills']
-    base_result = {'key': card['key'], 'name': local_name, 'title': title, 'author': root['member']['name']}
+    base_result = {'key': card['key'], 'name': local_name, 'title': title,
+                   'author': root['member']['name'], 'author_id': root['member']['id']}
     if mine or state in {'installed', 'update'}:
         installed_name = root['name'] if mine else local_name
-        replaces, replacement_note = _plan_replaces([root], exclude={installed_name, root['name']})
-        replaced_local = inspect_replaced_local(home, replaces, registry=registry, agents=agents) if replaces else []
+        if mine or state == 'installed':
+            replaces, replacement_note = _plan_replaces([root], exclude={installed_name, root['name']})
+            replaced_local = inspect_replaced_local(home, replaces, registry=registry, agents=agents) if replaces else []
+        else:
+            replaces, replacement_note, replaced_local = [], '', []
         return {**base_result, 'installed': [], 'reuse': [local_name],
                 **({'replaces': replaces} if replaces else {}),
                 **({'replacement_note': replacement_note} if replacement_note else {}),
@@ -1934,7 +1962,7 @@ def install_named(home, name, author=None, agents=(), confirmed=False, replace_a
     guard(Path(home) / '.skill-pilot', home)
     result = {**plan, 'operations': [], 'message': f'本机已经有「{plan["title"]}」了'}
     if plan['installed']:
-        installed = install(home, plan['key'])
+        installed = install(home, plan['key'], member_id=plan.get('author_id'))
         result.update(installed=installed['installed'], reuse=installed['reuse'], message=installed['message'])
         if 'id' in installed:
             result['operations'].append(installed['id'])
@@ -1954,7 +1982,8 @@ def install_named(home, name, author=None, agents=(), confirmed=False, replace_a
         result['new_session_agents'] = []
     if has_cleanup:
         required = sorted(set(result.get('installed') or []) | {plan['name']})
-        cleaned = cleanup_replaced(home, resolved_actions, confirmed=True,
+        post_rev = operations.revision(home, operations.load(home)[2])
+        cleaned = cleanup_replaced(home, resolved_actions, confirmed=True, expected=post_rev,
                                    allowed=allowed_replaces, required_present=required)
         result['replaced_cleanup'] = cleaned
         result['operations'].extend(cleaned.get('operations', []))

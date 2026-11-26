@@ -2595,20 +2595,24 @@ class Handler(BaseHTTPRequestHandler):
                 entries = [self.server.replace_reviews.get(rid) for rid in review_ids]
             if not entries or any(entry is None for entry in entries):
                 raise ValueError('这份旧版清理核对已失效，请重新打开清理确认。')
+            if any(entry.get('revision') != revision for entry in entries):
+                raise ValueError('本机技能状态已经变了，请重新打开清理确认。')
             allowed = sorted({n for entry in entries for n in entry['allowed']})
             installed = sorted({n for entry in entries for n in entry['installed']})
             with self.server.local_write():
-                result = team.cleanup_replaced(home, body.get('actions'),
-                                               confirmed=body.get('confirmed') is True,
-                                               expected=revision,
-                                               allowed=allowed, required_present=installed)
-                if result.get('operations'):
-                    with self.server.jobs_lock:
-                        for rid in review_ids:
-                            self.server.replace_reviews.pop(rid, None)
-                self.server.invalidate_agents()
-                self.server.inventory = scan(home)
-                return result
+                try:
+                    result = team.cleanup_replaced(home, body.get('actions'),
+                                                   confirmed=body.get('confirmed') is True,
+                                                   expected=revision,
+                                                   allowed=allowed, required_present=installed)
+                    if result.get('operations'):
+                        with self.server.jobs_lock:
+                            for rid in review_ids:
+                                self.server.replace_reviews.pop(rid, None)
+                    return result
+                finally:
+                    self.server.invalidate_agents()
+                    self.server.inventory = scan(home)
         if path == '/api/team/packs':
             with self.server.local_write():
                 return team.packs_apply(home, body.get('packs'))

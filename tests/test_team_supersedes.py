@@ -31,10 +31,14 @@ class TeamHubReplacesTests(unittest.TestCase):
         self.assertEqual(team_hub.clean_replaces([' old-a ', 'old-b', 'old-a']), ['old-a', 'old-b'])
         self.assertEqual(team_hub.clean_replaces([]), [])
         self.assertEqual(len(team_hub.clean_replaces([f'old-{i}' for i in range(20)])), 20)
-        for bad in ('old-a', 123, [123], [''], ['   '], ['../bad'], ['has space'], ['a' * 65],
+        for bad in (None, 'old-a', 123, [123], [''], ['   '], ['../bad'], ['has space'], ['a' * 65],
                     [f'old-{i}' for i in range(21)]):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 team_hub.clean_replaces(bad)
+        with self.assertRaises(ValueError):
+            team.parse_replaces(None)
+        with self.assertRaises(ValueError):
+            team_hub.short_text('含非法代理\ud800字符', '替代说明')
         with self.assertRaises(ValueError):
             team_hub.clean_replaces(['self-skill'], own_name='self-skill')
 
@@ -481,6 +485,98 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
                                       expected=rev, allowed=['acme-other'], required_present=['acme-local'])
         self.assertIn('acme-other', operations.load(self.other)[1]['skills'])
 
+    def test_r2_surgical_fixes_revision_binding_update_gate_author_install_and_partial_undo(self):
+        self.configure()
+        # 1. Outdated local copy (status == 'update') blocks cleanup preview & find
+        card = self.publish_with_replaces('acme-local', ['acme-other'], '第一版说明')
+        team.install(self.other, card['key'])
+        # Author publishes v2 with new files and updated replaces -> B now has status='update'
+        skill_md = self.home / '.skill-pilot/store/acme-local/SKILL.md'
+        skill_md.write_text(skill_md.read_text() + '\nv2 内容\n')
+        self.publish_with_replaces('acme-local', ['acme-other'], '第二版说明')
+        status, body = self.request(self.b, '/api/team/replace/preview', {'card_key': card['key']})
+        self.assertEqual(status, 409, body)
+        self.assertIn('先更新到新版', body['error'])
+        found_outdated = team.find(self.other, 'acme-local')
+        self.assertNotIn('replaced_local', found_outdated)
+
+        # 2. Server verifies review entry['revision'] == client revision (R2 #1)
+        # Re-publish v1-like or reinstall so B is current; easiest: test on A where status == 'mine'
+        prev_a = self.ok(self.a, '/api/team/replace/preview', {'card_key': card['key']})
+        self.assertTrue(prev_a['review'])
+        status, body = self.request(self.a, '/api/team/replace/cleanup', {
+            'actions': {'acme-other': 'withdraw'}, 'revision': 'mismatched-rev',
+            'review': prev_a['review'], 'confirmed': True,
+        })
+        self.assertEqual(status, 409, body)
+        self.assertIn('状态已经变了', body['error'])
+
+        # 3. _check_replace_live verifies replacement store directory exists (R2 #3)
+        missing_dir = self.other / '.skill-pilot/store/acme-local'
+        backup_dir = self.other / '.skill-pilot/store/acme-local-tmp-bak'
+        shutil.move(missing_dir, backup_dir)
+        try:
+            with self.assertRaisesRegex(ValueError, '尚未独立保存'):
+                team.cleanup_replaced(self.other, {'acme-other': 'delete'}, confirmed=True,
+                                      allowed=['acme-other'], required_present=['acme-local'])
+        finally:
+            shutil.move(backup_dir, missing_dir)
+
+        # 4. One-click update_listing omits replaces from PUT so concurrent server edits stay intact (R2 #6)
+        skill_md.write_text(skill_md.read_text() + '\nv3 内容\n')
+        conn = team._connection_version(team._connection(self.home))
+        real_apply = team.listings_apply
+        captured_payloads = []
+        def spy_apply(home_arg, review_arg):
+            captured_payloads.append(copy.deepcopy(review_arg['listings']))
+            return real_apply(home_arg, review_arg)
+        with patch.object(team, 'listings_apply', side_effect=spy_apply):
+            team.update_listing(self.home, 'acme-local', conn)
+        self.assertEqual(len(captured_payloads), 1)
+        self.assertNotIn('replaces', captured_payloads[0][0])
+        self.assertNotIn('replacement_note', captured_payloads[0][0])
+        # Hub still preserved replaces & replacement_note
+        refreshed = next(c for c in self.ok(self.b, '/api/team/catalog')['cards'] if c['name'] == 'acme-local')
+        self.assertEqual(refreshed['replaces'], ['acme-other'])
+        self.assertEqual(refreshed['replacement_note'], '第二版说明')
+
+        # 5. CLI install_named --author A installs A's listing when B's is newer on same card (R2 #2)
+        row_a = {
+            'name': 'acme-extra', 'requires': [], 'replaces': ['acme-other'], 'replacement_note': 'A 版',
+            'source': {'kind': 'github', 'repository': 'acme/skills', 'path': 'skills/acme-extra',
+                       'files': [test_team_hub.file('SKILL.md', '---\nname: acme-extra\ndescription: A版\n---\nFROM_AUTHOR_A\n')]},
+        }
+        row_b = {
+            'name': 'acme-extra', 'requires': [], 'replaces': [],
+            'source': {'kind': 'github', 'repository': 'acme/skills', 'path': 'skills/acme-extra',
+                       'files': [test_team_hub.file('SKILL.md', '---\nname: acme-extra\ndescription: B版\n---\nFROM_AUTHOR_B\n')]},
+        }
+        with patch.object(team_hub, 'now', return_value='2026-10-01T00:00:00+00:00'):
+            self.raw_put([row_a], self.first)
+        with patch.object(team_hub, 'now', return_value='2026-10-02T00:00:00+00:00'):
+            self.raw_put([row_b], self.second)
+        called_member = []
+        real_install = team.install
+        def spy_install(home_arg, key_arg, member_id=None):
+            called_member.append(member_id)
+            return real_install(home_arg, key_arg, member_id=member_id)
+        with patch.object(team, 'install', side_effect=spy_install):
+            res_author = team.install_named(self.other, 'acme-extra', author='示例成员 A', confirmed=True)
+        self.assertEqual(called_member, [self.first['id']])
+        self.assertEqual(res_author['author_id'], self.first['id'])
+        self.assertIn('FROM_AUTHOR_A', (self.other / '.skill-pilot/store/acme-extra/SKILL.md').read_text())
+
+        # 6. Mixed withdraw + delete surfaces step-1 op ID if step 2 fails (R2 #7)
+        # Set up two old skills on A (acme-extra & acme-other) and force step 2 delete to fail
+        with patch.object(cleanup, 'delete', side_effect=ValueError('模拟第二步失败')):
+            with self.assertRaisesRegex(ValueError, '已先撤下 1 个旧版技能.*编号.*模拟第二步失败') as ctx:
+                team.cleanup_replaced(self.home, {'acme-other': 'withdraw', 'acme-extra': 'delete'}, confirmed=True)
+        # Step 1 op ID from error message is undoable!
+        op_match = re.search(r'编号 ([0-9a-f]+)', str(ctx.exception))
+        self.assertIsNotNone(op_match)
+        operations.undo(op_match.group(1), home=self.home)
+        self.assertFalse(operations.load(self.home)[1]['skills']['acme-other'].get('withdrawn'))
+
 
 class TeamSupersedesCliTests(unittest.TestCase):
     Team = test_team.TeamTests
@@ -596,15 +692,15 @@ const detailHtml = storeReplacesDetailHtml({
 assert.ok(detailHtml.includes('旧版 A（old-a）'));
 assert.ok(detailHtml.includes('新版更稳'));
 assert.ok(detailHtml.includes('data-store-replace-open="team:1:new-a"'));
-// R1 #5: blocked/conflict/lark must NOT show 清理旧版 button
-for (const status of ['installable', 'blocked', 'conflict', 'lark']) {
+// R1 #5 & R2 #3: installable/update/blocked/conflict/lark must NOT show 清理旧版 button
+for (const status of ['installable', 'update', 'blocked', 'conflict', 'lark']) {
   const blockedHtml = storeReplacesDetailHtml({
     key: 'team:1:new-a', replaces: ['old-a'],
     replaces_local: [{name: 'old-a', title: '旧版 A'}], local: {status},
   });
   assert.ok(!blockedHtml.includes('data-store-replace-open'), status + ' must not show cleanup button');
 }
-// R1 #8: checkReplacedJobs triggers on unseen completed team_install without prior active state
+// R1 #8 & R2 #1: checkReplacedJobs enqueues one prompt per job with its own revision, review & note
 const sessionStore = new Map();
 global.sessionStorage = {getItem: k => sessionStore.get(k) || null, setItem: (k, v) => sessionStore.set(k, v)};
 const prompts = [];
@@ -615,14 +711,21 @@ const enqueueReplacePrompt = payload => prompts.push(payload);
             extract_function(source, 'function markReplaceJobSeen('),
             extract_function(source, 'function checkReplacedJobs('),
         ]) + r'''
-checkReplacedJobs([{id: 'fast-1', kind: 'team_install', status: 'done', title: '新版',
-  replaced_local: [{name: 'old-a', title: '旧版 A'}], replace_revision: 'rev1', replace_review: 'r1'}]);
-assert.equal(prompts.length, 1);
+checkReplacedJobs([
+  {id: 'fast-1', kind: 'team_install', status: 'done', title: '新版 1', replacement_note: '说明 1',
+   replaced_local: [{name: 'old-a', title: '旧版 A'}], replace_revision: 'rev1', replace_review: 'r1'},
+  {id: 'fast-2', kind: 'team_install', status: 'done', title: '新版 2', replacement_note: '说明 2',
+   replaced_local: [{name: 'old-b', title: '旧版 B'}], replace_revision: 'rev2', replace_review: 'r2'},
+]);
+assert.equal(prompts.length, 2);
 assert.equal(prompts[0].review, 'r1');
-// Second poll for same job must not re-open dialog
-checkReplacedJobs([{id: 'fast-1', kind: 'team_install', status: 'done', title: '新版',
+assert.equal(prompts[0].note, '说明 1');
+assert.equal(prompts[1].review, 'r2');
+assert.equal(prompts[1].note, '说明 2');
+// Second poll for same jobs must not re-open dialogs
+checkReplacedJobs([{id: 'fast-1', kind: 'team_install', status: 'done', title: '新版 1',
   replaced_local: [{name: 'old-a', title: '旧版 A'}], replace_revision: 'rev1', replace_review: 'r1'}]);
-assert.equal(prompts.length, 1);
+assert.equal(prompts.length, 2);
 const listHtml = renderReplaceDialogList([
   {name: 'old-a', title: '旧版 A', status: 'active', agent_names: ['Codex'], can_withdraw: true, can_delete: true, irreplaceable: true},
   {name: 'old-b', title: '旧版 B', status: 'active', agent_names: ['Claude'], can_withdraw: false, can_delete: false,
@@ -631,6 +734,46 @@ const listHtml = renderReplaceDialogList([
 assert.ok(listHtml.includes('已启用：Codex'));
 assert.ok(listHtml.includes('自制或已本地修改'));
 assert.ok(listHtml.includes('正在使用且依赖'));
+// R2 #4: switching replaced_by in unlist dialog must not carry over A's untouched prefilled note to B
+const els = {
+  'store-unlist-replaced-by': {value: ''},
+  'store-unlist-note-wrap': {hidden: true},
+  'store-unlist-note': {value: '', placeholder: ''},
+};
+const $ = id => els[id];
+let unlistDialogState = {
+  others: [
+    {name: 'new-a', replacement_note: 'A 的说明'},
+    {name: 'new-b', replacement_note: ''},
+  ],
+  existingLinked: [{name: 'new-a', replacement_note: 'A 的说明'}],
+  noteDirty: false,
+};
+''' + extract_function(source, 'function syncUnlistDialogNote(') + r'''
+syncUnlistDialogNote();
+assert.equal(els['store-unlist-note-wrap'].hidden, false);
+assert.equal(els['store-unlist-note'].value, 'A 的说明');
+assert.equal(unlistDialogState.noteDirty, false);
+// Switch dropdown from "" (linked A) to new-b -> resets untouched note to B's note ("")
+els['store-unlist-replaced-by'].value = 'new-b';
+syncUnlistDialogNote();
+assert.equal(els['store-unlist-note'].value, '');
+assert.equal(unlistDialogState.noteDirty, false);
+// User edits note -> noteDirty becomes true and switching dropdown keeps user's text
+els['store-unlist-note'].value = '自定义说明';
+unlistDialogState.noteDirty = true;
+els['store-unlist-replaced-by'].value = 'new-a';
+syncUnlistDialogNote();
+assert.equal(els['store-unlist-note'].value, '自定义说明');
+// When no existing link and dropdown cleared -> hides note and resets noteDirty
+unlistDialogState.existingLinked = [];
+els['store-unlist-replaced-by'].value = '';
+syncUnlistDialogNote();
+assert.equal(els['store-unlist-note-wrap'].hidden, true);
+assert.equal(els['store-unlist-note'].value, '');
+assert.equal(unlistDialogState.noteDirty, false);
 '''
+        self.assertIn('const sendNote = Boolean(rawNote && unlistDialogState?.noteDirty);', source)
+        self.assertIn('maxlength="1400"', source)
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

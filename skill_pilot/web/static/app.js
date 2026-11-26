@@ -5868,27 +5868,13 @@ function checkReplacedJobs(items) {
     && job.replaced_local?.length && !seenReplaceJobs.has(job.id));
   if (!replacedJobs.length) return;
   markReplaceJobSeen(replacedJobs.map(job => job.id));
-  const merged = new Map();
-  const titles = [];
-  const reviews = [];
-  let note = '';
-  let revision = '';
   for (const job of replacedJobs) {
-    titles.push(job.title || job.name || '新技能');
-    if (!note && job.replacement_note) note = job.replacement_note;
-    if (job.replace_revision) revision = job.replace_revision;
-    if (job.replace_review) reviews.push(job.replace_review);
-    for (const item of job.replaced_local || []) {
-      if (!merged.has(item.name)) merged.set(item.name, item);
-    }
-  }
-  if (merged.size) {
     enqueueReplacePrompt({
-      installedTitles: [...new Set(titles)],
-      items: [...merged.values()],
-      note,
-      revision,
-      review: reviews.length === 1 ? reviews[0] : reviews,
+      installedTitles: [job.title || job.name || '新技能'],
+      items: job.replaced_local,
+      note: job.replacement_note || '',
+      revision: job.replace_revision || '',
+      review: job.replace_review || '',
     });
   }
 }
@@ -6052,7 +6038,24 @@ function syncUnlistDialogNote() {
   const selected = $('store-unlist-replaced-by').value;
   const showNote = Boolean(selected || unlistDialogState.existingLinked.length);
   $('store-unlist-note-wrap').hidden = !showNote;
-  if (!showNote) $('store-unlist-note').value = '';
+  if (!showNote) {
+    $('store-unlist-note').value = '';
+    unlistDialogState.noteDirty = false;
+    return;
+  }
+  if (!unlistDialogState.noteDirty) {
+    if (selected) {
+      const target = unlistDialogState.others.find(item => item.name === selected);
+      $('store-unlist-note').value = target?.replacement_note || '';
+      $('store-unlist-note').placeholder = '例如：已合并到新版，建议切换';
+    } else {
+      const linked = unlistDialogState.existingLinked;
+      $('store-unlist-note').value = linked.length === 1 ? (linked[0].replacement_note || '') : '';
+      $('store-unlist-note').placeholder = linked.length > 1
+        ? '留空则保持各关联技能原有说明；填写将统一更新'
+        : '例如：已合并到新版，建议切换';
+    }
+  }
 }
 
 $('store-unlist-replaced-by').addEventListener('change', syncUnlistDialogNote);
@@ -6111,7 +6114,7 @@ async function unlistStore(name, button) {
   $('store-unlist-message').textContent = '';
   $('store-unlist-message').hidden = true;
   $('store-unlist-apply').textContent = extra.length ? `下架 ${names.length} 个` : '下架';
-  unlistDialogState = {name, card, names, extra, existingLinked, button, busy: false, noteDirty: false};
+  unlistDialogState = {name, card, names, extra, others, existingLinked, button, busy: false, noteDirty: false};
   syncUnlistDialogNote();
   const dialog = $('store-unlist-dialog');
   const confirmed = await new Promise(resolve => {
@@ -6129,7 +6132,7 @@ async function unlistStore(name, button) {
   });
   const replacedBy = canLink ? $('store-unlist-replaced-by').value.trim() : '';
   const rawNote = canLink ? $('store-unlist-note').value.trim() : '';
-  const sendNote = Boolean(rawNote && (replacedBy || unlistDialogState?.noteDirty));
+  const sendNote = Boolean(rawNote && unlistDialogState?.noteDirty);
   unlistDialogState = null;
   if (!confirmed) return;
   const rows = [...$('store-list').querySelectorAll('.store-row-main')];
@@ -6231,11 +6234,13 @@ function storeReplacesDetailHtml(card) {
     return found?.title && found.title !== name ? `${found.title}（${name}）` : name;
   }).join('、');
   const status = card.local?.status;
-  const canOpenNow = local.length > 0 && ['installed', 'update', 'mine'].includes(status);
+  const canOpenNow = local.length > 0 && ['installed', 'mine'].includes(status);
   const locked = teamCanWrite() && !jobsBlocked() ? '' : ' disabled';
   let localHtml = '';
   if (local.length) {
-    const summary = `本机已装有旧版：${local.map(item => item.title || item.name).join('、')}${status === 'installable' ? '（安装完成后会提示保留、撤下或删除）' : ''}`;
+    const suffix = status === 'installable' ? '（安装完成后会提示保留、撤下或删除）'
+      : status === 'update' ? '（请先更新到新版后再清理）' : '';
+    const summary = `本机已装有旧版：${local.map(item => item.title || item.name).join('、')}${suffix}`;
     localHtml = `<div class="store-replaces-local">
       <span>${escape(summary)}</span>
       ${canOpenNow ? `<button class="btn btn-small" type="button" data-store-replace-open="${escape(card.key)}"${locked}>清理旧版…</button>` : ''}
@@ -7078,7 +7083,7 @@ function storePickRowHtml(candidate) {
     ${showReplaces ? `<div class="store-pick-replaces">
       <label class="store-pick-sublabel">
         <span>替代的旧技能名称（选填）${hint('填写本技能替代的旧技能英文原名，多个用逗号分隔；同事安装时若本机已有这些旧版，会提示选择保留、撤下或删除。留空可清除已标记的替代关系。')}</span>
-        <input class="input store-pick-replaces-input" data-store-replaces="${escape(candidate.name)}" maxlength="400"
+        <input class="input store-pick-replaces-input" data-store-replaces="${escape(candidate.name)}" maxlength="1400"
           placeholder="例如：old-skill-a, old-skill-b（选填，多个用逗号分隔）"
           aria-label="${escape(`设置「${name}」替代的旧技能名称`)}" value="${escape(replacesValue)}">
       </label>

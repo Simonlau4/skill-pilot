@@ -259,7 +259,7 @@ def github_worker(store, stopped):
 
 def short_text(value, label):
     if (not isinstance(value, str) or len(value) > 200 or
-            any(unicodedata.category(c) in {'Cc', 'Cf', 'Zl', 'Zp'} for c in value)):
+            any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'} for c in value)):
         raise ValueError(f'{label}最多 200 字，不能含换行或看不见的字符。')
     return value
 
@@ -998,7 +998,7 @@ class HubStore:
                 else:
                     atomic_write(path, value)
                 done.append(path)
-        except OSError:
+        except (OSError, UnicodeEncodeError):
             for path in reversed(done):
                 if previous[path] is None:
                     path.unlink(missing_ok=True)
