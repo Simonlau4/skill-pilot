@@ -4590,8 +4590,8 @@ function storePackStripHtml(pack) {
   </button>`;
 }
 
-function storeBoardRowHtml(card, rank) {
-  return `<button class="store-board-row" type="button" data-store-open="${escape(card.key)}">
+function storeBoardRowHtml(card, rank, isLastRow = false) {
+  return `<button class="store-board-row${isLastRow ? ' is-last-row' : ''}" type="button" data-store-open="${escape(card.key)}">
     <span class="store-board-num">${number(rank)}</span>
     <span class="store-board-main">
       <span class="store-board-name"><span class="t">${escape(storeTitle(card))}</span>${storeNeedsHtml(card)}</span>
@@ -4651,6 +4651,7 @@ function storeDuoBoardHtml(cards) {
   const right = (tab === 'rating'
     ? pool.filter(card => card.rating?.count).sort(STORE_SORTS.rating)
     : [...pool].sort(STORE_SORTS.latest)).slice(0, 5);
+  const rowCount = Math.max(left.length, right.length, 1);
   return `<section class="shelf" aria-labelledby="shelf-featured">
     <div class="shelf-head">
       <h2 id="shelf-featured" tabindex="-1">精选技能</h2>
@@ -4659,7 +4660,7 @@ function storeDuoBoardHtml(cards) {
     <div class="store-duo-board">
       <div class="store-duo-col">
         <div class="store-duo-head"><span>安装最多</span></div>
-        ${left.length ? left.map((card, index) => storeBoardRowHtml(card, index + 1)).join('') : '<p class="store-board-empty">暂时还没有多人安装记录</p>'}
+        ${left.length ? left.map((card, index) => storeBoardRowHtml(card, index + 1, index + 1 === rowCount)).join('') : '<p class="store-board-empty">暂时还没有多人安装记录</p>'}
       </div>
       <div class="store-duo-col">
         <div class="store-duo-head">
@@ -4669,7 +4670,7 @@ function storeDuoBoardHtml(cards) {
             <button class="seg" type="button" data-board-tab="latest" aria-pressed="${tab === 'latest'}">最新上架</button>
           </div>
         </div>
-        ${right.length ? right.map((card, index) => storeBoardRowHtml(card, index + 1)).join('') : '<p class="store-board-empty">暂时还没有同事评价</p>'}
+        ${right.length ? right.map((card, index) => storeBoardRowHtml(card, index + 1, index + 1 === rowCount)).join('') : '<p class="store-board-empty">暂时还没有同事评价</p>'}
       </div>
     </div>
   </section>`;

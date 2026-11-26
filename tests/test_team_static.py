@@ -1597,6 +1597,135 @@ process.on('beforeExit', () => { if (!finished) { console.error('ASYNC TEST DID 
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_store_duo_board_alignment_and_last_row_borders(self):
+        source = (STATIC / 'app.js').read_text()
+        css = (STATIC / 'app.css').read_text()
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const icon = (name'),
+            line(source, 'const number = value => '),
+            line(source, 'const storeTitle = '),
+            line(source, 'const storeTime = '),
+            line(source, 'const storeScore = '),
+            line(source, 'const storeInstalls = '),
+            extract_function(source, 'const STORE_STATUS = {') + ';',
+            extract_function(source, 'const STORE_SORTS = {') + ';',
+            'function storeQueueItem() { return null; }',
+            extract_function(source, 'function storeSummary('),
+            extract_function(source, 'function storeRecommenders('),
+            line(source, 'const starIcon = '),
+            extract_function(source, 'function storeRatingHtml('),
+            extract_function(source, 'function storeInstallsHtml('),
+            extract_function(source, 'function storeStatusTag('),
+            extract_function(source, 'function storeNeedsHtml('),
+            extract_function(source, 'function storeBoardRowHtml('),
+            extract_function(source, 'function storeDuoBoardHtml('),
+        ]
+        script = '\n'.join(parts) + r'''
+const assert = require('assert/strict');
+const state = {storeBoardTab: ''};
+const mkCard = (n, extra = {}) => ({
+  key: 'k' + n, name: 'skill-' + n, title: '技能' + n, summary: '说明' + n,
+  updated_at: `2026-11-${String(10 + n).padStart(2, '0')}T00:00:00Z`,
+  installs: 10 - n, rating: n <= 4 ? {average: 5, count: 1} : null,
+  listings: [{member: {id: 'm1', name: '成员A'}, note: ''}],
+  local: {status: 'installable'}, packs: [], needs: [], ...extra,
+});
+const cards5 = [1, 2, 3, 4, 5].map(n => mkCard(n));
+const splitCols = html => {
+  const cols = html.split('<div class="store-duo-col">').slice(1);
+  assert.equal(cols.length, 2, '应包含左右两栏');
+  return cols.map(col => [...col.matchAll(/<button class="([^"]*store-board-row[^"]*)"[^>]*data-store-open="([^"]+)"/g)]
+    .map(m => ({classes: m[1].split(/\s+/), key: m[2]})));
+};
+
+// 1. 左 5 右 4：只有左栏第 5 行带 is-last-row，右栏第 4 行保留底边线
+const [left5, right4] = splitCols(storeDuoBoardHtml(cards5));
+assert.equal(left5.length, 5);
+assert.equal(right4.length, 4);
+assert.deepEqual(left5.map(r => r.classes.includes('is-last-row')), [false, false, false, false, true]);
+assert.deepEqual(right4.map(r => r.classes.includes('is-last-row')), [false, false, false, false]);
+
+// 2. 切到最新上架（左 5 右 5）：两栏第 5 行都带 is-last-row
+state.storeBoardTab = 'latest';
+const [leftLatest, rightLatest] = splitCols(storeDuoBoardHtml(cards5));
+assert.equal(leftLatest.length, 5);
+assert.equal(rightLatest.length, 5);
+assert.equal(leftLatest[4].classes.includes('is-last-row'), true);
+assert.equal(rightLatest[4].classes.includes('is-last-row'), true);
+
+// 3. 左右都是 3 条：第 3 行都带 is-last-row
+state.storeBoardTab = 'rating';
+const [left3, right3] = splitCols(storeDuoBoardHtml([1, 2, 3].map(n => mkCard(n))));
+assert.deepEqual(left3.map(r => r.classes.includes('is-last-row')), [false, false, true]);
+assert.deepEqual(right3.map(r => r.classes.includes('is-last-row')), [false, false, true]);
+
+// 4. 左 4 右 5：左栏第 4 行保留底边线，右栏第 5 行带 is-last-row
+const cardsLeft4 = [1, 2, 3, 4, 5].map(n => mkCard(n, {installs: n <= 4 ? 10 - n : 0}));
+state.storeBoardTab = 'latest';
+const [left4, right5] = splitCols(storeDuoBoardHtml(cardsLeft4));
+assert.equal(left4.length, 4);
+assert.equal(right5.length, 5);
+assert.deepEqual(left4.map(r => r.classes.includes('is-last-row')), [false, false, false, false]);
+assert.deepEqual(right5.map(r => r.classes.includes('is-last-row')), [false, false, false, false, true]);
+
+// 5. 左栏暂无多人安装记录，右栏最新上架 3 条：左栏显示空状态，右栏第 3 行带 is-last-row
+const noInstalls = [1, 2, 3].map(n => mkCard(n, {installs: 0}));
+state.storeBoardTab = 'latest';
+const leftEmptyBoard = storeDuoBoardHtml(noInstalls);
+assert.ok(leftEmptyBoard.includes('暂时还没有多人安装记录'));
+const [left0, right3b] = splitCols(leftEmptyBoard);
+assert.equal(left0.length, 0);
+assert.deepEqual(right3b.map(r => r.classes.includes('is-last-row')), [false, false, true]);
+
+// 6. 右栏暂无评价：显示空状态且左栏最后一行带 is-last-row
+const noRatings = [1, 2].map(n => mkCard(n, {rating: null}));
+state.storeBoardTab = 'rating';
+const emptyBoard = storeDuoBoardHtml(noRatings);
+assert.ok(emptyBoard.includes('暂时还没有同事评价'));
+const [left2, right0] = splitCols(emptyBoard);
+assert.deepEqual(left2.map(r => r.classes.includes('is-last-row')), [false, true]);
+assert.equal(right0.length, 0);
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        base_col = re.search(r'\.store-duo-col\s*\{([^}]+)\}', css)
+        self.assertIsNotNone(base_col)
+        self.assertIn('display: flex; flex-direction: column;', base_col.group(1))
+        head_rule = re.search(r'\.store-duo-head\s*\{([^}]+)\}', css)
+        self.assertIsNotNone(head_rule)
+        self.assertIn('min-height: 58px;', head_rule.group(1))
+        row_rule = re.search(r'\.store-board-row\s*\{([^}]+)\}', css)
+        self.assertIsNotNone(row_rule)
+        self.assertIn('min-height: 68px;', row_rule.group(1))
+        empty_rule = re.search(r'\.store-board-empty\s*\{([^}]+)\}', css)
+        self.assertIsNotNone(empty_rule)
+        self.assertIn('flex: 1 0 auto;', empty_rule.group(1))
+
+        supports_match = re.search(r'@supports \(grid-template-rows: subgrid\)\s*\{([\s\S]*?\n\})', css)
+        self.assertIsNotNone(supports_match)
+        supports_body = supports_match.group(1)
+        self.assertIn('grid-row: 1 / span 6;', supports_body)
+        self.assertIn('grid-template-rows: auto repeat(5, auto);', supports_body)
+        self.assertIn('grid-template-rows: subgrid;', supports_body)
+        self.assertLess(
+            supports_body.index('grid-template-rows: auto repeat(5, auto);'),
+            supports_body.index('grid-template-rows: subgrid;'),
+        )
+        self.assertIn('.store-board-empty { grid-row: 2 / -1; }', supports_body)
+
+        self.assertRegex(css, r'\.store-board-row\.is-last-row\s*\{\s*border-bottom:\s*0;\s*\}')
+        narrow = re.search(r'@container team-main \(inline-size < 760px\)\s*\{([\s\S]*?\n\})', css)
+        self.assertIsNotNone(narrow)
+        self.assertGreater(narrow.start(), supports_match.end(), '@container 窄屏规则必须位于 @supports subgrid 之后')
+        narrow_body = narrow.group(1)
+        self.assertIn('grid-template-rows: none;', narrow_body)
+        self.assertIn('grid-row: auto;', narrow_body)
+        self.assertIn('display: flex; flex-direction: column;', narrow_body)
+        self.assertIn('.store-board-row:last-child { border-bottom: 0; }', narrow_body)
+        self.assertIn('.store-board-empty { grid-row: auto; flex: none;', narrow_body)
+
 
 if __name__ == '__main__':
     unittest.main()
