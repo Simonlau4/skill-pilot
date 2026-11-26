@@ -330,7 +330,12 @@ class Dashboard(ThreadingHTTPServer):
         return bool(thread and thread.is_alive() and not self.program_progress.get('automatic'))
 
     def ping_team_activity(self):
-        if self.closing or self.reload_pending or not preview_allowed(self.home):
+        if self.closing or self.reload_pending:
+            return False
+        try:
+            if not preview_allowed(self.home):
+                return False
+        except OSError:
             return False
         with self.activity_lock:
             if self.closing or self.reload_pending:
@@ -343,11 +348,13 @@ class Dashboard(ThreadingHTTPServer):
             return True
 
     def _send_team_activity(self):
-        if self.closing or self.reload_pending or not preview_allowed(self.home):
+        if self.closing or self.reload_pending:
             return
         try:
+            if not preview_allowed(self.home):
+                return
             config = team.settings(self.home)
-        except ValueError:
+        except (ValueError, OSError):
             return
         if not config:
             return
@@ -372,7 +379,7 @@ class Dashboard(ThreadingHTTPServer):
             if outcome.get('sent'):
                 self.activity_connection = connection
                 self.activity_last_ping = finished_mono
-                self.activity_last_date = (outcome.get('data') or {}).get('date') or today_utc
+                self.activity_last_date = today_utc
                 self.activity_unsupported_connection = ''
                 self.activity_unsupported_until = None
             elif outcome.get('unsupported'):

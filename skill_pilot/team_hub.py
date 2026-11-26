@@ -71,7 +71,7 @@ def _activity_time(value):
             parsed = datetime.fromisoformat(value)
             if parsed.tzinfo is not None:
                 return parsed.astimezone(timezone.utc)
-        except ValueError:
+        except (ValueError, OverflowError):
             pass
     raise ValueError('活跃记录的时间格式不正确。')
 
@@ -899,12 +899,12 @@ class HubStore:
                             self.data / 'installs.json': self._installs_payload(installs, with_mine),
                             self.data / 'members.json': {'members': [m for m in members if m['id'] != member_id]}})
             activity_path = self.data / 'activity.json'
+            activity_skipped = False
             if activity_path.exists():
                 try:
                     activity = self._activity()
                 except (HubError, OSError):
-                    print('提示：活跃记录文件损坏或无法读取，已保留原文件；成员及其口令已删除，请管理员检查 activity.json。',
-                          file=sys.stderr, flush=True)
+                    activity_skipped = True
                 else:
                     if member_id in activity:
                         activity.pop(member_id, None)
@@ -912,6 +912,10 @@ class HubStore:
             self._save(changes)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
             shutil.rmtree(self.data / 'deliverables' / member_id, ignore_errors=True)
+            if activity_skipped:
+                print('提示：活跃记录文件损坏或无法读取，已保留原文件，请管理员检查 activity.json。',
+                      file=sys.stderr, flush=True)
+            return {'activity_cleaned': not activity_skipped}
 
     # The HTTP handler holds locked() while authenticating and accessing data.
     def _authenticate(self, authorization):
@@ -1866,5 +1870,8 @@ def run(args):
             print(f'{row["id"]}\t{row["name"]}\t{row["active_days"]} 天\t{row["total_opens"]} 次\t'
                   f'{row["opens_today"]} 次\t{last_active}\t{daily}')
     else:
-        store.remove_member(args.member_id)
-        print('已删除这位成员和他的上架、技能包、文件、评价及活跃记录。')
+        result = store.remove_member(args.member_id)
+        if isinstance(result, dict) and result.get('activity_cleaned') is False:
+            print('已删除这位成员和他的上架、技能包、文件及评价；活跃记录文件损坏，已保留原文件，请管理员检查。')
+        else:
+            print('已删除这位成员和他的上架、技能包、文件、评价及活跃记录。')

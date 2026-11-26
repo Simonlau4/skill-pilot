@@ -237,13 +237,43 @@ class TeamHubActivityTests(unittest.TestCase):
         # HubServer starts cleanly even if activity.json is corrupted.
         with team_hub.HubServer(self.data, '127.0.0.1', 0):
             self.assertEqual((self.data / 'activity.json').read_bytes(), corrupt)
+        # If saving members.json fails, no misleading deletion warning is printed.
+        write = team_hub.atomic_write
+        def fail_members(path, data):
+            if path == self.data / 'members.json':
+                raise OSError('simulated members write failure')
+            return write(path, data)
+        with patch.object(team_hub, 'atomic_write', side_effect=fail_members), \
+                redirect_stderr(io.StringIO()) as err, self.assertRaises(OSError):
+            self.store.remove_member(self.first['id'])
+        self.assertEqual(err.getvalue(), '')
         # remove_member still revokes token & deletes member, preserving corrupt file with a warning.
         with redirect_stderr(io.StringIO()) as err:
-            self.store.remove_member(self.first['id'])
+            outcome = self.store.remove_member(self.first['id'])
+        self.assertEqual(outcome, {'activity_cleaned': False})
         self.assertIn('活跃记录文件损坏', err.getvalue())
         self.assertEqual((self.data / 'activity.json').read_bytes(), corrupt)
         self.assertEqual(self.request('/api/me', 'GET', token='first')[0], 401)
         self.assertEqual([m['id'] for m in self.store.members()], [self.second['id']])
+
+        # Extreme timezone offset causing OverflowError in astimezone is also handled as corrupt.
+        overflow_payload = json.dumps({
+            'activity': {
+                self.second['id']: {
+                    'last_active_at': '9999-12-31T23:59:59-23:59',
+                    'days': {'2026-11-26': 1},
+                }
+            }
+        }).encode('utf-8')
+        (self.data / 'activity.json').write_bytes(overflow_payload)
+        self.assertEqual(self.request('/api/activity', 'GET', token='second')[0], 500)
+        with team_hub.HubServer(self.data, '127.0.0.1', 0):
+            pass
+        with redirect_stderr(io.StringIO()) as err:
+            outcome = self.store.remove_member(self.second['id'])
+        self.assertEqual(outcome, {'activity_cleaned': False})
+        self.assertIn('活跃记录文件损坏', err.getvalue())
+        self.assertEqual(self.store.members(), [])
 
     def test_startup_prunes_expired_activity_and_clock_rollback_bounds_future_dates(self):
         with patch.object(team_hub, 'now', return_value='2026-01-01T08:00:00+00:00'):
@@ -283,8 +313,8 @@ class TeamHubActivityTests(unittest.TestCase):
     def test_restart_preserves_activity_and_corrupt_file_returns_500(self):
         with patch.object(team_hub, 'now', return_value='2026-11-26T09:00:00+00:00'):
             self.assertEqual(self.request('/api/activity', 'POST', {}, token='first')[0], 200)
-        with team_hub.HubServer(self.data, '127.0.0.1', 0) as restarted:
-            with patch.object(team_hub, 'now', return_value='2026-11-26T10:00:00+00:00'):
+        with patch.object(team_hub, 'now', return_value='2026-11-26T10:00:00+00:00'):
+            with team_hub.HubServer(self.data, '127.0.0.1', 0) as restarted:
                 summary = restarted.store.activity_summary()
                 first_row = next(m for m in summary['members'] if m['id'] == self.first['id'])
                 self.assertEqual(first_row['opens_today'], 1)
@@ -360,8 +390,17 @@ class TeamHubActivityCliTests(unittest.TestCase):
 
         removed = self.command('team-hub', 'remove-member', first['id'], '--data', str(self.data))
         self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertIn('及活跃记录', removed.stdout)
         after = json.loads(self.command('team-hub', 'activity', '--json', '--data', str(self.data)).stdout)
         self.assertEqual([m['id'] for m in after['members']], [second['id']])
+
+        # CLI remove-member with corrupt activity.json truthfully reports file preserved.
+        (self.data / 'activity.json').write_text('{corrupt', encoding='utf-8')
+        removed_second = self.command('team-hub', 'remove-member', second['id'], '--data', str(self.data))
+        self.assertEqual(removed_second.returncode, 0, removed_second.stderr)
+        self.assertIn('活跃记录文件损坏，已保留原文件', removed_second.stdout)
+        self.assertNotIn('及活跃记录', removed_second.stdout)
+        self.assertEqual((self.data / 'activity.json').read_text(encoding='utf-8'), '{corrupt')
         self.assertFalse((self.home / 'ignored home').exists())
 
     def test_activity_cli_never_resolves_local_home_or_tools(self):
@@ -557,6 +596,29 @@ class TeamDashboardActivityTests(unittest.TestCase):
         self._wait_ping(fresh_b)
         second_row = next(m for m in self.hub.store.activity_summary()['members'] if m['id'] == self.second['id'])
         self.assertEqual(second_row['opens_today'], 1)
+
+        # PermissionError / OSError reading team.json silently skips without leaking paths to stderr.
+        with patch.object(team, 'settings', side_effect=PermissionError(str(self.home / '.skill-pilot/team.json'))), \
+                redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self._post(fresh_b, '/api/team/activity', {})[0], 200)
+            self._wait_ping(fresh_b)
+        self.assertEqual(err.getvalue(), '')
+
+        # Clock skew between client (23:59) and hub (00:01 next day) does not bypass the 5-minute throttle.
+        skew_dash = self._start(Dashboard({'home': str(self.home)}))
+        self._configure(skew_dash, self.first)
+        skew_calls = []
+        def skewed_report(home, config=None):
+            skew_calls.append(home)
+            return {'sent': True, 'data': {'recorded': True, 'date': '2026-11-26', 'opens_today': len(skew_calls),
+                                           'last_active_at': '2026-11-26T00:01:00+00:00'}}
+        with patch.object(team_hub, 'now', return_value='2026-11-25T23:59:30+00:00'), \
+                patch.object(team, 'report_activity', side_effect=skewed_report):
+            self.assertEqual(self._post(skew_dash, '/api/team/activity', {})[0], 200)
+            self._wait_ping(skew_dash)
+            self.assertEqual(self._post(skew_dash, '/api/team/activity', {})[0], 200)
+            self._wait_ping(skew_dash)
+        self.assertEqual(len(skew_calls), 1)
 
     def test_old_hub_404_cooldown_recovery_and_old_client_compatible(self):
         hits = {'activity': 0, 'me': 0, 'catalog': 0}
