@@ -1082,6 +1082,22 @@ class HubStore:
         except ValueError as error:
             raise HubError(400, str(error)) from None
         current = self._listings(member_id)
+        # Preserve existing replaces/replacement_note when an older client omits them.
+        for raw_row, row in zip(data['listings'], rows):
+            previous = current.get(row['name'], {})
+            if 'replaces' not in raw_row and previous.get('replaces'):
+                row['replaces'] = list(previous['replaces'])
+                if 'replacement_note' not in raw_row and previous.get('replacement_note'):
+                    row['replacement_note'] = previous['replacement_note']
+                elif 'replacement_note' in raw_row:
+                    try:
+                        note_val = short_text(raw_row['replacement_note'], '替代说明').strip()
+                    except ValueError as error:
+                        raise HubError(400, str(error)) from None
+                    if note_val:
+                        row['replacement_note'] = note_val
+                    else:
+                        row.pop('replacement_note', None)
         names = [r['name'] for r in rows]
         if len(set(names)) != len(names):
             raise HubError(400, '一次上架的名单里不能有同名技能。')

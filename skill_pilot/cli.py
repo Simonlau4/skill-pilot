@@ -387,6 +387,8 @@ def main():
                           (f'；不要的话加 --skip-pack {pack["id"]}' if not args.yes and not pack.get('requested') else ''))
             else:
                 print(result['message'])
+                if result.get('replacement_note'):
+                    print(f'  替代说明：{result["replacement_note"]}')
                 for item in result.get('replaced_local', []):
                     where = ('启用中：' + '、'.join(item['agent_names']) if item['status'] == 'active' and item.get('agent_names')
                              else '已撤下' if item['status'] == 'withdrawn'

@@ -74,6 +74,20 @@ class TeamHubReplacesTests(unittest.TestCase):
         self.assertNotIn('replaces', by_name['new-tool'])
         self.assertNotIn('replacement_note', by_name['new-tool'])
 
+        # Old dashboard omitting replaces/replacement_note preserves existing values on update (#236 R1 #2)
+        status, _ = self.put([listing('new-tool', 'files', replaces=['old-tool'], replacement_note='保留说明')])
+        self.assertEqual(status, 200)
+        status, _ = self.put([listing('new-tool', 'files', note='旧版看板更新推荐语')])
+        self.assertEqual(status, 200)
+        by_name = {c['listings'][0]['name']: c['listings'][0] for c in self.cards()}
+        self.assertEqual(by_name['new-tool']['replaces'], ['old-tool'])
+        self.assertEqual(by_name['new-tool']['replacement_note'], '保留说明')
+        self.assertEqual(by_name['new-tool']['note'], '旧版看板更新推荐语')
+        # Clear again so unpublish linkage test below starts clean
+        status, _ = self.put([listing('new-tool', 'files', replaces=[])])
+        self.assertEqual(status, 200)
+        by_name = {c['listings'][0]['name']: c['listings'][0] for c in self.cards()}
+
         # Unpublish old-tool while attaching replaced_by and replacement_note
         new_updated_before = by_name['new-tool']['updated_at']
         status, body = self.request('/api/listings/me/old-tool', 'DELETE',
@@ -172,6 +186,7 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
         self.assertEqual([i['name'] for i in done['replaced_local']], ['acme-other'])
         self.assertEqual(done['replacement_note'], '改用新版')
         self.assertTrue(done['replace_revision'])
+        self.assertTrue(done['replace_review'])
 
         # Old skill MUST still be present and enabled on claude (never silently deleted/withdrawn!)
         reg = operations.load(self.other)[1]['skills']
@@ -180,16 +195,33 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
         self.assertEqual(reg['acme-other']['assigned_agents'], ['claude'])
         self.assertTrue((self.other / '.claude/skills/acme-other').exists())
 
+        # Endpoint rejects missing revision, missing/invalid review, or unapproved arbitrary target (#236 R1 #3)
+        status, body = self.request(self.b, '/api/team/replace/cleanup', {
+            'actions': {'acme-other': 'withdraw'}, 'review': done['replace_review'], 'confirmed': True,
+        })
+        self.assertEqual(status, 409, body)
+        status, body = self.request(self.b, '/api/team/replace/cleanup', {
+            'actions': {'acme-other': 'withdraw'}, 'revision': done['replace_revision'], 'confirmed': True,
+        })
+        self.assertEqual(status, 409, body)
+        status, body = self.request(self.b, '/api/team/replace/cleanup', {
+            'actions': {'acme-local': 'delete'}, 'revision': done['replace_revision'],
+            'review': done['replace_review'], 'confirmed': True,
+        })
+        self.assertEqual(status, 409, body)
+
         # User chooses Keep -> zero writes, zero operations
         kept = self.ok(self.b, '/api/team/replace/cleanup', {
-            'actions': {'acme-other': 'keep'}, 'revision': done['replace_revision'], 'confirmed': True,
+            'actions': {'acme-other': 'keep'}, 'revision': done['replace_revision'],
+            'review': done['replace_review'], 'confirmed': True,
         })
         self.assertEqual(kept['operations'], [])
         self.assertEqual(operations.load(self.other)[1]['skills']['acme-other']['assigned_agents'], ['claude'])
 
         # User chooses Withdraw -> withdraws from claude, recorded in log, undo restores completely
         withdrawn = self.ok(self.b, '/api/team/replace/cleanup', {
-            'actions': {'acme-other': 'withdraw'}, 'revision': done['replace_revision'], 'confirmed': True,
+            'actions': {'acme-other': 'withdraw'}, 'revision': done['replace_revision'],
+            'review': done['replace_review'], 'confirmed': True,
         })
         self.assertEqual(withdrawn['withdrawn'], ['acme-other'])
         self.assertEqual(len(withdrawn['operations']), 1)
@@ -203,10 +235,11 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
         self.assertEqual(reg['acme-other']['assigned_agents'], ['claude'])
         self.assertTrue((self.other / '.claude/skills/acme-other').exists())
 
-        # Fresh preview -> User chooses Delete -> removes from store & claude, undo restores completely
-        preview = self.ok(self.b, '/api/team/replace/preview', {'names': ['acme-other']})
+        # Fresh verified card preview -> User chooses Delete -> removes from store & claude, undo restores completely
+        preview = self.ok(self.b, '/api/team/replace/preview', {'card_key': card['key']})
         deleted = self.ok(self.b, '/api/team/replace/cleanup', {
-            'actions': {'acme-other': 'delete'}, 'revision': preview['revision'], 'confirmed': True,
+            'actions': {'acme-other': 'delete'}, 'revision': preview['revision'],
+            'review': preview['review'], 'confirmed': True,
         })
         self.assertEqual(deleted['deleted'], ['acme-other'])
         self.assertEqual(len(deleted['operations']), 1)
@@ -246,6 +279,14 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
         self.assertFalse(by_name['legacy-external']['can_delete'])
         self.assertIn('外部工具维护', by_name['legacy-external']['blocked_reason'])
 
+        # Install a replacement card first so /api/team/replace/preview is bound to an installed card
+        card = self.publish_with_replaces('acme-local', ['acme-other'], '替代旧版')
+        # Preview before installing must reject (#236 R1 #5)
+        status, body = self.request(self.b, '/api/team/replace/preview', {'card_key': card['key']})
+        self.assertEqual(status, 409, body)
+        self.assertIn('先安装', body['error'])
+        team.install(self.other, card['key'])
+
         # Active dependent blocking: add acme-extra to B depending on acme-other
         shutil.copytree(self.repository / 'skills/acme-extra', self.other / '.skill-pilot/store/acme-extra')
         shutil.copytree(self.repository / 'skills/acme-extra', self.other / '.skill-pilot/bases/acme-extra')
@@ -256,9 +297,11 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
         self.assertFalse(dep_items[0]['can_withdraw'])
         self.assertFalse(dep_items[0]['can_delete'])
         self.assertIn('依赖', dep_items[0]['blocked_reason'])
+        dep_preview = self.ok(self.b, '/api/team/replace/preview', {'card_key': card['key']})
         for action in ('withdraw', 'delete'):
             status, body = self.request(self.b, '/api/team/replace/cleanup', {
-                'actions': {'acme-other': action}, 'confirmed': True,
+                'actions': {'acme-other': action}, 'revision': dep_preview['revision'],
+                'review': dep_preview['review'], 'confirmed': True,
             })
             self.assertEqual(status, 409, body)
             self.assertIn('依赖', body['error'])
@@ -266,13 +309,14 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
 
         # Read-only mode blocking
         with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}):
-            preview = self.ok(self.b, '/api/team/replace/preview', {'names': ['acme-other']})
+            preview = self.ok(self.b, '/api/team/replace/preview', {'card_key': card['key']})
             self.assertFalse(preview['write_allowed'])
             self.assertFalse(preview['items'][0]['can_withdraw'])
             self.assertFalse(preview['items'][0]['can_delete'])
             self.assertIn('只读', preview['items'][0]['blocked_reason'])
             status, body = self.request(self.b, '/api/team/replace/cleanup', {
-                'actions': {'acme-other': 'delete'}, 'confirmed': True,
+                'actions': {'acme-other': 'delete'}, 'revision': preview['revision'],
+                'review': preview['review'], 'confirmed': True,
             })
             self.assertEqual(status, 403, body)
             self.assertIn('只读', body['error'])
@@ -281,8 +325,10 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
 
         # Stale revision rejection
         self.registry(self.other, lambda skills: skills.pop('acme-extra', None))
+        fresh_preview = self.ok(self.b, '/api/team/replace/preview', {'card_key': card['key']})
         status, body = self.request(self.b, '/api/team/replace/cleanup', {
-            'actions': {'acme-other': 'withdraw'}, 'revision': rev + '-stale', 'confirmed': True,
+            'actions': {'acme-other': 'withdraw'}, 'revision': rev + '-stale',
+            'review': fresh_preview['review'], 'confirmed': True,
         })
         self.assertEqual(status, 409, body)
         self.assertIn('状态已经变了', body['error'])
@@ -330,6 +376,110 @@ class TeamSupersedesIntegrationTests(unittest.TestCase):
             # Plain unpublish works against old hub without body
             removed = team.listings_remove(self.home, ['acme-local'], confirmed=True)
             self.assertIn('下架', removed['message'])
+
+    def test_same_origin_rename_does_not_delete_users_only_copy(self):
+        # R1 #1: local acme-other shares GitHub (repository, path) with renamed store listing acme-other-v2
+        self.configure()
+        renamed = {
+            'name': 'acme-other-v2', 'requires': [], 'replaces': ['acme-other'], 'replacement_note': '更名新版',
+            'source': {'kind': 'github', 'repository': 'acme/skills', 'path': 'skills/acme-other'},
+        }
+        self.raw_put([renamed])
+        cat = team.catalog(self.other)
+        card = next(c for c in cat['cards'] if c['name'] == 'acme-other-v2')
+        self.assertEqual(card['local']['status'], 'installed')
+        self.assertNotIn('replaces_local', card)
+        found = team.find(self.other, 'acme-other-v2')
+        self.assertNotIn('replaced_local', found)
+        with self.assertRaisesRegex(ValueError, '不在本次检测到的本机旧版技能中'):
+            team.install_named(self.other, 'acme-other-v2', confirmed=True, replace_actions=['acme-other=delete'])
+        self.assertIn('acme-other', operations.load(self.other)[1]['skills'])
+
+    def test_different_authors_replaces_not_merged_on_same_card(self):
+        # R1 #6: member A and member B both list same GitHub skill with different replaces
+        self.configure()
+        row_a = {
+            'name': 'acme-extra', 'requires': [], 'replaces': ['old-from-a'], 'replacement_note': 'A 的说明',
+            'source': {'kind': 'github', 'repository': 'acme/skills', 'path': 'skills/acme-extra'},
+        }
+        row_b = {
+            'name': 'acme-extra', 'requires': [], 'replaces': ['acme-other'], 'replacement_note': 'B 的说明',
+            'source': {'kind': 'github', 'repository': 'acme/skills', 'path': 'skills/acme-extra'},
+        }
+        # Put B first (older), then A (latest -> root listing)
+        with patch.object(team_hub, 'now', return_value='2026-10-01T00:00:00+00:00'):
+            self.raw_put([row_b], self.second)
+        with patch.object(team_hub, 'now', return_value='2026-10-02T00:00:00+00:00'):
+            self.raw_put([row_a], self.first)
+        cat = team.catalog(self.other)
+        card = next(c for c in cat['cards'] if c['name'] == 'acme-extra')
+        self.assertEqual(card['replaces'], ['old-from-a'])
+        self.assertEqual(card.get('replacement_note'), 'A 的说明')
+        self.assertNotIn('replaces_local', card)
+        # Explicitly selecting author A must NOT include B's acme-other
+        found_a = team.find(self.other, 'acme-extra', author='示例成员 A')
+        self.assertEqual(found_a.get('replaces'), ['old-from-a'])
+        self.assertNotIn('replaced_local', found_a)
+
+    def test_transitive_required_dependency_replaces_detected_on_install(self):
+        # R1 #7: acme-main requires acme-base; acme-base declares replaces=['acme-other']
+        self.configure()
+        preview = self.ok(self.a, '/api/team/listings/preview', {
+            'skills': [
+                {'name': 'acme-base', 'note': '基础新版', 'replaces': ['acme-other'], 'replacement_note': '依赖替代旧版'},
+                {'name': 'acme-main', 'note': '主技能'},
+            ],
+        })
+        self.ok(self.a, '/api/team/listings/apply', {'review': preview['review']})
+        # CLI find on acme-main pulls in acme-base and detects acme-other locally on B
+        found = team.find(self.other, 'acme-main')
+        self.assertEqual(found['installed'], ['acme-base', 'acme-main'])
+        self.assertEqual([i['name'] for i in found['replaced_local']], ['acme-other'])
+        # Web queue install on B also detects acme-other from transitive dependency acme-base
+        card = next(c for c in self.ok(self.b, '/api/team/catalog')['cards'] if c['name'] == 'acme-main')
+        self.assertEqual([i['name'] for i in card['replaces_local']], ['acme-other'])
+        self.ok(self.b, '/api/team/queue', {'key': card['key']})
+        done = self.wait_queue(self.b, card['key'])
+        self.assertEqual(done['status'], 'done')
+        self.assertEqual([i['name'] for i in done['replaced_local']], ['acme-other'])
+        self.assertTrue(done['replace_review'])
+
+    def test_batch_unpublish_prevalidates_replaces_cap_without_partial_delete(self):
+        # R1 #10: target already has 19 replaces; batch unpublishing 2 skills must fail BEFORE deleting either
+        self.configure()
+        nineteen = [f'legacy-{i}' for i in range(19)]
+        self.raw_put([
+            listing('target-new', 'files', replaces=nineteen),
+            listing('old-x', 'files'),
+            listing('old-y', 'files'),
+        ])
+        with self.assertRaisesRegex(ValueError, '最多标记 20 个'):
+            team.listings_remove(self.home, ['old-x', 'old-y'], confirmed=True, replaced_by='target-new')
+        owned = team._owned(team._fetch(self.home)[2], self.first['id'])
+        self.assertIn('old-x', owned)
+        self.assertIn('old-y', owned)
+        self.assertEqual(len(owned['target-new']['replaces']), 19)
+
+    def test_cleanup_replaced_enforces_locked_active_dependent_check(self):
+        # R1 #4: even if a dependent is enabled right before lock acquisition, locked_check blocks atomically
+        self.configure()
+        card = self.publish_with_replaces('acme-local', ['acme-other'], '替代旧版')
+        team.install(self.other, card['key'])
+        rev = operations.revision(self.other, operations.load(self.other)[2])
+        # Simulate concurrent process adding a dependent skill between preview and locked execution
+        real_run = operations._run
+        def inject_concurrent_dependent(home, registry, agents, expected, message, mutation, **kwargs):
+            shutil.copytree(self.repository / 'skills/acme-extra', self.other / '.skill-pilot/store/acme-extra')
+            shutil.copytree(self.repository / 'skills/acme-extra', self.other / '.skill-pilot/bases/acme-extra')
+            self.registry(self.other, lambda skills: skills.update({
+                'acme-extra': {**skills['acme-other'], 'requires': ['acme-other'], 'assigned_agents': ['claude'], 'entries': []}
+            }))
+            return real_run(home, registry, agents, expected, message, mutation, **kwargs)
+        with patch.object(operations, '_run', side_effect=inject_concurrent_dependent):
+            with self.assertRaisesRegex(ValueError, '目录内容已经变了|依赖'):
+                team.cleanup_replaced(self.other, {'acme-other': 'delete'}, confirmed=True,
+                                      expected=rev, allowed=['acme-other'], required_present=['acme-local'])
+        self.assertIn('acme-other', operations.load(self.other)[1]['skills'])
 
 
 class TeamSupersedesCliTests(unittest.TestCase):
@@ -446,6 +596,33 @@ const detailHtml = storeReplacesDetailHtml({
 assert.ok(detailHtml.includes('旧版 A（old-a）'));
 assert.ok(detailHtml.includes('新版更稳'));
 assert.ok(detailHtml.includes('data-store-replace-open="team:1:new-a"'));
+// R1 #5: blocked/conflict/lark must NOT show 清理旧版 button
+for (const status of ['installable', 'blocked', 'conflict', 'lark']) {
+  const blockedHtml = storeReplacesDetailHtml({
+    key: 'team:1:new-a', replaces: ['old-a'],
+    replaces_local: [{name: 'old-a', title: '旧版 A'}], local: {status},
+  });
+  assert.ok(!blockedHtml.includes('data-store-replace-open'), status + ' must not show cleanup button');
+}
+// R1 #8: checkReplacedJobs triggers on unseen completed team_install without prior active state
+const sessionStore = new Map();
+global.sessionStorage = {getItem: k => sessionStore.get(k) || null, setItem: (k, v) => sessionStore.set(k, v)};
+const prompts = [];
+const enqueueReplacePrompt = payload => prompts.push(payload);
+''' + '\n'.join([
+            'const REPLACE_SEEN_KEY = "sp-replace-seen-jobs";',
+            'const seenReplaceJobs = new Set();',
+            extract_function(source, 'function markReplaceJobSeen('),
+            extract_function(source, 'function checkReplacedJobs('),
+        ]) + r'''
+checkReplacedJobs([{id: 'fast-1', kind: 'team_install', status: 'done', title: '新版',
+  replaced_local: [{name: 'old-a', title: '旧版 A'}], replace_revision: 'rev1', replace_review: 'r1'}]);
+assert.equal(prompts.length, 1);
+assert.equal(prompts[0].review, 'r1');
+// Second poll for same job must not re-open dialog
+checkReplacedJobs([{id: 'fast-1', kind: 'team_install', status: 'done', title: '新版',
+  replaced_local: [{name: 'old-a', title: '旧版 A'}], replace_revision: 'rev1', replace_review: 'r1'}]);
+assert.equal(prompts.length, 1);
 const listHtml = renderReplaceDialogList([
   {name: 'old-a', title: '旧版 A', status: 'active', agent_names: ['Codex'], can_withdraw: true, can_delete: true, irreplaceable: true},
   {name: 'old-b', title: '旧版 B', status: 'active', agent_names: ['Claude'], can_withdraw: false, can_delete: false,

@@ -40,7 +40,7 @@ def preview(names, home=None):
             'revision': operations.revision(home, agents)}
 
 
-def apply(names, confirmed=False, home=None, expected=None, review_check=None):
+def apply(names, confirmed=False, home=None, expected=None, review_check=None, locked_check=None):
     home, registry, agents = operations.load(home)
     operations.guard(home/'.skill-pilot', home)
     view = preview(names, home)
@@ -54,6 +54,14 @@ def apply(names, confirmed=False, home=None, expected=None, review_check=None):
         return {'needs_confirmation': True, **view}
     selected = view['skills']
     now = datetime.now(timezone.utc).isoformat()
+    def check_expected():
+        _, current, current_agents = operations.load(home)
+        target_rev = expected if expected is not None else view['revision']
+        if operations.revision(home, current_agents) != target_rev:
+            raise ValueError('目录内容已经变了，请刷新后重新核对。')
+        if locked_check:
+            locked_check(current, current_agents)
+        return current
     def mutate(current, checked):
         for name in selected:
             skill = current['skills'][name]
@@ -62,7 +70,8 @@ def apply(names, confirmed=False, home=None, expected=None, review_check=None):
         reconcile_assignments(current, home, checked, selected)
         return selected, [], {'withdrawn': selected, 'path_warnings': view['path_warnings'],
                               'dependency_warnings': view['dependency_warnings']}
-    return operations._run(home, registry, agents, view['revision'], f'撤下了 {len(selected)} 个技能', mutate)
+    return operations._run(home, registry, agents, check_expected if locked_check else view['revision'],
+                           f'撤下了 {len(selected)} 个技能', mutate)
 
 
 def delete_preview(names, home=None):
@@ -92,7 +101,7 @@ def delete_preview(names, home=None):
             'revision': operations.revision(home, agents)}
 
 
-def delete(names, confirmed=False, home=None, expected=None, review_check=None):
+def delete(names, confirmed=False, home=None, expected=None, review_check=None, locked_check=None):
     home, registry, agents = operations.load(home)
     operations.guard(home / '.skill-pilot', home)
     view = delete_preview(names, home)
@@ -105,6 +114,14 @@ def delete(names, confirmed=False, home=None, expected=None, review_check=None):
     if confirmed is not True:
         return {'needs_confirmation': True, **view}
     selected = view['skills']
+    def check_expected():
+        _, current, current_agents = operations.load(home)
+        target_rev = expected if expected is not None else view['revision']
+        if operations.revision(home, current_agents) != target_rev:
+            raise ValueError('目录内容已经变了，请刷新后重新核对。')
+        if locked_check:
+            locked_check(current, current_agents)
+        return current
     def mutate(current, checked):
         for name in selected:
             current['skills'][name]['assigned_agents'] = []
@@ -120,7 +137,8 @@ def delete(names, confirmed=False, home=None, expected=None, review_check=None):
                 changed.add(name)
         return sorted(changed), selected, {'deleted': selected, 'dependency_warnings': view['dependency_warnings'],
                                           'path_warnings': view['path_warnings'], 'irreplaceable': view['irreplaceable']}
-    return operations._run(home, registry, agents, view['revision'], f'删除了 {len(selected)} 个技能', mutate)
+    return operations._run(home, registry, agents, check_expected if locked_check else view['revision'],
+                           f'删除了 {len(selected)} 个技能', mutate)
 
 
 def restore(names, home=None, expected=None):
