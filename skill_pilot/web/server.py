@@ -35,6 +35,8 @@ from . import runtime
 STATIC = Path(__file__).parent / "static"
 HEARTBEAT_TIMEOUT = 30
 PROGRAM_AUTO_CHECK_INTERVAL = 600
+ACTIVITY_PING_INTERVAL = 300
+ACTIVITY_UNSUPPORTED_COOLDOWN = 3600
 # Browsers slow or pause timers in background tabs, so an open page keeps the
 # dashboard alive until it says goodbye or has been silent this long.
 OPEN_PAGE_TIMEOUT = 24 * 3600
@@ -257,6 +259,15 @@ class Dashboard(ThreadingHTTPServer):
         self.preview_generation = 0
         self.preview_generation_lock = threading.Lock()
         self.preview_work_lock = threading.Lock()
+        self.activity_lock = threading.Lock()
+        self.activity_thread = None
+        self.activity_connection = ''
+        self.activity_last_ping = None
+        self.activity_last_date = ''
+        self.activity_unsupported_connection = ''
+        self.activity_unsupported_until = None
+        self.activity_throttle_seconds = ACTIVITY_PING_INTERVAL
+        self.activity_unsupported_cooldown = ACTIVITY_UNSUPPORTED_COOLDOWN
         super().__init__(("127.0.0.1", 0), Handler, bind_and_activate=not bool(resume))
         if resume:
             self.socket.close()
@@ -317,6 +328,63 @@ class Dashboard(ThreadingHTTPServer):
         # 打开看板时的自动检查不挡住关看板和刷新应用新版；手动检查和升级仍要等。
         thread = self.program_thread
         return bool(thread and thread.is_alive() and not self.program_progress.get('automatic'))
+
+    def ping_team_activity(self):
+        if self.closing or self.reload_pending:
+            return False
+        try:
+            if not preview_allowed(self.home):
+                return False
+        except OSError:
+            return False
+        with self.activity_lock:
+            if self.closing or self.reload_pending:
+                return False
+            if self.activity_thread is not None and self.activity_thread.is_alive():
+                return False
+            thread = threading.Thread(target=self._send_team_activity, daemon=True)
+            self.activity_thread = thread
+            thread.start()
+            return True
+
+    def _send_team_activity(self):
+        if self.closing or self.reload_pending:
+            return
+        try:
+            if not preview_allowed(self.home):
+                return
+            config = team.settings(self.home)
+        except (ValueError, OSError):
+            return
+        if not config:
+            return
+        connection = team._connection_version(config)
+        now_mono = time.monotonic()
+        today_utc = team.team_hub._activity_time(team.team_hub.now()).date().isoformat()
+        with self.activity_lock:
+            if self.closing or self.reload_pending:
+                return
+            if (self.activity_unsupported_connection == connection and
+                    self.activity_unsupported_until is not None and
+                    now_mono < self.activity_unsupported_until):
+                return
+            if (self.activity_connection == connection and
+                    self.activity_last_date == today_utc and
+                    self.activity_last_ping is not None and
+                    0 <= now_mono - self.activity_last_ping < self.activity_throttle_seconds):
+                return
+        outcome = team.report_activity(self.home, config=config)
+        finished_mono = time.monotonic()
+        with self.activity_lock:
+            if outcome.get('sent'):
+                self.activity_connection = connection
+                self.activity_last_ping = finished_mono
+                self.activity_last_date = today_utc
+                self.activity_unsupported_connection = ''
+                self.activity_unsupported_until = None
+            elif outcome.get('unsupported'):
+                self.activity_unsupported_connection = connection
+                self.activity_unsupported_until = finished_mono + self.activity_unsupported_cooldown
 
     def preview_assignment(self, changes, recheck):
         """Run one read-only assignment check. A newer check replaces an older one."""
@@ -2024,6 +2092,8 @@ class Handler(BaseHTTPRequestHandler):
             body = file.read_bytes().replace(b"__SESSION_TOKEN__", self.server.token.encode())
             kind = {"html": "text/html", "js": "text/javascript", "css": "text/css", "svg": "image/svg+xml"}[file.suffix.removeprefix(".")]
             self.reply(200, body, kind + "; charset=utf-8")
+            if path == "/":
+                self.server.ping_team_activity()
         else:
             self.reply(404, {"error": "没有这个页面。"})
 
@@ -2219,7 +2289,7 @@ class Handler(BaseHTTPRequestHandler):
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/updates/prepare',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan', '/api/team/listings/preview', '/api/program/auto-check'}
+                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/activity', '/api/program/auto-check'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
@@ -2530,6 +2600,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def team_post(self, path, body):
         home = self.server.home
+        if path == '/api/team/activity':
+            return {'queued': self.server.ping_team_activity()}
         if path == '/api/team/listings/update':
             return self.server.queue_team_updates()
         if path == '/api/team/github/retry':

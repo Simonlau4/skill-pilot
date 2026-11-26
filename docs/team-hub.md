@@ -130,10 +130,11 @@ docker exec skill-pilot-team python3 -m skill_pilot hub remove-member <成员编
 
 ```bash
 python3 -m skill_pilot hub members --data "/srv/Team Hub Data"
+python3 -m skill_pilot hub activity --data "/srv/Team Hub Data"
 python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Data"
 ```
 
-删除后，这位成员的口令立即失效，上架信息、技能包、技能文件、他写的评价和装了哪些技能的记录一并删除，不再计入安装人数；其他成员的上架不受影响。口令遗失时不能找回原口令，请删除该成员后重新添加，交付新口令，并让同事重新上架。
+删除后，这位成员的口令立即失效，上架信息、技能包、技能文件、他写的评价、装了哪些技能的记录和活跃记录一并删除，不再计入安装人数和活跃统计；其他成员的上架不受影响。`hub activity`（也可用 `team-hub activity`）支持 `--days <1–90>` 和 `--json`，仅显示成员编号、显示名、近期活跃天数、每日打开次数与最近活跃时间，不含口令或任何本机隐私信息。口令遗失时不能找回原口令，请删除该成员后重新添加，交付新口令，并让同事重新上架。
 
 数据文件夹包含：
 
@@ -145,6 +146,7 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 | `packages/<成员编号>/<技能名>.json` | 带文件上架的技能包，只保存最新一版 |
 | `ratings.json` | 每张技能卡片的成员评分、评价和更新时间 |
 | `installs.json` | 每位成员本机已有的商店卡片编号，格式为 `{"installs":{"成员编号":["卡片编号",...]},"with_mine":["成员编号",...]}`；文件不存在时按空记录处理，只用来算人数 |
+| `activity.json` | 已连接团队看板的成员每日打开次数与最近活跃时间（按成员编号和 UTC 自然日聚合，保留最近 90 天、总大小不超过 1 MB；不含口令、技能名称或本机路径） |
 | `deliverables/<成员编号>/items/<成品编号>.json` | 此成员上架的成品：名字、版本、一句话说明、用到的技能、复刻配方、文件清单（相对位置 → 内容编号和大小）和更新时间 |
 | `deliverables/<成员编号>/blobs/<内容编号>` | 同一位成员的技能和成品文件按 SHA-256 存一份；下架或换版后清理不再使用的内容 |
 | `feedback.json` | 署名反馈留底，最多保留最近 200 条且总大小不超过 1 MB；含成员编号、署名、转发状态及附件清单 |
@@ -206,6 +208,8 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 | `POST /api/feedback` | 提交纯文本署名反馈（亦兼容可选截图字段，纯文字部分 ≤ 64 KB）；返回 `{"submitted":true,"duplicate":false,"feedback_id":"留底编号"}` |
 | `POST /api/feedback/with-attachments` | 提交带截图的署名反馈（最多 3 张 PNG/JPEG，单张 ≤ 2 MB、合计 ≤ 5 MB，纯文字部分 ≤ 64 KB；看板支持选择或粘贴 PNG/JPEG/WebP 并自动将 WebP 转为 PNG/JPEG）；旧版分享站返回 `404`，不会误留底或转发纯文本；成功返回 `{"submitted":true,"duplicate":false,"feedback_id":"留底编号","attachments":[...]}` |
 | `GET /api/feedback/<留底编号>/attachments/<内容编号>` | 仅允许原提交成员凭口令安全下载该条反馈已留底的截图；返回实际图片类型及 `Content-Disposition: attachment`、`X-Content-Type-Options: nosniff`、`Content-Security-Policy: default-src 'none'; sandbox`；记录不存在、非本人或已因容量上限淘汰时返回 `404` |
+| `POST /api/activity` | 请求体 `{}`（≤ 1024 字节）；按口令对应的成员累计当日打开看板次数与最近活跃时间，不接收或保存本机技能、路径或系统信息；返回 `{"recorded":true,"date":"YYYY-MM-DD","opens_today":1,"last_active_at":"..."}` |
+| `GET /api/activity` | 支持可选 `?days=<1–90>`（默认 30）；任何已持有有效成员口令的成员（含开放加入的成员）均可读取团队成员近期活跃天数、每日打开次数与最近活跃时间汇总，不含口令或本机隐私字段 |
 
 第一期的 `/api/shares*` 接口一律返回 `404`。
 

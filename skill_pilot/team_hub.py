@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PureWindowsPath
@@ -30,6 +30,9 @@ MAX_RATING_BODY = 64 * 1024
 MAX_INSTALL_BODY = 64 * 1024
 MAX_PACK_BODY = 64 * 1024
 MAX_JOIN_BODY = 4096
+MAX_ACTIVITY_BODY = 1024
+ACTIVITY_RETENTION_DAYS = 90
+ACTIVITY_MAX_BYTES = 1024 * 1024
 INLINE_MAX_FILES = 300
 INLINE_MAX_SIZE = 5 * 1024 * 1024
 MAX_FILES = 1000
@@ -59,6 +62,28 @@ GITHUB_READMES = ('readme.md', 'readme.markdown', 'readme.rst', 'readme.txt', 'r
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _activity_time(value):
+    if (isinstance(value, str) and re.fullmatch(
+            r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})', value)):
+        try:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is not None:
+                return parsed.astimezone(timezone.utc)
+        except (ValueError, OverflowError):
+            pass
+    raise ValueError('活跃记录的时间格式不正确。')
+
+
+def _valid_activity_date(value):
+    if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 def member_name(name):
@@ -873,9 +898,24 @@ class HubStore:
                             self.data / 'ratings.json': {'ratings': ratings},
                             self.data / 'installs.json': self._installs_payload(installs, with_mine),
                             self.data / 'members.json': {'members': [m for m in members if m['id'] != member_id]}})
+            activity_path = self.data / 'activity.json'
+            activity_skipped = False
+            if activity_path.exists():
+                try:
+                    activity = self._activity()
+                except (HubError, OSError):
+                    activity_skipped = True
+                else:
+                    if member_id in activity:
+                        activity.pop(member_id, None)
+                        changes[activity_path] = {'activity': activity}
             self._save(changes)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
             shutil.rmtree(self.data / 'deliverables' / member_id, ignore_errors=True)
+            if activity_skipped:
+                print('提示：活跃记录文件损坏或无法读取，已保留原文件，请管理员检查 activity.json。',
+                      file=sys.stderr, flush=True)
+            return {'activity_cleaned': not activity_skipped}
 
     # The HTTP handler holds locked() while authenticating and accessing data.
     def _authenticate(self, authorization):
@@ -954,6 +994,156 @@ class HubStore:
         if with_mine:
             payload['with_mine'] = sorted(with_mine)
         return payload
+
+    def _activity(self):
+        path = self.data / 'activity.json'
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(raw, dict) or not isinstance(raw.get('activity'), dict):
+                raise ValueError
+            result = {}
+            for member_id, entry in raw['activity'].items():
+                if (not isinstance(member_id, str) or not re.fullmatch(r'[0-9a-f]{32}', member_id) or
+                        not isinstance(entry, dict) or not isinstance(entry.get('days'), dict)):
+                    raise ValueError
+                last_active_at = entry.get('last_active_at')
+                if last_active_at is not None:
+                    _activity_time(last_active_at)
+                days = {}
+                for day, count in entry['days'].items():
+                    if not _valid_activity_date(day) or type(count) is not int or count < 1:
+                        raise ValueError
+                    days[day] = count
+                if days:
+                    result[member_id] = {'last_active_at': last_active_at, 'days': dict(sorted(days.items()))}
+            return result
+        except (ValueError, KeyError, TypeError, RecursionError):
+            raise HubError(500, '活跃记录没能读懂，请联系管理员检查或还原备份。') from None
+
+    def _prune_activity(self, activity, current_dt, active_member_ids=None, protect_member=None):
+        cutoff = (current_dt.date() - timedelta(days=ACTIVITY_RETENTION_DAYS - 1)).isoformat()
+        pruned = {}
+        for member_id, entry in activity.items():
+            if active_member_ids is not None and member_id not in active_member_ids:
+                continue
+            days = {day: count for day, count in entry['days'].items() if day >= cutoff}
+            if not days:
+                continue
+            pruned[member_id] = {'last_active_at': entry.get('last_active_at'), 'days': dict(sorted(days.items()))}
+
+        def encoded_size():
+            text = json.dumps({'activity': pruned}, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
+            return len(text.replace('\n', os.linesep).encode('utf-8'))
+
+        while pruned and encoded_size() > ACTIVITY_MAX_BYTES:
+            all_days = sorted({day for entry in pruned.values() for day in entry['days']})
+            if len(all_days) > 1:
+                oldest_day = all_days[0]
+                for member_id in list(pruned):
+                    pruned[member_id]['days'].pop(oldest_day, None)
+                    if not pruned[member_id]['days']:
+                        del pruned[member_id]
+                continue
+            candidates = [mid for mid in pruned if mid != protect_member] or list(pruned)
+            victim = min(candidates, key=lambda mid: (
+                _activity_time(pruned[mid]['last_active_at']).timestamp() if pruned[mid].get('last_active_at') else -1.0,
+                mid,
+            ))
+            del pruned[victim]
+        return pruned
+
+    def _record_activity(self, member_id):
+        timestamp = now()
+        current_dt = _activity_time(timestamp)
+        today = current_dt.date().isoformat()
+        activity = self._activity()
+        previous = activity.get(member_id)
+        days = dict(previous['days']) if previous else {}
+        days[today] = days.get(today, 0) + 1
+        previous_last = previous.get('last_active_at') if previous else None
+        if previous_last is not None and _activity_time(previous_last) > current_dt:
+            latest = previous_last
+        else:
+            latest = timestamp
+        activity[member_id] = {'last_active_at': latest, 'days': dict(sorted(days.items()))}
+        active_ids = {m['id'] for m in self._members()}
+        activity = self._prune_activity(activity, current_dt, active_member_ids=active_ids, protect_member=member_id)
+        atomic_write(self.data / 'activity.json', {'activity': activity})
+        saved = activity.get(member_id) or {'days': {}, 'last_active_at': latest}
+        return {
+            'recorded': True,
+            'date': today,
+            'opens_today': saved['days'].get(today, 0),
+            'last_active_at': saved.get('last_active_at'),
+        }
+
+    def _cleanup_expired_activity(self):
+        path = self.data / 'activity.json'
+        if not path.exists():
+            return
+        try:
+            activity = self._activity()
+            current_dt = _activity_time(now())
+            active_ids = {m['id'] for m in self._members()}
+            pruned = self._prune_activity(activity, current_dt, active_member_ids=active_ids)
+            if pruned != activity:
+                atomic_write(path, {'activity': pruned})
+        except (HubError, OSError, ValueError):
+            return
+
+    def _activity_summary(self, days=30):
+        if type(days) is not int or not 1 <= days <= ACTIVITY_RETENTION_DAYS:
+            raise HubError(400, f'统计天数须为 1 到 {ACTIVITY_RETENTION_DAYS} 之间的整数。')
+        timestamp = now()
+        current_dt = _activity_time(timestamp)
+        today = current_dt.date()
+        today_str = today.isoformat()
+        retention_cutoff = (today - timedelta(days=ACTIVITY_RETENTION_DAYS - 1)).isoformat()
+        window_cutoff = (today - timedelta(days=days - 1)).isoformat()
+        members = self._members()
+        activity = self._activity()
+        rows = []
+        for member in members:
+            record = activity.get(member['id'])
+            kept_days = ({d: c for d, c in record['days'].items() if retention_cutoff <= d <= today_str}
+                         if record else {})
+            daily = {d: c for d, c in sorted(kept_days.items()) if window_cutoff <= d <= today_str}
+            last_active_at = record.get('last_active_at') if kept_days else None
+            rows.append({
+                'id': member['id'],
+                'name': member['name'],
+                'active_days': len(daily),
+                'total_opens': sum(daily.values()),
+                'opens_today': daily.get(today_str, 0),
+                'last_active_at': last_active_at,
+                'daily': daily,
+            })
+        rows.sort(key=lambda r: (
+            0 if r['last_active_at'] is not None else 1,
+            -_activity_time(r['last_active_at']).timestamp() if r['last_active_at'] is not None else 0.0,
+            -r['total_opens'],
+            -r['active_days'],
+            r['name'],
+            r['id'],
+        ))
+        return {
+            'generated_at': timestamp,
+            'window_days': days,
+            'retention_days': ACTIVITY_RETENTION_DAYS,
+            'summary': {
+                'total_members': len(rows),
+                'active_members': sum(1 for r in rows if r['active_days'] > 0),
+                'active_today': sum(1 for r in rows if r['opens_today'] > 0),
+                'total_opens': sum(r['total_opens'] for r in rows),
+            },
+            'members': rows,
+        }
+
+    def activity_summary(self, days=30):
+        with self.locked():
+            return self._activity_summary(days=days)
 
     def _save(self, changes):
         # Readers hold the same lock. Roll back completed writes if any later write fails.
@@ -1475,11 +1665,22 @@ class Handler(BaseHTTPRequestHandler):
             deliverable = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity, path)
             served = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity + '/(.+)', path)
             query = urllib.parse.parse_qs(address.query, keep_blank_values=True)
-            if not served and ('?' in self.path or (package and package[3])) and (
+            activity_days = 30
+            if path == '/api/activity' and self.command == 'GET' and '?' in self.path:
+                if set(query) != {'days'} or len(query['days']) != 1:
+                    raise HubError(404, '没有这个分享站地址，请核对后重试。')
+                raw_days = query['days'][0]
+                if not re.fullmatch(r'\d{1,3}', raw_days):
+                    raise HubError(400, f'统计天数须为 1 到 {ACTIVITY_RETENTION_DAYS} 之间的整数。')
+                activity_days = int(raw_days)
+                if not 1 <= activity_days <= ACTIVITY_RETENTION_DAYS:
+                    raise HubError(400, f'统计天数须为 1 到 {ACTIVITY_RETENTION_DAYS} 之间的整数。')
+            elif not served and ('?' in self.path or (package and package[3])) and (
                     not package or set(query) != {'version'} or len(query['version']) != 1 or
                     not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             allowed = ({'POST'} if path in {'/api/join', '/api/feedback', '/api/feedback/with-attachments'} else
+                       {'GET', 'POST'} if path == '/api/activity' else
                        {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served or feedback_att else
                        {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} or blob else
                        {'DELETE'} if listing else
@@ -1517,6 +1718,8 @@ class Handler(BaseHTTPRequestHandler):
             is_feedback = path in {'/api/feedback', '/api/feedback/with-attachments'}
             data = (self._read_feedback_body()
                     if is_feedback else
+                    self._read_body(MAX_ACTIVITY_BODY, '活跃上报内容超过 1024 字节。')
+                    if path == '/api/activity' and self.command == 'POST' else
                     self._read_body(MAX_INSTALL_BODY, '上报内容超过 64 KB，请缩短后重试。')
                     if path == '/api/installs/me' else
                     self._read_body(MAX_PACK_BODY, '技能包内容超过 64 KB，请缩短后重试。')
@@ -1561,6 +1764,9 @@ class Handler(BaseHTTPRequestHandler):
                         ]
                 elif path == '/api/catalog':
                     result = store._catalog(member['id'], skill_files)
+                elif path == '/api/activity':
+                    result = (store._record_activity(member['id']) if self.command == 'POST' else
+                              store._activity_summary(days=activity_days))
                 elif path == '/api/listings/me':
                     result = store._put_listings(member['id'], data, skill_files)
                 elif path == '/api/installs/me':
@@ -1612,6 +1818,7 @@ class HubServer(ThreadingHTTPServer):
         with self.store.locked():
             self.store._members()
             self.store._cleanup_feedback_orphans()
+            self.store._cleanup_expired_activity()
         super().__init__((host, port), Handler)
 
 
@@ -1643,6 +1850,28 @@ def run(args):
         print('成员编号\t显示名\t创建时间' if members else '还没有成员，请先添加。')
         for member in members:
             print('\t'.join(member[key] for key in ('id', 'name', 'created_at')))
+    elif args.hub_command == 'activity':
+        report = store.activity_summary(days=args.days)
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return
+        rows = report['members']
+        if not rows:
+            print('还没有成员，请先添加。')
+            return
+        summary = report['summary']
+        print(f'最近 {report["window_days"]} 天成员活跃统计：共 {summary["total_members"]} 位成员，'
+              f'{summary["active_members"]} 位活跃，今日 {summary["active_today"]} 位打开，'
+              f'累计打开 {summary["total_opens"]} 次')
+        print('成员编号\t显示名\t活跃天数\t总打开次数\t今日打开\t最近活跃时间\t每日打开')
+        for row in rows:
+            daily = '、'.join(f'{day}({count}次)' for day, count in sorted(row['daily'].items(), reverse=True)) or '—'
+            last_active = row['last_active_at'] or '暂无记录'
+            print(f'{row["id"]}\t{row["name"]}\t{row["active_days"]} 天\t{row["total_opens"]} 次\t'
+                  f'{row["opens_today"]} 次\t{last_active}\t{daily}')
     else:
-        store.remove_member(args.member_id)
-        print('已删除这位成员和他的上架、技能包、文件及评价。')
+        result = store.remove_member(args.member_id)
+        if isinstance(result, dict) and result.get('activity_cleaned') is False:
+            print('已删除这位成员和他的上架、技能包、文件及评价；活跃记录文件损坏，已保留原文件，请管理员检查。')
+        else:
+            print('已删除这位成员和他的上架、技能包、文件、评价及活跃记录。')
