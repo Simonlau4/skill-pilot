@@ -58,6 +58,9 @@ DELIVERABLE_TYPES = {
 GITHUB_SEARCH_LIMIT = 2 * 1024 * 1024
 GITHUB_TREE_LIMIT = 8 * 1024 * 1024
 GITHUB_READMES = ('readme.md', 'readme.markdown', 'readme.rst', 'readme.txt', 'readme')
+GITHUB_REFRESH_HOURS = 24 * 7
+GITHUB_REFRESH_MIN_HOURS = 1
+GITHUB_REFRESH_MAX_HOURS = 24 * 30
 
 
 def now():
@@ -273,6 +276,33 @@ def fetch_github_trending():
     if candidates and not completed:
         raise ValueError('暂时没能读取 GitHub 仓库的文件清单。')
     return {'fetched_at': fetched_at, 'repos': repos}
+
+
+def clean_github_refresh_hours(value, *, allow_blank=True):
+    message = f'GitHub 最近热门的刷新间隔须为 {GITHUB_REFRESH_MIN_HOURS} 到 {GITHUB_REFRESH_MAX_HOURS} 之间的整数小时。'
+    if value is None:
+        return GITHUB_REFRESH_HOURS
+    if isinstance(value, bool):
+        raise ValueError(message)
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            if allow_blank:
+                return GITHUB_REFRESH_HOURS
+            raise ValueError(message)
+        if not re.fullmatch(r'\d+', value):
+            raise ValueError(message)
+        trimmed = value.lstrip('0')
+        if not trimmed or len(trimmed) > 3:
+            raise ValueError(message)
+        hours = int(trimmed)
+    elif isinstance(value, int):
+        hours = value
+    else:
+        raise ValueError(message)
+    if not GITHUB_REFRESH_MIN_HOURS <= hours <= GITHUB_REFRESH_MAX_HOURS:
+        raise ValueError(message)
+    return hours
 
 
 def github_worker(store, stopped):
@@ -532,8 +562,9 @@ class HubError(ValueError):
 
 
 class HubStore:
-    def __init__(self, data):
+    def __init__(self, data, github_refresh_hours=GITHUB_REFRESH_HOURS):
         self.data = Path(data).expanduser().resolve()
+        self.github_refresh_hours = clean_github_refresh_hours(github_refresh_hours)
         self._in_flight_feedback = set()
 
     @contextmanager
@@ -844,14 +875,21 @@ class HubStore:
         except (OSError, ValueError, RecursionError):
             return None
 
-    def refresh_github(self):
+    def refresh_github(self, refresh_hours=None):
+        hours = self.github_refresh_hours if refresh_hours is None else clean_github_refresh_hours(refresh_hours)
         try:
             with self.locked():
                 previous = self._github()
-            if previous and _github_time(now()) - _github_time(previous['fetched_at']) < timedelta(hours=24):
+            if previous and _github_time(now()) - _github_time(previous['fetched_at']) < timedelta(hours=hours):
                 return
             data = clean_github(fetch_github_trending())
             with self.locked():
+                if not data['repos']:
+                    current = self._github()
+                    message = ('这次没有查到热门仓库，继续保留上一份名单。' if current and current['repos']
+                               else '这次没有查到热门仓库，稍后会重试。')
+                    print('GitHub 最近热门更新失败：' + message, file=sys.stderr, flush=True)
+                    return
                 atomic_write(self.data / 'github-trending.json', data)
         except ValueError as error:
             print('GitHub 最近热门更新失败：' + str(error), file=sys.stderr, flush=True)
@@ -1809,12 +1847,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class HubServer(ThreadingHTTPServer):
-    def __init__(self, data, host='0.0.0.0', port=8765, open=False, feedback_webhook=''):
+    def __init__(self, data, host='0.0.0.0', port=8765, open=False, feedback_webhook='',
+                 github_refresh_hours=GITHUB_REFRESH_HOURS):
         if not 0 <= port <= 65535:
             raise ValueError('端口应为 0 到 65535 之间的数字。')
         self.open = open
         self.feedback_webhook = feedback.webhook_url(feedback_webhook)
-        self.store = HubStore(data)
+        self.store = HubStore(data, github_refresh_hours=github_refresh_hours)
         with self.store.locked():
             self.store._members()
             self.store._cleanup_feedback_orphans()
@@ -1824,8 +1863,14 @@ class HubServer(ThreadingHTTPServer):
 
 def run(args):
     if args.hub_command == 'serve':
+        raw_refresh = getattr(args, 'github_refresh_hours', None)
+        if raw_refresh is not None:
+            refresh_hours = clean_github_refresh_hours(raw_refresh, allow_blank=False)
+        else:
+            refresh_hours = clean_github_refresh_hours(os.environ.get('SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS', ''))
         with HubServer(args.data, args.host, args.port, open=args.open,
-                       feedback_webhook=args.feedback_webhook or os.environ.get('SKILL_PILOT_HUB_FEEDBACK_WEBHOOK', '')) as server:
+                       feedback_webhook=args.feedback_webhook or os.environ.get('SKILL_PILOT_HUB_FEEDBACK_WEBHOOK', ''),
+                       github_refresh_hours=refresh_hours) as server:
             access = ('开放加入，知道地址的同事填名字就能加入。' if args.open else
                       '只有管理员发了口令的成员能用。')
             print(f'分享站已启动，监听 {args.host}:{server.server_port}；{access}按 Ctrl+C 停止。', flush=True)

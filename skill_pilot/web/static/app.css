@@ -1946,6 +1946,10 @@ p.store-queue-state { margin: var(--sp-2) 0 0; }
 .store-gh-meta { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; font-size: var(--fs-small); color: var(--muted); }
 .store-gh-actions { display: flex; align-items: center; gap: var(--sp-2); justify-content: flex-end; flex: none; }
 .store-gh-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-4); }
+.store-gh-grid > .empty { grid-column: 1 / -1; }
+.github-categories { margin: 0 0 var(--sp-3); }
+.github-card-cat { color: var(--ink-2); font-weight: 500; }
+.github-curated-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-3); margin-top: var(--sp-4); padding: 0 var(--sp-1); font-size: var(--fs-small); }
 @container team-main (inline-size < 760px) {
   .store-duo-board { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
   .store-duo-col { grid-row: auto; display: flex; flex-direction: column; }
