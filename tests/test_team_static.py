@@ -110,6 +110,8 @@ const openJobsPanel = () => { opened++; };
             line(source, 'const queueActive = '),
             line(source, 'const storeQueueItem = '),
             line(source, 'const githubQueueKey = '),
+            line(source, 'const GITHUB_CATEGORIES = '),
+            extract_function(source, 'function githubRepoCategory('),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             extract_function(source, 'function githubCreatedText('),
             extract_function(source, 'function githubStatusTag('),
@@ -302,6 +304,8 @@ const button = {isConnected: true};
             line(source, 'const queueActive = '),
             line(source, 'const storeQueueItem = '),
             line(source, 'const githubQueueKey = '),
+            line(source, 'const GITHUB_CATEGORIES = '),
+            extract_function(source, 'function githubRepoCategory('),
             extract_function(source, 'const STORE_STATUS = {') + ';',
             extract_function(source, 'function githubCreatedText('),
             extract_function(source, 'function githubStatusTag('),
@@ -1293,7 +1297,10 @@ if (storePackIntroHtml({...pack, mine: true}) !== '') fail('自己的包没写�
             line(source, 'const queueActive = '),
             line(source, 'const storeQueueItem = '),
             line(source, 'const githubQueueKey = '),
+            line(source, 'const GITHUB_CATEGORIES = '),
+            line(source, 'const GITHUB_CURATED_SIZE = '),
             line(source, 'const githubRepos = '),
+            extract_function(source, 'function githubRepoCategory('),
             line(source, 'const deliverableCovers = '),
             line(source, 'const DELIVERABLE_COVER_RETRY_MS = '),
             line(source, 'let deliverableCoverSequence = '),
@@ -1430,8 +1437,11 @@ if (storeDeliverableMatches('提案').length !== 1 || storeDeliverableMatches('o
             line(source, 'const queueActive = '),
             line(source, 'const storeQueueItem = '),
             line(source, 'const githubQueueKey = '),
+            line(source, 'const GITHUB_CATEGORIES = '),
+            line(source, 'const GITHUB_CURATED_SIZE = '),
             line(source, 'const githubRepos = '),
             line(source, 'const githubRepo = '),
+            extract_function(source, 'function githubRepoCategory('),
             line(source, 'const deliverableCovers = '),
             line(source, 'const DELIVERABLE_COVER_RETRY_MS = '),
             line(source, 'let deliverableCoverSequence = '),
@@ -1725,6 +1735,149 @@ assert.equal(right0.length, 0);
         self.assertIn('display: flex; flex-direction: column;', narrow_body)
         self.assertIn('.store-board-row:last-child { border-bottom: 0; }', narrow_body)
         self.assertIn('.store-board-empty { grid-row: auto; flex: none;', narrow_body)
+
+    def test_store_github_categories_curated_slice_and_polling_sync(self):
+        source = (STATIC / 'app.js').read_text()
+        css = (STATIC / 'app.css').read_text()
+        parts = [
+            line(source, 'const escape = value => '),
+            line(source, 'const icon = (name'),
+            line(source, 'const number = value => '),
+            line(source, 'const emptyInner = '),
+            line(source, 'const queueActive = '),
+            line(source, 'const storeQueueItem = '),
+            line(source, 'const githubQueueKey = '),
+            line(source, 'const GITHUB_CATEGORIES = '),
+            line(source, 'const GITHUB_CURATED_SIZE = '),
+            line(source, 'const githubRepos = '),
+            line(source, 'const githubRepo = '),
+            extract_function(source, 'function githubRepoCategory('),
+            extract_function(source, 'const STORE_STATUS = {') + ';',
+            extract_function(source, 'function githubCreatedText('),
+            extract_function(source, 'function githubStatusTag('),
+            extract_function(source, 'function githubInstallHtml('),
+            extract_function(source, 'function githubCardHtml('),
+            extract_function(source, 'function githubCompactRowHtml('),
+            extract_function(source, 'function githubListHtml('),
+            extract_function(source, 'function githubSkillsHtml('),
+            extract_function(source, 'function feedbackButton('),
+            extract_function(source, 'function githubDigestStatusHtml('),
+            extract_function(source, 'function githubDetailHtml('),
+            extract_function(source, 'function githubApplyEntry('),
+            extract_function(source, 'function storeGithubViewHtml('),
+            extract_function(source, 'function rerenderGithubView('),
+            extract_function(source, 'function applyGithubDigests('),
+        ]
+        script = '\n'.join(parts) + r'''
+const assert = require('node:assert/strict');
+const teamReadOnly = () => false;
+const storeQuery = () => '';
+const CSS = {escape: value => value};
+let githubDetail = null;
+const updatedCards = [], loadedDetails = [];
+const updateGithubCard = repo => updatedCards.push(repo);
+const loadGithubDetail = repo => loadedDetails.push(repo);
+const focused = [];
+const shelvesEl = {
+  innerHTML: '',
+  contains: () => true,
+  querySelector: sel => ({focus: () => focused.push(sel)}),
+};
+const $ = id => id === 'store-shelves' ? shelvesEl : null;
+const document = {activeElement: {dataset: {githubCategory: '开发编程'}, hasAttribute: () => false, closest: () => null}};
+const state = {
+  page: 'team', storeMine: false, storeView: 'github',
+  storeGithubFilter: 'all', storeGithubCategory: '', storeGithubExpanded: false,
+  queue: {items: []}, table: {llm_configured: true}, store: {github: {repos: []}},
+};
+const mkRepo = (idx, extra = {}) => ({
+  repository: `acme/repo-${idx}`, url: `https://github.com/acme/repo-${idx}`,
+  description: `English description ${idx}`, stars: 500 - idx,
+  created_at: new Date().toISOString(), pushed_at: new Date().toISOString(),
+  skill_count: 2, local: {status: idx % 3 === 0 ? 'installed' : 'installable'},
+  digest_status: 'off', ...extra,
+});
+
+// 1. 无分类数据时自动隐藏分类筛选栏，且默认只展示精选前 6 个并可展开全部
+state.store.github.repos = Array.from({length: 10}, (_, i) => mkRepo(i));
+const noCatHtml = storeGithubViewHtml();
+assert.ok(!noCatHtml.includes('data-github-category'), '没有分类数据时应自动隐藏分类筛选栏');
+assert.equal((noCatHtml.match(/class="store-card github-card"/g) || []).length, 6, '默认应展示精选前 6 个');
+assert.ok(noCatHtml.includes('展开全部 10 个') && noCatHtml.includes('aria-expanded="false"'));
+
+state.storeGithubExpanded = true;
+const expandedHtml = storeGithubViewHtml();
+assert.equal((expandedHtml.match(/class="store-card github-card"/g) || []).length, 10, '展开后应展示全部 10 个');
+assert.ok(expandedHtml.includes('收起至精选 6 个') && expandedHtml.includes('aria-expanded="true"'));
+state.storeGithubExpanded = false;
+
+// 2. 旧缓存（无 category 字段）与未配置 AI 均不显示分类栏，卡片正常展示中文/英文
+state.store.github.repos = [
+  mkRepo(0, {digest_status: 'ready', digest: {title: '旧缓存工具', summary: '没有分类字段'}}),
+  mkRepo(1, {digest_status: 'ready', digest: {title: '非法分类工具', summary: '非法分类自动忽略', category: '不存在的分类'}}),
+];
+const legacyOnlyHtml = storeGithubViewHtml();
+assert.ok(!legacyOnlyHtml.includes('data-github-category'), '仅旧缓存或非法分类时隐藏分类筛选栏');
+assert.ok(!legacyOnlyHtml.includes('github-card-cat'), '无有效分类时卡片不显示分类文本');
+assert.ok(!legacyOnlyHtml.includes('data-github-more'), '数量不超过 6 个时不显示展开按钮');
+
+// 3. 混合态（含有效分类与旧缓存未分类）：显示分类栏含「未分类」，且与状态筛选双向联动
+state.store.github.repos = [
+  ...Array.from({length: 7}, (_, i) => mkRepo(i, {
+    local: {status: i === 0 ? 'installed' : 'installable'},
+    digest_status: 'ready',
+    digest: {title: `编程${i}`, summary: `编程用途${i}`, category: '开发编程'},
+  })),
+  mkRepo(7, {local: {status: 'installed'}, digest_status: 'ready', digest: {title: '写作', summary: '写作用途', category: '文档写作'}}),
+  mkRepo(8, {local: {status: 'installable'}, digest_status: 'ready', digest: {title: '旧缓存', summary: '旧缓存无分类'}}),
+];
+const mixedHtml = storeGithubViewHtml();
+assert.ok(mixedHtml.includes('data-github-category=""'), '应显示全部分类胶囊');
+assert.ok(mixedHtml.includes('data-github-category="开发编程"') && mixedHtml.includes('>开发编程<span class="n">7</span>'));
+assert.ok(mixedHtml.includes('data-github-category="文档写作"') && mixedHtml.includes('>文档写作<span class="n">1</span>'));
+assert.ok(mixedHtml.includes('data-github-category="-"') && mixedHtml.includes('>未分类<span class="n">1</span>'));
+assert.ok(mixedHtml.includes('<span class="github-card-cat">开发编程</span>'), '卡片应展示用途分类');
+assert.ok(githubCompactRowHtml(state.store.github.repos[0]).includes('<span class="github-card-cat">开发编程</span>'));
+assert.ok(githubDetailHtml({...state.store.github.repos[0], materials: {readme: '', skills: []}}).includes('<span>开发编程</span>'));
+
+// 选中「开发编程」+「全部」：7 个超过精选上限 6，应先展示 6 个并给展开按钮
+state.storeGithubCategory = '开发编程';
+state.storeGithubFilter = 'all';
+const devAllHtml = storeGithubViewHtml();
+assert.equal((devAllHtml.match(/class="store-card github-card"/g) || []).length, 6);
+assert.ok(devAllHtml.includes('展开全部 7 个'));
+assert.ok(devAllHtml.includes('data-github-filter="installed" aria-pressed="false">已安装 1</button>'), '状态分段应按当前分类交叉统计');
+
+// 选中「开发编程」+「已安装」：只剩 1 个，全部展示且不显示展开按钮
+state.storeGithubFilter = 'installed';
+const devInstalledHtml = storeGithubViewHtml();
+assert.equal((devInstalledHtml.match(/class="store-card github-card"/g) || []).length, 1);
+assert.ok(!devInstalledHtml.includes('data-github-more'));
+
+// 选中「未分类」+「已安装」：命中 0 个，保留已选胶囊写 0 并提供「查看全部」重置入口
+state.storeGithubCategory = '-';
+const emptyComboHtml = storeGithubViewHtml();
+assert.ok(emptyComboHtml.includes('data-github-category="-" aria-pressed="true">未分类<span class="n">0</span>'));
+assert.ok(emptyComboHtml.includes('「未分类」下暂无已安装的 GitHub 仓库'));
+assert.ok(emptyComboHtml.includes('data-github-reset-filters'));
+
+// 4. 后台轮询补齐新分类时在 github 视图自动重绘分类栏并保留焦点
+state.storeGithubCategory = '开发编程';
+state.storeGithubFilter = 'all';
+applyGithubDigests({repos: {'acme/repo-8': {digest_status: 'ready', digest: {title: '补齐分类', summary: '新整理', category: '效率工具'}}}});
+assert.ok(shelvesEl.innerHTML.includes('data-github-category="效率工具"'), '轮询到达新分类后应立即出现对应分类胶囊');
+assert.deepEqual(focused, ['[data-github-category="开发编程"]'], '重绘后应保留键盘焦点');
+assert.equal(updatedCards.length, 0, '分类变动走整体视图重绘，不重复逐卡替换');
+'''
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        handler = source[source.index("$('page-team').addEventListener('click'"):]
+        self.assertIn("target.closest('[data-github-category]')", handler[:2500])
+        self.assertIn("target.closest('[data-github-reset-filters]')", handler[:2500])
+        self.assertIn('.store-gh-grid > .empty { grid-column: 1 / -1; }', css)
+        self.assertIn('.github-categories', css)
+        self.assertIn('.github-curated-foot', css)
 
 
 if __name__ == '__main__':

@@ -190,7 +190,7 @@ class GitHubTrendingTests(unittest.TestCase):
         self.save(previous)
         before = self.path.read_bytes()
         for response in (None, [], {}, {'items': {}}, {'items': None}):
-            with self.subTest(response=response), patch.object(team_hub, 'now', return_value='2026-10-30T12:00:00Z'), \
+            with self.subTest(response=response), patch.object(team_hub, 'now', return_value='2026-11-05T12:00:00Z'), \
                     patch.object(team_hub, '_github_json', return_value=response), redirect_stderr(io.StringIO()) as output:
                 self.store.refresh_github()
             self.assertEqual(self.path.read_bytes(), before)
@@ -201,7 +201,7 @@ class GitHubTrendingTests(unittest.TestCase):
         for previous in (None, github_catalog('acme/previous')):
             if previous:
                 self.save(previous)
-            with self.subTest(previous=bool(previous)), patch.object(team_hub, 'now', return_value='2026-10-30T12:00:00Z'), \
+            with self.subTest(previous=bool(previous)), patch.object(team_hub, 'now', return_value='2026-11-05T12:00:00Z'), \
                     patch.object(team_hub, '_github_json', side_effect=ValueError('暂时连不上 GitHub 公开接口。')), \
                     redirect_stderr(io.StringIO()) as output:
                 self.store.refresh_github()
@@ -209,19 +209,50 @@ class GitHubTrendingTests(unittest.TestCase):
             self.assertEqual(self.path.exists(), bool(previous))
             self.assertEqual(len(output.getvalue().splitlines()), 1)
 
-    def test_fresh_cache_is_not_refetched_and_exactly_twenty_four_hours_is_due(self):
+    def test_fresh_cache_is_not_refetched_and_default_weekly_interval_is_due(self):
         previous = github_catalog('acme/previous')
         self.save(previous)
-        with patch.object(team_hub, 'now', return_value='2026-10-30T11:59:59Z'), \
-                patch.object(team_hub, 'fetch_github_trending') as fetch:
-            self.store.refresh_github()
-        fetch.assert_not_called()
-        updated = github_catalog('acme/updated') | {'fetched_at': '2026-10-30T12:00:00Z'}
+        for fresh_time in ('2026-10-30T12:00:00Z', '2026-11-05T11:59:59Z'):
+            with self.subTest(fresh_time=fresh_time), patch.object(team_hub, 'now', return_value=fresh_time), \
+                    patch.object(team_hub, 'fetch_github_trending') as fetch:
+                self.store.refresh_github()
+            fetch.assert_not_called()
+        updated = github_catalog('acme/updated') | {'fetched_at': '2026-11-05T12:00:00Z'}
         with patch.object(team_hub, 'now', return_value=updated['fetched_at']), \
                 patch.object(team_hub, 'fetch_github_trending', return_value=updated) as fetch:
             self.store.refresh_github()
         fetch.assert_called_once_with()
         self.assertEqual(self.store._github(), updated)
+
+    def test_custom_refresh_interval_and_validation(self):
+        self.assertEqual(team_hub.GITHUB_REFRESH_HOURS, 168)
+        for raw, expected in ((None, 168), ('', 168), ('  ', 168), (1, 1), ('24', 24), (' 72 ', 72), (720, 720)):
+            with self.subTest(raw=raw):
+                self.assertEqual(team_hub.clean_github_refresh_hours(raw), expected)
+        for bad in (0, -1, 721, True, False, 1.5, '0', '-24', '721', '24h', 'abc'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, '刷新间隔'):
+                team_hub.clean_github_refresh_hours(bad)
+        daily = team_hub.HubStore(self.home, github_refresh_hours=24)
+        self.save(github_catalog('acme/previous'))
+        with patch.object(team_hub, 'now', return_value='2026-10-30T11:59:59Z'), \
+                patch.object(team_hub, 'fetch_github_trending') as fetch:
+            daily.refresh_github()
+        fetch.assert_not_called()
+        updated = github_catalog('acme/daily') | {'fetched_at': '2026-10-30T12:00:00Z'}
+        with patch.object(team_hub, 'now', return_value=updated['fetched_at']), \
+                patch.object(team_hub, 'fetch_github_trending', return_value=updated) as fetch:
+            daily.refresh_github()
+        fetch.assert_called_once_with()
+        self.assertEqual(daily._github(), updated)
+        # Failure on custom interval still retains previous snapshot.
+        with patch.object(team_hub, 'now', return_value='2026-10-31T12:00:00Z'), \
+                patch.object(team_hub, 'fetch_github_trending', side_effect=ValueError('网络异常')), \
+                redirect_stderr(io.StringIO()) as output:
+            daily.refresh_github()
+        self.assertEqual(daily._github(), updated)
+        self.assertIn('网络异常', output.getvalue())
+        with self.assertRaisesRegex(ValueError, '刷新间隔'):
+            daily.refresh_github(refresh_hours=0)
 
     def test_missing_or_corrupt_cache_is_fetched_immediately(self):
         for content in (None, '{', '{"fetched_at": "invalid", "repos": []}'):
@@ -248,7 +279,7 @@ class GitHubTrendingTests(unittest.TestCase):
     def test_all_failed_trees_preserve_previous_results(self):
         self.save(github_catalog('acme/previous'))
         read = self.search([repository('unavailable')], {'unavailable': ValueError('读取失败。')})
-        with patch.object(team_hub, 'now', return_value='2026-10-30T12:00:00Z'), \
+        with patch.object(team_hub, 'now', return_value='2026-11-05T12:00:00Z'), \
                 patch.object(team_hub, '_github_json', side_effect=read), redirect_stderr(io.StringIO()):
             self.store.refresh_github()
         self.assertEqual(self.store._github(), github_catalog('acme/previous'))
@@ -256,7 +287,7 @@ class GitHubTrendingTests(unittest.TestCase):
     def test_failed_atomic_write_keeps_the_previous_file(self):
         self.save(github_catalog('acme/previous'))
         before = self.path.read_bytes()
-        with patch.object(team_hub, 'now', return_value='2026-10-30T12:00:00Z'), \
+        with patch.object(team_hub, 'now', return_value='2026-11-05T12:00:00Z'), \
                 patch.object(team_hub, 'fetch_github_trending', return_value=github_catalog('acme/updated')), \
                 patch.object(team_hub.os, 'replace', side_effect=OSError('写入失败。')), \
                 redirect_stderr(io.StringIO()) as output:

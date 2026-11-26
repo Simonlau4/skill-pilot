@@ -23,7 +23,8 @@ from tests.test_github_trending import github_catalog
 
 MATERIALS = {'readme': 'Acme example repository.', 'skills': [
     {'name': 'acme-example', 'description': 'Summarize example material.'}]}
-DIGEST = {'title': '示例工具', 'summary': '整理公开的示例资料。', 'uses': ['阅读示例资料', '归纳主要用途'],
+DIGEST = {'title': '示例工具', 'summary': '整理公开的示例资料。', 'category': '效率工具',
+          'uses': ['阅读示例资料', '归纳主要用途'],
           'skills': [{'name': 'acme-example', 'title': '示例整理', 'purpose': '汇总示例资料。'}], 'notes': []}
 
 
@@ -61,14 +62,14 @@ class DigestTests(unittest.TestCase):
     def assert_ready(self, value, expected):
         state = self.digests.status()
         self.assertEqual(state['error'], '')
-        self.assertEqual(state['repos']['acme/example'], {'digest_status': 'ready',
-                         'digest': {k: expected[k] for k in ('title', 'summary')}})
+        expected_summary = {k: expected[k] for k in ('title', 'summary', 'category') if k in expected}
+        self.assertEqual(state['repos']['acme/example'], {'digest_status': 'ready', 'digest': expected_summary})
         detail = self.digests.detail('acme/example')
         self.assertEqual(detail['digest_status'], 'ready')
         self.assertEqual(detail['digest'], expected)
         row = self.digests.catalog(copy.deepcopy(value))['github']['repos'][0]
         self.assertEqual(row['digest_status'], 'ready')
-        self.assertEqual(row['digest'], {k: expected[k] for k in ('title', 'summary')})
+        self.assertEqual(row['digest'], expected_summary)
 
     def test_download_quotes_segments_and_uses_timeout_and_bounded_read(self):
         row = catalog()['github']['repos'][0]
@@ -257,10 +258,63 @@ class DigestTests(unittest.TestCase):
                    {**DIGEST, 'skills': {}}, {**DIGEST, 'skills': [None]},
                    {**DIGEST, 'skills': [{'name': 'acme-example', 'title': '缺用途'}]},
                    {**DIGEST, 'notes': None}]
-        invalid += [{k: v for k, v in DIGEST.items() if k != field} for field in DIGEST]
+        invalid += [{k: v for k, v in DIGEST.items() if k != field} for field in DIGEST if field != 'category']
         for value in invalid:
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, labels.PARSE_ERROR):
                 digest.clean_digest(value, MATERIALS)
+
+    def test_category_normalization_valid_and_invalid_ai_outputs(self):
+        for category in digest.CATEGORIES:
+            with self.subTest(category=category):
+                raw = {**DIGEST, 'category': f' 「{category}」\n\x00 '}
+                cleaned = digest.clean_digest(raw, MATERIALS)
+                self.assertEqual(cleaned['category'], category)
+        for invalid in ('', '   ', '编程开发', 'AI工具', 'unknown', None, 123, ['开发编程'], {'name': '开发编程'}):
+            with self.subTest(invalid=invalid):
+                cleaned = digest.clean_digest({**DIGEST, 'category': invalid}, MATERIALS)
+                self.assertEqual(cleaned['category'], '其他')
+        missing = {k: v for k, v in DIGEST.items() if k != 'category'}
+        self.assertEqual(digest.clean_digest(missing, MATERIALS)['category'], '其他')
+        for category in digest.CATEGORIES:
+            self.assertIn(category, digest.SYSTEM)
+
+    def test_legacy_cache_without_category_loads_without_forced_rerun(self):
+        legacy_digest = {k: v for k, v in DIGEST.items() if k != 'category'}
+        row = catalog()['github']['repos'][0]
+        self.path.write_text(json.dumps({'repos': {'acme/example': {
+            'materials': MATERIALS, 'pushed_at': row['pushed_at'],
+            'fingerprint': digest.fingerprint(MATERIALS),
+            'digest': legacy_digest, 'digested_at': '2026-10-29T12:00:00+00:00',
+        }}}, ensure_ascii=False), encoding='utf-8')
+        loaded = digest.read_cache(self.home)
+        self.assertEqual(loaded['acme/example']['digest'], legacy_digest)
+        self.assertNotIn('category', loaded['acme/example']['digest'])
+        manager = digest.Digests(self.home)
+        self.addCleanup(manager.close)
+        with patch.object(digest, 'fetch_materials') as fetch, patch.object(labels, 'completion') as ai:
+            rows = manager.catalog(catalog())['github']['repos']
+            self.assertEqual(rows[0]['digest_status'], 'ready')
+            self.assertEqual(rows[0]['digest'], {'title': DIGEST['title'], 'summary': DIGEST['summary']})
+            self.assertNotIn('category', rows[0]['digest'])
+            self.assertEqual(manager.queue, [])
+            manager.start()
+            self.join(manager)
+            detail = manager.detail('acme/example')
+            self.assertEqual(detail['digest'], legacy_digest)
+        fetch.assert_not_called()
+        ai.assert_not_called()
+
+    def test_corrupt_cache_category_is_ignored(self):
+        with patch.object(digest, 'fetch_materials', return_value=MATERIALS), patch.object(
+                labels, 'completion', return_value=DIGEST):
+            self.run_batch()
+        original = json.loads(self.path.read_text(encoding='utf-8'))
+        for bad in ('非法分类', '', None, 123, ['开发编程']):
+            with self.subTest(bad=bad):
+                corrupt = copy.deepcopy(original)
+                corrupt['repos']['acme/example']['digest']['category'] = bad
+                self.path.write_text(json.dumps(corrupt, ensure_ascii=False), encoding='utf-8')
+                self.assertEqual(digest.read_cache(self.home), {})
 
     def test_cache_unchanged_push_skips_download_and_ai_across_restarts(self):
         with patch.object(digest, 'fetch_materials', return_value=MATERIALS) as fetch, patch.object(
@@ -710,7 +764,7 @@ class DigestRouteTests(unittest.TestCase):
             status, result = self.request('/api/team/github/digests')
             self.assertEqual(status, 200)
             self.assertEqual(result['repos']['acme/example'], {'digest_status': 'ready',
-                             'digest': {k: DIGEST[k] for k in ('title', 'summary')}})
+                             'digest': {k: DIGEST[k] for k in ('title', 'summary', 'category')}})
             self.assertEqual(self.request('/api/team/github/detail?repository=acme/example')[1]['digest'], DIGEST)
         ai.assert_called_once()
 

@@ -867,7 +867,8 @@ class TeamHubCliTests(unittest.TestCase):
                 server.server_port = 8765
                 server.serve_forever.side_effect = KeyboardInterrupt
                 cli.main()
-                server_class.assert_called_once_with(str(self.data), '0.0.0.0', 8765, open=opened, feedback_webhook='')
+                server_class.assert_called_once_with(str(self.data), '0.0.0.0', 8765, open=opened,
+                                                     feedback_webhook='', github_refresh_hours=168)
                 self.assertIn(message, output.getvalue())
                 thread.assert_called_once()
                 self.assertTrue(thread.call_args.kwargs['daemon'])
@@ -875,8 +876,32 @@ class TeamHubCliTests(unittest.TestCase):
                 self.assertIs(thread.call_args.kwargs['args'][0], server.store)
                 self.assertTrue(thread.call_args.kwargs['args'][1].is_set())
                 thread.return_value.start.assert_called_once_with()
-        self.assertIn('开放加入：知道地址的同事填名字就能加入，不用口令', self.command('serve', '--help').stdout)
+        help_text = self.command('serve', '--help').stdout
+        self.assertIn('开放加入：知道地址的同事填名字就能加入，不用口令', help_text)
+        self.assertIn('--github-refresh-hours', help_text)
         self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_serve_github_refresh_hours_flag_env_and_validation(self):
+        cases = [
+            (['--github-refresh-hours', '24'], {}, 24),
+            ([], {'SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS': '72'}, 72),
+            (['--github-refresh-hours', '48'], {'SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS': '72'}, 48),
+        ]
+        for flags, extra_env, expected in cases:
+            argv = ['skill-pilot', 'hub', 'serve', '--data', str(self.data), *flags]
+            with self.subTest(flags=flags, env=extra_env), patch.dict(os.environ, extra_env, clear=False), \
+                    patch.object(sys, 'argv', argv), patch.object(team_hub, 'HubServer') as server_class, \
+                    patch.object(team_hub.threading, 'Thread'), redirect_stdout(io.StringIO()):
+                server = server_class.return_value.__enter__.return_value
+                server.server_port = 8765
+                server.serve_forever.side_effect = KeyboardInterrupt
+                cli.main()
+                server_class.assert_called_once_with(str(self.data), '0.0.0.0', 8765, open=False,
+                                                     feedback_webhook='', github_refresh_hours=expected)
+        for bad in ('0', '721', 'abc'):
+            result = self.command('serve', '--data', str(self.data), '--github-refresh-hours', bad)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('刷新间隔', result.stdout)
 
 
     def test_add_list_remove_and_errors(self):
