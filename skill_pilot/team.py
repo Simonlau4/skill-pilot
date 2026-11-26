@@ -25,6 +25,7 @@ from .store import git_tree, guard
 
 MAX_BODY = team_hub.MAX_BODY
 TIMEOUT = 10
+ACTIVITY_TIMEOUT = 3
 _FEEDBACK_RECEIPT_LOCK = threading.Lock()
 FORMAT_ERROR = '分享站的技能格式不对，请联系管理员检查。'
 PACKS_UNSUPPORTED = '分享站版本较旧，暂不能整理技能包，请联系管理员更新分享站。'
@@ -96,6 +97,7 @@ def _redact(value, key):
 def _request(config, path, method='GET', data=None):
     body = json.dumps(data, ensure_ascii=False).encode('utf-8') if data is not None else None
     limit = (team_hub.MAX_JOIN_BODY if path == '/api/join' else
+             team_hub.MAX_ACTIVITY_BODY if path == '/api/activity' else
              team_hub.MAX_RATING_BODY if path == '/api/ratings' else
              team_hub.MAX_INSTALL_BODY if path == '/api/installs/me' else MAX_BODY)
     if path == '/api/packs/me':
@@ -113,6 +115,7 @@ def _request(config, path, method='GET', data=None):
         raise ValueError('反馈内容及截图超过上传上限，请减少截图数量或缩小图片后重试。'
                          if path in {'/api/feedback', '/api/feedback/with-attachments'} and limit == feedback.MAX_UPLOAD_BODY else
                          '反馈内容超过 64 KB，请缩短后重试。' if path == '/api/feedback' else
+                         '活跃上报内容超过 1024 字节。' if path == '/api/activity' else
                          '技能包内容超过 64 KB，请缩短后重试。' if path == '/api/packs/me' else
                          '上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
                          '上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
@@ -124,7 +127,8 @@ def _request(config, path, method='GET', data=None):
         headers['Authorization'] = 'Bearer ' + key
     try:
         request = urllib.request.Request(config['url'] + path, data=body, method=method, headers=headers)
-        request_timeout = max(TIMEOUT, 30) if path in {'/api/feedback', '/api/feedback/with-attachments'} else TIMEOUT
+        request_timeout = (max(TIMEOUT, 30) if path in {'/api/feedback', '/api/feedback/with-attachments'} else
+                           ACTIVITY_TIMEOUT if path == '/api/activity' else TIMEOUT)
         with urllib.request.build_opener(labels.NoRedirect).open(request, timeout=request_timeout) as response:
             raw = response.read(MAX_BODY + 1)
         if len(raw) > MAX_BODY:
@@ -213,6 +217,28 @@ def status(home, config=None, strict=True):
         from .diagnostics import failure
         result.update(failure(home, 'backend', '连接分享站', error, result['error']))
     return result
+
+
+def report_activity(home, config=None):
+    """Send a lightweight authenticated dashboard-open ping when connected and writable."""
+    if not store.write_allowed(home):
+        return {'sent': False, 'reason': 'read_only'}
+    if config is None:
+        try:
+            config = settings(home)
+        except ValueError:
+            return {'sent': False, 'reason': 'unconfigured'}
+    if not config:
+        return {'sent': False, 'reason': 'unconfigured'}
+    try:
+        result = _request(config, '/api/activity', 'POST', {})
+    except RequestError as error:
+        if error.status in {404, 405}:
+            return {'sent': False, 'unsupported': True, 'reason': 'unsupported'}
+        return {'sent': False, 'reason': 'error'}
+    except (ValueError, OSError, HTTPException):
+        return {'sent': False, 'reason': 'offline'}
+    return {'sent': True, 'data': result}
 
 
 def feedback_preview(home, error_id='', note='', attachments=None, *, prefer_running=False, pending_version=''):

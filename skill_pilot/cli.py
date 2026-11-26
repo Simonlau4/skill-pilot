@@ -19,19 +19,23 @@ def main():
     inventory.add_argument("--json", action="store_true", help="输出完整机器可读结果")
     commands.add_parser("ui", help="打开中文看板").add_argument('--json', action='store_true')
     commands.add_parser('doctor', help='只读查看脱敏环境与最近错误').add_argument('--json', action='store_true')
-    hub = commands.add_parser('hub', help='运行团队分享站或管理成员')
+    hub = commands.add_parser('hub', aliases=['team-hub'], help='运行团队分享站或管理成员')
     hub_commands = hub.add_subparsers(dest='hub_command', required=True)
     serving = hub_commands.add_parser('serve', help='启动分享站')
     serving.add_argument('--host', default='0.0.0.0', help='监听地址，默认局域网所有地址')
     serving.add_argument('--port', type=int, default=8765, help='监听端口，默认 8765')
     serving.add_argument('--open', action='store_true', help='开放加入：知道地址的同事填名字就能加入，不用口令')
     serving.add_argument('--feedback-webhook', help='飞书多维表格自动化接收地址；也可设置 SKILL_PILOT_HUB_FEEDBACK_WEBHOOK')
+    serving.add_argument('--github-refresh-hours', help='GitHub 最近热门刷新间隔（小时，1–720，默认 168 即每周一次）；也可设置 SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS')
     member = hub_commands.add_parser('add-member', help='添加成员并显示一次口令')
     member.add_argument('name', help='成员显示名')
     members = hub_commands.add_parser('members', help='查看成员名单，不显示口令')
     removing = hub_commands.add_parser('remove-member', help='删除成员和他的分享')
     removing.add_argument('member_id', help='成员编号')
-    for command in (serving, member, members, removing):
+    activity = hub_commands.add_parser('activity', help='查看成员每日打开看板与近期活跃统计')
+    activity.add_argument('--days', type=int, default=30, help='统计最近几天（1–90，默认 30）')
+    activity.add_argument('--json', action='store_true', help='输出完整机器可读结果')
+    for command in (serving, member, members, removing, activity):
         command.add_argument('--data', required=True, help='分享站数据文件夹（必须指定）')
     migrate = commands.add_parser("migrate", help="预览整理或在模拟目录确认执行")
     mode = migrate.add_mutually_exclusive_group(required=True)
@@ -171,7 +175,7 @@ def main():
         result = bundle()
         print(result['text'] if args.json else '本机诊断（已脱敏）\n' + result['text'])
         return
-    if args.command == 'hub':
+    if args.command in {'hub', 'team-hub'}:
         from . import team_hub
         try:
             team_hub.run(args)

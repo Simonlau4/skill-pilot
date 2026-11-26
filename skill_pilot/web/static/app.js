@@ -1480,6 +1480,7 @@ const state = {
   storeSpotDeliverable: '',     // 精选总览中当前展示的成品 key
   storeBoardTab: '',            // 双列精选榜右列切换：'' 自动 / rating / latest
   storeGithubFilter: 'all',     // GitHub 热门独立视图筛选：all / installable / installed
+  storeGithubCategory: '',      // GitHub 热门用途分类筛选：'' 全部 / 分类名 / '-' 未分类
   storeDetail: null,   // 详情面板里正在看的卡片编号或技能包编号（pack: 开头）
   storeGithubExpanded: false,   // 「GitHub 最近热门」是否展开全部
   queue: null,         // /api/team/queue：安装队列；null 是还没读
@@ -3729,11 +3730,20 @@ $('team-form').addEventListener('submit', event => {
   });
 });
 
+/* 轻量活跃上报：只通知本机后台按会话节流上报，不阻塞页面、静默忽略失败。 */
+function pingTeamActivity() {
+  if (!state.team?.configured || teamReadOnly()) return;
+  api('/api/team/activity', {}).catch(() => {});
+}
+
 /* 进团队页：先画已知的，再读最新状态和商店目录。 */
 async function enterTeam() {
   renderTeam();
   await refreshTeam();
-  if (state.team?.configured && !state.team.error) await loadStore();
+  if (state.team?.configured && !state.team.error) {
+    pingTeamActivity();
+    await loadStore();
+  }
 }
 
 let storeSequence = 0;
@@ -4222,8 +4232,14 @@ function githubStatusTag(repo) {
   return label ? `<span class="tag ${tone}">${escape(label)}</span>` : '';
 }
 
+const GITHUB_CATEGORIES = ['开发编程', '文档写作', '数据检索', '设计视觉', '效率工具', '其他'];
+const GITHUB_CURATED_SIZE = 6;
 const githubRepos = () => state.store?.github?.repos || [];
 const githubRepo = repository => githubRepos().find(repo => repo.repository === repository) || null;
+function githubRepoCategory(repo) {
+  const value = repo?.digest_status === 'ready' ? String(repo?.digest?.category || '').trim() : '';
+  return GITHUB_CATEGORIES.includes(value) ? value : '';
+}
 const githubDetailKey = repository => `github-repo:${repository}`;
 const githubErrorText = error => error instanceof TypeError
   ? '没能连接到看板，请稍后重试。'
@@ -4263,6 +4279,7 @@ function githubCardHtml(repo) {
   const digest = repo.digest_status === 'ready' && repo.digest && String(repo.digest.title || '').trim()
     ? repo.digest : null;
   const summary = String((digest ? digest.summary : repo.description) || '').trim();
+  const category = githubRepoCategory(repo);
   const created = githubCreatedText(repo.created_at);
   const skillCount = Number.isInteger(repo.skill_count) ? `<span>含 ${number(repo.skill_count)} 个技能</span>` : '';
   const title = digest ? String(digest.title).trim() : repository;
@@ -4279,6 +4296,7 @@ function githubCardHtml(repo) {
     </div>
     <span class="store-card-sum github-card-sum${summary ? '' : ' is-empty'}">${escape(summary || '仓库没有写说明')}</span>
     <span class="store-card-foot">
+      ${category ? `<span class="github-card-cat">${escape(category)}</span>` : ''}
       <span>${number(repo.stars)} 星</span>
       ${created ? `<span>${created}</span>` : ''}
       ${skillCount}
@@ -4319,7 +4337,7 @@ let githubDigestSequence = 0;
 let githubDetail = null;        // 详情面板正在看的仓库：{repository, data, error, loading}
 let githubDetailSequence = 0;
 
-const githubHasPending = () => githubRepos().some(repo => repo.digest_status === 'pending');
+const githubHasPending = () => Boolean(state.store?.github?.digest_running) || githubRepos().some(repo => repo.digest_status === 'pending');
 
 /* 只把轻量状态合并进目录里的对应条目；返回这一项是否真的变了。 */
 function githubApplyEntry(repository, entry) {
@@ -4341,6 +4359,7 @@ function githubCompactRowHtml(repo) {
   const digest = repo.digest_status === 'ready' && repo.digest && String(repo.digest.title || '').trim()
     ? repo.digest : null;
   const title = digest ? String(digest.title).trim() : repository;
+  const category = githubRepoCategory(repo);
   const created = githubCreatedText(repo.created_at);
   const skillCount = Number.isInteger(repo.skill_count) ? `<span>含 ${number(repo.skill_count)} 个技能</span>` : '';
   return `<div class="store-gh-row" data-github-card="${escape(repository)}">
@@ -4349,6 +4368,7 @@ function githubCompactRowHtml(repo) {
       <span class="github-card-repo" title="${escape(repository)}">${escape(repository)}</span>
     </div>
     <div class="store-gh-meta">
+      ${category ? `<span class="github-card-cat">${escape(category)}</span>` : ''}
       <span>${number(repo.stars)} 星</span>
       ${created ? `<span>${created}</span>` : ''}
       ${skillCount}
@@ -4381,13 +4401,64 @@ function updateGithubCard(repository) {
   else if (focusKey === 'link') next.querySelector('a[href]')?.focus({preventScroll: true});
 }
 
+function rerenderGithubView() {
+  if (state.page !== 'team' || state.storeMine || state.storeView !== 'github' || storeQuery()) return;
+  const box = $('store-shelves');
+  const active = document.activeElement;
+  const hadFocus = box.contains(active);
+  let focusTarget = '';
+  if (hadFocus) {
+    if (active.dataset?.githubCategory !== undefined) {
+      focusTarget = `[data-github-category="${CSS.escape(active.dataset.githubCategory)}"]`;
+    } else if (active.dataset?.githubFilter) {
+      focusTarget = `[data-github-filter="${CSS.escape(active.dataset.githubFilter)}"]`;
+    } else if (active.hasAttribute?.('data-github-more')) {
+      focusTarget = '[data-github-more]';
+    } else if (active.hasAttribute?.('data-github-reset-filters')) {
+      focusTarget = '[data-github-reset-filters]';
+    } else {
+      const card = active.closest?.('[data-github-card]');
+      if (card) {
+        const repoSel = `[data-github-card="${CSS.escape(card.dataset.githubCard)}"]`;
+        const part = active.dataset?.githubOpen ? '[data-github-open]'
+          : active.dataset?.githubInstall ? '[data-github-install]'
+          : active.closest?.('a[href]') ? 'a[href]' : '';
+        if (part) focusTarget = `${repoSel} ${part}`;
+      }
+    }
+  }
+  box.innerHTML = storeGithubViewHtml();
+  if (hadFocus) {
+    const target = (focusTarget && box.querySelector(focusTarget))
+      || (state.storeGithubCategory && box.querySelector(`[data-github-category="${CSS.escape(state.storeGithubCategory)}"]`))
+      || box.querySelector('[data-github-category=""]')
+      || box.querySelector('#shelf-github');
+    target?.focus({preventScroll: true});
+  }
+}
+
 function applyGithubDigests(result) {
+  if (state.store?.github && typeof result?.running === 'boolean') {
+    state.store.github.digest_running = result.running;
+  }
   const entries = result?.repos && typeof result.repos === 'object' ? result.repos : {};
   const changed = [];
+  let categoryChanged = false;
   for (const [repository, entry] of Object.entries(entries)) {
-    if (githubApplyEntry(repository, entry)) changed.push(repository);
+    const prev = githubRepo(repository);
+    const prevCategory = prev?.digest_status === 'ready' ? String(prev?.digest?.category || '') : '';
+    if (githubApplyEntry(repository, entry)) {
+      changed.push(repository);
+      const next = githubRepo(repository);
+      const nextCategory = next?.digest_status === 'ready' ? String(next?.digest?.category || '') : '';
+      if (prevCategory !== nextCategory) categoryChanged = true;
+    }
   }
-  for (const repository of changed) updateGithubCard(repository);
+  if (categoryChanged && state.page === 'team' && !state.storeMine && state.storeView === 'github' && !storeQuery()) {
+    rerenderGithubView();
+  } else {
+    for (const repository of changed) updateGithubCard(repository);
+  }
   if (githubDetail && changed.includes(githubDetail.repository)) loadGithubDetail(githubDetail.repository);
 }
 
@@ -4471,6 +4542,9 @@ function githubDetailHtml(data) {
   const digest = repo.digest && typeof repo.digest === 'object' ? repo.digest : null;
   const materials = repo.materials && typeof repo.materials === 'object' ? repo.materials : {};
   const facts = [];
+  const category = digest && GITHUB_CATEGORIES.includes(String(digest.category || '').trim())
+    ? String(digest.category).trim() : '';
+  if (category) facts.push(category);
   if (repo.stars !== undefined && repo.stars !== null && Number.isFinite(Number(repo.stars))) {
     facts.push(`${number(repo.stars)} 星`);
   }
@@ -4695,7 +4769,7 @@ function storeGithubOverviewHtml() {
   return `<section class="shelf shelf-github" aria-labelledby="shelf-github">
     <div class="shelf-head">
       <h2 id="shelf-github" tabindex="-1">GitHub 最近热门</h2>
-      <button class="link-btn" type="button" data-store-goto-view="github">展开全部 ${number(repos.length)} 个</button>
+      <button class="link-btn" type="button" data-store-goto-view="github" data-github-expand-all="1">展开全部 ${number(repos.length)} 个</button>
     </div>
     <p class="shelf-note">最近 30 天新建、星数最多的 GitHub 技能仓库，团队里还没人上架。</p>
     <div id="shelf-github-cards" class="store-gh-feed">${repos.slice(0, 3).map(githubCompactRowHtml).join('')}</div>
@@ -4718,15 +4792,58 @@ function storePacksViewHtml() {
 function storeGithubViewHtml() {
   const repos = githubRepos();
   if (!repos.length) return '';
+  const hasCategories = repos.some(repo => Boolean(githubRepoCategory(repo)));
+  const rawCategory = state.storeGithubCategory || '';
+  const activeCategory = hasCategories && (GITHUB_CATEGORIES.includes(rawCategory) || rawCategory === '-')
+    ? rawCategory : '';
+  const matchesCategory = repo => !activeCategory
+    || (activeCategory === '-' ? !githubRepoCategory(repo) : githubRepoCategory(repo) === activeCategory);
+  const byCategory = activeCategory ? repos.filter(matchesCategory) : repos;
   const counts = {
-    all: repos.length,
-    installable: repos.filter(repo => repo.local?.status === 'installable').length,
-    installed: repos.filter(repo => repo.local?.status === 'installed').length,
+    all: byCategory.length,
+    installable: byCategory.filter(repo => repo.local?.status === 'installable').length,
+    installed: byCategory.filter(repo => repo.local?.status === 'installed').length,
   };
   const filter = counts[state.storeGithubFilter] !== undefined ? state.storeGithubFilter : 'all';
-  const shown = filter === 'all' ? repos : repos.filter(repo => repo.local?.status === filter);
+  const byStatus = filter === 'all' ? repos : repos.filter(repo => repo.local?.status === filter);
+  const shown = activeCategory ? byStatus.filter(matchesCategory) : byStatus;
   const filters = [['all', '全部'], ['installable', '可安装'], ['installed', '已安装']].map(([id, label]) =>
     `<button class="seg" type="button" data-github-filter="${id}" aria-pressed="${filter === id}">${label} ${number(counts[id])}</button>`).join('');
+  let categoryBar = '';
+  if (hasCategories) {
+    const catCounts = new Map();
+    let uncategorized = 0;
+    for (const repo of byStatus) {
+      const cat = githubRepoCategory(repo);
+      if (cat) catCounts.set(cat, (catCounts.get(cat) || 0) + 1);
+      else uncategorized += 1;
+    }
+    const pills = [['', byStatus.length]];
+    for (const cat of GITHUB_CATEGORIES) {
+      const count = catCounts.get(cat) || 0;
+      if (count > 0 || activeCategory === cat) pills.push([cat, count]);
+    }
+    if (uncategorized > 0 || activeCategory === '-') pills.push(['-', uncategorized]);
+    categoryBar = `<div class="store-groups github-categories" role="group" aria-label="按用途分类筛选">${pills.map(([cat, count]) =>
+      `<button class="store-group" type="button" data-github-category="${escape(cat)}" aria-pressed="${activeCategory === cat}">${
+        escape(cat === '' ? '全部' : cat === '-' ? '未分类' : cat)}<span class="n">${number(count)}</span></button>`).join('')}</div>`;
+  }
+  const canExpand = shown.length > GITHUB_CURATED_SIZE;
+  const expanded = Boolean(state.storeGithubExpanded);
+  const visible = canExpand && !expanded ? shown.slice(0, GITHUB_CURATED_SIZE) : shown;
+  const curatedFoot = canExpand
+    ? `<div class="github-curated-foot">
+        <span class="muted">${expanded ? `已展开全部 ${number(shown.length)} 个` : `当前展示精选前 ${number(visible.length)} 个，共 ${number(shown.length)} 个`}</span>
+        <button class="btn btn-small" type="button" data-github-more aria-expanded="${expanded}" aria-controls="shelf-github-cards">${
+          expanded ? `收起至精选 ${number(GITHUB_CURATED_SIZE)} 个` : `展开全部 ${number(shown.length)} 个`}</button>
+      </div>`
+    : '';
+  const emptyText = activeCategory
+    ? `「${activeCategory === '-' ? '未分类' : activeCategory}」下暂无${filter === 'installed' ? '已安装的' : filter === 'installable' ? '可安装的' : ''} GitHub 仓库`
+    : (filter === 'installed' ? '还没有已安装的 GitHub 仓库' : '没有可安装的 GitHub 仓库');
+  const emptyAction = activeCategory
+    ? '<button class="link-btn" type="button" data-github-reset-filters>查看全部</button>'
+    : '';
   return `<section class="shelf shelf-github" aria-labelledby="shelf-github">
     <div class="shelf-head">
       <h2 id="shelf-github" tabindex="-1">GitHub 最近热门</h2>
@@ -4735,9 +4852,11 @@ function storeGithubViewHtml() {
       </div>
     </div>
     <p class="shelf-note">最近 30 天新建、星数最多的 GitHub 技能仓库，团队里还没人上架。</p>
-    <div id="shelf-github-cards" class="store-gh-grid">${shown.length
-      ? shown.map(githubCardHtml).join('')
-      : `<div class="empty">${emptyInner('search', filter === 'installed' ? '还没有已安装的 GitHub 仓库' : '没有可安装的 GitHub 仓库')}</div>`}</div>
+    ${categoryBar}
+    <div id="shelf-github-cards" class="store-gh-grid">${visible.length
+      ? visible.map(githubCardHtml).join('')
+      : `<div class="empty">${emptyInner('search', emptyText, emptyAction)}</div>`}</div>
+    ${curatedFoot}
   </section>`;
 }
 
@@ -5573,12 +5692,22 @@ function renderStoreAll(cards) {
     : `<div class="empty">${empty}</div>`;
 }
 
-function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTop = false, focusTarget = false} = {}) {
+function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTop = false, focusTarget = false, expandGithub = null} = {}) {
+  const wasGithubView = state.storeView === 'github' && !state.storeMine && !storeQuery();
   state.storeView = view || 'overview';
   state.storeMine = false;
   if (clearSearch) $('store-search').value = '';
   if (sort) state.storeSort = sort;
   if (group !== null) state.storeGroup = group;
+  if (state.storeView === 'github') {
+    if (expandGithub === true) {
+      state.storeGithubFilter = 'all';
+      state.storeGithubCategory = '';
+      state.storeGithubExpanded = true;
+    } else if (expandGithub === false && !wasGithubView) {
+      state.storeGithubExpanded = false;
+    }
+  }
   renderTeam();
   if (scrollTop && window.scrollY > 96) {
     window.scrollTo({top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
@@ -5598,7 +5727,7 @@ function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTo
 $('store-views').addEventListener('click', event => {
   const button = event.target.closest('[data-store-view]');
   if (!button || button.hidden) return;
-  setStoreView(button.dataset.storeView, {group: '', scrollTop: true});
+  setStoreView(button.dataset.storeView, {group: '', scrollTop: true, expandGithub: false});
   button.scrollIntoView({block: 'nearest', inline: 'nearest'});
 });
 
@@ -5614,7 +5743,7 @@ $('store-views').addEventListener('keydown', event => {
     : event.key === 'End' ? tabs.length - 1
     : (current + (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
   const next = tabs[nextIndex];
-  setStoreView(next.dataset.storeView, {group: ''});
+  setStoreView(next.dataset.storeView, {group: '', expandGithub: false});
   next.focus({preventScroll: true});
   next.scrollIntoView({block: 'nearest', inline: 'nearest'});
 });
@@ -5737,6 +5866,8 @@ $('page-team').addEventListener('click', event => {
   const findSkill = event.target.closest('[data-deliverable-find]');
   const boardTab = event.target.closest('[data-board-tab]');
   const githubFilter = event.target.closest('[data-github-filter]');
+  const githubCategory = event.target.closest('[data-github-category]');
+  const githubReset = event.target.closest('[data-github-reset-filters]');
   const retry = event.target.closest('[data-store-queue-retry]');
   const clear = event.target.closest('[data-store-queue-clear]');
   const open = event.target.closest('[data-store-open]');
@@ -5772,8 +5903,24 @@ $('page-team').addEventListener('click', event => {
     state.storeGithubFilter = filter;
     renderTeam();
     $('store-shelves').querySelector(`[data-github-filter="${CSS.escape(filter)}"]`)?.focus({preventScroll: true});
+  } else if (githubCategory) {
+    const category = githubCategory.dataset.githubCategory;
+    state.storeGithubCategory = category === state.storeGithubCategory ? '' : category;
+    renderTeam();
+    const target = state.storeGithubCategory
+      ? `[data-github-category="${CSS.escape(state.storeGithubCategory)}"]`
+      : '[data-github-category=""]';
+    $('store-shelves').querySelector(target)?.focus({preventScroll: true});
+  } else if (githubReset) {
+    state.storeGithubCategory = '';
+    state.storeGithubFilter = 'all';
+    renderTeam();
+    $('store-shelves').querySelector('[data-github-filter="all"]')?.focus({preventScroll: true});
   } else if (gotoView) {
-    setStoreView(gotoView.dataset.storeGotoView, {group: '', scrollTop: true, focusTarget: true});
+    setStoreView(gotoView.dataset.storeGotoView, {
+      group: '', scrollTop: true, focusTarget: true,
+      expandGithub: gotoView.dataset.githubExpandAll === '1' ? true : null,
+    });
   } else if (goto) gotoStoreSkill(goto);
   else if (gotoTags) gotoStoreTag(gotoTags.dataset.storeGotoTag);
   else if (retry) retryStoreQueue(retry.dataset.storeQueueRetry, retry);
@@ -8182,8 +8329,14 @@ function closeDetail() {
     const selector = github
       ? `[data-github-open="${CSS.escape(storeKey.slice('github-repo:'.length))}"]`
       : `[data-store-open="${CSS.escape(storeKey)}"]`;
-    const opener = storeOpener?.isConnected ? storeOpener
-      : (storeOpenerArea && $(storeOpenerArea)?.querySelector(selector)) || $('page-team').querySelector(selector);
+    const fallback = github
+      ? (state.storeGithubCategory && $('store-shelves')?.querySelector(`[data-github-category="${CSS.escape(state.storeGithubCategory)}"]`))
+        || $('store-shelves')?.querySelector('[data-github-category=""]')
+        || $('store-shelves')?.querySelector('#shelf-github')
+      : null;
+    const opener = (storeOpener?.isConnected ? storeOpener
+      : (storeOpenerArea && $(storeOpenerArea)?.querySelector(selector)) || $('page-team').querySelector(selector))
+      || fallback;
     opener?.focus();
     storeOpener = null;
     return;
