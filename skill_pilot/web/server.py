@@ -36,6 +36,7 @@ STATIC = Path(__file__).parent / "static"
 HEARTBEAT_TIMEOUT = 30
 PROGRAM_AUTO_CHECK_INTERVAL = 600
 ACTIVITY_PING_INTERVAL = 300
+ACTIVITY_UNSUPPORTED_COOLDOWN = 3600
 # Browsers slow or pause timers in background tabs, so an open page keeps the
 # dashboard alive until it says goodbye or has been silent this long.
 OPEN_PAGE_TIMEOUT = 24 * 3600
@@ -262,8 +263,11 @@ class Dashboard(ThreadingHTTPServer):
         self.activity_thread = None
         self.activity_connection = ''
         self.activity_last_ping = None
+        self.activity_last_date = ''
         self.activity_unsupported_connection = ''
+        self.activity_unsupported_until = None
         self.activity_throttle_seconds = ACTIVITY_PING_INTERVAL
+        self.activity_unsupported_cooldown = ACTIVITY_UNSUPPORTED_COOLDOWN
         super().__init__(("127.0.0.1", 0), Handler, bind_and_activate=not bool(resume))
         if resume:
             self.socket.close()
@@ -328,38 +332,52 @@ class Dashboard(ThreadingHTTPServer):
     def ping_team_activity(self):
         if self.closing or self.reload_pending or not preview_allowed(self.home):
             return False
-        try:
-            config = team.settings(self.home)
-        except ValueError:
-            return False
-        if not config:
-            return False
-        connection = team._connection_version(config)
-        now_mono = time.monotonic()
         with self.activity_lock:
-            if self.closing:
-                return False
-            if self.activity_unsupported_connection == connection:
-                return False
-            if (self.activity_connection == connection and
-                    self.activity_last_ping is not None and
-                    0 <= now_mono - self.activity_last_ping < self.activity_throttle_seconds):
+            if self.closing or self.reload_pending:
                 return False
             if self.activity_thread is not None and self.activity_thread.is_alive():
                 return False
-            self.activity_connection = connection
-            self.activity_last_ping = now_mono
-            thread = threading.Thread(target=self._send_team_activity, args=(config, connection), daemon=True)
+            thread = threading.Thread(target=self._send_team_activity, daemon=True)
             self.activity_thread = thread
             thread.start()
             return True
 
-    def _send_team_activity(self, config, connection):
+    def _send_team_activity(self):
+        if self.closing or self.reload_pending or not preview_allowed(self.home):
+            return
+        try:
+            config = team.settings(self.home)
+        except ValueError:
+            return
+        if not config:
+            return
+        connection = team._connection_version(config)
+        now_mono = time.monotonic()
+        today_utc = team.team_hub._activity_time(team.team_hub.now()).date().isoformat()
+        with self.activity_lock:
+            if self.closing or self.reload_pending:
+                return
+            if (self.activity_unsupported_connection == connection and
+                    self.activity_unsupported_until is not None and
+                    now_mono < self.activity_unsupported_until):
+                return
+            if (self.activity_connection == connection and
+                    self.activity_last_date == today_utc and
+                    self.activity_last_ping is not None and
+                    0 <= now_mono - self.activity_last_ping < self.activity_throttle_seconds):
+                return
         outcome = team.report_activity(self.home, config=config)
-        if outcome.get('unsupported'):
-            with self.activity_lock:
-                if self.activity_connection == connection:
-                    self.activity_unsupported_connection = connection
+        finished_mono = time.monotonic()
+        with self.activity_lock:
+            if outcome.get('sent'):
+                self.activity_connection = connection
+                self.activity_last_ping = finished_mono
+                self.activity_last_date = (outcome.get('data') or {}).get('date') or today_utc
+                self.activity_unsupported_connection = ''
+                self.activity_unsupported_until = None
+            elif outcome.get('unsupported'):
+                self.activity_unsupported_connection = connection
+                self.activity_unsupported_until = finished_mono + self.activity_unsupported_cooldown
 
     def preview_assignment(self, changes, recheck):
         """Run one read-only assignment check. A newer check replaces an older one."""
@@ -2066,9 +2084,9 @@ class Handler(BaseHTTPRequestHandler):
             file = STATIC / ("index.html" if path == "/" else path.removeprefix("/"))
             body = file.read_bytes().replace(b"__SESSION_TOKEN__", self.server.token.encode())
             kind = {"html": "text/html", "js": "text/javascript", "css": "text/css", "svg": "image/svg+xml"}[file.suffix.removeprefix(".")]
+            self.reply(200, body, kind + "; charset=utf-8")
             if path == "/":
                 self.server.ping_team_activity()
-            self.reply(200, body, kind + "; charset=utf-8")
         else:
             self.reply(404, {"error": "没有这个页面。"})
 

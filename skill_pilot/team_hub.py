@@ -900,10 +900,15 @@ class HubStore:
                             self.data / 'members.json': {'members': [m for m in members if m['id'] != member_id]}})
             activity_path = self.data / 'activity.json'
             if activity_path.exists():
-                activity = self._activity()
-                if member_id in activity:
-                    activity.pop(member_id, None)
-                    changes[activity_path] = {'activity': activity}
+                try:
+                    activity = self._activity()
+                except (HubError, OSError):
+                    print('提示：活跃记录文件损坏或无法读取，已保留原文件；成员及其口令已删除，请管理员检查 activity.json。',
+                          file=sys.stderr, flush=True)
+                else:
+                    if member_id in activity:
+                        activity.pop(member_id, None)
+                        changes[activity_path] = {'activity': activity}
             self._save(changes)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
             shutil.rmtree(self.data / 'deliverables' / member_id, ignore_errors=True)
@@ -1070,6 +1075,20 @@ class HubStore:
             'last_active_at': saved.get('last_active_at'),
         }
 
+    def _cleanup_expired_activity(self):
+        path = self.data / 'activity.json'
+        if not path.exists():
+            return
+        try:
+            activity = self._activity()
+            current_dt = _activity_time(now())
+            active_ids = {m['id'] for m in self._members()}
+            pruned = self._prune_activity(activity, current_dt, active_member_ids=active_ids)
+            if pruned != activity:
+                atomic_write(path, {'activity': pruned})
+        except (HubError, OSError, ValueError):
+            return
+
     def _activity_summary(self, days=30):
         if type(days) is not int or not 1 <= days <= ACTIVITY_RETENTION_DAYS:
             raise HubError(400, f'统计天数须为 1 到 {ACTIVITY_RETENTION_DAYS} 之间的整数。')
@@ -1084,8 +1103,9 @@ class HubStore:
         rows = []
         for member in members:
             record = activity.get(member['id'])
-            kept_days = {d: c for d, c in record['days'].items() if d >= retention_cutoff} if record else {}
-            daily = {d: c for d, c in sorted(kept_days.items()) if d >= window_cutoff}
+            kept_days = ({d: c for d, c in record['days'].items() if retention_cutoff <= d <= today_str}
+                         if record else {})
+            daily = {d: c for d, c in sorted(kept_days.items()) if window_cutoff <= d <= today_str}
             last_active_at = record.get('last_active_at') if kept_days else None
             rows.append({
                 'id': member['id'],
@@ -1794,6 +1814,7 @@ class HubServer(ThreadingHTTPServer):
         with self.store.locked():
             self.store._members()
             self.store._cleanup_feedback_orphans()
+            self.store._cleanup_expired_activity()
         super().__init__((host, port), Handler)
 
 

@@ -212,6 +212,17 @@ class TeamHubActivityTests(unittest.TestCase):
             self.store.remove_member(self.first['id'])
         self.assertEqual((self.data / 'activity.json').read_bytes(), before)
 
+        # Rollback when writing activity.json itself fails (written after members.json).
+        before_members = (self.data / 'members.json').read_bytes()
+        def fail_activity(path, data):
+            if path == self.data / 'activity.json':
+                raise OSError('simulated activity write failure')
+            return write(path, data)
+        with patch.object(team_hub, 'atomic_write', side_effect=fail_activity), self.assertRaises(OSError):
+            self.store.remove_member(self.first['id'])
+        self.assertEqual((self.data / 'members.json').read_bytes(), before_members)
+        self.assertEqual((self.data / 'activity.json').read_bytes(), before)
+
         self.store.remove_member(self.first['id'])
         saved = json.loads((self.data / 'activity.json').read_text(encoding='utf-8'))['activity']
         self.assertNotIn(self.first['id'], saved)
@@ -219,6 +230,55 @@ class TeamHubActivityTests(unittest.TestCase):
         self.assertEqual(self.request('/api/activity', 'POST', {}, token='first')[0], 401)
         report = self.request('/api/activity', 'GET', token='second')[1]
         self.assertEqual([m['id'] for m in report['members']], [self.second['id']])
+
+    def test_corrupt_activity_file_does_not_block_remove_member_or_startup(self):
+        corrupt = b'{not valid json'
+        (self.data / 'activity.json').write_bytes(corrupt)
+        # HubServer starts cleanly even if activity.json is corrupted.
+        with team_hub.HubServer(self.data, '127.0.0.1', 0):
+            self.assertEqual((self.data / 'activity.json').read_bytes(), corrupt)
+        # remove_member still revokes token & deletes member, preserving corrupt file with a warning.
+        with redirect_stderr(io.StringIO()) as err:
+            self.store.remove_member(self.first['id'])
+        self.assertIn('活跃记录文件损坏', err.getvalue())
+        self.assertEqual((self.data / 'activity.json').read_bytes(), corrupt)
+        self.assertEqual(self.request('/api/me', 'GET', token='first')[0], 401)
+        self.assertEqual([m['id'] for m in self.store.members()], [self.second['id']])
+
+    def test_startup_prunes_expired_activity_and_clock_rollback_bounds_future_dates(self):
+        with patch.object(team_hub, 'now', return_value='2026-01-01T08:00:00+00:00'):
+            self.assertEqual(self.request('/api/activity', 'POST', {}, token='first')[0], 200)
+        with patch.object(team_hub, 'now', return_value='2026-03-31T08:00:00+00:00'):
+            self.assertEqual(self.request('/api/activity', 'POST', {}, token='second')[0], 200)
+        # Restarting hub 91 days after 2026-01-01 prunes first's expired record on disk without new writes.
+        with patch.object(team_hub, 'now', return_value='2026-04-02T08:00:00+00:00'):
+            with team_hub.HubServer(self.data, '127.0.0.1', 0):
+                pass
+        saved = json.loads((self.data / 'activity.json').read_text(encoding='utf-8'))['activity']
+        self.assertNotIn(self.first['id'], saved)
+        self.assertIn(self.second['id'], saved)
+
+        # Clock rollback: second has a future-dated entry (2026-03-31) when clock rolls back to 2026-03-30.
+        with patch.object(team_hub, 'now', return_value='2026-03-30T10:00:00+00:00'):
+            self.assertEqual(self.request('/api/activity', 'POST', {}, token='first')[0], 200)
+            status, one_day = self.request('/api/activity?days=1', 'GET', token='first')
+            self.assertEqual(status, 200)
+            by_id = {m['id']: m for m in one_day['members']}
+            self.assertEqual(by_id[self.first['id']]['active_days'], 1)
+            self.assertEqual(by_id[self.first['id']]['total_opens'], 1)
+            self.assertEqual(by_id[self.second['id']]['active_days'], 0)
+            self.assertEqual(by_id[self.second['id']]['total_opens'], 0)
+            self.assertEqual(by_id[self.second['id']]['daily'], {})
+            self.assertIsNone(by_id[self.second['id']]['last_active_at'])
+        # When first has both today (03-30) and future (03-31), --days 1 counts only 03-30.
+        with patch.object(team_hub, 'now', return_value='2026-03-31T09:00:00+00:00'):
+            self.assertEqual(self.request('/api/activity', 'POST', {}, token='first')[0], 200)
+        with patch.object(team_hub, 'now', return_value='2026-03-30T11:00:00+00:00'):
+            one_day = self.request('/api/activity?days=1', 'GET', token='first')[1]
+            first_row = next(m for m in one_day['members'] if m['id'] == self.first['id'])
+            self.assertEqual(first_row['active_days'], 1)
+            self.assertEqual(first_row['total_opens'], 1)
+            self.assertEqual(first_row['daily'], {'2026-03-30': 1})
 
     def test_restart_preserves_activity_and_corrupt_file_returns_500(self):
         with patch.object(team_hub, 'now', return_value='2026-11-26T09:00:00+00:00'):
@@ -362,7 +422,14 @@ class TeamDashboardActivityTests(unittest.TestCase):
             return response.status, json.load(response)
 
     def _wait_ping(self, server):
-        thread = server.activity_thread
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with server.runtime_lock:
+                if server.active_requests == 0:
+                    break
+            time.sleep(0.005)
+        with server.activity_lock:
+            thread = server.activity_thread
         if thread is not None:
             thread.join(timeout=3)
             self.assertFalse(thread.is_alive())
@@ -374,7 +441,8 @@ class TeamDashboardActivityTests(unittest.TestCase):
     def test_zero_ping_when_unconnected_or_read_only(self):
         with patch.object(team, '_request', wraps=team._request) as network:
             self.assertEqual(self._get(self.dash_a, '/')[0], 200)
-            self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[1], {'queued': False})
+            self._wait_ping(self.dash_a)
+            self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[0], 200)
             self._wait_ping(self.dash_a)
             self.assertEqual(team.report_activity(self.home), {'sent': False, 'reason': 'unconfigured'})
             network.assert_not_called()
@@ -391,7 +459,7 @@ class TeamDashboardActivityTests(unittest.TestCase):
             self.assertFalse(any(call.args[1] == '/api/activity' for call in network.call_args_list))
         self.assertFalse((self.hub.store.data / 'activity.json').exists())
 
-    def test_throttled_ping_multi_open_and_empty_privacy_payload(self):
+    def test_throttled_ping_multi_open_midnight_rollover_and_empty_privacy_payload(self):
         self._configure(self.dash_a, self.first)
         self._configure(self.dash_b, self.second)
         captured_payloads = []
@@ -404,30 +472,39 @@ class TeamDashboardActivityTests(unittest.TestCase):
 
         with patch.object(team, '_request', side_effect=spy_request):
             # Repeated opens & team visits within one session throttle to a single ping.
-            self.assertEqual(self._get(self.dash_a, '/')[0], 200)
-            self._wait_ping(self.dash_a)
-            self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[1], {'queued': False})
-            self.assertEqual(self._get(self.dash_a, '/')[0], 200)
-            self._wait_ping(self.dash_a)
-            self.assertEqual(len(captured_payloads), 1)
-            self.assertEqual(captured_payloads[0], ('POST', {}))
+            with patch.object(team_hub, 'now', return_value='2026-11-25T23:59:00+00:00'):
+                self.assertEqual(self._get(self.dash_a, '/')[0], 200)
+                self._wait_ping(self.dash_a)
+                self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[0], 200)
+                self._wait_ping(self.dash_a)
+                self.assertEqual(self._get(self.dash_a, '/')[0], 200)
+                self._wait_ping(self.dash_a)
+                self.assertEqual(len(captured_payloads), 1)
+                self.assertEqual(captured_payloads[0], ('POST', {}))
 
-            # After throttle window expires, visiting team page records another open.
-            self.dash_a.activity_last_ping -= (self.dash_a.activity_throttle_seconds + 1)
-            self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[1], {'queued': True})
-            self._wait_ping(self.dash_a)
-            self.assertEqual(len(captured_payloads), 2)
+            # Crossing UTC midnight (23:59 -> 00:01) does NOT throttle the next day's first open.
+            with patch.object(team_hub, 'now', return_value='2026-11-26T00:01:00+00:00'):
+                self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[0], 200)
+                self._wait_ping(self.dash_a)
+                self.assertEqual(len(captured_payloads), 2)
 
-            # A fresh dashboard session for member A records a 3rd open; member B visits team page.
-            fresh_a = self._start(Dashboard({'home': str(self.home)}))
-            self.assertEqual(self._get(fresh_a, '/')[0], 200)
-            self._wait_ping(fresh_a)
-            self.assertEqual(self._post(self.dash_b, '/api/team/activity', {})[1], {'queued': True})
-            self._wait_ping(self.dash_b)
+                # After throttle window expires on the same UTC day, visiting team page records another open.
+                self.dash_a.activity_last_ping -= (self.dash_a.activity_throttle_seconds + 1)
+                self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[0], 200)
+                self._wait_ping(self.dash_a)
+                self.assertEqual(len(captured_payloads), 3)
 
-        report = self.hub.store.activity_summary()
+                # A fresh dashboard session for member A records a 3rd open today; member B visits team page.
+                fresh_a = self._start(Dashboard({'home': str(self.home)}))
+                self.assertEqual(self._get(fresh_a, '/')[0], 200)
+                self._wait_ping(fresh_a)
+                self.assertEqual(self._post(self.dash_b, '/api/team/activity', {})[0], 200)
+                self._wait_ping(self.dash_b)
+
+                report = self.hub.store.activity_summary()
         by_id = {m['id']: m for m in report['members']}
         self.assertEqual(by_id[self.first['id']]['opens_today'], 3)
+        self.assertEqual(by_id[self.first['id']]['daily'], {'2026-11-25': 1, '2026-11-26': 3})
         self.assertEqual(by_id[self.second['id']]['opens_today'], 1)
         raw_activity = (self.hub.store.data / 'activity.json').read_text(encoding='utf-8')
         self.assertNotIn('private-local-skill', raw_activity)
@@ -435,26 +512,28 @@ class TeamDashboardActivityTests(unittest.TestCase):
         self.assertNotIn(self.first['token'], raw_activity)
         self.assertEqual(diagnostics.recent(self.home), [])
 
-    def test_non_blocking_first_screen_and_offline_silent_skip(self):
+    def test_non_blocking_first_screen_and_offline_recovery_without_throttle_penalty(self):
         self._configure(self.dash_a, self.first)
         started = threading.Event()
         release = threading.Event()
+        real_settings = team.settings
 
-        def slow_ping(home, config=None):
+        def slow_settings(home):
             started.set()
             release.wait(timeout=3)
-            return {'sent': True}
+            return real_settings(home)
 
-        with patch.object(team, 'report_activity', side_effect=slow_ping):
+        # Even if reading team.json blocks, GET / returns HTML immediately without waiting on disk I/O.
+        with patch.object(team, 'settings', side_effect=slow_settings):
             t0 = time.monotonic()
             self.assertEqual(self._get(self.dash_a, '/')[0], 200)
             elapsed = time.monotonic() - t0
-            self.assertLess(elapsed, 1.0)
+            self.assertLess(elapsed, 0.5)
             self.assertTrue(started.wait(timeout=2))
             release.set()
             self._wait_ping(self.dash_a)
 
-        # Offline hub: zero errors in diagnostics, dashboard still serves cleanly.
+        # Offline hub failure must not consume the 5-minute throttle window when hub comes back online.
         with socket.socket() as unused:
             unused.bind(('127.0.0.1', 0))
             offline_url = f'http://127.0.0.1:{unused.getsockname()[1]}'
@@ -467,8 +546,21 @@ class TeamDashboardActivityTests(unittest.TestCase):
         self.assertEqual(err.getvalue(), '')
         self.assertEqual(diagnostics.recent(self.home), [])
 
-    def test_old_hub_404_silently_skipped_and_cached_and_old_client_compatible(self):
+        # Transient failure on the same URL+token followed immediately by hub recovery succeeds right away.
+        fresh_b = self._start(Dashboard({'home': str(self.other)}))
+        self._configure(fresh_b, self.second)
+        with patch.object(team, '_request', side_effect=OSError('temporary network drop')):
+            self.assertEqual(self._get(fresh_b, '/')[0], 200)
+            self._wait_ping(fresh_b)
+        self.assertIsNone(fresh_b.activity_last_ping)
+        self.assertEqual(self._post(fresh_b, '/api/team/activity', {})[0], 200)
+        self._wait_ping(fresh_b)
+        second_row = next(m for m in self.hub.store.activity_summary()['members'] if m['id'] == self.second['id'])
+        self.assertEqual(second_row['opens_today'], 1)
+
+    def test_old_hub_404_cooldown_recovery_and_old_client_compatible(self):
         hits = {'activity': 0, 'me': 0, 'catalog': 0}
+        upgraded = {'enabled': False}
         member_payload = {'id': self.first['id'], 'name': self.first['name']}
 
         class LegacyHubHandler(BaseHTTPRequestHandler):
@@ -496,6 +588,10 @@ class TeamDashboardActivityTests(unittest.TestCase):
             def do_POST(self):
                 if self.path == '/api/activity':
                     hits['activity'] += 1
+                    if upgraded['enabled']:
+                        self._send(200, {'recorded': True, 'date': '2026-11-26', 'opens_today': 1,
+                                         'last_active_at': '2026-11-26T09:00:00+00:00'})
+                        return
                 self._send(404, {'error': '没有这个分享站地址，请核对后重试。'})
 
         legacy = self._start(ThreadingHTTPServer(('127.0.0.1', 0), LegacyHubHandler))
@@ -504,18 +600,27 @@ class TeamDashboardActivityTests(unittest.TestCase):
         with redirect_stderr(io.StringIO()) as err:
             self.assertEqual(self._get(self.dash_a, '/')[0], 200)
             self._wait_ping(self.dash_a)
-            # Even after throttle interval expires, cached 404 prevents spamming the old hub.
-            self.dash_a.activity_last_ping -= (self.dash_a.activity_throttle_seconds + 1)
-            self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[1], {'queued': False})
+            # Within unsupported cooldown, repeated visits do not spam the old hub.
+            self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[0], 200)
+            self._wait_ping(self.dash_a)
             self.assertEqual(self._get(self.dash_a, '/api/team/catalog')[0], 200)
             self._wait_ping(self.dash_a)
         self.assertEqual(err.getvalue(), '')
         self.assertEqual(hits['activity'], 1)
         self.assertEqual(diagnostics.recent(self.home), [])
 
+        # Once the bounded cooldown expires after an in-place hub upgrade, reporting recovers automatically.
+        upgraded['enabled'] = True
+        self.dash_a.activity_unsupported_until = time.monotonic() - 1
+        self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[0], 200)
+        self._wait_ping(self.dash_a)
+        self.assertEqual(hits['activity'], 2)
+        self.assertEqual(self.dash_a.activity_unsupported_connection, '')
+        self.assertIsNone(self.dash_a.activity_unsupported_until)
+
         # Switching from an old 404 hub to a new hub clears cached unsupported state and pings immediately.
         self._configure(self.dash_a, self.first, url=self.url)
-        self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[1], {'queued': True})
+        self.assertEqual(self._post(self.dash_a, '/api/team/activity', {})[0], 200)
         self._wait_ping(self.dash_a)
         summary = self.hub.store.activity_summary()
         first_row = next(m for m in summary['members'] if m['id'] == self.first['id'])
