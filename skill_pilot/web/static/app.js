@@ -3728,11 +3728,20 @@ $('team-form').addEventListener('submit', event => {
   });
 });
 
+/* 轻量活跃上报：只通知本机后台按会话节流上报，不阻塞页面、静默忽略失败。 */
+function pingTeamActivity() {
+  if (!state.team?.configured || teamReadOnly()) return;
+  api('/api/team/activity', {}).catch(() => {});
+}
+
 /* 进团队页：先画已知的，再读最新状态和商店目录。 */
 async function enterTeam() {
   renderTeam();
   await refreshTeam();
-  if (state.team?.configured && !state.team.error) await loadStore();
+  if (state.team?.configured && !state.team.error) {
+    pingTeamActivity();
+    await loadStore();
+  }
 }
 
 let storeSequence = 0;
