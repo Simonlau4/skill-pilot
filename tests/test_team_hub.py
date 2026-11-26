@@ -229,6 +229,7 @@ class TeamHubTests(unittest.TestCase):
         self.assertEqual(self.request(), (200, {'service': 'skill-pilot-team', 'api': 2,
             'feedback_supported': True, 'feedback_configured': False,
             'feedback_attachments_supported': True, 'skill_file_upload': True,
+            'replaces_supported': True,
             'member': {k: self.first[k] for k in ('id', 'name')}}))
         for name in ('', '  ', 'Acme\nexample', 'Acme\x00example'):
             with self.assertRaises(ValueError):

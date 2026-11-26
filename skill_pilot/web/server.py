@@ -420,7 +420,8 @@ class Dashboard(ThreadingHTTPServer):
 
     def team_queue_status(self):
         fields = {'id', 'kind', 'key', 'name', 'title', 'repository', 'status', 'message', 'installed', 'reuse',
-                  'skipped', 'operation', 'tag', 'pack', 'pack_title', 'error_id'}
+                  'skipped', 'operation', 'tag', 'pack', 'pack_title', 'error_id',
+                  'replaced_local', 'replacement_note', 'replace_revision'}
         with self.jobs_lock:
             return {'items': [copy.deepcopy({k: v for k, v in item.items() if k in fields})
                               for item in self.team_queue]}
@@ -1273,7 +1274,10 @@ class Dashboard(ThreadingHTTPServer):
             return {'message': result['message'], 'installed': result['installed'], 'reuse': result['reuse'],
                     **({'skills': sorted(set(result['installed'] + result['reuse']))} if result['installed'] else {}),
                     **({'operation': result['id']} if 'id' in result else {}),
-                    'operations': [result['id']] if 'id' in result else []}
+                    'operations': [result['id']] if 'id' in result else [],
+                    **({'replaced_local': result['replaced_local']} if result.get('replaced_local') else {}),
+                    **({'replacement_note': result['replacement_note']} if result.get('replacement_note') else {}),
+                    **({'replace_revision': result['replace_revision']} if result.get('replace_revision') else {})}
         op_id = result.get('id')
         new_session = list(result.get('new_session_agents') or [])
         return {'message': result['message'], 'operations': [op_id] if op_id else [],
@@ -2219,12 +2223,12 @@ class Handler(BaseHTTPRequestHandler):
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/updates/prepare',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan', '/api/team/listings/preview', '/api/program/auto-check'}
+                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/replace/preview', '/api/program/auto-check'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/listings/update', '/api/team/queue', '/api/team/queue/clear',
-                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry'}
+                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry', '/api/team/replace/cleanup'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
         read_routes.add('/api/external/preview')
@@ -2551,7 +2555,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/team/queue/clear':
             return self.server.clear_team_queue()
         if path == '/api/team/listings/remove':
-            return team.listings_remove(home, body.get('names'))
+            return team.listings_remove(home, body.get('names'),
+                                        replaced_by=body.get('replaced_by'),
+                                        replacement_note=body.get('replacement_note'))
+        if path == '/api/team/replace/preview':
+            names = body.get('names')
+            if not isinstance(names, list) or any(not isinstance(n, str) for n in names):
+                raise ValueError('请提供要检查的旧技能名称列表。')
+            items, rev = team.inspect_replaced_local(home, names, include_revision=True)
+            return {'items': items, 'revision': rev, 'write_allowed': preview_allowed(home)}
+        if path == '/api/team/replace/cleanup':
+            with self.server.local_write():
+                result = team.cleanup_replaced(home, body.get('actions'),
+                                               confirmed=body.get('confirmed') is True,
+                                               expected=body.get('revision'))
+                self.server.invalidate_agents()
+                self.server.inventory = scan(home)
+                return result
         if path == '/api/team/packs':
             with self.server.local_write():
                 return team.packs_apply(home, body.get('packs'))

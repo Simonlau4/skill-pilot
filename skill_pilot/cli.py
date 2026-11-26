@@ -96,16 +96,26 @@ def main():
     team_publish = team_commands.add_parser('publish', help='把本机在用的技能上架到分享站')
     team_publish.add_argument('skills', nargs='+', metavar='SKILL')
     team_publish.add_argument('--note', action='append', default=[], metavar='技能=推荐语', help='给同事看的推荐语')
+    team_publish.add_argument('--replaces', action='append', default=[], metavar='技能=旧技能1,旧技能2',
+                              help='声明该技能替代的旧技能名称，多个用逗号分隔')
+    team_publish.add_argument('--clear-replaces', action='append', default=[], metavar='技能',
+                              help='清除该技能已声明的替代旧技能')
+    team_publish.add_argument('--replacement-note', action='append', default=[], metavar='技能=替代说明',
+                              help='替代旧技能时的简短说明')
     team_publish.add_argument('--no-require', action='append', default=[], metavar='技能=依赖',
                               help='预览认错的依赖，不算作这个技能需要的')
     team_publish.add_argument('--skip-pack', action='append', default=[], metavar='编号', help='不要预览里的这个技能包')
     team_publish.add_argument('--pack', metavar='包名', help='把这次列出的技能组成一个技能包；包名已有时加进那个包')
     team_unpublish = team_commands.add_parser('unpublish', help='从分享站下架自己上架的技能')
     team_unpublish.add_argument('skills', nargs='+', metavar='SKILL')
+    team_unpublish.add_argument('--replaced-by', metavar='新技能', help='推荐同事改用的另一个已上架技能名称')
+    team_unpublish.add_argument('--replacement-note', metavar='说明', help='下架时附带的替代说明')
     team_install = team_commands.add_parser('install', help='按名称从团队商店安装')
     team_install.add_argument('name', help='技能名称或中文名')
     team_install.add_argument('--author', help='有重名时指定上架人')
     team_install.add_argument('--agent', action='append', default=[], help='装好后分配给这个 agent，可以重复指定')
+    team_install.add_argument('--replace-action', action='append', default=[], metavar='动作或旧技能=动作',
+                              help='本机已有被替代旧版时的处理方式：keep（保留，默认）、withdraw（撤下）或 delete（删除）')
     team_deliverable = team_commands.add_parser('deliverable', help='把一份成品（网页文件夹）上架到分享站，只限团队成员查看')
     team_deliverable.add_argument('folder', help='成品文件夹，首页是 index.html')
     team_deliverable.add_argument('--id', required=True, help='成品编号：字母、数字、点、横线或下划线')
@@ -310,11 +320,19 @@ def main():
             if args.team_command == 'list':
                 result = team.catalog(home)
             elif args.team_command == 'publish':
+                replaces = {}
+                for skill_name, text in pairs(args.replaces, '--replaces'):
+                    replaces[skill_name] = replaces[skill_name] + ',' + text if skill_name in replaces else text
                 result = team.publish(home, args.skills, dict(pairs(args.note, '--note')),
                                       [list(p) for p in pairs(args.no_require, '--no-require')],
-                                      args.skip_pack, args.yes, args.pack)
+                                      args.skip_pack, args.yes, args.pack,
+                                      replaces=replaces,
+                                      clear_replaces=args.clear_replaces,
+                                      replacement_notes=dict(pairs(args.replacement_note, '--replacement-note')))
             elif args.team_command == 'unpublish':
-                result = team.unpublish(home, args.skills, args.yes)
+                result = team.unpublish(home, args.skills, args.yes,
+                                        replaced_by=args.replaced_by,
+                                        replacement_note=args.replacement_note)
             elif args.team_command == 'deliverable':
                 recipe = Path(args.recipe).expanduser().read_text(encoding='utf-8') if args.recipe else ''
                 result = team.publish_deliverable(home, args.folder, args.id, args.title, args.version,
@@ -322,7 +340,8 @@ def main():
             elif args.team_command == 'deliverable-remove':
                 result = team.remove_deliverable(home, args.id, args.yes)
             else:
-                result = team.install_named(home, args.name, args.author, args.agent, args.yes)
+                result = team.install_named(home, args.name, args.author, args.agent, args.yes,
+                                            replace_actions=args.replace_action)
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
             elif args.team_command in {'deliverable', 'deliverable-remove'}:
@@ -351,6 +370,10 @@ def main():
                         line += '；因为 ' + '、'.join(row['auto']) + ' 需要它，一起上架'
                     if row['requires']:
                         line += '；需要 ' + '、'.join(row['requires'])
+                    if row.get('replaces'):
+                        line += '；替代旧技能：' + '、'.join(row['replaces'])
+                        if row.get('replacement_note'):
+                            line += f'（{row["replacement_note"]}）'
                     print(line)
                     for item in files['blocked']:
                         print(f'  不上传 {item["path"]}：{item["reason"]}')
@@ -364,6 +387,16 @@ def main():
                           (f'；不要的话加 --skip-pack {pack["id"]}' if not args.yes and not pack.get('requested') else ''))
             else:
                 print(result['message'])
+                for item in result.get('replaced_local', []):
+                    where = ('启用中：' + '、'.join(item['agent_names']) if item['status'] == 'active' and item.get('agent_names')
+                             else '已撤下' if item['status'] == 'withdrawn'
+                             else '在技能库中（未启用）' if item['status'] == 'idle'
+                             else '外部维护' if item['status'] == 'external'
+                             else '未纳入统一管理')
+                    detail = f'  本机旧版：{named(item.get("title"), item["name"])}（{where}）'
+                    if item.get('blocked_reason'):
+                        detail += f' — {item["blocked_reason"]}'
+                    print(detail)
                 if result.get('operations'):
                     print('可以撤销：' + '；'.join('skill-pilot undo ' + i for i in reversed(result['operations'])))
             if result.get('needs_confirmation'):
