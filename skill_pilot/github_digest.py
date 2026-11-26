@@ -96,10 +96,9 @@ def clean_digest(value, materials, *, from_cache=False):
             seen.add(name)
         result = {'title': title, 'summary': summary, 'uses': uses, 'skills': skills, 'notes': notes}
         if from_cache:
-            if 'category' in value:
-                if not isinstance(value['category'], str) or value['category'] not in CATEGORIES:
-                    raise ValueError
-                result['category'] = value['category']
+            raw_category = value.get('category')
+            if isinstance(raw_category, str) and raw_category in CATEGORIES:
+                result['category'] = raw_category
         else:
             result['category'] = clean_category(value.get('category'))
         return result
@@ -283,6 +282,8 @@ class Digests:
                     self.error = SAVE_ERROR
             if 'github' in data:
                 data['github']['repos'] = [{**r, **self._state(r)} for r in rows]
+                if self.running or self.queue:
+                    data['github']['digest_running'] = True
             return data
 
     def status(self):

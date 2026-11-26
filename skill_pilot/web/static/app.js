@@ -4315,7 +4315,7 @@ let githubDigestSequence = 0;
 let githubDetail = null;        // 详情面板正在看的仓库：{repository, data, error, loading}
 let githubDetailSequence = 0;
 
-const githubHasPending = () => githubRepos().some(repo => repo.digest_status === 'pending');
+const githubHasPending = () => Boolean(state.store?.github?.digest_running) || githubRepos().some(repo => repo.digest_status === 'pending');
 
 /* 只把轻量状态合并进目录里的对应条目；返回这一项是否真的变了。 */
 function githubApplyEntry(repository, entry) {
@@ -4383,8 +4383,9 @@ function rerenderGithubView() {
   if (state.page !== 'team' || state.storeMine || state.storeView !== 'github' || storeQuery()) return;
   const box = $('store-shelves');
   const active = document.activeElement;
+  const hadFocus = box.contains(active);
   let focusTarget = '';
-  if (box.contains(active)) {
+  if (hadFocus) {
     if (active.dataset?.githubCategory !== undefined) {
       focusTarget = `[data-github-category="${CSS.escape(active.dataset.githubCategory)}"]`;
     } else if (active.dataset?.githubFilter) {
@@ -4405,10 +4406,19 @@ function rerenderGithubView() {
     }
   }
   box.innerHTML = storeGithubViewHtml();
-  if (focusTarget) box.querySelector(focusTarget)?.focus({preventScroll: true});
+  if (hadFocus) {
+    const target = (focusTarget && box.querySelector(focusTarget))
+      || (state.storeGithubCategory && box.querySelector(`[data-github-category="${CSS.escape(state.storeGithubCategory)}"]`))
+      || box.querySelector('[data-github-category=""]')
+      || box.querySelector('#shelf-github');
+    target?.focus({preventScroll: true});
+  }
 }
 
 function applyGithubDigests(result) {
+  if (state.store?.github && typeof result?.running === 'boolean') {
+    state.store.github.digest_running = result.running;
+  }
   const entries = result?.repos && typeof result.repos === 'object' ? result.repos : {};
   const changed = [];
   let categoryChanged = false;
@@ -4737,7 +4747,7 @@ function storeGithubOverviewHtml() {
   return `<section class="shelf shelf-github" aria-labelledby="shelf-github">
     <div class="shelf-head">
       <h2 id="shelf-github" tabindex="-1">GitHub 最近热门</h2>
-      <button class="link-btn" type="button" data-store-goto-view="github">展开全部 ${number(repos.length)} 个</button>
+      <button class="link-btn" type="button" data-store-goto-view="github" data-github-expand-all="1">展开全部 ${number(repos.length)} 个</button>
     </div>
     <p class="shelf-note">最近 30 天新建、星数最多的 GitHub 技能仓库，团队里还没人上架。</p>
     <div id="shelf-github-cards" class="store-gh-feed">${repos.slice(0, 3).map(githubCompactRowHtml).join('')}</div>
@@ -5660,12 +5670,22 @@ function renderStoreAll(cards) {
     : `<div class="empty">${empty}</div>`;
 }
 
-function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTop = false, focusTarget = false} = {}) {
+function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTop = false, focusTarget = false, expandGithub = null} = {}) {
+  const previous = state.storeView;
   state.storeView = view || 'overview';
   state.storeMine = false;
   if (clearSearch) $('store-search').value = '';
   if (sort) state.storeSort = sort;
   if (group !== null) state.storeGroup = group;
+  if (state.storeView === 'github') {
+    if (expandGithub === true) {
+      state.storeGithubFilter = 'all';
+      state.storeGithubCategory = '';
+      state.storeGithubExpanded = true;
+    } else if (expandGithub === false && previous !== 'github') {
+      state.storeGithubExpanded = false;
+    }
+  }
   renderTeam();
   if (scrollTop && window.scrollY > 96) {
     window.scrollTo({top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth'});
@@ -5685,7 +5705,7 @@ function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTo
 $('store-views').addEventListener('click', event => {
   const button = event.target.closest('[data-store-view]');
   if (!button || button.hidden) return;
-  setStoreView(button.dataset.storeView, {group: '', scrollTop: true});
+  setStoreView(button.dataset.storeView, {group: '', scrollTop: true, expandGithub: false});
   button.scrollIntoView({block: 'nearest', inline: 'nearest'});
 });
 
@@ -5701,7 +5721,7 @@ $('store-views').addEventListener('keydown', event => {
     : event.key === 'End' ? tabs.length - 1
     : (current + (event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
   const next = tabs[nextIndex];
-  setStoreView(next.dataset.storeView, {group: ''});
+  setStoreView(next.dataset.storeView, {group: '', expandGithub: false});
   next.focus({preventScroll: true});
   next.scrollIntoView({block: 'nearest', inline: 'nearest'});
 });
@@ -5875,7 +5895,10 @@ $('page-team').addEventListener('click', event => {
     renderTeam();
     $('store-shelves').querySelector('[data-github-filter="all"]')?.focus({preventScroll: true});
   } else if (gotoView) {
-    setStoreView(gotoView.dataset.storeGotoView, {group: '', scrollTop: true, focusTarget: true});
+    setStoreView(gotoView.dataset.storeGotoView, {
+      group: '', scrollTop: true, focusTarget: true,
+      expandGithub: gotoView.dataset.githubExpandAll === '1' ? true : null,
+    });
   } else if (goto) gotoStoreSkill(goto);
   else if (gotoTags) gotoStoreTag(gotoTags.dataset.storeGotoTag);
   else if (retry) retryStoreQueue(retry.dataset.storeQueueRetry, retry);

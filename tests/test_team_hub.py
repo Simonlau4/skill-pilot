@@ -860,7 +860,10 @@ class TeamHubCliTests(unittest.TestCase):
         for flags, opened, message in (([], False, '只有管理员发了口令的成员能用'),
                                        (['--open'], True, '开放加入，知道地址的同事填名字就能加入')):
             argv = ['skill-pilot', 'hub', 'serve', '--data', str(self.data), *flags]
-            with self.subTest(open=opened), patch.object(sys, 'argv', argv), \
+            clean_env = {k: v for k, v in os.environ.items()
+                         if k not in {'SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS', 'SKILL_PILOT_HUB_FEEDBACK_WEBHOOK'}}
+            with self.subTest(open=opened), patch.dict(os.environ, clean_env, clear=True), \
+                    patch.object(sys, 'argv', argv), \
                     patch.object(team_hub, 'HubServer') as server_class, \
                     patch.object(team_hub.threading, 'Thread') as thread, redirect_stdout(io.StringIO()) as output:
                 server = server_class.return_value.__enter__.return_value
@@ -898,10 +901,18 @@ class TeamHubCliTests(unittest.TestCase):
                 cli.main()
                 server_class.assert_called_once_with(str(self.data), '0.0.0.0', 8765, open=False,
                                                      feedback_webhook='', github_refresh_hours=expected)
-        for bad in ('0', '721', 'abc'):
-            result = self.command('serve', '--data', str(self.data), '--github-refresh-hours', bad)
-            self.assertEqual(result.returncode, 1)
-            self.assertIn('刷新间隔', result.stdout)
+        for bad in ('', '   ', '0', '721', '9' * 5000, 'abc'):
+            with self.subTest(bad=bad[:16]):
+                result = subprocess.run(
+                    [sys.executable, '-m', 'skill_pilot', 'hub', 'serve', '--data', str(self.data),
+                     '--github-refresh-hours', bad],
+                    cwd=Path(__file__).resolve().parents[1],
+                    env={**os.environ, 'SKILL_PILOT_HOME': str(self.home / 'ignored home'),
+                         'SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS': '24', 'PYTHONDONTWRITEBYTECODE': '1'},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('刷新间隔', result.stdout)
 
 
     def test_add_list_remove_and_errors(self):

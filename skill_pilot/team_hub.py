@@ -253,19 +253,24 @@ def fetch_github_trending():
     return {'fetched_at': fetched_at, 'repos': repos}
 
 
-def clean_github_refresh_hours(value):
+def clean_github_refresh_hours(value, *, allow_blank=True):
     message = f'GitHub 最近热门的刷新间隔须为 {GITHUB_REFRESH_MIN_HOURS} 到 {GITHUB_REFRESH_MAX_HOURS} 之间的整数小时。'
-    if value is None or value == '':
+    if value is None:
         return GITHUB_REFRESH_HOURS
     if isinstance(value, bool):
         raise ValueError(message)
     if isinstance(value, str):
         value = value.strip()
         if not value:
-            return GITHUB_REFRESH_HOURS
+            if allow_blank:
+                return GITHUB_REFRESH_HOURS
+            raise ValueError(message)
         if not re.fullmatch(r'\d+', value):
             raise ValueError(message)
-        hours = int(value)
+        trimmed = value.lstrip('0')
+        if not trimmed or len(trimmed) > 3:
+            raise ValueError(message)
+        hours = int(trimmed)
     elif isinstance(value, int):
         hours = value
     else:
@@ -854,6 +859,10 @@ class HubStore:
                 return
             data = clean_github(fetch_github_trending())
             with self.locked():
+                current = self._github()
+                if current and current['repos'] and not data['repos']:
+                    print('GitHub 最近热门更新失败：这次没有查到热门仓库，继续保留上一份名单。', file=sys.stderr, flush=True)
+                    return
                 atomic_write(self.data / 'github-trending.json', data)
         except ValueError as error:
             print('GitHub 最近热门更新失败：' + str(error), file=sys.stderr, flush=True)
@@ -1646,9 +1655,10 @@ class HubServer(ThreadingHTTPServer):
 def run(args):
     if args.hub_command == 'serve':
         raw_refresh = getattr(args, 'github_refresh_hours', None)
-        if raw_refresh is None:
-            raw_refresh = os.environ.get('SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS', '')
-        refresh_hours = clean_github_refresh_hours(raw_refresh)
+        if raw_refresh is not None:
+            refresh_hours = clean_github_refresh_hours(raw_refresh, allow_blank=False)
+        else:
+            refresh_hours = clean_github_refresh_hours(os.environ.get('SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS', ''))
         with HubServer(args.data, args.host, args.port, open=args.open,
                        feedback_webhook=args.feedback_webhook or os.environ.get('SKILL_PILOT_HUB_FEEDBACK_WEBHOOK', ''),
                        github_refresh_hours=refresh_hours) as server:
