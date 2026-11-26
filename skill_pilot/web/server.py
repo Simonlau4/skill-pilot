@@ -144,6 +144,7 @@ class Dashboard(ThreadingHTTPServer):
         extra_sources.ensure(self.home)
         self.install_reviews = session.get('install_reviews', {})
         self.team_upload_reviews = session.get('team_upload_reviews', {})
+        self.replace_reviews = session.get('replace_reviews', {})
         self.feedback_previews = {}
         self.feedback_lock = threading.Lock()
         self.feedback_prune_timer = None
@@ -486,9 +487,22 @@ class Dashboard(ThreadingHTTPServer):
         message = ('deliverable:' + member_id + ':' + identity).encode()
         return hmac.new(self.token.encode(), message, hashlib.sha256).hexdigest()[:32]
 
+    def save_replace_review(self, allowed, installed, revision):
+        review = secrets.token_urlsafe(16)
+        with self.jobs_lock:
+            self.replace_reviews[review] = {
+                'allowed': list(dict.fromkeys(allowed)),
+                'installed': list(dict.fromkeys(installed)),
+                'revision': revision,
+            }
+            while len(self.replace_reviews) > 50:
+                self.replace_reviews.pop(next(iter(self.replace_reviews)), None)
+        return review
+
     def team_queue_status(self):
         fields = {'id', 'kind', 'key', 'name', 'title', 'repository', 'status', 'message', 'installed', 'reuse',
-                  'skipped', 'operation', 'tag', 'pack', 'pack_title', 'error_id'}
+                  'skipped', 'operation', 'tag', 'pack', 'pack_title', 'error_id',
+                  'replaced_local', 'replacement_note', 'replace_revision', 'replace_review'}
         with self.jobs_lock:
             return {'items': [copy.deepcopy({k: v for k, v in item.items() if k in fields})
                               for item in self.team_queue]}
@@ -1338,10 +1352,19 @@ class Dashboard(ThreadingHTTPServer):
             if item.get('pack'):
                 warning = team.tag_pack(self.home, item['_pack_skills'], item['pack_title'])
                 if warning: result['message'] += ' ' + warning
+            replace_review = (self.save_replace_review(
+                [row['name'] for row in result['replaced_local']],
+                result['installed'] or ([item['name']] if item.get('name') else []),
+                result.get('replace_revision', ''),
+            ) if result.get('replaced_local') else '')
             return {'message': result['message'], 'installed': result['installed'], 'reuse': result['reuse'],
                     **({'skills': sorted(set(result['installed'] + result['reuse']))} if result['installed'] else {}),
                     **({'operation': result['id']} if 'id' in result else {}),
-                    'operations': [result['id']] if 'id' in result else []}
+                    'operations': [result['id']] if 'id' in result else [],
+                    **({'replaced_local': result['replaced_local']} if result.get('replaced_local') else {}),
+                    **({'replacement_note': result['replacement_note']} if result.get('replacement_note') else {}),
+                    **({'replace_revision': result['replace_revision']} if result.get('replace_revision') else {}),
+                    **({'replace_review': replace_review} if replace_review else {})}
         op_id = result.get('id')
         new_session = list(result.get('new_session_agents') or [])
         return {'message': result['message'], 'operations': [op_id] if op_id else [],
@@ -2289,12 +2312,12 @@ class Handler(BaseHTTPRequestHandler):
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/updates/prepare',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/activity', '/api/program/auto-check'}
+                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/replace/preview', '/api/team/activity', '/api/program/auto-check'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/listings/update', '/api/team/queue', '/api/team/queue/clear',
-                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry'}
+                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry', '/api/team/replace/cleanup'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
         read_routes.add('/api/external/preview')
@@ -2623,7 +2646,45 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/team/queue/clear':
             return self.server.clear_team_queue()
         if path == '/api/team/listings/remove':
-            return team.listings_remove(home, body.get('names'))
+            return team.listings_remove(home, body.get('names'),
+                                        replaced_by=body.get('replaced_by'),
+                                        replacement_note=body.get('replacement_note'))
+        if path == '/api/team/replace/preview':
+            preview = team.preview_card_replace(home, body.get('card_key'))
+            review = self.server.save_replace_review(preview['allowed'], preview['installed'], preview['revision'])
+            return {'items': preview['items'], 'revision': preview['revision'], 'review': review,
+                    'write_allowed': preview_allowed(home),
+                    **({'replacement_note': preview['replacement_note']} if preview.get('replacement_note') else {})}
+        if path == '/api/team/replace/cleanup':
+            revision = body.get('revision')
+            if not isinstance(revision, str) or not revision.strip():
+                raise ValueError('请先核对本机旧版技能状态，再确认清理。')
+            review_id = body.get('review')
+            review_ids = ([review_id] if isinstance(review_id, str) and review_id else
+                          review_id if isinstance(review_id, list) and review_id and
+                          all(isinstance(rid, str) and rid for rid in review_id) else [])
+            with self.server.jobs_lock:
+                entries = [self.server.replace_reviews.get(rid) for rid in review_ids]
+            if not entries or any(entry is None for entry in entries):
+                raise ValueError('这份旧版清理核对已失效，请重新打开清理确认。')
+            if any(entry.get('revision') != revision for entry in entries):
+                raise ValueError('本机技能状态已经变了，请重新打开清理确认。')
+            allowed = sorted({n for entry in entries for n in entry['allowed']})
+            installed = sorted({n for entry in entries for n in entry['installed']})
+            with self.server.local_write():
+                try:
+                    result = team.cleanup_replaced(home, body.get('actions'),
+                                                   confirmed=body.get('confirmed') is True,
+                                                   expected=revision,
+                                                   allowed=allowed, required_present=installed)
+                    if result.get('operations'):
+                        with self.server.jobs_lock:
+                            for rid in review_ids:
+                                self.server.replace_reviews.pop(rid, None)
+                    return result
+                finally:
+                    self.server.invalidate_agents()
+                    self.server.inventory = scan(home)
         if path == '/api/team/packs':
             with self.server.local_write():
                 return team.packs_apply(home, body.get('packs'))

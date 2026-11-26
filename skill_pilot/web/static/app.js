@@ -1048,6 +1048,7 @@ function applyJobs(result, {force = false} = {}) {
   renderJobState();
   if (blockedChanged) renderJobAvailability();
   if (finished.length) finishJobs(finished);
+  if (typeof checkReplacedJobs === 'function') checkReplacedJobs(items);
   if (jobsHasActive(items)) scheduleJobsPoll(); else stopJobsPolling();
 }
 
@@ -3999,6 +4000,17 @@ function storeNeedsHtml(card) {
   return `<span class="flag store-needs" role="img" aria-label="${escape(text)}" data-hint="${escape(text)}">${icon('link')}需要 ${needs.length} 个</span>`;
 }
 
+function storeReplacesFlagHtml(card) {
+  const replaces = card.replaces || [];
+  if (!replaces.length) return '';
+  const local = card.replaces_local || [];
+  const text = local.length
+    ? `替代本机已有旧版：${local.map(item => item.title || item.name).join('、')}`
+    : `替代旧技能：${replaces.join('、')}`;
+  const label = local.length ? `可替代本机 ${local.length} 个旧版` : '替代旧版';
+  return `<span class="flag store-replaces-flag${local.length ? ' is-local' : ''}" role="img" aria-label="${escape(text)}" data-hint="${escape(text)}">${icon('update-up')}${label}</span>`;
+}
+
 function storeCardHtml(card) {
   const quote = card.listings.find(item => item.note);
   const people = card.listings.length > 1 ? `<span>${card.listings.length} 人推荐</span>` : '';
@@ -4008,7 +4020,7 @@ function storeCardHtml(card) {
     <span class="store-card-quote">${quote
       ? `“${escape(quote.note)}”<span class="by"> — ${escape(quote.member.name)}</span>`
       : `<span class="by">${escape(storeRecommenders(card))}</span>`}</span>
-    <span class="store-card-foot">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}${people}${card.group ? `<span>${escape(card.group)}</span>` : ''}${storeNeedsHtml(card)}</span>
+    <span class="store-card-foot">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}${people}${card.group ? `<span>${escape(card.group)}</span>` : ''}${storeNeedsHtml(card)}${storeReplacesFlagHtml(card)}</span>
   </button>`;
 }
 
@@ -4039,14 +4051,15 @@ function storeRowHtml(card, options) {
   const pack = hidePack ? null : storePackOf(card);
   const locked = teamCanWrite() ? '' : ' disabled';
   const end = mine
-    ? `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>` : ''}
+    ? `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>`
+         : candidate && !candidate.unavailable ? `<button class="btn btn-small btn-quiet" type="button" data-store-republish="${escape(card.name)}"${locked}>编辑信息</button>` : ''}
        ${pack && state.store?.packs_supported !== false ? `<button class="btn btn-small btn-quiet" type="button" data-store-pack-edit="${escape(pack.id)}"${locked}>改技能包</button>` : ''}
        <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`
     : storeStatusTag(card);
   const sub = escape(storeSummary(card) || card.listings.find(item => item.note)?.note || '');
   return `<div class="store-row${child ? ' is-pack-child' : ''}">
     <button class="store-row-main" type="button" data-store-open="${escape(card.key)}">
-      <span class="store-row-name"><span class="t">${escape(storeTitle(card))}</span>${card.title ? `<span class="skill-id">${escape(card.name)}</span>` : ''}${storeNeedsHtml(card)}</span>
+      <span class="store-row-name"><span class="t">${escape(storeTitle(card))}</span>${card.title ? `<span class="skill-id">${escape(card.name)}</span>` : ''}${storeNeedsHtml(card)}${storeReplacesFlagHtml(card)}</span>
       <span class="store-row-sub">${sub}${pack ? `<span class="store-row-pack">属于「${escape(pack.title)}」</span>` : ''}</span>
     </button>
     <span class="store-row-rating">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}</span>
@@ -4083,7 +4096,7 @@ function storeQueueRowHtml(item, locked = false) {
     ? (item.installed || []).filter(name => name !== item.name).length
     : 0;
   const status = item.status === 'done'
-    ? `<span class="tag tag-ok">安装完成</span>${github ? githubQueueNote(item) : extra ? `<small class="item-note">含 ${extra} 个前置依赖</small>` : ''}`
+    ? `<span class="tag tag-ok">安装完成</span>${github ? githubQueueNote(item) : extra ? `<small class="item-note">含 ${extra} 个前置依赖</small>` : ''}${!github && item.replaced_local?.length ? `<small class="item-note">本机含 ${item.replaced_local.length} 个旧版</small>` : ''}`
     : item.status === 'failed'
       ? `<span class="tag ${item.installed?.length ? 'tag-warn' : 'tag-danger'}">${item.installed?.length ? '部分安装完成' : '安装失败'}：${escape(item.message || '原因未知')}</span>`
       : item.status === 'running'
@@ -5985,6 +5998,226 @@ async function gotoStoreSkill(button) {
   if (button.hasAttribute('data-store-check') && !updateState.review?.running && !updateState.starting) checkUpdates();
 }
 
+const REPLACE_SEEN_KEY = 'sp-replace-seen-jobs';
+const seenReplaceJobs = new Set((() => {
+  try { return JSON.parse(sessionStorage.getItem(REPLACE_SEEN_KEY) || '[]'); } catch { return []; }
+})());
+const pendingReplacePrompts = [];
+let replaceDialogState = null;
+
+function markReplaceJobSeen(ids) {
+  for (const id of ids) if (id) seenReplaceJobs.add(id);
+  try { sessionStorage.setItem(REPLACE_SEEN_KEY, JSON.stringify([...seenReplaceJobs].slice(-100))); } catch {}
+}
+
+function checkReplacedJobs(items) {
+  const replacedJobs = (items || []).filter(job => job.kind === 'team_install' && job.status === 'done'
+    && job.replaced_local?.length && !seenReplaceJobs.has(job.id));
+  if (!replacedJobs.length) return;
+  markReplaceJobSeen(replacedJobs.map(job => job.id));
+  for (const job of replacedJobs) {
+    enqueueReplacePrompt({
+      installedTitles: [job.title || job.name || '新技能'],
+      items: job.replaced_local,
+      note: job.replacement_note || '',
+      revision: job.replace_revision || '',
+      review: job.replace_review || '',
+    });
+  }
+}
+
+function parseReplacesInput(text) {
+  return [...new Set(String(text || '').trim().split(/[,，、\s]+/).map(part => part.trim()).filter(Boolean))];
+}
+
+function replaceWhereText(item) {
+  if (item.status === 'active') return item.agent_names?.length ? `已启用：${item.agent_names.join('、')}` : '已启用';
+  if (item.status === 'withdrawn') return '已在技能库中（已撤下）';
+  if (item.status === 'idle') return '已在技能库中，尚未分配给 Agent';
+  if (item.status === 'external') return item.agent_names?.length ? `外部工具维护（${item.agent_names.join('、')}）` : '外部工具维护';
+  return item.agent_names?.length ? `未纳入统一管理（${item.agent_names.join('、')}）` : '未纳入统一管理';
+}
+
+function renderReplaceDialogList(items, choices) {
+  return items.map((item, index) => {
+    const choice = choices.get(item.name) || 'keep';
+    const opt = (value, label, enabled, reason, danger = false) => `<label class="store-replace-choice${danger ? ' is-danger' : ''}${enabled ? '' : ' is-disabled'}"${!enabled && reason ? ` data-hint="${escape(reason)}" title="${escape(reason)}"` : ''}>
+      <input type="radio" name="replace-action-${index}" data-replace-skill="${escape(item.name)}" value="${value}"${choice === value ? ' checked' : ''}${enabled ? '' : ' disabled'}>
+      <span>${label}</span>
+    </label>`;
+    return `<div class="store-replace-item">
+      <div class="store-replace-head">
+        <span class="store-replace-name"><span>${escape(item.title || item.name)}</span>${item.title && item.title !== item.name ? `<span class="skill-id">${escape(item.name)}</span>` : ''}</span>
+        <span class="store-replace-where">${escape(replaceWhereText(item))}</span>
+      </div>
+      ${item.blocked_reason ? `<p class="row-note is-error">${escape(item.blocked_reason)}</p>` : ''}
+      ${item.can_delete && item.irreplaceable ? '<p class="row-note">该技能为自制或已本地修改，删除后仍可在操作记录中撤销。</p>' : ''}
+      <div class="store-replace-choices" role="radiogroup" aria-label="${escape(`处理旧版技能「${item.title || item.name}」`)}">
+        ${opt('keep', '保留', true, '')}
+        ${opt('withdraw', '撤下', Boolean(item.can_withdraw), item.withdraw_reason || '暂不能撤下')}
+        ${opt('delete', '删除', Boolean(item.can_delete), item.delete_reason || '暂不能删除', true)}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateReplaceDialogActions() {
+  const apply = $('store-replace-apply');
+  const keep = $('store-replace-keep');
+  if (!replaceDialogState) return;
+  const actionable = replaceDialogState.items.some(item => item.can_withdraw || item.can_delete);
+  let withdrawCount = 0;
+  let deleteCount = 0;
+  for (const action of replaceDialogState.choices.values()) {
+    if (action === 'withdraw') withdrawCount += 1;
+    else if (action === 'delete') deleteCount += 1;
+  }
+  keep.textContent = actionable ? '全部保留' : '知道了（保留旧版）';
+  apply.hidden = !actionable;
+  const parts = [];
+  if (withdrawCount) parts.push(`撤下 ${withdrawCount} 个`);
+  if (deleteCount) parts.push(`删除 ${deleteCount} 个`);
+  apply.textContent = parts.length ? parts.join('、') : '请选择撤下或删除';
+  apply.disabled = !parts.length || replaceDialogState.busy || !teamCanWrite();
+  apply.classList.toggle('btn-danger-solid', deleteCount > 0);
+}
+
+function openReplaceDialog({installedTitles = [], items = [], note = '', revision = '', review = ''}) {
+  if (!items.length) return;
+  const choices = new Map();
+  for (const item of items) {
+    choices.set(item.name, item.can_withdraw ? 'withdraw' : 'keep');
+  }
+  replaceDialogState = {installedTitles, items, note, revision, review, choices, busy: false};
+  const newNames = installedTitles.length ? `「${installedTitles.join('、')}」` : '新技能';
+  const oldNames = items.map(item => `「${item.title || item.name}」`).join('、');
+  $('store-replace-lead').textContent = `已安装${newNames}。本机已装有被它替代的旧版${oldNames}，是否同时撤下或删除？`;
+  $('store-replace-note').textContent = note ? `作者说明：“${note}”` : '';
+  $('store-replace-note').hidden = !note;
+  $('store-replace-list').innerHTML = renderReplaceDialogList(items, choices);
+  $('store-replace-message').textContent = '';
+  $('store-replace-message').hidden = true;
+  updateReplaceDialogActions();
+  const dialog = $('store-replace-dialog');
+  if (!dialog.open) dialog.showModal();
+}
+
+function enqueueReplacePrompt(payload) {
+  if (!payload?.items?.length) return;
+  const anyOpen = document.querySelector('dialog[open]');
+  if (anyOpen && anyOpen.id !== 'store-replace-dialog') {
+    pendingReplacePrompts.push(payload);
+    anyOpen.addEventListener('close', () => {
+      if (!document.querySelector('dialog[open]') && pendingReplacePrompts.length) {
+        openReplaceDialog(pendingReplacePrompts.shift());
+      }
+    }, {once: true});
+    return;
+  }
+  if ($('store-replace-dialog').open) {
+    pendingReplacePrompts.push(payload);
+    return;
+  }
+  openReplaceDialog(payload);
+}
+
+$('store-replace-list').addEventListener('change', event => {
+  const input = event.target.closest('input[data-replace-skill]');
+  if (!input || !replaceDialogState) return;
+  replaceDialogState.choices.set(input.dataset.replaceSkill, input.value);
+  updateReplaceDialogActions();
+});
+
+$('store-replace-keep').addEventListener('click', () => {
+  if (replaceDialogState?.busy) return;
+  $('store-replace-dialog').close();
+});
+
+$('store-replace-dialog').addEventListener('close', () => {
+  replaceDialogState = null;
+  if (pendingReplacePrompts.length && !document.querySelector('dialog[open]')) {
+    openReplaceDialog(pendingReplacePrompts.shift());
+  }
+});
+
+$('store-replace-dialog').addEventListener('cancel', event => {
+  if (replaceDialogState?.busy) event.preventDefault();
+});
+
+$('store-replace-apply').addEventListener('click', async event => {
+  if (!replaceDialogState || replaceDialogState.busy) return;
+  const actions = Object.fromEntries(replaceDialogState.choices.entries());
+  const revision = replaceDialogState.revision;
+  const review = replaceDialogState.review;
+  replaceDialogState.busy = true;
+  $('store-replace-keep').disabled = true;
+  $('store-replace-message').hidden = true;
+  updateReplaceDialogActions();
+  await withBusy(event.currentTarget, '正在处理…', async () => {
+    try {
+      const result = await api('/api/team/replace/cleanup', {actions, revision, review, confirmed: true});
+      replaceDialogState.busy = false;
+      $('store-replace-dialog').close();
+      const affected = [...(result.withdrawn || []), ...(result.deleted || [])];
+      const ops = result.operations || [];
+      toast({
+        text: result.message || '已处理本机旧版技能。',
+        reminder: newSessionReminderText(result.new_session_agents || [], 'disable'),
+        undo: ops.length ? button => undoOperation([...ops].reverse(), {
+          skills: affected, message: result.message, button,
+        }) : null,
+      });
+      await Promise.allSettled([refreshEverything(), loadStore()]);
+    } catch (error) {
+      if (replaceDialogState) replaceDialogState.busy = false;
+      $('store-replace-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      $('store-replace-message').hidden = false;
+      updateReplaceDialogActions();
+    }
+  });
+  $('store-replace-keep').disabled = false;
+});
+
+let unlistDialogState = null;
+
+function syncUnlistDialogNote() {
+  if (!unlistDialogState) return;
+  const selected = $('store-unlist-replaced-by').value;
+  const showNote = Boolean(selected || unlistDialogState.existingLinked.length);
+  $('store-unlist-note-wrap').hidden = !showNote;
+  if (!showNote) {
+    $('store-unlist-note').value = '';
+    unlistDialogState.noteDirty = false;
+    return;
+  }
+  if (!unlistDialogState.noteDirty) {
+    if (selected) {
+      const target = unlistDialogState.others.find(item => item.name === selected);
+      $('store-unlist-note').value = target?.replacement_note || '';
+      $('store-unlist-note').placeholder = '例如：已合并到新版，建议切换';
+    } else {
+      const linked = unlistDialogState.existingLinked;
+      $('store-unlist-note').value = linked.length === 1 ? (linked[0].replacement_note || '') : '';
+      $('store-unlist-note').placeholder = linked.length > 1
+        ? '留空则保持各关联技能原有说明；填写将统一更新'
+        : '例如：已合并到新版，建议切换';
+    }
+  }
+}
+
+$('store-unlist-replaced-by').addEventListener('change', syncUnlistDialogNote);
+$('store-unlist-note').addEventListener('input', () => {
+  if (unlistDialogState) unlistDialogState.noteDirty = true;
+});
+$('store-unlist-close').addEventListener('click', () => {
+  if (unlistDialogState?.busy) return;
+  $('store-unlist-dialog').close();
+});
+$('store-unlist-dialog').addEventListener('cancel', event => {
+  if (unlistDialogState?.busy) event.preventDefault();
+});
+$('store-unlist-dialog').querySelector('form').addEventListener('submit', event => event.preventDefault());
+
 async function unlistStore(name, button) {
   const cards = (state.store?.cards || []).filter(item => item.local?.status === 'mine');
   const card = cards.find(item => item.name === name);
@@ -5994,18 +6227,67 @@ async function unlistStore(name, button) {
     for (const item of cards) if (item.requires?.includes(names[index]) && !names.includes(item.name)) names.push(item.name);
   }
   const extra = cards.filter(item => names.slice(1).includes(item.name)).map(storeTitle);
-  const ok = await confirmDialog({
-    title: `下架「${card ? storeTitle(card) : name}」`,
-    lines: [extra.length ? `${extra.join('、')} 需要它，会一起下架。` : '', '同事在商店里将看不到它。',
-      '已安装的同事不受影响，之后仍可重新上架。'],
-    okText: extra.length ? `下架 ${names.length} 个` : '下架',
+  const others = cards.filter(item => !names.includes(item.name));
+  const existingLinked = others.filter(item => (item.replaces || []).some(old => names.includes(old)));
+  const lines = [
+    extra.length ? `${extra.join('、')} 需要它，会一起下架。` : '',
+    '同事在商店里将看不到它。',
+    '已安装的同事不受影响，之后仍可重新上架。',
+  ].filter(Boolean);
+  $('store-unlist-title').textContent = `下架「${card ? storeTitle(card) : name}」`;
+  $('store-unlist-body').innerHTML = lines.map(line => `<p class="confirm-line">${escape(line)}</p>`).join('');
+  if (existingLinked.length) {
+    $('store-unlist-existing').textContent = `已有关联的新技能：${existingLinked.map(storeTitle).join('、')}（下架后仍会保留替代提示）。`;
+    $('store-unlist-existing').hidden = false;
+  } else {
+    $('store-unlist-existing').textContent = '';
+    $('store-unlist-existing').hidden = true;
+  }
+  const canLink = state.store?.replaces_supported !== false && others.length > 0;
+  $('store-unlist-replace-wrap').hidden = !canLink;
+  if (canLink) {
+    const firstLabel = existingLinked.length ? '保持现有替代关联' : '不关联新技能';
+    $('store-unlist-replaced-by').innerHTML = `<option value="">${firstLabel}</option>`
+      + others.map(item => `<option value="${escape(item.name)}">${escape(storeTitle(item))}${item.title ? ` (${escape(item.name)})` : ''}</option>`).join('');
+    $('store-unlist-replaced-by').value = '';
+    $('store-unlist-note').value = existingLinked.length === 1 ? (existingLinked[0].replacement_note || '') : '';
+    $('store-unlist-note').placeholder = existingLinked.length > 1
+      ? '留空则保持各关联技能原有说明；填写将统一更新'
+      : '例如：已合并到新版，建议切换';
+  } else {
+    $('store-unlist-replaced-by').innerHTML = '';
+    $('store-unlist-note').value = '';
+  }
+  $('store-unlist-message').textContent = '';
+  $('store-unlist-message').hidden = true;
+  $('store-unlist-apply').textContent = extra.length ? `下架 ${names.length} 个` : '下架';
+  unlistDialogState = {name, card, names, extra, others, existingLinked, button, busy: false, noteDirty: false};
+  syncUnlistDialogNote();
+  const dialog = $('store-unlist-dialog');
+  const confirmed = await new Promise(resolve => {
+    const onApply = () => {
+      dialog.returnValue = 'ok';
+      dialog.close('ok');
+    };
+    $('store-unlist-apply').addEventListener('click', onApply, {once: true});
+    dialog.addEventListener('close', () => {
+      $('store-unlist-apply').removeEventListener('click', onApply);
+      resolve(dialog.returnValue === 'ok');
+    }, {once: true});
+    dialog.returnValue = '';
+    dialog.showModal();
   });
-  if (!ok) return;
+  const replacedBy = canLink ? $('store-unlist-replaced-by').value.trim() : '';
+  const rawNote = canLink ? $('store-unlist-note').value.trim() : '';
+  const sendNote = Boolean(rawNote && unlistDialogState?.noteDirty);
+  unlistDialogState = null;
+  if (!confirmed) return;
   const rows = [...$('store-list').querySelectorAll('.store-row-main')];
   const place = rows.findIndex(row => row.closest('.store-row')?.contains(button));
   await withBusy(button, '正在下架…', async () => {
     try {
-      await api('/api/team/listings/remove', {names});
+      const payload = {names, ...(replacedBy ? {replaced_by: replacedBy} : {}), ...(sendNote ? {replacement_note: rawNote} : {})};
+      await api('/api/team/listings/remove', payload);
       if (state.storeDetail === card?.key) closeDetail();
       forgetCandidates();
       await loadStore();
@@ -6065,6 +6347,7 @@ function renderStoreDetail(fresh = false) {
     ${storeSummary(card) ? `<p class="detail-summary">${escape(storeSummary(card))}</p>` : ''}
     ${storeFactsHtml(card)}
     ${storeRequiredByHtml(card)}
+    ${storeReplacesDetailHtml(card)}
     ${storeGetHtml(card)}
     ${storePackHintHtml(card)}
     <h3 class="sub-title">推荐人</h3>
@@ -6086,6 +6369,35 @@ function storeRequiredByHtml(card) {
   const titles = names.map(name => storeRequireTitle(card, name));
   const shown = titles.slice(0, 3).join('、') + (titles.length > 3 ? ' 等' : '');
   return `<p class="store-required-by">被 ${number(names.length)} 个技能需要：${escape(shown)}</p>`;
+}
+
+function storeReplacesDetailHtml(card) {
+  const replaces = card.replaces || [];
+  if (!replaces.length) return '';
+  const local = card.replaces_local || [];
+  const localByName = new Map(local.map(item => [item.name, item]));
+  const namesText = replaces.map(name => {
+    const found = localByName.get(name);
+    return found?.title && found.title !== name ? `${found.title}（${name}）` : name;
+  }).join('、');
+  const status = card.local?.status;
+  const canOpenNow = local.length > 0 && ['installed', 'mine'].includes(status);
+  const locked = teamCanWrite() && !jobsBlocked() ? '' : ' disabled';
+  let localHtml = '';
+  if (local.length) {
+    const suffix = status === 'installable' ? '（安装完成后会提示保留、撤下或删除）'
+      : status === 'update' ? '（请先更新到新版后再清理）' : '';
+    const summary = `本机已装有旧版：${local.map(item => item.title || item.name).join('、')}${suffix}`;
+    localHtml = `<div class="store-replaces-local">
+      <span>${escape(summary)}</span>
+      ${canOpenNow ? `<button class="btn btn-small" type="button" data-store-replace-open="${escape(card.key)}"${locked}>清理旧版…</button>` : ''}
+    </div>`;
+  }
+  return `<section class="store-replaces-box">
+    <p class="store-replaces-head">${icon('update-up')}<span>替代旧技能：${escape(namesText)}</span></p>
+    ${card.replacement_note ? `<p class="store-replaces-note">“${escape(card.replacement_note)}”</p>` : ''}
+    ${localHtml}
+  </section>`;
 }
 
 /* 属于技能包时的浅色提示：包还没全装时给一个回到包详情的入口。 */
@@ -6139,7 +6451,8 @@ function storeGetHtml(card) {
   if (local.status === 'mine') {
     const candidate = storeCandidates?.find(item => item.name === card.name);
     return box('quiet', `${icon('team')}<span><strong>我的上架</strong>${candidate?.changed ? '，已有本地修改，可上架新版' : ''}</span>`,
-      `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>` : ''}
+      `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>`
+         : candidate && !candidate.unavailable ? `<button class="btn btn-small btn-quiet" type="button" data-store-republish="${escape(card.name)}"${locked}>编辑信息</button>` : ''}
        <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`);
   }
   if (local.status === 'lark') {
@@ -6748,6 +7061,30 @@ $('detail-body').addEventListener('click', event => {
     const name = target.closest('[data-store-republish]').dataset.storeRepublish;
     closeDetail();
     openPublish([name]);
+  } else if (target.closest('[data-store-replace-open]')) {
+    const button = target.closest('[data-store-replace-open]');
+    const card = storeCard(button.dataset.storeReplaceOpen);
+    if (card?.replaces?.length) {
+      withBusy(button, '正在检查…', async () => {
+        try {
+          const preview = await api('/api/team/replace/preview', {card_key: card.key});
+          if (!preview.items?.length) {
+            toast({text: '本机已经没有需要清理的旧版技能了。'});
+            await loadStore();
+            return;
+          }
+          openReplaceDialog({
+            installedTitles: [storeTitle(card)],
+            items: preview.items,
+            note: preview.replacement_note || card.replacement_note || '',
+            revision: preview.revision || '',
+            review: preview.review || '',
+          });
+        } catch (error) {
+          toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
+        }
+      });
+    }
   } else if (target.closest('[data-store-unlist]')) {
     const button = target.closest('[data-store-unlist]');
     unlistStore(button.dataset.storeUnlist, button);
@@ -6828,11 +7165,14 @@ async function rateStore(form, remove) {
 
 /* ---------- 上架：先挑技能、写推荐语，再核对要传的文件 ---------- */
 
-let storePick = null;   // {selected: Map(技能名 → 推荐语), plan}
+let storePick = null;   // {selected: Map(技能名 → 推荐语), replaces: Map, replacementNotes: Map, plan}
 let storePublishing = false;
 
 async function openPublish(preselect = []) {
-  storePick = {selected: new Map(), plan: null, rejected: new Set(), packs: null, timer: null, previewing: false, pendingPreview: false};
+  storePick = {
+    selected: new Map(), replaces: new Map(), replacementNotes: new Map(),
+    plan: null, rejected: new Set(), packs: null, timer: null, previewing: false, pendingPreview: false,
+  };
   $('store-pick-search').value = '';
   showPublishStep('pick');
   $('store-pick-list').innerHTML = '<p class="muted store-pick-loading">正在读取已启用技能…</p>';
@@ -6847,7 +7187,11 @@ async function openPublish(preselect = []) {
   }
   for (const name of preselect) {
     const candidate = storeCandidates.find(item => item.name === name);
-    if (candidate && !candidate.unavailable) storePick.selected.set(name, candidate.note || '');
+    if (candidate && !candidate.unavailable) {
+      storePick.selected.set(name, candidate.note || '');
+      storePick.replaces.set(name, (candidate.replaces || []).join(', '));
+      storePick.replacementNotes.set(name, candidate.replacement_note || '');
+    }
   }
   renderPick();
   if (preselect.length) $('store-pick-list').querySelector('input:checked')?.scrollIntoView({block: 'nearest'});
@@ -6869,6 +7213,10 @@ function storePickRowHtml(candidate) {
   const state = candidate.listed ? candidate.changed ? '<span class="tag">已修改，可上架新版</span>' : '<span class="tag tag-ok">已上架</span>' : '';
   const kind = candidate.unavailable ? '' : candidate.kind === 'files' ? `<span class="flag">${icon('file-kept')}包含技能文件</span>`
     : candidate.kind === 'lark' ? '<span class="flag">飞书官方</span>' : '';
+  const replacesValue = storePick.replaces?.get(candidate.name) || '';
+  const replacesNote = storePick.replacementNotes?.get(candidate.name) || '';
+  const hasReplaces = parseReplacesInput(replacesValue).length > 0;
+  const showReplaces = checked && storeCandidateData?.replaces_supported !== false;
   return `<div class="store-pick-row${checked ? ' is-checked' : ''}">
     <label class="store-pick-main">
       <input type="checkbox" data-store-pick="${escape(candidate.name)}"${checked ? ' checked' : ''}${candidate.unavailable ? ' disabled' : ''}>
@@ -6879,6 +7227,17 @@ function storePickRowHtml(candidate) {
     ${checked ? `<input class="input store-pick-note" data-store-note="${escape(candidate.name)}" maxlength="200"
       placeholder="${escape(candidate.summary ? `推荐语（留空将使用：${candidate.summary}）` : '推荐语：简述适用场景（选填）')}"
       aria-label="${escape(`给「${name}」写推荐语`)}" value="${escape(storePick.selected.get(candidate.name))}">` : ''}
+    ${showReplaces ? `<div class="store-pick-replaces">
+      <label class="store-pick-sublabel">
+        <span>替代的旧技能名称（选填）${hint('填写本技能替代的旧技能英文原名，多个用逗号分隔；同事安装时若本机已有这些旧版，会提示选择保留、撤下或删除。留空可清除已标记的替代关系。')}</span>
+        <input class="input store-pick-replaces-input" data-store-replaces="${escape(candidate.name)}" maxlength="1400"
+          placeholder="例如：old-skill-a, old-skill-b（选填，多个用逗号分隔）"
+          aria-label="${escape(`设置「${name}」替代的旧技能名称`)}" value="${escape(replacesValue)}">
+      </label>
+      <input class="input store-pick-replaces-note" data-store-replaces-note="${escape(candidate.name)}" maxlength="200"
+        placeholder="替代说明（选填，例如：已合并旧版能力，建议切换）"
+        aria-label="${escape(`给「${name}」填写替代说明`)}" value="${escape(replacesNote)}"${hasReplaces ? '' : ' hidden'}>
+    </div>` : ''}
   </div>`;
 }
 
@@ -6900,8 +7259,16 @@ $('store-pick-list').addEventListener('change', event => {
   const box = event.target.closest('[data-store-pick]');
   if (!box) return;
   const name = box.dataset.storePick;
-  if (box.checked) storePick.selected.set(name, storeCandidates.find(item => item.name === name)?.note || '');
-  else storePick.selected.delete(name);
+  if (box.checked) {
+    const candidate = storeCandidates.find(item => item.name === name);
+    storePick.selected.set(name, candidate?.note || '');
+    storePick.replaces.set(name, (candidate?.replaces || []).join(', '));
+    storePick.replacementNotes.set(name, candidate?.replacement_note || '');
+  } else {
+    storePick.selected.delete(name);
+    storePick.replaces.delete(name);
+    storePick.replacementNotes.delete(name);
+  }
   renderPick();
   const again = $('store-pick-list').querySelector(`[data-store-pick="${CSS.escape(name)}"]`);
   again?.focus();
@@ -6909,7 +7276,21 @@ $('store-pick-list').addEventListener('change', event => {
 
 $('store-pick-list').addEventListener('input', event => {
   const note = event.target.closest('[data-store-note]');
-  if (note) storePick.selected.set(note.dataset.storeNote, note.value);
+  if (note) {
+    storePick.selected.set(note.dataset.storeNote, note.value);
+    return;
+  }
+  const replaces = event.target.closest('[data-store-replaces]');
+  if (replaces) {
+    const name = replaces.dataset.storeReplaces;
+    storePick.replaces.set(name, replaces.value);
+    const has = parseReplacesInput(replaces.value).length > 0;
+    const noteField = replaces.closest('.store-pick-replaces')?.querySelector('[data-store-replaces-note]');
+    if (noteField) noteField.hidden = !has;
+    return;
+  }
+  const replacesNote = event.target.closest('[data-store-replaces-note]');
+  if (replacesNote) storePick.replacementNotes.set(replacesNote.dataset.storeReplacesNote, replacesNote.value);
 });
 
 const reviewPairKey = (skill, requires) => skill + '|' + requires;
@@ -6987,6 +7368,7 @@ function storeReviewHtml(plan) {
       <p class="store-review-name"><strong>${escape(item.title || item.name)}</strong>${item.title && item.title !== item.name ? ` <span class="skill-id">${escape(item.name)}</span>` : ''}</p>
       <p class="row-note">${escape(what)}</p>
       <p class="store-review-note">${item.note ? `“${escape(item.note)}”` : `<span class="muted">未填写推荐语，将使用技能自带的简短说明。</span>`}</p>
+      ${item.replaces?.length ? `<p class="row-note store-review-replaces">${icon('update-up')} 替代旧技能：${escape(item.replaces.join('、'))}${item.replacement_note ? `（${escape(item.replacement_note)}）` : ''}</p>` : ''}
       ${item.auto?.length ? `<p class="row-note">${icon('link')} ${escape(item.auto.map(name => storeCandidates?.find(row => row.name === name)?.title || name).join('、'))} 依赖此技能，将一并上架</p>` : ''}
       ${blocked.length ? `<details class="fold fold-inner store-blocked">
         <summary>${icon('lock')} ${blockedTitle}</summary>
@@ -7028,7 +7410,17 @@ async function previewStore({initial = false} = {}) {
     updateReviewActions();
     return null;
   }
-  const skills = [...pick.selected].map(([name, note]) => ({name, ...(note.trim() ? {note: note.trim()} : {})}));
+  const supportsReplaces = storeCandidateData?.replaces_supported !== false;
+  const skills = [...pick.selected].map(([name, note]) => {
+    const item = {name, ...(note.trim() ? {note: note.trim()} : {})};
+    if (supportsReplaces) {
+      const replacesList = parseReplacesInput(pick.replaces?.get(name) || '');
+      const rnote = (pick.replacementNotes?.get(name) || '').trim();
+      item.replaces = replacesList;
+      item.replacement_note = replacesList.length ? rnote : '';
+    }
+    return item;
+  });
   const body = {skills};
   if (!initial && pick.rejected.size) body.rejected = [...pick.rejected].map(key => key.split('|'));
   if (!initial) body.packs = storePackPayload();

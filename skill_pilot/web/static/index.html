@@ -939,6 +939,43 @@
   </form>
 </dialog>
 
+<dialog id="store-unlist-dialog" class="dialog" aria-labelledby="store-unlist-title">
+  <form class="dialog-form">
+    <h2 id="store-unlist-title">下架技能</h2>
+    <div id="store-unlist-body"></div>
+    <p id="store-unlist-existing" class="row-note" hidden></p>
+    <div id="store-unlist-replace-wrap" class="store-unlist-replace" hidden>
+      <label class="store-unlist-field">
+        <span>推荐替代的新技能（选填）</span>
+        <select id="store-unlist-replaced-by" class="input select"></select>
+      </label>
+      <label id="store-unlist-note-wrap" class="store-unlist-field" hidden>
+        <span>替代说明（选填）</span>
+        <input id="store-unlist-note" type="text" class="input" maxlength="200" placeholder="例如：已合并到新版，建议切换">
+      </label>
+    </div>
+    <p id="store-unlist-message" class="row-note is-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="store-unlist-close" type="button" class="btn">取消</button>
+      <button id="store-unlist-apply" type="button" class="btn btn-primary">下架</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="store-replace-dialog" class="dialog dialog-wide" aria-labelledby="store-replace-title">
+  <form class="dialog-form">
+    <h2 id="store-replace-title">发现本机旧版技能</h2>
+    <p id="store-replace-lead" class="confirm-line"></p>
+    <p id="store-replace-note" class="store-rec-note" hidden></p>
+    <div id="store-replace-list" class="dialog-body store-replace-list"></div>
+    <p id="store-replace-message" class="row-note is-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="store-replace-keep" type="button" class="btn">全部保留</button>
+      <button id="store-replace-apply" type="button" class="btn btn-primary">确认处理</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="absorb-dialog" class="dialog dialog-wide" aria-labelledby="absorb-title">
   <div class="dialog-form">
     <h2 id="absorb-title">核对技能副本</h2>

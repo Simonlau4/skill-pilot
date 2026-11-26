@@ -40,6 +40,7 @@ SKILL_FILE_HEADER = 'X-Skill-Pilot-Skill-Files'
 MAX_SIZE = 100 * 1024 * 1024
 TEXT_FIELDS = ('title', 'summary', 'group', 'description', 'note')
 NAME = r'[A-Za-z0-9][A-Za-z0-9_.-]*'
+MAX_REPLACES = 20
 MAX_BLOB = 50 * 1024 * 1024
 MAX_DELIVERABLE_SIZE = 200 * 1024 * 1024
 MAX_DELIVERABLE_FILES = 2000
@@ -313,7 +314,7 @@ def github_worker(store, stopped):
 
 def short_text(value, label):
     if (not isinstance(value, str) or len(value) > 200 or
-            any(unicodedata.category(c) in {'Cc', 'Cf', 'Zl', 'Zp'} for c in value)):
+            any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'} for c in value)):
         raise ValueError(f'{label}最多 200 字，不能含换行或看不见的字符。')
     return value
 
@@ -393,6 +394,27 @@ def package_version(files):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def clean_replaces(value, own_name=None):
+    if not isinstance(value, list):
+        raise ValueError('替代的旧技能名称须放在列表中。')
+    cleaned = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError('替代的旧技能名称须是文字。')
+        name = item.strip()
+        if not name or len(name) > 64 or not re.fullmatch(NAME, name):
+            raise ValueError('替代的旧技能名称只能用字母、数字、点、横线或下划线，最多 64 个字符。')
+        if own_name and name == own_name:
+            raise ValueError('替代的旧技能名称不能包含当前技能自己。')
+        if name not in seen:
+            seen.add(name)
+            cleaned.append(name)
+    if len(cleaned) > MAX_REPLACES:
+        raise ValueError(f'每个技能最多标记 {MAX_REPLACES} 个替代的旧技能名称。')
+    return cleaned
+
+
 def clean_listing(row, packaged=False):
     if not isinstance(row, dict) or not isinstance(row.get('source'), dict):
         raise ValueError('上架的技能或来源格式不正确。')
@@ -412,6 +434,16 @@ def clean_listing(row, packaged=False):
     result = {k: row[k] for k in ('name', 'requires', *TEXT_FIELDS[:-1]) if k in row}
     if 'note' in row:
         result['note'] = short_text(row['note'], '推荐语')
+    if 'replaces' in row:
+        replaces = clean_replaces(row['replaces'], own_name=result['name'])
+        if replaces:
+            result['replaces'] = replaces
+    if 'replacement_note' in row:
+        replacement_note = short_text(row['replacement_note'], '替代说明').strip()
+        if replacement_note:
+            if not result.get('replaces'):
+                raise ValueError('填写替代说明前，请先填写替代的旧技能名称。')
+            result['replacement_note'] = replacement_note
     if kind == 'github':
         result['source'] = {k: source[k] for k in ('kind', 'repository', 'path', 'commit') if k in source}
         result['source']['path'] = Path(source['path']).as_posix()
@@ -1194,7 +1226,7 @@ class HubStore:
                 else:
                     atomic_write(path, value)
                 done.append(path)
-        except OSError:
+        except (OSError, UnicodeEncodeError):
             for path in reversed(done):
                 if previous[path] is None:
                     path.unlink(missing_ok=True)
@@ -1278,6 +1310,22 @@ class HubStore:
         except ValueError as error:
             raise HubError(400, str(error)) from None
         current = self._listings(member_id)
+        # Preserve existing replaces/replacement_note when an older client omits them.
+        for raw_row, row in zip(data['listings'], rows):
+            previous = current.get(row['name'], {})
+            if 'replaces' not in raw_row and previous.get('replaces'):
+                row['replaces'] = list(previous['replaces'])
+                if 'replacement_note' not in raw_row and previous.get('replacement_note'):
+                    row['replacement_note'] = previous['replacement_note']
+                elif 'replacement_note' in raw_row:
+                    try:
+                        note_val = short_text(raw_row['replacement_note'], '替代说明').strip()
+                    except ValueError as error:
+                        raise HubError(400, str(error)) from None
+                    if note_val:
+                        row['replacement_note'] = note_val
+                    else:
+                        row.pop('replacement_note', None)
         names = [r['name'] for r in rows]
         if len(set(names)) != len(names):
             raise HubError(400, '一次上架的名单里不能有同名技能。')
@@ -1325,13 +1373,40 @@ class HubStore:
             self._collect_blobs(member_id)
         return {'listings': receipts}
 
-    def _remove_listing(self, member_id, name):
+    def _remove_listing(self, member_id, name, data=None):
         current = self._listings(member_id)
         if name not in current:
             raise HubError(404, '这个技能还没有上架，或已经下架。')
         parents = [n for n, row in current.items() if n != name and name in row['requires']]
         if parents:
             raise HubError(409, '这些上架的技能仍需要它：' + '、'.join(sorted(parents)))
+        if data is not None:
+            replaced_by = data.get('replaced_by', '')
+            replacement_note = data.get('replacement_note', '')
+            if not isinstance(replaced_by, str):
+                raise HubError(400, '推荐替代的新技能名称格式不正确。')
+            replaced_by = replaced_by.strip()
+            if replacement_note != '':
+                try:
+                    replacement_note = short_text(replacement_note, '替代说明').strip()
+                except ValueError as error:
+                    raise HubError(400, str(error)) from None
+            if replaced_by:
+                if replaced_by == name or replaced_by not in current:
+                    raise HubError(400, '请选择你已上架的另一个技能作为推荐替代技能。')
+                try:
+                    merged = clean_replaces([*current[replaced_by].get('replaces', []), name], own_name=replaced_by)
+                except ValueError as error:
+                    raise HubError(400, str(error)) from None
+                current[replaced_by]['replaces'] = merged
+                if replacement_note:
+                    current[replaced_by]['replacement_note'] = replacement_note
+            elif replacement_note:
+                linked = [row for other, row in current.items() if other != name and name in row.get('replaces', [])]
+                if not linked:
+                    raise HubError(400, '填写替代说明时，请同时指定推荐替代的新技能。')
+                for row in linked:
+                    row['replacement_note'] = replacement_note
         removed = current.pop(name)
         packs = self._packs(member_id)
         for identity, pack in list(packs.items()):
@@ -1754,6 +1829,9 @@ class Handler(BaseHTTPRequestHandler):
                                  'token': member['token']})
                 return
             is_feedback = path in {'/api/feedback', '/api/feedback/with-attachments'}
+            has_listing_body = bool(listing and self.command == 'DELETE' and (
+                self.headers.get('Transfer-Encoding') or
+                any(value.strip() != '0' for value in self.headers.get_all('Content-Length', []))))
             data = (self._read_feedback_body()
                     if is_feedback else
                     self._read_body(MAX_ACTIVITY_BODY, '活跃上报内容超过 1024 字节。')
@@ -1764,6 +1842,8 @@ class Handler(BaseHTTPRequestHandler):
                     if path == '/api/packs/me' else
                     self._read_body(MAX_MANIFEST_BODY, '成品清单超过 1 MB，请减少文件数量。')
                     if mine and self.command == 'PUT' else None if mine else
+                    self._read_body(MAX_RATING_BODY, '下架信息超过 64 KB，请缩短后重试。')
+                    if has_listing_body else
                     self._read_body(MAX_BODY if path == '/api/listings/me' else MAX_RATING_BODY)
                     if self.command == 'PUT' or path == '/api/ratings' else None)
             parsed_attachments = None
@@ -1788,7 +1868,8 @@ class Handler(BaseHTTPRequestHandler):
                     result = {'service': 'skill-pilot-team', 'api': 2, 'member': member,
                               'feedback_supported': True, 'feedback_configured': bool(self.server.feedback_webhook),
                               'feedback_attachments_supported': True,
-                              'skill_file_upload': True}
+                              'skill_file_upload': True,
+                              'replaces_supported': True}
                 elif is_feedback:
                     if not self.server.feedback_webhook:
                         raise HubError(503, '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。')
@@ -1812,7 +1893,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == '/api/packs/me':
                     result = store._put_packs(member, data, skill_files)
                 elif listing:
-                    result = store._remove_listing(member['id'], listing[1])
+                    result = store._remove_listing(member['id'], listing[1], data)
                 elif package:
                     result = store._package(package[1], package[2], query.get('version', [None])[0])
                 elif mine:
