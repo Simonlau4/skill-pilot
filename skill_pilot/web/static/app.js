@@ -5671,7 +5671,7 @@ function renderStoreAll(cards) {
 }
 
 function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTop = false, focusTarget = false, expandGithub = null} = {}) {
-  const previous = state.storeView;
+  const wasGithubView = state.storeView === 'github' && !state.storeMine && !storeQuery();
   state.storeView = view || 'overview';
   state.storeMine = false;
   if (clearSearch) $('store-search').value = '';
@@ -5682,7 +5682,7 @@ function setStoreView(view, {sort = '', group = '', clearSearch = true, scrollTo
       state.storeGithubFilter = 'all';
       state.storeGithubCategory = '';
       state.storeGithubExpanded = true;
-    } else if (expandGithub === false && previous !== 'github') {
+    } else if (expandGithub === false && !wasGithubView) {
       state.storeGithubExpanded = false;
     }
   }
@@ -7928,8 +7928,14 @@ function closeDetail() {
     const selector = github
       ? `[data-github-open="${CSS.escape(storeKey.slice('github-repo:'.length))}"]`
       : `[data-store-open="${CSS.escape(storeKey)}"]`;
-    const opener = storeOpener?.isConnected ? storeOpener
-      : (storeOpenerArea && $(storeOpenerArea)?.querySelector(selector)) || $('page-team').querySelector(selector);
+    const fallback = github
+      ? (state.storeGithubCategory && $('store-shelves')?.querySelector(`[data-github-category="${CSS.escape(state.storeGithubCategory)}"]`))
+        || $('store-shelves')?.querySelector('[data-github-category=""]')
+        || $('store-shelves')?.querySelector('#shelf-github')
+      : null;
+    const opener = (storeOpener?.isConnected ? storeOpener
+      : (storeOpenerArea && $(storeOpenerArea)?.querySelector(selector)) || $('page-team').querySelector(selector))
+      || fallback;
     opener?.focus();
     storeOpener = null;
     return;

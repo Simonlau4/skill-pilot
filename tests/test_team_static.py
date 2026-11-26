@@ -1770,15 +1770,19 @@ assert.equal(right0.length, 0);
             extract_function(source, 'function rerenderGithubView('),
             extract_function(source, 'function applyGithubDigests('),
             block(source, 'function setStoreView('),
+            extract_function(source, 'function closeDetail('),
         ]
         script = '\n'.join(parts) + r'''
 const assert = require('node:assert/strict');
 const teamReadOnly = () => false;
-const storeQuery = () => '';
+let queryText = '';
+const storeQuery = () => queryText;
 const prefersReducedMotion = () => true;
 const renderTeam = () => {};
+const holdDetailBackground = () => {};
+const setTimeout = () => {};
 const CSS = {escape: value => value};
-let githubDetail = null;
+let githubDetail = null, githubDetailSequence = 0, storeGet = null, storeOpener = null, storeOpenerArea = 'store-shelves', detailOpener = null;
 const updatedCards = [], loadedDetails = [];
 const updateGithubCard = repo => updatedCards.push(repo);
 const loadGithubDetail = repo => loadedDetails.push(repo);
@@ -1791,10 +1795,12 @@ const shelvesEl = {
 };
 const searchEl = {value: ''};
 const viewsEl = {querySelector: () => null};
-const $ = id => id === 'store-shelves' ? shelvesEl : id === 'store-search' ? searchEl : id === 'store-views' ? viewsEl : {hidden: true};
+const panelEl = {classList: {remove: () => {}}, hidden: false};
+const pageTeamEl = {querySelector: () => null};
+const $ = id => id === 'store-shelves' ? shelvesEl : id === 'store-search' ? searchEl : id === 'store-views' ? viewsEl : id === 'detail-panel' ? panelEl : id === 'page-team' ? pageTeamEl : {hidden: true, querySelector: () => null};
 let document = {activeElement: {dataset: {githubCategory: '开发编程'}, hasAttribute: () => false, closest: () => null}};
 const state = {
-  page: 'team', storeMine: false, storeView: 'github',
+  page: 'team', storeMine: false, storeView: 'github', detail: null, storeDetail: null,
   storeGithubFilter: 'all', storeGithubCategory: '', storeGithubExpanded: false,
   queue: {items: []}, table: {llm_configured: true}, store: {github: {repos: []}},
 };
@@ -1912,6 +1918,37 @@ assert.equal(state.storeGithubExpanded, true);
 state.storeView = 'overview';
 setStoreView('github', {group: '', expandGithub: false});
 assert.equal(state.storeGithubExpanded, false, '左侧目录进入 GitHub 热门应恢复默认精选展示');
+
+// 7. 从搜索或「我的上架」返回左侧目录「GitHub 热门」时也应重置回精选前 6
+state.storeView = 'github';
+state.storeGithubExpanded = true;
+state.storeMine = true;
+setStoreView('github', {group: '', expandGithub: false});
+assert.equal(state.storeGithubExpanded, false, '从「我的上架」回到 GitHub 热门应恢复精选前 6');
+
+state.storeView = 'github';
+state.storeGithubExpanded = true;
+queryText = 'acme';
+setStoreView('github', {group: '', expandGithub: false});
+assert.equal(state.storeGithubExpanded, false, '从搜索回到 GitHub 热门应恢复精选前 6');
+queryText = '';
+
+// 8. 打开 GitHub 详情后若原卡片被后台重新分类移出当前筛选，关闭详情应回退焦点到分类胶囊或标题
+focused.length = 0;
+state.storeDetail = 'github-repo:acme/repo-8';
+state.storeGithubCategory = '-';
+storeOpener = {isConnected: false};
+availableSelectors = new Set(['[data-github-category="-"]', '#shelf-github']);
+closeDetail();
+assert.deepEqual(focused, ['[data-github-category="-"]'], '原卡片不在当前筛选时关闭详情应把焦点退回当前分类胶囊');
+
+focused.length = 0;
+state.storeDetail = 'github-repo:acme/repo-8';
+state.storeGithubCategory = '';
+availableSelectors = new Set(['#shelf-github']);
+closeDetail();
+assert.deepEqual(focused, ['#shelf-github'], '无分类胶囊时关闭详情应把焦点退回分区标题');
+availableSelectors = null;
 '''
         result = subprocess.run(['node', '-'], input=script, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

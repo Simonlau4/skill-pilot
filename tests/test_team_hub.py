@@ -890,9 +890,11 @@ class TeamHubCliTests(unittest.TestCase):
             ([], {'SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS': '72'}, 72),
             (['--github-refresh-hours', '48'], {'SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS': '72'}, 48),
         ]
+        base_env = {k: v for k, v in os.environ.items()
+                    if k not in {'SKILL_PILOT_HUB_GITHUB_REFRESH_HOURS', 'SKILL_PILOT_HUB_FEEDBACK_WEBHOOK'}}
         for flags, extra_env, expected in cases:
             argv = ['skill-pilot', 'hub', 'serve', '--data', str(self.data), *flags]
-            with self.subTest(flags=flags, env=extra_env), patch.dict(os.environ, extra_env, clear=False), \
+            with self.subTest(flags=flags, env=extra_env), patch.dict(os.environ, {**base_env, **extra_env}, clear=True), \
                     patch.object(sys, 'argv', argv), patch.object(team_hub, 'HubServer') as server_class, \
                     patch.object(team_hub.threading, 'Thread'), redirect_stdout(io.StringIO()):
                 server = server_class.return_value.__enter__.return_value

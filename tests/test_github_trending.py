@@ -279,7 +279,15 @@ class GitHubTrendingTests(unittest.TestCase):
         self.assertEqual(len(output.getvalue().splitlines()), 1)
         self.assertEqual(self.store._github(), github_catalog('acme/updated'))
 
-    def test_empty_fetch_preserves_previous_non_empty_cache(self):
+    def test_empty_fetch_preserves_previous_non_empty_cache_and_skips_empty_first_write(self):
+        # Brand-new hub with empty first fetch does not write a 168h-blocking empty snapshot.
+        with patch.object(team_hub, 'fetch_github_trending',
+                          return_value={'fetched_at': '2026-11-05T12:00:00Z', 'repos': []}), \
+                redirect_stderr(io.StringIO()) as first_out:
+            self.store.refresh_github()
+        self.assertFalse(self.path.exists())
+        self.assertIn('稍后会重试', first_out.getvalue())
+        # Existing non-empty cache is retained untouched when a due fetch yields empty repos.
         previous = github_catalog('acme/previous')
         self.save(previous)
         before = self.path.read_bytes()

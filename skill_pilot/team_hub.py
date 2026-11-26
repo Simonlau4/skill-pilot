@@ -859,9 +859,11 @@ class HubStore:
                 return
             data = clean_github(fetch_github_trending())
             with self.locked():
-                current = self._github()
-                if current and current['repos'] and not data['repos']:
-                    print('GitHub 最近热门更新失败：这次没有查到热门仓库，继续保留上一份名单。', file=sys.stderr, flush=True)
+                if not data['repos']:
+                    current = self._github()
+                    message = ('这次没有查到热门仓库，继续保留上一份名单。' if current and current['repos']
+                               else '这次没有查到热门仓库，稍后会重试。')
+                    print('GitHub 最近热门更新失败：' + message, file=sys.stderr, flush=True)
                     return
                 atomic_write(self.data / 'github-trending.json', data)
         except ValueError as error:
