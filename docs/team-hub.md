@@ -167,7 +167,7 @@ python3 -m skill_pilot hub remove-member <成员编号> --data "/srv/Team Hub Da
 
 在技能详情里点一次“装上”就加入安装队列，所需技能一起装上；等待时可以关掉详情、继续浏览并添加其他技能。队列会显示等待、正在安装、装好或没装上的原因；失败后可以重试，装好后可到「设置 → 操作记录」撤销。装好的技能默认不给任何 agent 启用，到「技能」页再选择给谁用。
 
-连接好以后，也可以在对话里让 agent 用命令完成：`skill-pilot team list` 查看商店；`skill-pilot team publish <技能...>` 上架本机在用的技能，可加 `--note 技能=推荐语`；`skill-pilot team unpublish <技能...>` 下架；`skill-pilot team install <技能名或中文名> --agent <编号>` 装上并分配，有重名时加 `--author <上架人>`。这些命令不带 `--yes` 只预览：上架预览列出要上传的文件、被拦下的疑似密钥文件、一起上架的所需技能和建议的技能包（不要时加 `--skip-pack <编号>`；想自己指定时加 `--pack <包名>`，这次列出的技能会组成这个包，包名已有时加进去）；带 `--yes` 才执行，上架和下架后会再读一次分享站确认。
+连接好以后，也可以在对话里让 agent 用命令完成：`skill-pilot team list` 查看商店；`skill-pilot team publish <技能...>` 上架本机在用的技能，可加 `--note 技能=推荐语`；`skill-pilot team unpublish <技能...>` 下架；`skill-pilot team install <技能名或中文名> --agent <编号>` 装上并分配，有重名时加 `--author <上架人>`。讨论区和分享文档也能在对话里处理：`skill-pilot team comments` 列出有留言的技能、成品和分享文档，`team comments <skill|deliverable|doc> <名称或编号>` 看某一处的留言；`team comment <类型> <名称或编号> <内容>` 留言，加 `--reply-to <留言编号>` 回复；`team comment-delete <留言编号>` 删除；`team doc-show <编号>` 阅读分享文档，`team deliverable-list` 列出成品；自己发出的改进建议可用 `team review <编号> --withdraw` 撤回。这些命令不带 `--yes` 只预览：上架预览列出要上传的文件、被拦下的疑似密钥文件、一起上架的所需技能和建议的技能包（不要时加 `--skip-pack <编号>`；想自己指定时加 `--pack <包名>`，这次列出的技能会组成这个包，包名已有时加进去）；带 `--yes` 才执行，上架和下架后会再读一次分享站确认。
 
 成套技能可以整理为技能包，默认一起安装，也可以取消个别；前置依赖仍须一起装，装好后本机已有的同包技能会加上包名标签。只整理技能包不会改变技能的上架时间。分享站版本较旧时仍可照常浏览、上架和逐个安装技能，更新分享站后才支持技能包，接口版本仍为 2。
 
