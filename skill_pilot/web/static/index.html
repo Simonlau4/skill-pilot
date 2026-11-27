@@ -745,7 +745,7 @@
         </div>
         <div class="rail-list team-rail-mine">
           <button id="store-mine" class="rail-item team-rail-item" type="button" aria-pressed="false">
-            <span class="team-rail-label">我的上架</span><span id="store-mine-count" class="team-rail-count n"></span>
+            <span class="team-rail-label">我的上架</span><span id="store-mine-suggest-badge" class="tag tag-warn team-rail-badge" hidden></span><span id="store-mine-count" class="team-rail-count n"></span>
           </button>
         </div>
         <div id="team-rail-groups-wrap" class="team-rail-groups" hidden>
@@ -980,6 +980,47 @@
   </form>
 </dialog>
 
+<dialog id="store-suggest-dialog" class="dialog dialog-wide" aria-labelledby="store-suggest-title">
+  <form class="dialog-form">
+    <h2 id="store-suggest-title">提交改进建议</h2>
+    <p id="store-suggest-lead" class="muted"></p>
+    <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>仅提交建议给原作者审核，不会直接覆盖线上版本；疑似密钥或凭证文件会自动拦下</p>
+    <div id="store-suggest-body" class="dialog-body suggest-body"></div>
+    <label id="store-suggest-note-wrap" class="suggest-field" hidden>
+      <span>修改说明（必填）</span>
+      <textarea id="store-suggest-note" class="input" rows="3" maxlength="500" placeholder="简短说明改了什么、解决了什么问题"></textarea>
+    </label>
+    <p id="store-suggest-message" class="row-note is-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="store-suggest-close" type="button" class="btn">取消</button>
+      <button id="store-suggest-submit" type="button" class="btn btn-primary" disabled>提交改进建议</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="store-review-dialog" class="dialog dialog-wide suggest-review-dialog" aria-labelledby="store-review-title">
+  <div class="dialog-form">
+    <div class="suggest-review-head">
+      <div>
+        <h2 id="store-review-title">改进建议</h2>
+        <p id="store-review-sub" class="muted"></p>
+      </div>
+      <div id="store-review-tabs" class="segmented" role="group" aria-label="切换建议视角">
+        <button class="seg" type="button" data-review-role="incoming" aria-pressed="true">收到的建议</button>
+        <button class="seg" type="button" data-review-role="outgoing" aria-pressed="false">我提交的</button>
+      </div>
+    </div>
+    <p id="store-review-message" class="row-note is-error" role="alert" hidden></p>
+    <div id="store-review-content" class="dialog-body suggest-review-grid">
+      <div id="store-review-list" class="suggest-review-list" aria-label="建议列表"></div>
+      <div id="store-review-detail" class="suggest-review-detail" aria-live="polite"></div>
+    </div>
+    <div class="dialog-actions">
+      <button id="store-review-close" type="button" class="btn">关闭</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="store-doc-dialog" class="dialog dialog-wide" aria-labelledby="store-doc-dialog-title">
   <form class="dialog-form">
     <h2 id="store-doc-dialog-title">上传分享文档</h2>
@@ -1022,7 +1063,6 @@
     </div>
   </form>
 </dialog>
-
 <dialog id="absorb-dialog" class="dialog dialog-wide" aria-labelledby="absorb-title">
   <div class="dialog-form">
     <h2 id="absorb-title">核对技能副本</h2>

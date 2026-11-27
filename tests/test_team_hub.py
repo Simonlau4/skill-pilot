@@ -229,7 +229,7 @@ class TeamHubTests(unittest.TestCase):
         self.assertEqual(self.request(), (200, {'service': 'skill-pilot-team', 'api': 2,
             'feedback_supported': True, 'feedback_configured': False,
             'feedback_attachments_supported': True, 'skill_file_upload': True,
-            'replaces_supported': True, 'docs_supported': True,
+            'replaces_supported': True, 'suggestions_supported': True, 'docs_supported': True,
             'member': {k: self.first[k] for k in ('id', 'name')}}))
         for name in ('', '  ', 'Acme\nexample', 'Acme\x00example'):
             with self.assertRaises(ValueError):
@@ -370,7 +370,8 @@ class TeamHubTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_', json.dumps(self.state().__str__()))
         self.assertEqual(set(package['files'][0]), {'path', 'content', 'executable'})
         summary = self.cards()[0]['listings'][0]
-        self.assertEqual(set(summary), {'name', 'requires', 'source', 'title', 'summary', 'group', 'description', 'note', 'member', 'updated_at'})
+        self.assertEqual(set(summary), {'name', 'requires', 'source', 'title', 'summary', 'group', 'description', 'note',
+                                        'member', 'created_at', 'updated_at', 'revision'})
         self.assertEqual(summary['source']['version'], package['version'])
         self.assertEqual(self.put()[0], 200)
         self.assertEqual(len(self.cards()), 1)
@@ -647,7 +648,8 @@ class TeamHubTests(unittest.TestCase):
                          (200, {'keys': [key]}))
         self.assertEqual(self.request('/api/listings/me/example', 'DELETE')[0], 200)
         self.assertEqual(self.request('/api/catalog', token=self.second['token'])[1],
-                         {'cards': [], 'my_installs': [], 'my_all_installs': [], 'packs': [], 'deliverables': [], 'docs': []})
+                         {'cards': [], 'my_installs': [], 'my_all_installs': [], 'packs': [], 'deliverables': [], 'docs': [],
+                          'suggestions_summary': {'incoming_total': 0, 'incoming_by_skill': {}, 'outgoing_total': 0}})
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
                          (200, {'keys': []}))
         self.put()
