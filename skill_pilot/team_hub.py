@@ -47,6 +47,24 @@ MAX_DELIVERABLE_FILES = 2000
 MAX_DELIVERABLES = 50
 MAX_MANIFEST_BODY = 1024 * 1024
 MAX_RECIPE = 64 * 1024
+DOC_ID = r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}'
+MAX_DOCS_PER_MEMBER = 100
+MAX_DOCS_TOTAL = 500
+MAX_DOC_CONTENT = 256 * 1024
+MAX_DOC_FILES = 30
+MAX_DOC_ATTACHMENT = 10 * 1024 * 1024
+MAX_DOC_SIZE = 20 * 1024 * 1024
+MAX_DOC_BODY = 512 * 1024
+MAX_ORPHAN_BLOBS_BYTES = 200 * 1024 * 1024
+ORPHAN_BLOB_TTL_SECONDS = 3600
+DOC_IMAGE_TYPES = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp'}
+DOC_ATTACHMENT_TYPES = {
+    **DOC_IMAGE_TYPES,
+    '.pdf': 'application/pdf', '.txt': 'text/plain; charset=utf-8',
+    '.md': 'text/plain; charset=utf-8', '.csv': 'text/csv; charset=utf-8',
+    '.json': 'application/json; charset=utf-8'}
 DELIVERABLE_TYPES = {
     '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
@@ -570,6 +588,83 @@ def clean_deliverable(row):
     return {**result, 'files': checked, 'file_count': len(checked), 'size': size}
 
 
+def doc_path(value):
+    parts = value.split('/') if isinstance(value, str) else []
+    if (not parts or len(value) > 300 or any(p in {'', '.', '..'} or p.endswith((' ', '.')) or
+            PureWindowsPath(p).is_reserved() for p in parts) or re.search(r'[<>:"\\|?*]', value) or
+            any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'} for c in value)):
+        raise ValueError('文档附件的位置不安全，请使用文件夹内的相对位置。')
+    return value
+
+
+def doc_info(row):
+    if not isinstance(row, dict):
+        raise ValueError('分享文档信息格式不正确。')
+    title = row.get('title')
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError('请填写文档标题。')
+    category = row.get('category', '')
+    if not isinstance(category, str):
+        raise ValueError('文档分类须是文字。')
+    category = short_text(category.strip(), '文档分类')
+    if len(category) > 40:
+        raise ValueError('文档分类最多 40 个字。')
+    summary = row.get('summary', '')
+    if not isinstance(summary, str):
+        raise ValueError('文档摘要须是文字。')
+    return {'title': short_text(title.strip(), '文档标题'),
+            'category': category,
+            'summary': short_text(summary.strip(), '文档摘要')}
+
+
+def clean_doc(row):
+    result = doc_info(row)
+    content = row.get('content')
+    if not isinstance(content, str):
+        raise ValueError('请填写文档正文内容。')
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+    if not content.strip():
+        raise ValueError('文档正文不能为空。')
+    if any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs'} and c not in '\n\t' for c in content):
+        raise ValueError('文档正文包含不能识别的控制字符，请清理后重试。')
+    content_bytes = len(content.encode('utf-8'))
+    if content_bytes > MAX_DOC_CONTENT:
+        raise HubError(413, f'文档正文不能超过 {MAX_DOC_CONTENT // 1024} KB。')
+    raw_files = row.get('files', {})
+    if raw_files is None:
+        raw_files = {}
+    if not isinstance(raw_files, dict):
+        raise ValueError('文档附件清单格式不正确。')
+    if len(raw_files) > MAX_DOC_FILES:
+        raise HubError(413, f'每篇分享文档最多附带 {MAX_DOC_FILES} 个附件。')
+    checked, folded_paths, directories, sizes, files_size = {}, set(), {}, {}, 0
+    for path, entry in raw_files.items():
+        doc_path(path)
+        parts = path.split('/')
+        folded = unicodedata.normalize('NFC', path).casefold()
+        if folded in folded_paths:
+            raise ValueError('文档有位置重复的附件。')
+        folded_paths.add(folded)
+        for i in range(1, len(parts)):
+            directory = '/'.join(parts[:i])
+            key = unicodedata.normalize('NFC', directory).casefold()
+            if directories.setdefault(key, directory) != directory:
+                raise ValueError('文档有位置重复的附件文件夹。')
+        if (not isinstance(entry, dict) or not isinstance(entry.get('sha256'), str) or
+                not re.fullmatch(r'[0-9a-f]{64}', entry['sha256']) or
+                type(entry.get('size')) is not int or not 0 <= entry['size'] <= MAX_DOC_ATTACHMENT or
+                sizes.setdefault(entry['sha256'], entry['size']) != entry['size']):
+            raise ValueError(f'文档附件的大小或内容编号不正确，单个附件最多 {MAX_DOC_ATTACHMENT // 1024 // 1024} MB。')
+        checked[path] = {'sha256': entry['sha256'], 'size': entry['size']}
+        files_size += entry['size']
+    if folded_paths.intersection(directories):
+        raise ValueError('文档附件和文件夹的位置相互冲突。')
+    if files_size > MAX_DOC_SIZE:
+        raise HubError(413, f'文档附件合计不能超过 {MAX_DOC_SIZE // 1024 // 1024} MB。')
+    return {**result, 'content': content, 'files': checked,
+            'file_count': len(checked), 'size': content_bytes + files_size}
+
+
 def byte_range(header, size):
     """One `bytes=` range as (start, end), None for a whole-file reply; raises for an unsatisfiable one."""
     if not header:
@@ -963,6 +1058,9 @@ class HubStore:
             installs.pop(member_id, None)
             with_mine.discard(member_id)
             changes = {p: None for p in (self.data / 'packages' / member_id).glob('*.json')}
+            changes.update({p: None for p in (self._doc_dir(member_id) / 'items').glob('*.json')})
+            if self._doc_index_path(member_id).exists():
+                changes[self._doc_index_path(member_id)] = None
             changes.update({self._listing_path(member_id): None,
                             self._pack_path(member_id): None,
                             self.data / 'ratings.json': {'ratings': ratings},
@@ -982,6 +1080,7 @@ class HubStore:
             self._save(changes)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
             shutil.rmtree(self.data / 'deliverables' / member_id, ignore_errors=True)
+            shutil.rmtree(self.data / 'docs' / member_id, ignore_errors=True)
             if activity_skipped:
                 print('提示：活跃记录文件损坏或无法读取，已保留原文件，请管理员检查 activity.json。',
                       file=sys.stderr, flush=True)
@@ -1265,7 +1364,8 @@ class HubStore:
                                 key=lambda p: p['updated_at'], reverse=True),
                 'my_installs': sorted(stored - own_cards),
                 'my_all_installs': sorted(counted_for_me),
-                'deliverables': self._public_deliverables()}
+                'deliverables': self._public_deliverables(),
+                'docs': self._public_docs()}
         if not skill_files:
             result['packs'] = [p for p in result['packs'] if all(
                 key in cards and any(row['member']['id'] == p['member']['id'] for row in cards[key]['listings'])
@@ -1456,26 +1556,69 @@ class HubStore:
     def _blob_dir(self, member_id):
         return self._deliverable_dir(member_id) / 'blobs'
 
-    def _put_blob(self, member_id, digest, temporary):
-        blobs = self._blob_dir(member_id)
-        blobs.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.replace(temporary, blobs / digest)
-        return {'sha256': digest, 'size': (blobs / digest).stat().st_size}
-
-    def _collect_blobs(self, member_id):
-        # A parallel upload of the same member may lose a blob here; its list then gets 409 with
-        # `missing` and the uploader sends those again, so no reservation is kept.
-        blobs = self._blob_dir(member_id)
+    def _used_blobs(self, member_id):
         used = {f['sha256'] for row in self._deliverables(member_id).values() for f in row['files'].values()}
+        used.update(f['sha256'] for row in self._docs(member_id).values() for f in row.get('files', {}).values())
         for name, row in self._listings(member_id).items():
             if row['source'].get('file_storage') == 'blobs':
                 used.update(f['sha256'] for f in self._package(member_id, name)['files'].values())
+        return used
+
+    def _orphan_blob_bytes(self, member_id, used=None):
+        used = self._used_blobs(member_id) if used is None else used
+        total = 0
+        for folder in (self._blob_dir(member_id), self._deliverable_dir(member_id) / 'uploads'):
+            if not folder.is_dir():
+                continue
+            for entry in folder.iterdir():
+                if entry.is_file() and (folder.name == 'uploads' or entry.name not in used):
+                    try:
+                        total += entry.stat().st_size
+                    except FileNotFoundError:
+                        pass
+        return total
+
+    def _put_blob(self, member_id, digest, temporary):
+        blobs = self._blob_dir(member_id)
+        blobs.mkdir(parents=True, exist_ok=True, mode=0o700)
+        incoming_size = temporary.stat().st_size
+        target = blobs / digest
+        if not target.is_file():
+            used = self._used_blobs(member_id)
+            orphan = self._orphan_blob_bytes(member_id, used)
+            if orphan > MAX_ORPHAN_BLOBS_BYTES:
+                self._collect_blobs(member_id, min_age=ORPHAN_BLOB_TTL_SECONDS)
+                orphan = self._orphan_blob_bytes(member_id, used)
+            if orphan > MAX_ORPHAN_BLOBS_BYTES:
+                self._collect_blobs(member_id)
+                orphan = self._orphan_blob_bytes(member_id, used)
+            if orphan > MAX_ORPHAN_BLOBS_BYTES:
+                raise HubError(507, '当前成员未完成的临时上传文件过多，请稍后重试。')
+        os.replace(temporary, target)
+        return {'sha256': digest, 'size': target.stat().st_size}
+
+    def _collect_blobs(self, member_id, min_age=0):
+        # A parallel upload of the same member may lose a blob here; its list then gets 409 with
+        # `missing` and the uploader sends those again, so no reservation is kept.
+        blobs = self._blob_dir(member_id)
+        used = self._used_blobs(member_id)
+        cutoff = (datetime.now(timezone.utc).timestamp() - min_age) if min_age > 0 else None
         for blob in (blobs.iterdir() if blobs.is_dir() else []):
             if blob.name not in used:
                 try:
+                    if cutoff is not None and blob.stat().st_mtime > cutoff:
+                        continue
                     blob.unlink(missing_ok=True)
-                except PermissionError:
+                except (PermissionError, FileNotFoundError):
                     pass  # Windows may still be serving the file. Revisit on the next write.
+        uploads = self._deliverable_dir(member_id) / 'uploads'
+        if uploads.is_dir() and min_age > 0:
+            for temp_file in uploads.iterdir():
+                try:
+                    if temp_file.is_file() and temp_file.stat().st_mtime <= cutoff:
+                        temp_file.unlink(missing_ok=True)
+                except (PermissionError, FileNotFoundError):
+                    pass
 
     def _check_blobs(self, member_id, entries):
         blobs = self._blob_dir(member_id)
@@ -1539,6 +1682,155 @@ class HubStore:
         blob = self._blob_dir(member_id) / entry['sha256']
         kind = DELIVERABLE_TYPES.get(Path(path).suffix.lower(), 'application/octet-stream')
         return blob.open('rb'), entry['size'], kind
+
+    def _doc_dir(self, member_id):
+        return self.data / 'docs' / member_id
+
+    def _doc_index_path(self, member_id):
+        return self._doc_dir(member_id) / 'index.json'
+
+    def _doc_item_stems(self, member_id):
+        items = self._doc_dir(member_id) / 'items'
+        if not items.is_dir():
+            return {}
+        return {p.stem.casefold(): p.stem for p in sorted(items.glob('*.json'))}
+
+    def _read_doc_item(self, member_id, identity):
+        stems = self._doc_item_stems(member_id)
+        if stems.get(identity.casefold()) != identity:
+            return None
+        path = self._doc_dir(member_id) / 'items' / (identity + '.json')
+        return json.loads(path.read_text(encoding='utf-8')) if path.is_file() else None
+
+    def _docs(self, member_id):
+        items = self._doc_dir(member_id) / 'items'
+        return {p.stem: json.loads(p.read_text(encoding='utf-8')) for p in sorted(items.glob('*.json'))}
+
+    def _doc_meta(self, row):
+        return {k: row[k] for k in ('title', 'category', 'summary', 'file_count', 'size', 'created_at', 'updated_at')}
+
+    def _doc_index(self, member_id):
+        stems = set(self._doc_item_stems(member_id).values())
+        path = self._doc_index_path(member_id)
+        if path.is_file():
+            try:
+                raw = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(raw, dict) and isinstance(raw.get('docs'), dict) and set(raw['docs'].keys()) == stems:
+                    return raw['docs']
+            except (OSError, ValueError, TypeError):
+                pass
+        rebuilt = {identity: self._doc_meta(row) for identity, row in self._docs(member_id).items()}
+        if stems or path.is_file():
+            try:
+                atomic_write(path, {'docs': rebuilt})
+            except OSError:
+                pass
+        return rebuilt
+
+    def _put_doc(self, member_id, identity, data):
+        stems = self._doc_item_stems(member_id)
+        folded = identity.casefold()
+        if folded in stems and stems[folded] != identity:
+            raise HubError(409, f'已存在仅大小写不同的文档编号「{stems[folded]}」，请使用原编号更新或换一个编号。')
+        existing = self._read_doc_item(member_id, identity)
+        if isinstance(data, dict) and 'expected_updated_at' in data:
+            expected = data.get('expected_updated_at')
+            if expected is not None and not isinstance(expected, str):
+                raise HubError(400, '文档版本核对信息格式不正确。')
+            current_ts = existing.get('updated_at', '') if isinstance(existing, dict) else ''
+            if expected and current_ts != expected:
+                raise HubError(409, '这篇分享文档已有较新的修改，请刷新后核对再保存。')
+        payload = dict(data) if isinstance(data, dict) else data
+        if isinstance(payload, dict) and isinstance(existing, dict):
+            for opt_field in ('category', 'summary'):
+                if opt_field not in payload and opt_field in existing:
+                    payload[opt_field] = existing[opt_field]
+            if 'files' not in payload and existing.get('files'):
+                payload['files'] = existing['files']
+            elif payload.get('merge_files') is True and isinstance(payload.get('files'), dict) and existing.get('files'):
+                merged_files = dict(existing['files'])
+                merged_files.update(payload['files'])
+                payload['files'] = merged_files
+        try:
+            row = clean_doc(payload)
+        except HubError:
+            raise
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
+        if existing is None:
+            if len(stems) >= MAX_DOCS_PER_MEMBER:
+                raise HubError(413, f'每位成员最多上传 {MAX_DOCS_PER_MEMBER} 篇分享文档，请先删除旧文档。')
+            total = sum(len(self._doc_item_stems(m['id'])) for m in self._members())
+            if total >= MAX_DOCS_TOTAL:
+                raise HubError(413, f'团队分享文档总数已达上限（{MAX_DOCS_TOTAL} 篇），请先清理旧文档。')
+        if row['files']:
+            self._check_blobs(member_id, row['files'].values())
+        timestamp = now()
+        row['created_at'] = existing.get('created_at', timestamp) if isinstance(existing, dict) else timestamp
+        row['updated_at'] = timestamp
+        index = self._doc_index(member_id)
+        index[identity] = self._doc_meta(row)
+        self._save({
+            self._doc_dir(member_id) / 'items' / (identity + '.json'): row,
+            self._doc_index_path(member_id): {'docs': index},
+        })
+        self._collect_blobs(member_id)
+        return {'key': 'doc:' + member_id + ':' + identity, 'id': identity,
+                'created_at': row['created_at'], 'updated_at': row['updated_at']}
+
+    def _remove_doc(self, member_id, identity):
+        stems = self._doc_item_stems(member_id)
+        if stems.get(identity.casefold()) != identity:
+            raise HubError(404, '这篇分享文档不存在，或已经删除。')
+        path = self._doc_dir(member_id) / 'items' / (identity + '.json')
+        index = self._doc_index(member_id)
+        index.pop(identity, None)
+        self._save({path: None, self._doc_index_path(member_id): {'docs': index}})
+        self._collect_blobs(member_id)
+        return {}
+
+    def _public_docs(self):
+        members = {m['id']: {k: m[k] for k in ('id', 'name')} for m in self._members()}
+        rows = [{'key': 'doc:' + member_id + ':' + identity, 'id': identity, 'member': member,
+                 **{k: row[k] for k in ('title', 'category', 'summary', 'file_count', 'size', 'created_at', 'updated_at')}}
+                for member_id, member in members.items() for identity, row in self._doc_index(member_id).items()]
+        return sorted(rows, key=lambda r: r['updated_at'], reverse=True)
+
+    def _doc(self, member_id, identity):
+        member = next(({k: m[k] for k in ('id', 'name')} for m in self._members() if m['id'] == member_id), None)
+        row = self._read_doc_item(member_id, identity) if member else None
+        if row is None:
+            raise HubError(404, '这篇分享文档已经删除，请刷新商店。')
+        files = [{'path': path, 'size': entry['size'], 'is_image': Path(path).suffix.lower() in DOC_IMAGE_TYPES}
+                 for path, entry in sorted(row.get('files', {}).items())]
+        return {'key': 'doc:' + member_id + ':' + identity, 'id': identity, 'member': member,
+                **{k: row[k] for k in ('title', 'category', 'summary', 'content', 'file_count', 'size', 'created_at', 'updated_at')},
+                'files': files}
+
+    def _doc_file(self, member_id, identity, path):
+        try:
+            doc_path(path)
+        except ValueError:
+            raise HubError(404, '文档里没有这个附件。') from None
+        if not any(m['id'] == member_id for m in self._members()):
+            raise HubError(404, '这篇分享文档已经删除，请刷新商店。')
+        row = self._read_doc_item(member_id, identity)
+        if row is None:
+            raise HubError(404, '这篇分享文档已经删除，请刷新商店。')
+        entry = row.get('files', {}).get(path)
+        if entry is None:
+            raise HubError(404, '文档里没有这个附件。')
+        blob = self._blob_dir(member_id) / entry['sha256']
+        if not blob.is_file():
+            raise HubError(404, '文档附件缺失，请重新上传。')
+        suffix = Path(path).suffix.lower()
+        inline = suffix in DOC_IMAGE_TYPES
+        kind = DOC_ATTACHMENT_TYPES.get(suffix, 'application/octet-stream')
+        original_name = Path(path).name
+        stem_ascii = re.sub(r'[^A-Za-z0-9._-]+', '_', Path(original_name).stem).strip('._') or 'attachment'
+        ext_ascii = re.sub(r'[^A-Za-z0-9.]+', '', suffix)
+        fallback_name = stem_ascii + ext_ascii
+        return blob.open('rb'), entry['size'], kind, inline, (fallback_name, original_name)
 
     def _rate(self, member, data, remove=False):
         if not isinstance(data, dict) or not isinstance(data.get('key'), str):
@@ -1660,6 +1952,14 @@ class Handler(BaseHTTPRequestHandler):
             stream, size, kind = store._deliverable_file(member_id, identity, urllib.parse.unquote(path))
         self._send_file(stream, size, kind, self.headers.get('Range'))
 
+    def _serve_doc_file(self, member_id, identity, path):
+        store = self.server.store
+        with store.locked():
+            store._authenticate(self.headers.get('Authorization', ''))
+            stream, size, kind, inline, filename = store._doc_file(member_id, identity, urllib.parse.unquote(path))
+        self._send_file(stream, size, kind, attachment=not inline, filename=filename if not inline else None,
+                        csp="default-src 'none'; sandbox")
+
     def _serve_package_file(self, member_id, name, version, digest):
         store = self.server.store
         with store.locked():
@@ -1695,7 +1995,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', kind)
             self.send_header('Content-Length', str(end - start + 1))
             if attachment:
-                disposition = f'attachment; filename="{filename}"' if filename else 'attachment'
+                if isinstance(filename, tuple):
+                    ascii_name, utf8_name = filename
+                    encoded = urllib.parse.quote(utf8_name, safe='')
+                    disposition = f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
+                else:
+                    disposition = f'attachment; filename="{filename}"' if filename else 'attachment'
                 self.send_header('Content-Disposition', disposition)
             else:
                 self.send_header('Accept-Ranges', 'bytes')
@@ -1777,6 +2082,10 @@ class Handler(BaseHTTPRequestHandler):
             mine = re.fullmatch(r'/api/deliverables/me/' + identity, path)
             deliverable = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity, path)
             served = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity + '/(.+)', path)
+            doc_id = '(' + DOC_ID + ')'
+            doc_mine = re.fullmatch(r'/api/docs/me/' + doc_id, path)
+            doc_item = re.fullmatch(r'/api/docs/([0-9a-f]{32})/' + doc_id, path)
+            doc_served = re.fullmatch(r'/api/docs/([0-9a-f]{32})/' + doc_id + '/(.+)', path)
             query = urllib.parse.parse_qs(address.query, keep_blank_values=True)
             activity_days = 30
             if path == '/api/activity' and self.command == 'GET' and '?' in self.path:
@@ -1788,16 +2097,16 @@ class Handler(BaseHTTPRequestHandler):
                 activity_days = int(raw_days)
                 if not 1 <= activity_days <= ACTIVITY_RETENTION_DAYS:
                     raise HubError(400, f'统计天数须为 1 到 {ACTIVITY_RETENTION_DAYS} 之间的整数。')
-            elif not served and ('?' in self.path or (package and package[3])) and (
+            elif not served and not doc_served and ('?' in self.path or (package and package[3])) and (
                     not package or set(query) != {'version'} or len(query['version']) != 1 or
                     not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             allowed = ({'POST'} if path in {'/api/join', '/api/feedback', '/api/feedback/with-attachments'} else
                        {'GET', 'POST'} if path == '/api/activity' else
-                       {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served or feedback_att else
+                       {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served or feedback_att or doc_item or doc_served else
                        {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} or blob else
                        {'DELETE'} if listing else
-                       {'PUT', 'DELETE'} if path == '/api/ratings' or mine else set())
+                       {'PUT', 'DELETE'} if path == '/api/ratings' or mine or doc_mine else set())
             if not allowed:
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             if self.command not in allowed:
@@ -1810,6 +2119,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if served:
                 self._serve_deliverable(served[1], served[2], served[3])
+                return
+            if doc_served:
+                self._serve_doc_file(doc_served[1], doc_served[2], doc_served[3])
                 return
             if feedback_att:
                 self._serve_feedback_attachment(feedback_att[1], feedback_att[2])
@@ -1842,6 +2154,8 @@ class Handler(BaseHTTPRequestHandler):
                     if path == '/api/packs/me' else
                     self._read_body(MAX_MANIFEST_BODY, '成品清单超过 1 MB，请减少文件数量。')
                     if mine and self.command == 'PUT' else None if mine else
+                    self._read_body(MAX_DOC_BODY, f'分享文档内容超过 {MAX_DOC_BODY // 1024} KB，请精简正文或减少附件数量。')
+                    if doc_mine and self.command == 'PUT' else None if doc_mine else
                     self._read_body(MAX_RATING_BODY, '下架信息超过 64 KB，请缩短后重试。')
                     if has_listing_body else
                     self._read_body(MAX_BODY if path == '/api/listings/me' else MAX_RATING_BODY)
@@ -1869,7 +2183,8 @@ class Handler(BaseHTTPRequestHandler):
                               'feedback_supported': True, 'feedback_configured': bool(self.server.feedback_webhook),
                               'feedback_attachments_supported': True,
                               'skill_file_upload': True,
-                              'replaces_supported': True}
+                              'replaces_supported': True,
+                              'docs_supported': True}
                 elif is_feedback:
                     if not self.server.feedback_webhook:
                         raise HubError(503, '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。')
@@ -1903,6 +2218,11 @@ class Handler(BaseHTTPRequestHandler):
                     row = store._deliverable(deliverable[1], deliverable[2])
                     result = {k: row[k] for k in ('title', 'version', 'summary', 'skills', 'recipe',
                                                   'file_count', 'size', 'updated_at')}
+                elif doc_mine:
+                    result = (store._put_doc(member['id'], doc_mine[1], data) if self.command == 'PUT' else
+                              store._remove_doc(member['id'], doc_mine[1]))
+                elif doc_item:
+                    result = store._doc(doc_item[1], doc_item[2])
                 else:
                     result = store._rate(member, data, self.command == 'DELETE')
             if is_feedback and not duplicate:
@@ -1936,9 +2256,12 @@ class HubServer(ThreadingHTTPServer):
         self.feedback_webhook = feedback.webhook_url(feedback_webhook)
         self.store = HubStore(data, github_refresh_hours=github_refresh_hours)
         with self.store.locked():
-            self.store._members()
+            members = self.store._members()
             self.store._cleanup_feedback_orphans()
             self.store._cleanup_expired_activity()
+            for member in members:
+                self.store._collect_blobs(member['id'], min_age=ORPHAN_BLOB_TTL_SECONDS)
+                self.store._doc_index(member['id'])
         super().__init__((host, port), Handler)
 
 

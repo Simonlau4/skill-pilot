@@ -196,9 +196,9 @@ if (storeGithubShelfHtml() !== '') fail('名单为空时不该显示这一排');
         # 精选总览（含空状态、技能少、正常）和独立分区展示热门仓库；搜索、看「我的上架」和读取中不显示。
         shelves = extract_function(source, 'function renderStoreShelves(')
         self.assertIn("if (state.storeView === 'github') { box.innerHTML = storeGithubViewHtml(); return; }", shelves)
-        self.assertIn('box.innerHTML = deliverableSection + emptyTeam + storeGithubOverviewHtml();', shelves)
-        self.assertIn('box.innerHTML = deliverableSection + packSection + githubSection;', shelves)
-        self.assertIn('box.innerHTML = deliverableSection + packSection + storeDuoBoardHtml(cards) + githubSection;', shelves)
+        self.assertIn('box.innerHTML = deliverableSection + docsSection + emptyTeam + storeGithubOverviewHtml();', shelves)
+        self.assertIn('box.innerHTML = deliverableSection + docsSection + packSection + githubSection;', shelves)
+        self.assertIn('box.innerHTML = deliverableSection + docsSection + packSection + storeDuoBoardHtml(cards) + githubSection;', shelves)
         self.assertLess(shelves.index('if (query)'), shelves.index('const githubSection'),
                         '要先判断是不是搜索状态，再准备热门仓库')
         self.assertLess(shelves.index('if (state.storeMine)'), shelves.index('const githubSection'),
