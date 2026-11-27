@@ -2090,6 +2090,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             key = self.server.doc_key(match[1], match[2])
             self.reply(200, {**detail, 'file_base_url': f'/doc-file/{key}/{match[1]}/{match[2]}/'})
+        elif path == '/api/team/discussions':
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            target_type = query.get('target_type', [''])[0]
+            target_key = query.get('target_key', [''])[0]
+            expected_conn = query.get('expected_connection', [''])[0]
+            try:
+                self.reply(200, team.discussions_list(self.server.home, target_type, target_key,
+                                                      expected_connection=expected_conn))
+            except team.RequestError as error:
+                self.reply(error.status if error.status in {400, 401, 403, 404, 409} else 502, {'error': str(error)})
+            except (ValueError, OSError) as error:
+                self.reply(400 if isinstance(error, ValueError) else 502,
+                           {'error': str(error) if isinstance(error, ValueError) else '当前连不上分享站，暂无法读取讨论区。'})
         elif path == '/api/tools/check':
             # Find known command entry points, including desktop installs; never run them.
             names = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('names', [''])[0].split(',')
@@ -2397,7 +2410,8 @@ class Handler(BaseHTTPRequestHandler):
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/listings/update', '/api/team/queue', '/api/team/queue/clear',
                         '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry', '/api/team/replace/cleanup',
                         '/api/team/suggestions/submit', '/api/team/suggestions/accept', '/api/team/suggestions/reject', '/api/team/suggestions/withdraw',
-                        '/api/team/docs/save', '/api/team/docs/remove'}
+                        '/api/team/docs/save', '/api/team/docs/remove',
+                        '/api/team/discussions/post', '/api/team/discussions/delete'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
         read_routes.add('/api/external/preview')
@@ -2835,6 +2849,19 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('文档核对信息格式不正确。')
             return team.remove_doc(home, body.get('id', ''), confirmed=True,
                                    expected_connection=expected_conn, expected_updated_at=expected_upd)
+        if path == '/api/team/discussions/post':
+            expected_conn = body.get('expected_connection', '')
+            if not isinstance(expected_conn, str):
+                raise ValueError('讨论区核对信息格式不正确。')
+            return team.discussion_post(
+                home, body.get('target_type', ''), body.get('target_key', ''),
+                body.get('body', ''), reply_to_id=body.get('reply_to_id', ''),
+                expected_connection=expected_conn)
+        if path == '/api/team/discussions/delete':
+            expected_conn = body.get('expected_connection', '')
+            if not isinstance(expected_conn, str):
+                raise ValueError('讨论区核对信息格式不正确。')
+            return team.discussion_delete(home, body.get('id', ''), expected_connection=expected_conn)
         if path == '/api/team/packs':
             with self.server.local_write():
                 return team.packs_apply(home, body.get('packs'))

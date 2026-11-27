@@ -5364,6 +5364,10 @@ function deliverableCardHtml(row) {
         <a class="btn btn-primary" href="${escape(row.open_url)}" target="_blank" rel="noopener noreferrer">打开演示</a>
         ${row.has_teardown ? `<button class="btn" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="screens">看拆解</button>` : ''}
         ${row.has_recipe ? `<button class="btn" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="recipe">照着做一份</button>` : ''}
+        ${state.store?.discussions_supported ? (() => {
+          const n = Number(state.store?.discussion_counts?.[row.key] || 0);
+          return `<button class="btn btn-quiet" type="button" data-deliverable-view="${escape(row.key)}" data-deliverable-tab="discuss">讨论${n ? ` ${number(n)}` : ''}</button>`;
+        })() : ''}
       </div>
     </div>
   </article>`;
@@ -5492,14 +5496,23 @@ async function openDeliverable(key, tab) {
 function renderDeliverable() {
   if (!dd) return;
   const tabs = [['screens', '按屏看', dd.row.has_teardown], ['items', '按技能和工具看', dd.row.has_teardown],
-    ['recipe', '照着做一份', dd.row.has_recipe]].filter(tab => tab[2]);
+    ['recipe', '照着做一份', dd.row.has_recipe],
+    ['discuss', '讨论区', Boolean(state.store?.discussions_supported)]].filter(tab => tab[2]);
   if (!tabs.some(tab => tab[0] === dd.tab)) dd.tab = tabs[0]?.[0] || 'recipe';
   renderButtons($('deliverable-tabs'), tabs.map(([id, label]) =>
     `<button class="seg" type="button" data-dd-tab="${id}" aria-pressed="${dd.tab === id}">${label}</button>`).join(''), 'data-dd-tab');
   const body = $('deliverable-dialog-body');
+  const discHtml = typeof discussionMountHtml === 'function' ? discussionMountHtml('deliverable', dd.row.key) : '';
+  if (dd.tab === 'discuss') {
+    const summaryHtml = dd.row.summary ? `<p class="detail-summary">${escape(dd.row.summary)}</p>` : '';
+    body.innerHTML = summaryHtml + discHtml;
+    if (typeof ensureDiscussions === 'function') ensureDiscussions('deliverable', dd.row.key);
+    return;
+  }
   if (dd.loading) { body.innerHTML = '<p class="muted" role="status">正在读取…</p>'; return; }
-  if (dd.error) { body.innerHTML = `<p class="row-note is-error" role="alert">${escape(dd.error)}</p>`; return; }
-  body.innerHTML = dd.tab === 'recipe' ? ddRecipeHtml() : dd.tab === 'items' ? ddItemsHtml() : ddScreensHtml();
+  if (dd.error) { body.innerHTML = `<p class="row-note is-error" role="alert">${escape(dd.error)}</p>` + discHtml; if (typeof ensureDiscussions === 'function') ensureDiscussions('deliverable', dd.row.key); return; }
+  body.innerHTML = (dd.tab === 'recipe' ? ddRecipeHtml() : dd.tab === 'items' ? ddItemsHtml() : ddScreensHtml()) + discHtml;
+  if (typeof ensureDiscussions === 'function') ensureDiscussions('deliverable', dd.row.key);
 }
 
 function ddScreensHtml() {
@@ -5611,7 +5624,10 @@ $('store-shelves').addEventListener('click', event => {
   if (button) openDeliverable(button.dataset.deliverableView, button.dataset.deliverableTab);
 });
 $('deliverable-dialog-close').addEventListener('click', () => $('deliverable-dialog').close());
-$('deliverable-dialog').addEventListener('close', () => { dd = null; });
+$('deliverable-dialog').addEventListener('close', () => {
+  if (dd?.row?.key && typeof clearDiscussionCache === 'function') clearDiscussionCache('deliverable', dd.row.key);
+  dd = null;
+});
 $('deliverable-tabs').addEventListener('click', event => {
   const button = event.target.closest('[data-dd-tab]');
   if (!button || !dd) return;
@@ -6425,6 +6441,7 @@ async function unlistStore(name, button) {
     extra.length ? `${extra.join('、')} 需要它，会一起下架。` : '',
     '同事在商店里将看不到它。',
     '已安装的同事不受影响，之后仍可重新上架。',
+    state.store?.discussions_supported ? '如果这是该技能在商店里的最后一份上架记录，对应讨论区的留言也会一并清除。' : '',
   ].filter(Boolean);
   $('store-unlist-title').textContent = `下架「${card ? storeTitle(card) : name}」`;
   $('store-unlist-body').innerHTML = lines.map(line => `<p class="confirm-line">${escape(line)}</p>`).join('');
@@ -6551,8 +6568,10 @@ function renderStoreDetail(fresh = false) {
     ${storeReviewsHtml(card)}
     ${card.description ? `<h3 class="sub-title">说明</h3><p class="detail-desc">${escape(card.description)}</p>` : ''}
     <h3 class="sub-title">来源</h3>
-    <p class="store-source">${escape(storeSourceText(card))}</p>`;
+    <p class="store-source">${escape(storeSourceText(card))}</p>
+    ${typeof discussionMountHtml === 'function' ? discussionMountHtml('skill', card.key) : ''}`;
   body.scrollTop = scroll;
+  if (typeof ensureDiscussions === 'function') ensureDiscussions('skill', card.key);
 }
 
 /* 被同一作者的哪些技能需要：最多列三个，多的写“等”。 */
@@ -9119,7 +9138,9 @@ function renderDocDetail() {
     </div>
     ${data.summary ? `<p class="doc-reader-summary">${escape(data.summary)}</p>` : ''}
     <article class="doc-md">${docMdHtml(data.content, files, baseUrl)}</article>
-    ${attachmentsHtml}`;
+    ${attachmentsHtml}
+    ${typeof discussionMountHtml === 'function' ? discussionMountHtml('doc', data.key) : ''}`;
+  if (typeof ensureDiscussions === 'function') ensureDiscussions('doc', data.key);
 }
 
 let docDialogState = null;
@@ -9333,17 +9354,24 @@ async function deleteStoreDoc(id, title, button) {
     create_only: true,
   } : null;
   const hasFiles = Boolean(docDetail?.data?.file_count);
+  const docKey = state.storeDetail;
+  const discCount = Number(state.store?.discussion_counts?.[docKey] || 0);
+  const lines = [
+    '删除后同事将无法在分享文档中查看这篇文章。',
+    hasFiles ? '附带的图片或文件会一并删除（撤销仅恢复文字正文，附件需重新上传）。' : '删除后可在提示条里撤销恢复正文。',
+  ];
+  if (state.store?.discussions_supported) {
+    lines.push(discCount > 0
+      ? `该文档下的 ${number(discCount)} 条讨论留言也会一并清除，撤销恢复后不会找回。`
+      : '若该文档下已有讨论留言，也会一并清除且不会随撤销找回。');
+  }
   const confirmed = await confirmDialog({
     title: `删除「${title}」`,
-    lines: [
-      '删除后同事将无法在分享文档中查看这篇文章。',
-      hasFiles ? '附带的图片或文件会一并删除（撤销仅恢复文字正文，附件需重新上传）。' : '删除后可在提示条里撤销恢复正文。',
-    ],
+    lines,
     okText: '删除文档',
     danger: true,
   });
   if (!confirmed) return;
-  const docKey = state.storeDetail;
   const cardsBefore = [...$('store-shelves').querySelectorAll('.doc-card')];
   const prevIndex = cardsBefore.findIndex(el => el.dataset.docOpen === docKey);
   await withBusy(button, '正在删除…', async () => {
@@ -9392,6 +9420,9 @@ function closeDetail() {
   }, 200);
   holdDetailBackground(false);
   if (storeKey) {
+    if (typeof clearDiscussionCache === 'function') {
+      clearDiscussionCache(storeKey.startsWith('doc:') ? 'doc' : 'skill', storeKey);
+    }
     // 商店的卡片、列表行、文档卡或热门仓库可能已经重画过：按编号找回来，把焦点还给它。
     const github = storeKey.startsWith('github-repo:');
     const doc = storeKey.startsWith('doc:');
@@ -9438,6 +9469,445 @@ function onDetailKey(event) {
 $('detail-close').addEventListener('click', closeDetail);
 $('panel-scrim').addEventListener('click', closeDetail);
 document.addEventListener('keydown', onDetailKey);
+
+/* ---------- 团队商店轻量讨论区（技能 / 成品 / 分享文档详情共用） ---------- */
+const discussionCache = new Map();
+let discussionSeq = 0;
+
+function discussionConnId() {
+  return state.store?.connection_id || '';
+}
+
+function discussionId(targetType, targetKey) {
+  return `${discussionConnId()}|${targetType}|${targetKey}`;
+}
+
+function discussionTimeLabel(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return friendlyDate(iso);
+  const pad = n => String(n).padStart(2, '0');
+  const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const nowDate = new Date();
+  const sameDay = d.getFullYear() === nowDate.getFullYear()
+    && d.getMonth() === nowDate.getMonth() && d.getDate() === nowDate.getDate();
+  if (sameDay) return `今天 ${hhmm}`;
+  const sameYear = d.getFullYear() === nowDate.getFullYear();
+  return sameYear
+    ? `${d.getMonth() + 1}月${d.getDate()}日 ${hhmm}`
+    : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${hhmm}`;
+}
+
+function discussionTimeFull(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function discussionCodePoints(text) {
+  return [...String(text || '')].length;
+}
+
+function getDiscussionEntry(targetType, targetKey) {
+  const id = discussionId(targetType, targetKey);
+  if (!discussionCache.has(id)) {
+    discussionCache.set(id, {
+      loading: false, loaded: false, unsupported: false, offline: false, error: '', comments: [],
+      count: Number(state.store?.discussion_counts?.[targetKey] || 0),
+      replyTo: null, draft: '', undoSnapshot: null, busy: false, seq: 0,
+    });
+  }
+  return discussionCache.get(id);
+}
+
+function clearDiscussionCache(targetType, targetKey) {
+  if (!targetType) { discussionCache.clear(); return; }
+  discussionCache.delete(discussionId(targetType, targetKey));
+}
+
+function findDiscussionHost(targetType, targetKey) {
+  const sel = `[data-disc-type="${CSS.escape(targetType)}"][data-disc-key="${CSS.escape(targetKey)}"]`;
+  return $('detail-body')?.querySelector(sel) || $('deliverable-dialog-body')?.querySelector(sel) || null;
+}
+
+function discussionThreadHtml(entry, canWrite) {
+  const count = entry.loaded ? entry.comments.length : entry.count;
+  const heading = `<div class="disc-head">
+    <h3>讨论区</h3>
+    <span class="disc-count">${entry.unsupported ? '当前分享站暂不支持' : count ? `${number(count)} 条留言` : '暂无留言'}</span>
+  </div>`;
+  let content = '';
+  if (entry.unsupported) {
+    content = '<p class="disc-empty">当前连接的分享站版本较旧，暂不支持讨论区。</p>';
+  } else if (entry.loading && !entry.loaded) {
+    content = '<p class="disc-empty" role="status">正在加载留言…</p>';
+  } else if (entry.offline) {
+    content = '<p class="disc-empty" role="status">当前连不上分享站，暂无法查看或发表留言。<button class="link-btn" type="button" data-disc-retry>重试</button></p>';
+  } else if (entry.error) {
+    content = `<p class="row-note is-error" role="alert">${escape(entry.error)} <button class="link-btn" type="button" data-disc-retry>重试</button></p>`;
+  } else if (!entry.comments.length) {
+    content = '<p class="disc-empty">还没有留言，欢迎补充使用经验或提问。</p>';
+  } else {
+    content = `<ul class="disc-list">${entry.comments.map(item => {
+      const quote = item.reply_to_id
+        ? `<p class="disc-reply-quote">${item.reply_to_deleted
+            ? '回复的留言已删除'
+            : `回复 ${escape(item.reply_to_author || '成员')}${item.reply_to_excerpt ? `：${escape(item.reply_to_excerpt)}` : ''}`}</p>`
+        : '';
+      const actions = canWrite ? `<span class="disc-item-actions">
+        <button class="link-btn" type="button" data-disc-reply="${escape(item.id)}"${entry.busy ? ' disabled' : ''}>回复</button>
+        ${item.can_delete ? `<button class="link-btn" type="button" data-disc-delete="${escape(item.id)}"${entry.busy ? ' disabled' : ''}>删除</button>` : ''}
+      </span>` : '';
+      return `<li class="disc-item" data-disc-item="${escape(item.id)}">
+        <div class="disc-item-head">
+          <span class="disc-item-meta"><strong>${escape(item.author?.name || '成员')}</strong><time datetime="${escape(item.created_at)}" title="${escape(discussionTimeFull(item.created_at))}">${escape(discussionTimeLabel(item.created_at))}</time></span>
+          ${actions}
+        </div>
+        ${quote}
+        <p class="disc-body">${escape(item.body)}</p>
+      </li>`;
+    }).join('')}</ul>`;
+  }
+  const undoBar = entry.undoSnapshot && canWrite ? `<div class="disc-reply-bar" role="status">
+    <span>已删除你的留言</span>
+    <span class="disc-item-actions">
+      <button class="link-btn" type="button" data-disc-undo${entry.busy ? ' disabled' : ''}>撤销恢复</button>
+      <button class="link-btn" type="button" data-disc-undo-dismiss${entry.busy ? ' disabled' : ''}>知道了</button>
+    </span>
+  </div>` : '';
+  return heading + undoBar + content;
+}
+
+function discussionComposerHtml(entry, canWrite) {
+  if (entry.unsupported || entry.offline || entry.error || !entry.loaded) return '';
+  if (!canWrite) return '<p class="row-note">只读预览，不能发表或删除留言。</p>';
+  const replyBar = entry.replyTo ? `<div class="disc-reply-bar">
+    <span>正在回复 ${escape(entry.replyTo.author)}${entry.replyTo.excerpt ? `：${escape(entry.replyTo.excerpt)}` : ''}</span>
+    <button class="link-btn" type="button" data-disc-reply-cancel${entry.busy ? ' disabled' : ''}>取消回复</button>
+  </div>` : '';
+  const len = discussionCodePoints(entry.draft.trim());
+  const counter = len > 1000
+    ? `已超出上限（${number(len)} / 1000 字）`
+    : len > 800 ? `已写 ${number(len)} / 1000 字` : '纯文本显示，最多 1000 字';
+  return `<div class="disc-composer">
+    ${replyBar}
+    <textarea class="input disc-input" data-disc-input rows="3" aria-label="发表留言" placeholder="${entry.replyTo ? `回复 ${escape(entry.replyTo.author)}…` : '写下你的经验、补充或问题…'}"${entry.busy ? ' disabled' : ''}>${escape(entry.draft)}</textarea>
+    <div class="disc-composer-foot">
+      <span class="disc-hint${len > 1000 ? ' is-error' : ''}" data-disc-hint>${counter}</span>
+      <button class="btn btn-small btn-primary" type="button" data-disc-submit${entry.busy || len > 1000 ? ' disabled' : ''}>${entry.replyTo ? '发送回复' : '发表留言'}</button>
+    </div>
+  </div>`;
+}
+
+function discussionInnerHtml(targetType, targetKey) {
+  const entry = getDiscussionEntry(targetType, targetKey);
+  const canWrite = !teamReadOnly();
+  return `<div class="disc-thread">${discussionThreadHtml(entry, canWrite)}</div><div class="disc-composer-wrap">${discussionComposerHtml(entry, canWrite)}</div>`;
+}
+
+function discussionMountHtml(targetType, targetKey) {
+  if (!state.store?.discussions_supported) return '';
+  return `<section class="disc-section" data-disc-type="${escape(targetType)}" data-disc-key="${escape(targetKey)}" aria-label="讨论区">${discussionInnerHtml(targetType, targetKey)}</section>`;
+}
+
+function renderDiscussionHost(targetType, targetKey, {threadOnly = false} = {}) {
+  const host = findDiscussionHost(targetType, targetKey);
+  if (!host) return;
+  const entry = getDiscussionEntry(targetType, targetKey);
+  const canWrite = !teamReadOnly();
+  const activeInput = document.activeElement?.matches?.('[data-disc-input]') && host.contains(document.activeElement)
+    ? document.activeElement : null;
+  if (threadOnly && activeInput && host.querySelector('.disc-thread') && entry.loaded && !entry.error && !entry.unsupported) {
+    host.querySelector('.disc-thread').innerHTML = discussionThreadHtml(entry, canWrite);
+    return;
+  }
+  const selStart = activeInput ? activeInput.selectionStart : null;
+  const selEnd = activeInput ? activeInput.selectionEnd : null;
+  if (activeInput) entry.draft = activeInput.value;
+  host.innerHTML = discussionInnerHtml(targetType, targetKey);
+  if (activeInput) {
+    const restored = host.querySelector('[data-disc-input]');
+    if (restored && !restored.disabled) {
+      restored.focus({preventScroll: true});
+      if (selStart !== null && selEnd !== null) {
+        try { restored.setSelectionRange(selStart, selEnd); } catch {}
+      }
+    }
+  }
+}
+
+async function ensureDiscussions(targetType, targetKey, force = false) {
+  if (!state.store?.discussions_supported) return;
+  const entry = getDiscussionEntry(targetType, targetKey);
+  if (entry.loading && !force) return;
+  if (entry.loaded && !force) return;
+  const seq = ++discussionSeq;
+  entry.seq = seq;
+  entry.loading = true;
+  entry.offline = false;
+  entry.error = '';
+  renderDiscussionHost(targetType, targetKey, {threadOnly: true});
+  try {
+    const connId = discussionConnId();
+    const query = `target_type=${encodeURIComponent(targetType)}&target_key=${encodeURIComponent(targetKey)}`
+      + (connId ? `&expected_connection=${encodeURIComponent(connId)}` : '');
+    const data = await api('/api/team/discussions?' + query);
+    if (entry.seq !== seq) return;
+    entry.loading = false;
+    if (data.discussions_supported === false) {
+      entry.loaded = true;
+      entry.unsupported = true;
+      entry.comments = [];
+      entry.count = 0;
+      if (state.store) state.store.discussions_supported = false;
+    } else {
+      entry.loaded = true;
+      entry.unsupported = false;
+      entry.comments = Array.isArray(data.comments) ? data.comments : [];
+      entry.count = entry.comments.length;
+      if (entry.replyTo && !entry.comments.some(c => c.id === entry.replyTo.id)) entry.replyTo = null;
+      if (state.store?.discussion_counts) {
+        if (entry.count) state.store.discussion_counts[targetKey] = entry.count;
+        else delete state.store.discussion_counts[targetKey];
+      }
+    }
+  } catch (error) {
+    if (entry.seq !== seq) return;
+    entry.loading = false;
+    const msg = String(error.message || '');
+    if (error.status === 502 || /连不上|离线|网络|Failed to fetch/i.test(msg)) {
+      entry.offline = true;
+      entry.error = '';
+    } else {
+      entry.error = msg || '没能加载讨论区，请稍后重试。';
+    }
+  }
+  renderDiscussionHost(targetType, targetKey, {threadOnly: true});
+}
+
+async function submitDiscussion(targetType, targetKey, button) {
+  const entry = getDiscussionEntry(targetType, targetKey);
+  if (entry.busy) return;
+  const host = findDiscussionHost(targetType, targetKey);
+  const input = host?.querySelector('[data-disc-input]');
+  const body = (input ? input.value : entry.draft).trim();
+  if (!body) {
+    toast({text: '请先填写留言内容。', tone: 'warn'});
+    input?.focus();
+    return;
+  }
+  if (discussionCodePoints(body) > 1000) {
+    toast({text: '单条留言最多 1000 字，请精简后再发送。', tone: 'warn'});
+    input?.focus();
+    return;
+  }
+  entry.draft = input ? input.value : entry.draft;
+  entry.busy = true;
+  if (input) input.disabled = true;
+  const replyToId = entry.replyTo?.id || '';
+  const connId = state.store?.connection_id || '';
+  let posted = false;
+  await withBusy(button, '正在发送…', async () => {
+    try {
+      const result = await api('/api/team/discussions/post', {
+        target_type: targetType,
+        target_key: targetKey,
+        body,
+        reply_to_id: replyToId,
+        expected_connection: connId,
+      });
+      entry.draft = '';
+      entry.replyTo = null;
+      posted = true;
+      toast({text: result.message || '留言已发布。'});
+    } catch (error) {
+      toast({error_id: error.error_id, text: error.message || '没能发布留言，请稍后重试。', tone: 'error', sticky: true});
+    } finally {
+      entry.busy = false;
+    }
+  });
+  if (posted) {
+    await ensureDiscussions(targetType, targetKey, true);
+    findDiscussionHost(targetType, targetKey)?.querySelector('[data-disc-input]')?.focus({preventScroll: true});
+  } else {
+    renderDiscussionHost(targetType, targetKey);
+    findDiscussionHost(targetType, targetKey)?.querySelector('[data-disc-input]')?.focus({preventScroll: true});
+  }
+}
+
+async function undoDeletedDiscussion(targetType, targetKey, button) {
+  const entry = getDiscussionEntry(targetType, targetKey);
+  const snapshot = entry.undoSnapshot;
+  if (!snapshot || entry.busy) return;
+  entry.busy = true;
+  let restored = false;
+  await withBusy(button, '正在恢复…', async () => {
+    try {
+      await api('/api/team/discussions/post', {
+        target_type: snapshot.targetType,
+        target_key: snapshot.targetKey,
+        body: snapshot.body,
+        reply_to_id: snapshot.replyToId || '',
+        expected_connection: snapshot.connId || '',
+      });
+      entry.undoSnapshot = null;
+      restored = true;
+      toast({text: '已重新发布这条留言。'});
+    } catch (error) {
+      toast({error_id: error.error_id, text: error.message || '没能恢复留言，请稍后重试。', tone: 'error', sticky: true});
+    } finally {
+      entry.busy = false;
+    }
+  });
+  if (restored) {
+    await ensureDiscussions(targetType, targetKey, true);
+    findDiscussionHost(targetType, targetKey)?.querySelector('[data-disc-input]')?.focus({preventScroll: true});
+  } else {
+    renderDiscussionHost(targetType, targetKey);
+  }
+}
+
+async function deleteDiscussionItem(targetType, targetKey, commentId, button) {
+  const entry = getDiscussionEntry(targetType, targetKey);
+  if (entry.busy) return;
+  const targetRow = entry.comments.find(c => c.id === commentId);
+  const myId = state.store?.member?.id || '';
+  const isOwn = Boolean(targetRow && myId && targetRow.author?.id === myId);
+  const confirmed = await confirmDialog({
+    title: '删除这条留言',
+    lines: [isOwn ? '删除后可在讨论区上方点击“撤销恢复”重新发出。' : '删除后其他成员将不再看到这条留言，且无法恢复。'],
+    okText: '删除留言',
+    danger: true,
+  });
+  if (!confirmed) return;
+  const prevIndex = entry.comments.findIndex(c => c.id === commentId);
+  const connId = discussionConnId();
+  const snapshot = isOwn ? {
+    targetType,
+    targetKey,
+    body: targetRow.body,
+    replyToId: targetRow.reply_to_deleted ? '' : (targetRow.reply_to_id || ''),
+    connId,
+  } : null;
+  entry.busy = true;
+  renderDiscussionHost(targetType, targetKey);
+  let deleted = false;
+  try {
+    const result = await api('/api/team/discussions/delete', {
+      id: commentId,
+      expected_connection: connId,
+    });
+    if (entry.replyTo?.id === commentId) entry.replyTo = null;
+    entry.undoSnapshot = snapshot;
+    deleted = true;
+    toast({text: result.message || '已删除留言。'});
+  } catch (error) {
+    toast({error_id: error.error_id, text: error.message || '没能删除留言，请稍后重试。', tone: 'error', sticky: true});
+  } finally {
+    entry.busy = false;
+  }
+  if (deleted) {
+    await ensureDiscussions(targetType, targetKey, true);
+  } else {
+    renderDiscussionHost(targetType, targetKey);
+  }
+  const host = findDiscussionHost(targetType, targetKey);
+  if (host) {
+    const items = [...host.querySelectorAll('[data-disc-item]')];
+    const nextItem = items[Math.min(Math.max(0, prevIndex), items.length - 1)];
+    const target = host.querySelector('[data-disc-undo]') || nextItem?.querySelector('button') || host.querySelector('[data-disc-input]') || $('detail-close');
+    target?.focus({preventScroll: true});
+  }
+}
+
+function bindDiscussionContainer(container) {
+  if (!container) return;
+  container.addEventListener('click', event => {
+    const host = event.target.closest('[data-disc-type][data-disc-key]');
+    if (!host) return;
+    const {discType: targetType, discKey: targetKey} = host.dataset;
+    const entry = getDiscussionEntry(targetType, targetKey);
+    if (event.target.closest('[data-disc-retry]')) {
+      ensureDiscussions(targetType, targetKey, true);
+      return;
+    }
+    const replyBtn = event.target.closest('[data-disc-reply]');
+    if (replyBtn) {
+      const found = entry.comments.find(c => c.id === replyBtn.dataset.discReply);
+      if (found) {
+        const compact = String(found.body || '').replace(/\s+/g, ' ').trim();
+        entry.replyTo = {
+          id: found.id,
+          author: found.author?.name || '成员',
+          excerpt: compact.length <= 40 ? compact : compact.slice(0, 39) + '…',
+        };
+        renderDiscussionHost(targetType, targetKey);
+        findDiscussionHost(targetType, targetKey)?.querySelector('[data-disc-input]')?.focus();
+      }
+      return;
+    }
+    if (event.target.closest('[data-disc-reply-cancel]')) {
+      entry.replyTo = null;
+      renderDiscussionHost(targetType, targetKey);
+      findDiscussionHost(targetType, targetKey)?.querySelector('[data-disc-input]')?.focus();
+      return;
+    }
+    const submitBtn = event.target.closest('[data-disc-submit]');
+    if (submitBtn) {
+      submitDiscussion(targetType, targetKey, submitBtn);
+      return;
+    }
+    const undoBtn = event.target.closest('[data-disc-undo]');
+    if (undoBtn) {
+      undoDeletedDiscussion(targetType, targetKey, undoBtn);
+      return;
+    }
+    if (event.target.closest('[data-disc-undo-dismiss]')) {
+      entry.undoSnapshot = null;
+      renderDiscussionHost(targetType, targetKey);
+      findDiscussionHost(targetType, targetKey)?.querySelector('[data-disc-input]')?.focus({preventScroll: true});
+      return;
+    }
+    const delBtn = event.target.closest('[data-disc-delete]');
+    if (delBtn) {
+      deleteDiscussionItem(targetType, targetKey, delBtn.dataset.discDelete, delBtn);
+    }
+  });
+  container.addEventListener('input', event => {
+    const input = event.target.closest('[data-disc-input]');
+    if (!input) return;
+    const host = input.closest('[data-disc-type][data-disc-key]');
+    if (!host) return;
+    const entry = getDiscussionEntry(host.dataset.discType, host.dataset.discKey);
+    entry.draft = input.value;
+    const hint = host.querySelector('[data-disc-hint]');
+    const submitBtn = host.querySelector('[data-disc-submit]');
+    const len = discussionCodePoints(input.value.trim());
+    if (hint) {
+      hint.textContent = len > 1000
+        ? `已超出上限（${number(len)} / 1000 字）`
+        : len > 800 ? `已写 ${number(len)} / 1000 字` : '纯文本显示，最多 1000 字';
+      hint.classList.toggle('is-error', len > 1000);
+    }
+    if (submitBtn) submitBtn.disabled = entry.busy || len > 1000;
+  });
+  container.addEventListener('keydown', event => {
+    if (!(event.ctrlKey || event.metaKey) || event.key !== 'Enter') return;
+    const input = event.target.closest('[data-disc-input]');
+    if (!input) return;
+    const host = input.closest('[data-disc-type][data-disc-key]');
+    const submitBtn = host?.querySelector('[data-disc-submit]');
+    if (host && submitBtn && !submitBtn.disabled) {
+      event.preventDefault();
+      submitDiscussion(host.dataset.discType, host.dataset.discKey, submitBtn);
+    }
+  });
+}
+
+bindDiscussionContainer($('detail-body'));
+bindDiscussionContainer($('deliverable-dialog-body'));
 
 $('detail-body').addEventListener('change', event => {
   if (event.target.id === 'dep-select') $('dep-add').disabled = !event.target.value || Boolean(writeBusy);

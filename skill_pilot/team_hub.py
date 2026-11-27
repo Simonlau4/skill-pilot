@@ -15,6 +15,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -76,8 +77,34 @@ MAX_DOC_FILES = 30
 MAX_DOC_ATTACHMENT = 10 * 1024 * 1024
 MAX_DOC_SIZE = 20 * 1024 * 1024
 MAX_DOC_BODY = 512 * 1024
+MAX_DISCUSSION_TEXT = 1000
+MAX_DISCUSSION_BODY = 16 * 1024
+MAX_DISCUSSIONS_PER_TARGET = 200
+MAX_DISCUSSIONS_TOTAL = 5000
+DISCUSSION_RATE_LIMIT = 5
+DISCUSSION_RATE_WINDOW = 60
+DISCUSSION_TYPES = ('skill', 'deliverable', 'doc')
 MAX_ORPHAN_BLOBS_BYTES = 1024 * 1024 * 1024
 ORPHAN_BLOB_TTL_SECONDS = 3600
+
+
+def clean_discussion_body(value):
+    if not isinstance(value, str):
+        raise ValueError('留言内容须是文字。')
+    normalized = value.replace('\r\n', '\n').replace('\r', '\n')
+    if any(c != '\n' and unicodedata.category(c) in {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'} for c in normalized):
+        raise ValueError('留言里包含无法显示的特殊字符，请清理后再发送。')
+    text = normalized.strip()
+    if not text:
+        raise ValueError('请先填写留言内容。')
+    if len(text) > MAX_DISCUSSION_TEXT:
+        raise ValueError(f'单条留言最多 {MAX_DISCUSSION_TEXT} 字，请精简后再发送。')
+    return text
+
+
+def discussion_excerpt(text, limit=60):
+    compact = ' '.join(str(text or '').split())
+    return compact if len(compact) <= limit else compact[:limit - 1] + '…'
 
 
 def clean_doc_id(identity):
@@ -1237,7 +1264,46 @@ class HubStore:
                     changes[self._suggestion_path(suggestion['id'])] = None
                     if suggestion['status'] == 'pending' and suggestion['author_id'] != member_id:
                         affected.add(suggestion['author_id'])
+            remaining_members = [m for m in members if m['id'] != member_id]
+            remaining_keys = set()
+            for other in remaining_members:
+                oid = other['id']
+                for row in self._listings(oid).values():
+                    remaining_keys.add(listing_key(oid, row))
+                for did in self._deliverables(oid):
+                    remaining_keys.add(f'deliverable:{oid}:{did}')
+                for doc_id in self._doc_item_stems(oid).values():
+                    remaining_keys.add(f'doc:{oid}:{doc_id}')
+            discussions = self._discussions(strict=False)
+            disc_changed = False
+            if discussions is not None:
+                for tkey in list(discussions):
+                    if tkey not in remaining_keys:
+                        del discussions[tkey]
+                        disc_changed = True
+                        continue
+                    rows = discussions[tkey]
+                    removed_ids = {r['id'] for r in rows if r.get('author_id') == member_id}
+                    if not removed_ids:
+                        continue
+                    kept = []
+                    for r in rows:
+                        if r.get('author_id') == member_id:
+                            continue
+                        if r.get('reply_to_id') in removed_ids:
+                            r = {**r, 'reply_to_author': '', 'reply_to_excerpt': '', 'reply_to_deleted': True}
+                        kept.append(r)
+                    if kept:
+                        discussions[tkey] = kept
+                    else:
+                        del discussions[tkey]
+                    disc_changed = True
+                if disc_changed or (self._discussions_raw(strict=False) or {}).get('rate', {}).get(member_id):
+                    changes[self.data / 'discussions.json'] = self._discussions_payload(discussions, remove_rate_member=member_id)
             self._save(changes)
+            rate = getattr(self, '_discussion_rate', None)
+            if rate is not None:
+                rate.pop(member_id, None)
             for author in affected:
                 self._collect_blobs(author)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
@@ -1533,7 +1599,8 @@ class HubStore:
                 'my_installs': sorted(stored - own_cards),
                 'my_all_installs': sorted(counted_for_me),
                 'deliverables': self._public_deliverables(),
-                'docs': self._public_docs()}
+                'docs': self._public_docs(),
+                'discussion_counts': {k: len(v) for k, v in (self._discussions(strict=False) or {}).items() if v}}
         if member_id:
             incoming, outgoing = {}, 0
             for suggestion in self._suggestions():
@@ -1620,6 +1687,14 @@ class HubStore:
         changes, receipts = {}, []
         collect = bool(manifests)
         updated_at = now()
+        replaced_keys = set()
+        for row in rows:
+            prev = current.get(row['name'])
+            if prev:
+                old_k = listing_key(member_id, prev)
+                new_k = listing_key(member_id, row)
+                if old_k != new_k:
+                    replaced_keys.add(old_k)
         for raw_row, row in zip(data['listings'], rows):
             name, source = row['name'], row['source']
             previous = current.get(name, {})
@@ -1635,7 +1710,7 @@ class HubStore:
                 if previous.get('source', {}).get('kind') != 'files':
                     raise HubError(400, '请附带完整的技能文件后再上架。')
                 row['source'] = dict(previous['source'])
-                if 'description' in previous:
+                if 'description' in previous and (previous.get('published_via') == 'suggestion' or 'description' not in raw_row):
                     row['description'] = previous['description']
                 source = row['source']
                 receipt = {'name': name, 'key': listing_key(member_id, row), 'updated_at': updated_at}
@@ -1673,10 +1748,31 @@ class HubStore:
             extra = {'published_via': previous['published_via']} if (preserve and previous.get('published_via')) else {}
             if ver_revs:
                 extra['version_revisions'] = ver_revs
+            prev_key = listing_key(member_id, previous) if previous else ''
+            new_key = listing_key(member_id, row)
+            same_card = bool(previous and prev_key == new_key)
             current[name] = {**row, **extra, 'updated_at': updated_at, 'revision': revision,
-                             'created_at': previous.get('created_at', previous.get('updated_at', updated_at))}
+                             'created_at': previous.get('created_at', previous.get('updated_at', updated_at)) if same_card else updated_at}
             receipts.append(receipt)
         changes[self._listing_path(member_id)] = {'listings': current}
+        if replaced_keys:
+            discussions = self._discussions(strict=False)
+            if discussions is not None:
+                disc_changed = False
+                for old_k in replaced_keys:
+                    if old_k not in discussions:
+                        continue
+                    still_present = (
+                        any(listing_key(member_id, r) == old_k for r in current.values()) or
+                        any(listing_key(m['id'], r) == old_k
+                            for m in self._members() if m['id'] != member_id
+                            for r in self._listings(m['id']).values())
+                    )
+                    if not still_present:
+                        del discussions[old_k]
+                        disc_changed = True
+                if disc_changed:
+                    changes[self.data / 'discussions.json'] = self._discussions_payload(discussions)
         if 'packs' in data:
             changes[self._pack_path(member_id)] = {'packs': self._pack_changes(member_id, data['packs'], current, skill_files)}
         installs, with_mine = self._installs_state()
@@ -1736,6 +1832,18 @@ class HubStore:
         changes = {self.data / 'packages' / member_id / (name + '.json'): None,
                    self._pack_path(member_id): {'packs': packs},
                    self._listing_path(member_id): {'listings': current}}
+        removed_key = listing_key(member_id, removed)
+        still_listed = (
+            any(listing_key(member_id, row) == removed_key for row in current.values()) or
+            any(listing_key(m['id'], row) == removed_key
+                for m in self._members() if m['id'] != member_id
+                for row in self._listings(m['id']).values())
+        )
+        if not still_listed:
+            discussions = self._discussions(strict=False)
+            if discussions is not None and removed_key in discussions:
+                del discussions[removed_key]
+                changes[self.data / 'discussions.json'] = self._discussions_payload(discussions)
         affected = set()
         for row in self._suggestions():
             if (row['target_member_id'], row['skill_name'], row['status']) == (member_id, name, 'pending'):
@@ -2244,10 +2352,18 @@ class HubStore:
         return {'key': 'deliverable:' + member_id + ':' + identity, 'updated_at': row['updated_at']}
 
     def _remove_deliverable(self, member_id, identity):
-        path = self._deliverable_dir(member_id) / 'items' / (identity + '.json')
-        if not path.is_file():
+        items_dir = self._deliverable_dir(member_id) / 'items'
+        exact = {p.stem for p in items_dir.glob('*.json')} if items_dir.is_dir() else set()
+        if identity not in exact:
             raise HubError(404, '这个成品还没有上架，或已经下架。')
-        path.unlink()
+        path = items_dir / (identity + '.json')
+        changes = {path: None}
+        discussions = self._discussions(strict=False)
+        key = 'deliverable:' + member_id + ':' + identity
+        if discussions is not None and key in discussions:
+            del discussions[key]
+            changes[self.data / 'discussions.json'] = self._discussions_payload(discussions)
+        self._save(changes)
         self._collect_blobs(member_id)
         return {}
 
@@ -2394,7 +2510,13 @@ class HubStore:
         path = self._doc_dir(member_id) / 'items' / (identity + '.json')
         index = self._doc_index(member_id)
         index.pop(identity, None)
-        self._save({path: None, self._doc_index_path(member_id): {'docs': index}})
+        changes = {path: None, self._doc_index_path(member_id): {'docs': index}}
+        discussions = self._discussions(strict=False)
+        key = 'doc:' + member_id + ':' + identity
+        if discussions is not None and key in discussions:
+            del discussions[key]
+            changes[self.data / 'discussions.json'] = self._discussions_payload(discussions)
+        self._save(changes)
         self._collect_blobs(member_id)
         return {}
 
@@ -2440,6 +2562,246 @@ class HubStore:
         ext_ascii = re.sub(r'[^A-Za-z0-9.]+', '', suffix)
         fallback_name = stem_ascii + ext_ascii
         return blob.open('rb'), entry['size'], kind, inline, (fallback_name, original_name)
+
+    def _discussions_raw(self, *, strict=True):
+        path = self.data / 'discussions.json'
+        if not path.exists():
+            return {'targets': {}, 'rate': {}}
+        try:
+            payload = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(payload, dict):
+                raise ValueError('invalid discussions structure')
+            raw = payload.get('targets', {})
+            if not isinstance(raw, dict) or any(
+                not isinstance(k, str) or not isinstance(v, list) or any(not isinstance(r, dict) for r in v)
+                for k, v in raw.items()
+            ):
+                raise ValueError('invalid discussions targets')
+            rate = payload.get('rate', {})
+            if not isinstance(rate, dict):
+                rate = {}
+            return {'targets': raw, 'rate': rate}
+        except (OSError, ValueError, TypeError) as error:
+            if strict:
+                raise HubError(500, '讨论区数据暂时无法读取，请联系管理员检查或还原备份。') from None
+            print(f'跳过损坏的讨论区数据读取：{error}', file=sys.stderr)
+            return None
+
+    def _discussions(self, *, strict=True):
+        raw = self._discussions_raw(strict=strict)
+        return None if raw is None else raw['targets']
+
+    def _discussions_payload(self, targets, rate=None, remove_rate_member=''):
+        if rate is None:
+            raw = self._discussions_raw(strict=False)
+            rate = dict(raw['rate']) if raw else {}
+        else:
+            rate = dict(rate)
+        if remove_rate_member:
+            rate.pop(remove_rate_member, None)
+        now_utc = datetime.now(timezone.utc)
+        cleaned_rate = {}
+        for mid, stamps in rate.items():
+            if not isinstance(mid, str) or not isinstance(stamps, list):
+                continue
+            kept = []
+            for stamp in stamps:
+                if not isinstance(stamp, str):
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+                    if 0 <= (now_utc - parsed).total_seconds() < DISCUSSION_RATE_WINDOW:
+                        kept.append(stamp)
+                except ValueError:
+                    pass
+            if kept:
+                cleaned_rate[mid] = kept[-DISCUSSION_RATE_LIMIT:]
+        payload = {'targets': targets}
+        if cleaned_rate:
+            payload['rate'] = cleaned_rate
+        return payload
+
+    def _discussion_target(self, target_type, target_key):
+        if target_type not in DISCUSSION_TYPES:
+            raise HubError(400, '讨论区目标类型不正确。')
+        if not isinstance(target_key, str) or not 1 <= len(target_key) <= 8192:
+            raise HubError(400, '讨论区目标标识不正确。')
+        members = {m['id'] for m in self._members()}
+        if target_type == 'skill':
+            if target_key.startswith('team:'):
+                parts = target_key.split(':', 2)
+                if len(parts) != 3 or parts[1] not in members:
+                    raise HubError(404, '对应的技能已下架或不存在。')
+                row = self._listings(parts[1]).get(parts[2])
+                if not row or listing_key(parts[1], row) != target_key:
+                    raise HubError(404, '对应的技能已下架或不存在。')
+                return {parts[1]: ''}
+            matched = []
+            for mid in members:
+                for row in self._listings(mid).values():
+                    if listing_key(mid, row) == target_key:
+                        matched.append((row.get('created_at', row.get('updated_at', '')), mid))
+            if not matched:
+                raise HubError(404, '对应的技能已下架或不存在。')
+            # For shared external (GitHub/Lark) skills, only the earliest recommender holds card-owner delete rights,
+            # and never over comments posted before they joined.
+            earliest_at, earliest_mid = min(matched, key=lambda pair: (pair[0], pair[1]))
+            return {earliest_mid: earliest_at}
+        if target_type == 'deliverable':
+            match = re.fullmatch(r'deliverable:([0-9a-f]{32}):(' + DELIVERABLE_ID + ')', target_key)
+            if not match or match[1] not in members or match[2] not in self._deliverables(match[1]):
+                raise HubError(404, '对应的成品已下架或不存在。')
+            return {match[1]: ''}
+        match = re.fullmatch(r'doc:([0-9a-f]{32}):(' + DOC_ID + ')', target_key)
+        if not match or match[1] not in members:
+            raise HubError(404, '对应的分享文档已删除或不存在。')
+        try:
+            clean_doc_id(match[2])
+        except ValueError:
+            raise HubError(404, '对应的分享文档已删除或不存在。') from None
+        if self._read_doc_item(match[1], match[2]) is None:
+            raise HubError(404, '对应的分享文档已删除或不存在。')
+        return {match[1]: ''}
+
+    def _can_delete_discussion(self, member_id, row, owners):
+        if member_id == row['author_id']:
+            return True
+        if member_id in owners:
+            since = owners[member_id]
+            return not since or row.get('created_at', '') >= since
+        return False
+
+    def _public_discussion(self, row, member_id, owners, member_names):
+        author_id = row['author_id']
+        return {
+            'id': row['id'],
+            'target_type': row['target_type'],
+            'target_key': row['target_key'],
+            'author': {'id': author_id, 'name': member_names.get(author_id, row.get('author_name', '成员'))},
+            'body': row['body'],
+            'reply_to_id': row.get('reply_to_id', ''),
+            'reply_to_author': row.get('reply_to_author', ''),
+            'reply_to_excerpt': row.get('reply_to_excerpt', ''),
+            'reply_to_deleted': bool(row.get('reply_to_deleted', False)),
+            'created_at': row['created_at'],
+            'can_delete': self._can_delete_discussion(member_id, row, owners),
+        }
+
+    def _list_discussions(self, member_id, target_type, target_key):
+        owners = self._discussion_target(target_type, target_key)
+        member_names = {m['id']: m['name'] for m in self._members()}
+        rows = self._discussions(strict=True).get(target_key, [])
+        comments = [self._public_discussion(row, member_id, owners, member_names) for row in rows]
+        return {'target_type': target_type, 'target_key': target_key,
+                'comments': comments, 'count': len(comments)}
+
+    def _post_discussion(self, member, data):
+        if not isinstance(data, dict):
+            raise HubError(400, '留言内容格式不正确。')
+        target_type = data.get('target_type', '')
+        target_key = data.get('target_key', '')
+        owners = self._discussion_target(target_type, target_key)
+        try:
+            body = clean_discussion_body(data.get('body', ''))
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
+        reply_to_id = data.get('reply_to_id', '')
+        if reply_to_id is None:
+            reply_to_id = ''
+        if not isinstance(reply_to_id, str) or (reply_to_id and not re.fullmatch(r'[0-9a-f]{32}', reply_to_id)):
+            raise HubError(400, '要回复的留言编号不正确。')
+        raw_disc = self._discussions_raw(strict=True)
+        discussions = raw_disc['targets']
+        persisted_rate = dict(raw_disc['rate'])
+        now_mono = time.monotonic()
+        rate = getattr(self, '_discussion_rate', None)
+        if rate is None:
+            rate = {}
+            self._discussion_rate = rate
+        recent = [ts for ts in rate.get(member['id'], ()) if now_mono - ts < DISCUSSION_RATE_WINDOW]
+        # Count persisted post timestamps (independent of deletions) so hub restarts cannot reset rate limiting.
+        now_utc = datetime.now(timezone.utc)
+        persisted_stamps = []
+        for stamp in persisted_rate.get(member['id'], ()):
+            if not isinstance(stamp, str):
+                continue
+            try:
+                parsed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+                if 0 <= (now_utc - parsed).total_seconds() < DISCUSSION_RATE_WINDOW:
+                    persisted_stamps.append(stamp)
+            except ValueError:
+                pass
+        if max(len(recent), len(persisted_stamps)) >= DISCUSSION_RATE_LIMIT:
+            rate[member['id']] = recent
+            raise HubError(429, '发言太快了，请稍等片刻再继续留言。')
+        thread = list(discussions.get(target_key, []))
+        if len(thread) >= MAX_DISCUSSIONS_PER_TARGET:
+            raise HubError(413, f'这条内容下的留言已达上限（{MAX_DISCUSSIONS_PER_TARGET} 条）。')
+        total = sum(len(rows) for rows in discussions.values())
+        if total >= MAX_DISCUSSIONS_TOTAL:
+            raise HubError(413, f'分享站留言总数已达上限（{MAX_DISCUSSIONS_TOTAL} 条），请先清理旧留言。')
+        member_names = {m['id']: m['name'] for m in self._members()}
+        reply_author = ''
+        reply_excerpt = ''
+        if reply_to_id:
+            parent = next((r for r in thread if r['id'] == reply_to_id), None)
+            if parent is None:
+                raise HubError(404, '要回复的留言不存在，或已被删除。')
+            reply_author = member_names.get(parent['author_id'], parent.get('author_name', '成员'))
+            reply_excerpt = discussion_excerpt(parent['body'])
+        stamp = now()
+        entry = {
+            'id': secrets.token_hex(16),
+            'target_type': target_type,
+            'target_key': target_key,
+            'author_id': member['id'],
+            'author_name': member['name'],
+            'body': body,
+            'reply_to_id': reply_to_id,
+            'reply_to_author': reply_author,
+            'reply_to_excerpt': reply_excerpt,
+            'created_at': stamp,
+        }
+        thread.append(entry)
+        discussions[target_key] = thread
+        persisted_stamps.append(stamp)
+        persisted_rate[member['id']] = persisted_stamps
+        self._save({self.data / 'discussions.json': self._discussions_payload(discussions, persisted_rate)})
+        recent.append(now_mono)
+        rate[member['id']] = recent
+        return {'comment': self._public_discussion(entry, member['id'], owners, member_names),
+                'count': len(thread)}
+
+    def _delete_discussion(self, member_id, comment_id):
+        discussions = self._discussions(strict=True)
+        found_key = None
+        found_idx = -1
+        found_row = None
+        for tkey, rows in discussions.items():
+            for idx, row in enumerate(rows):
+                if row.get('id') == comment_id:
+                    found_key, found_idx, found_row = tkey, idx, row
+                    break
+            if found_key is not None:
+                break
+        if found_row is None:
+            raise HubError(404, '找不到这条留言，或已被删除。')
+        try:
+            owners = self._discussion_target(found_row['target_type'], found_key)
+        except HubError:
+            owners = {}
+        if not self._can_delete_discussion(member_id, found_row, owners):
+            raise HubError(403, '只有留言本人或内容作者可以删除这条留言。')
+        remaining = [r for i, r in enumerate(discussions[found_key]) if i != found_idx]
+        for idx, r in enumerate(remaining):
+            if r.get('reply_to_id') == comment_id:
+                remaining[idx] = {**r, 'reply_to_author': '', 'reply_to_excerpt': '', 'reply_to_deleted': True}
+        if remaining:
+            discussions[found_key] = remaining
+        else:
+            del discussions[found_key]
+        self._save({self.data / 'discussions.json': self._discussions_payload(discussions)})
+        return {'deleted': True, 'id': comment_id, 'target_key': found_key, 'count': len(remaining)}
 
     def _rate(self, member, data, remove=False):
         if not isinstance(data, dict) or not isinstance(data.get('key'), str):
@@ -2698,6 +3060,7 @@ class Handler(BaseHTTPRequestHandler):
             doc_mine = re.fullmatch(r'/api/docs/me/' + doc_id, path)
             doc_item = re.fullmatch(r'/api/docs/([0-9a-f]{32})/' + doc_id, path)
             doc_served = re.fullmatch(r'/api/docs/([0-9a-f]{32})/' + doc_id + '/(.+)', path)
+            discussion_item = re.fullmatch(r'/api/discussions/([0-9a-f]{32})', path)
             query = urllib.parse.parse_qs(address.query, keep_blank_values=True)
             activity_days = 30
             if path == '/api/suggestions' and self.command == 'GET':
@@ -2708,6 +3071,11 @@ class Handler(BaseHTTPRequestHandler):
                         role not in {'all', 'incoming', 'outgoing'} or status not in {'all', 'pending'} or
                         ('skill' in query and not re.fullmatch(NAME, skill))):
                     raise HubError(400, '建议筛选条件不正确，请核对角色、状态和技能名称。')
+            elif path == '/api/discussions' and self.command == 'GET':
+                disc_type = query.get('target_type', [''])[0]
+                disc_key = query.get('target_key', [''])[0]
+                if set(query) != {'target_type', 'target_key'} or any(len(v) != 1 for v in query.values()):
+                    raise HubError(400, '请指定讨论区的目标类型和对象标识。')
             elif path == '/api/activity' and self.command == 'GET' and '?' in self.path:
                 if set(query) != {'days'} or len(query['days']) != 1:
                     raise HubError(404, '没有这个分享站地址，请核对后重试。')
@@ -2725,8 +3093,9 @@ class Handler(BaseHTTPRequestHandler):
                     not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             allowed = ({'POST'} if path in {'/api/join', '/api/feedback', '/api/feedback/with-attachments'} else
-                       {'GET', 'POST'} if path in {'/api/activity', '/api/suggestions'} else
+                       {'GET', 'POST'} if path in {'/api/activity', '/api/suggestions', '/api/discussions'} else
                        {'POST'} if suggestion and suggestion[2] else {'GET', 'DELETE'} if suggestion else
+                       {'DELETE'} if discussion_item else
                        {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served or feedback_att or doc_item or doc_served else
                        {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} or blob else
                        {'DELETE'} if listing else
@@ -2770,6 +3139,8 @@ class Handler(BaseHTTPRequestHandler):
                 any(value.strip() != '0' for value in self.headers.get_all('Content-Length', []))))
             data = (self._read_feedback_body()
                     if is_feedback else
+                    self._read_body(MAX_DISCUSSION_BODY, '留言内容超过 16 KB，请精简后重试。')
+                    if path == '/api/discussions' and self.command == 'POST' else
                     self._read_body(MAX_SUGGESTION_BODY, '建议内容超过 1 MB，请减少文件数量。')
                     if self.command == 'POST' and (suggestion or path == '/api/suggestions') else
                     self._read_body(MAX_ACTIVITY_BODY, '活跃上报内容超过 1024 字节。')
@@ -2811,7 +3182,13 @@ class Handler(BaseHTTPRequestHandler):
                               'skill_file_upload': True,
                               'suggestions_supported': True,
                               'replaces_supported': True,
-                              'docs_supported': True}
+                              'docs_supported': True,
+                              'discussions_supported': True}
+                elif path == '/api/discussions':
+                    result = (store._post_discussion(member, data) if self.command == 'POST' else
+                              store._list_discussions(member['id'], disc_type, disc_key))
+                elif discussion_item:
+                    result = store._delete_discussion(member['id'], discussion_item[1])
                 elif path == '/api/suggestions':
                     result = (store._create_suggestion(member, data) if self.command == 'POST' else
                               store._list_suggestions(member['id'], role, status, skill))

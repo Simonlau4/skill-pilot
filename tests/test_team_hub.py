@@ -229,7 +229,7 @@ class TeamHubTests(unittest.TestCase):
         self.assertEqual(self.request(), (200, {'service': 'skill-pilot-team', 'api': 2,
             'feedback_supported': True, 'feedback_configured': False,
             'feedback_attachments_supported': True, 'skill_file_upload': True,
-            'replaces_supported': True, 'suggestions_supported': True, 'docs_supported': True,
+            'replaces_supported': True, 'suggestions_supported': True, 'docs_supported': True, 'discussions_supported': True,
             'member': {k: self.first[k] for k in ('id', 'name')}}))
         for name in ('', '  ', 'Acme\nexample', 'Acme\x00example'):
             with self.assertRaises(ValueError):
@@ -649,6 +649,7 @@ class TeamHubTests(unittest.TestCase):
         self.assertEqual(self.request('/api/listings/me/example', 'DELETE')[0], 200)
         self.assertEqual(self.request('/api/catalog', token=self.second['token'])[1],
                          {'cards': [], 'my_installs': [], 'my_all_installs': [], 'packs': [], 'deliverables': [], 'docs': [],
+                          'discussion_counts': {},
                           'suggestions_summary': {'incoming_total': 0, 'incoming_by_skill': {}, 'outgoing_total': 0}})
         self.assertEqual(self.request('/api/installs/me', 'PUT', {'keys': [key]}, self.second['token']),
                          (200, {'keys': []}))
