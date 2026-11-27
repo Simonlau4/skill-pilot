@@ -8468,6 +8468,12 @@ $('store-suggest-submit')?.addEventListener('click', async event => {
       $('store-suggest-dialog').close();
       await loadStore();
       renderTeam();
+      const panel = $('detail-panel');
+      if (panel && !panel.hidden) {
+        const nextFocus = $('detail-body')?.querySelector('[data-store-suggest], [data-store-suggestions-open]')
+          || $('detail-close');
+        nextFocus?.focus({preventScroll: true});
+      }
       toast({text: result.message || '改进建议已提交，等待原作者审核。'});
     } catch (error) {
       $('store-suggest-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);

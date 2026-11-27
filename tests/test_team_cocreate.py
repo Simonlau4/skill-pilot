@@ -499,3 +499,48 @@ class CoCreationTests(unittest.TestCase):
         }
         body = self.error(400, self.request, self.b, '/api/suggestions', 'POST', payload)
         self.assertIn('密钥', body['error'])
+        # UTF-16LE secret text is caught both locally and on the server.
+        utf16_bytes = 'api_key=sk-1234567890abcdef123456\n'.encode('utf-16')
+        utf16_sha = hashlib.sha256(utf16_bytes).hexdigest()
+        team._upload_blob(team.settings(self.b), utf16_sha, utf16_bytes)
+        utf16_manifest = hub.skill_manifest(self.original['source']['files'])
+        utf16_manifest['win_note.txt'] = {'sha256': utf16_sha, 'size': len(utf16_bytes), 'executable': False}
+        body_u16 = self.error(400, self.request, self.b, '/api/suggestions', 'POST', {
+            **payload, 'files': utf16_manifest,
+        })
+        self.assertIn('密钥', body_u16['error'])
+        # Nested SKILL.md + SKILL.example.md collision is rejected before publishing an uninstallable package.
+        sample = b'---\nname: sub\ndescription: x\n---\n'
+        sample_sha = hashlib.sha256(sample).hexdigest()
+        team._upload_blob(team.settings(self.b), sample_sha, sample)
+        collide = hub.skill_manifest(self.original['source']['files'])
+        collide['sub/SKILL.md'] = {'sha256': sample_sha, 'size': len(sample), 'executable': False}
+        collide['sub/SKILL.example.md'] = {'sha256': sample_sha, 'size': len(sample), 'executable': False}
+        body_col = self.error(400, self.request, self.b, '/api/suggestions', 'POST', {
+            **payload, 'files': collide,
+        })
+        self.assertIn('SKILL.example.md', body_col['error'])
+        # Author publishes v2 from local edits, accepts suggestion v3, and still gets behind_store=True (not changed).
+        team.install(self.home, self.key)
+        operations.apply_assign([{'skill': 'example', 'agent': 'claude', 'enabled': True}], home=self.home)
+        author_root = self.home / '.skill-pilot/store/example'
+        (author_root / 'v2_author.txt').write_text('author v2', encoding='utf-8')
+        pub_saved, _ = team.listings_preview(self.home, [{'name': 'example', 'note': '第二版'}])
+        team.listings_apply(self.home, pub_saved)
+        # Concurrent edit-info preview opened BEFORE a suggestion is accepted must NOT revert the accepted v3!
+        edit_before_saved, _ = team.listings_preview(self.home, [{'name': 'example', 'note': '并发编辑推荐语'}])
+        team.install(self.c, self.key)
+        c_root = self.c / '.skill-pilot/store/example'
+        (c_root / 'v3_colleague.txt').write_text('colleague v3', encoding='utf-8')
+        s_saved, _ = team.suggestion_preview(self.c, self.key)
+        s_id = team.suggestion_submit(self.c, s_saved, '基于v2的改进')['id']
+        v3_res = team.suggestion_accept(self.home, s_id)
+        # Author's local copy is still v2 (locally modified vs v1), yet behind_store must be True and changed False!
+        cand = next(c for c in team.listing_candidates(self.home)['skills'] if c['name'] == 'example')
+        self.assertTrue(cand['behind_store'])
+        self.assertFalse(cand['changed'])
+        # Applying the stale edit-info preview updates note without reverting v3 files!
+        team.listings_apply(self.home, edit_before_saved)
+        after_race = self.db._listings(self.members[self.home])['example']
+        self.assertEqual(after_race['source']['version'], v3_res['version'])
+        self.assertEqual(after_race['note'], '并发编辑推荐语')

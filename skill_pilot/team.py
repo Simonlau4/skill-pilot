@@ -450,6 +450,11 @@ def _catalog(config):
                     if not isinstance(row['published_via'], str):
                         raise ValueError
                     rows[-1]['published_via'] = row['published_via']
+                if 'previous_versions' in row:
+                    if (not isinstance(row['previous_versions'], list) or
+                            any(not isinstance(v, str) for v in row['previous_versions'])):
+                        raise ValueError
+                    rows[-1]['previous_versions'] = list(row['previous_versions'])
             for row in card['ratings']:
                 member = _member(row.get('member'))
                 if (type(row.get('stars')) is not int or not 1 <= row['stars'] <= 5 or
@@ -1416,7 +1421,7 @@ def _files(root):
                 raw = stream.read(team_hub.MAX_BLOB + 1)
             if len(raw) > team_hub.MAX_BLOB:
                 raise ValueError(f'「{relative}」超过单文件 {team_hub.MAX_BLOB // 1024 // 1024} MB 的上限。')
-            if SECRET_CONTENT.search(raw.decode('utf-8', errors='replace')):
+            if team_hub.has_secret_content(raw):
                 blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
                 continue
             size += len(raw)
@@ -1464,8 +1469,10 @@ def _candidates(home, registry, member, cards):
                     recorded.get('record', {}).get('skillFolderHash'))
             if isinstance(tree, str) and re.fullmatch(r'[0-9a-f]{40}', tree):
                 source['tree_sha'] = tree
-        behind_store = bool(listed and listed.get('published_via') == 'suggestion' and not row['local_modified'] and
-                            version and listed['source'].get('version') and version != listed['source']['version'])
+        previous_versions = set(listed.get('previous_versions') or ()) if listed else set()
+        behind_store = bool(listed and listed.get('published_via') == 'suggestion' and
+                            version and listed['source'].get('version') and version != listed['source']['version'] and
+                            (not row['local_modified'] or version in previous_versions))
         result[name] = {**{k: row[k] for k in ('name', 'title', 'summary', 'group', 'description', 'requires') if k in row},
             'kind': kind, 'listed': bool(listed), 'note': listed.get('note', '') if listed else '',
             'replaces': list(listed.get('replaces', [])) if listed else [],
@@ -1589,17 +1596,21 @@ def listings_preview(home, skills, rejected=None, packs=None):
         download_note = ''
         try:
             if row['kind'] == 'files':
-                if row.get('behind_store') and name in shared:
+                local_files, local_info = _files(home / '.skill-pilot/store' / name)
+                local_version = team_hub.package_version(local_files)
+                same_as_online = bool(name in shared and shared[name]['source'].get('kind') == 'files' and
+                                      shared[name]['source'].get('version') == local_version)
+                if info['suggestions_supported'] and name in shared and (row.get('behind_store') or same_as_online):
                     listing['source'] = {'kind': 'files', 'preserve_files': True}
-                    if 'description' in shared[name]:
+                    if row.get('behind_store') and 'description' in shared[name]:
                         listing['description'] = shared[name]['description']
                     version = shared[name]['source'].get('version')
                     files_info = {'count': shared[name]['source'].get('file_count', 0),
                                   'size': shared[name]['source'].get('size', 0), 'blocked': []}
                 else:
-                    files, files_info = _files(home / '.skill-pilot/store' / name)
+                    files, files_info = local_files, local_info
                     listing['source'] = {'kind': 'files', 'files': files}
-                    version = team_hub.package_version(files)
+                    version = local_version
             else:
                 listing['source'] = dict(row['_source']) if row['kind'] == 'github' else {'kind': 'lark'}
                 if row['kind'] == 'github':
@@ -1619,6 +1630,9 @@ def listings_preview(home, skills, rejected=None, packs=None):
             else:
                 # Omit replaces/replacement_note when not edited so the hub preserves latest server values.
                 payload[name] = {k: v for k, v in listing.items() if k not in {'replaces', 'replacement_note'}}
+            if (info['suggestions_supported'] and row['kind'] == 'files' and name in shared and
+                    not payload[name]['source'].get('preserve_files') and shared[name]['source'].get('version')):
+                payload[name]['expected_version'] = shared[name]['source']['version']
             public[name] = {**{k: v for k, v in listing.items() if k != 'source'},
                             'title': listing.get('title', name), 'kind': row['kind'],
                             'auto': sorted(auto.get(name, set())), 'files': files_info, 'version': version,

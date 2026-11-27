@@ -439,6 +439,35 @@ def suggestion_text(value, *, review=False):
     return value.strip()
 
 
+def has_secret_content(raw):
+    if not raw:
+        return False
+    if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
+        try:
+            if SECRET_CONTENT.search(raw.decode('utf-16')):
+                return True
+        except UnicodeDecodeError:
+            pass
+    head = raw[:8192]
+    if b'\x00' in head and len(head) >= 4 and head.count(b'\x00') >= len(head) // 4:
+        for enc in ('utf-16-le', 'utf-16-be'):
+            try:
+                if SECRET_CONTENT.search(raw.decode(enc, errors='ignore')):
+                    return True
+            except UnicodeDecodeError:
+                pass
+    return bool(SECRET_CONTENT.search(raw.decode('utf-8', errors='replace')))
+
+
+def check_nested_skill_collision(files):
+    folded = {unicodedata.normalize('NFC', p).casefold() for p in files}
+    for path in files:
+        if path != 'SKILL.md' and path.rsplit('/', 1)[-1] == 'SKILL.md':
+            renamed = path[:-len('SKILL.md')] + 'SKILL.example.md'
+            if unicodedata.normalize('NFC', renamed).casefold() in folded:
+                raise ValueError('子文件夹同时包含 SKILL.md 和 SKILL.example.md，会导致同事无法安装或更新，请先整理后再提交。')
+
+
 def _clean_description(value):
     if not isinstance(value, str):
         return ''
@@ -1365,6 +1394,11 @@ class HubStore:
                     continue
                 key = listing_key(author_id, row)
                 public_row = {k: v for k, v in row.items() if k != 'version_revisions'}
+                if row.get('published_via') == 'suggestion' and row.get('version_revisions'):
+                    cur_ver = row['source'].get('version')
+                    prev_vers = [v for v in row['version_revisions'] if v != cur_ver]
+                    if prev_vers:
+                        public_row['previous_versions'] = prev_vers
                 cards.setdefault(key, {'key': key, 'listings': [], 'ratings': []})['listings'].append(
                     {'created_at': row['updated_at'], 'revision': 1, **public_row, 'member': member})
         for key, ratings in self._ratings().items():
@@ -1474,11 +1508,17 @@ class HubStore:
         changes, receipts = {}, []
         collect = bool(manifests)
         updated_at = now()
-        for row in rows:
+        for raw_row, row in zip(data['listings'], rows):
             name, source = row['name'], row['source']
             previous = current.get(name, {})
             path = self.data / 'packages' / member_id / (name + '.json')
             preserve = bool(source.get('preserve_files'))
+            expected_version = raw_row.get('expected_version') if isinstance(raw_row, dict) else None
+            if expected_version is not None:
+                if not isinstance(expected_version, str):
+                    raise HubError(400, '技能版本核对信息格式不正确。')
+                if not preserve and previous.get('source', {}).get('version', '') != expected_version:
+                    raise HubError(409, f'技能「{name}」线上已有更新版本，请刷新核对后再上架。')
             if preserve:
                 if previous.get('source', {}).get('kind') != 'files':
                     raise HubError(400, '请附带完整的技能文件后再上架。')
@@ -1660,8 +1700,8 @@ class HubStore:
         if incoming_bytes > 0:
             self._reserve_upload(member_id, incoming_bytes)
         folder = self._deliverable_dir(member_id) / 'uploads'
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd, name = tempfile.mkstemp(prefix='.blob-', dir=folder)
             return os.fdopen(fd, 'wb'), Path(name)
         except OSError:
@@ -1826,7 +1866,7 @@ class HubStore:
             if any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_NAMES):
                 raise HubError(400, f'文件「{relative}」文件名像账号或密钥文件，已拦下，不能提交。')
             raw = self._verified_bytes(author, entry)
-            if SECRET_CONTENT.search(raw.decode('utf-8', errors='replace')):
+            if has_secret_content(raw):
                 raise HubError(400, f'文件「{relative}」内容疑似含有密钥或密码，已拦下，不能提交。')
 
     def _verified_bytes(self, member, file):
@@ -1868,6 +1908,7 @@ class HubStore:
         message = suggestion_text(data.get('message'))
         try:
             files = clean_skill_manifest(data.get('files'))
+            check_nested_skill_collision(files)
         except ValueError as error:
             raise HubError(400, str(error)) from None
         version = package_version(files)
@@ -1992,6 +2033,7 @@ class HubStore:
             raise HubError(409, '建议内容与线上当前版本完全一致。')
         try:
             files = clean_skill_manifest(row['files'])
+            check_nested_skill_collision(files)
         except ValueError as error:
             raise HubError(400, str(error)) from None
         self._check_suggestion_secrets(author, files)
