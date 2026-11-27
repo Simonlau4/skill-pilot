@@ -1992,9 +1992,16 @@ class Handler(BaseHTTPRequestHandler):
         if not match or not secrets.compare_digest(match[1], self.server.doc_key(match[2], match[3])):
             self.reply(404, {"error": "没有这个附件。"})
             return
+        relative = urllib.parse.unquote(match[4])
+        try:
+            team.team_hub.clean_doc_id(match[3])
+            team.team_hub.doc_path(relative)
+        except ValueError:
+            self.reply(404, {"error": "没有这个附件。"})
+            return
         failure = None
         try:
-            response = team.open_doc_file(self.server.home, match[2], match[3], urllib.parse.unquote(match[4]))
+            response = team.open_doc_file(self.server.home, match[2], match[3], relative)
         except team.RequestError as error:
             failure = (error.status if error.status in {401, 404} else 502, str(error))
         except (ValueError, OSError) as error:

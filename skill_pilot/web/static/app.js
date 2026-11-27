@@ -8823,7 +8823,11 @@ $('store-doc-save')?.addEventListener('click', async event => {
   };
   $('store-doc-message').hidden = true;
   docDialogState.busy = true;
-  $('store-doc-close').disabled = true;
+  const lockIds = ['store-doc-close', 'store-doc-title', 'store-doc-category', 'store-doc-summary', 'store-doc-content', 'store-doc-import'];
+  for (const fieldId of lockIds) {
+    const el = $(fieldId);
+    if (el) el.disabled = true;
+  }
   const button = event.currentTarget;
   let needWarningConfirm = false;
   await withBusy(button, '正在提交…', async () => {
@@ -8858,7 +8862,10 @@ $('store-doc-save')?.addEventListener('click', async event => {
       $('store-doc-message').hidden = false;
     } finally {
       if (docDialogState) docDialogState.busy = false;
-      $('store-doc-close').disabled = false;
+      for (const fieldId of lockIds) {
+        const el = $(fieldId);
+        if (el) el.disabled = false;
+      }
     }
   });
   if (needWarningConfirm) button.textContent = '确认已脱敏，继续发布';

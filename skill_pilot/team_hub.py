@@ -55,7 +55,7 @@ MAX_DOC_FILES = 30
 MAX_DOC_ATTACHMENT = 10 * 1024 * 1024
 MAX_DOC_SIZE = 20 * 1024 * 1024
 MAX_DOC_BODY = 512 * 1024
-MAX_ORPHAN_BLOBS_BYTES = 500 * 1024 * 1024
+MAX_ORPHAN_BLOBS_BYTES = 1024 * 1024 * 1024
 ORPHAN_BLOB_TTL_SECONDS = 3600
 
 
@@ -1554,12 +1554,48 @@ class HubStore:
         items = self._deliverable_dir(member_id) / 'items'
         return {p.stem: json.loads(p.read_text(encoding='utf-8')) for p in sorted(items.glob('*.json'))}
 
-    def upload_slot(self, member_id):
+    def _inflight_by_member(self, member_id):
+        return getattr(self, '_inflight_member_bytes', {}).get(member_id, 0)
+
+    def _reserve_upload(self, member_id, incoming_bytes):
+        if incoming_bytes <= 0:
+            return
+        orphan = self._orphan_blob_bytes(member_id) + self._inflight_by_member(member_id)
+        if orphan + incoming_bytes > MAX_ORPHAN_BLOBS_BYTES:
+            self._collect_blobs(member_id, min_age=ORPHAN_BLOB_TTL_SECONDS)
+            orphan = self._orphan_blob_bytes(member_id) + self._inflight_by_member(member_id)
+        if orphan + incoming_bytes > MAX_ORPHAN_BLOBS_BYTES:
+            raise HubError(507, '当前成员未完成的临时上传文件过多，请稍后重试。')
+        per = getattr(self, '_inflight_member_bytes', None)
+        if per is None:
+            per = {}
+            self._inflight_member_bytes = per
+        per[member_id] = per.get(member_id, 0) + incoming_bytes
+
+    def release_upload(self, member_id, reserved_bytes):
+        if reserved_bytes <= 0:
+            return
+        per = getattr(self, '_inflight_member_bytes', None)
+        if per and member_id in per:
+            remaining = per[member_id] - reserved_bytes
+            if remaining > 0:
+                per[member_id] = remaining
+            else:
+                per.pop(member_id, None)
+
+    def upload_slot(self, member_id, incoming_bytes=0):
         """A private temporary file next to the blobs, so the final rename stays on one disk."""
+        if incoming_bytes > 0:
+            self._reserve_upload(member_id, incoming_bytes)
         folder = self._deliverable_dir(member_id) / 'uploads'
-        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, name = tempfile.mkstemp(prefix='.blob-', dir=folder)
-        return os.fdopen(fd, 'wb'), Path(name)
+        try:
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd, name = tempfile.mkstemp(prefix='.blob-', dir=folder)
+            return os.fdopen(fd, 'wb'), Path(name)
+        except OSError:
+            if incoming_bytes > 0:
+                self.release_upload(member_id, incoming_bytes)
+            raise
 
     def _blob_dir(self, member_id):
         return self._deliverable_dir(member_id) / 'blobs'
@@ -1941,7 +1977,7 @@ class Handler(BaseHTTPRequestHandler):
         store = self.server.store
         with store.locked():
             member = store._authenticate(self.headers.get('Authorization', ''))
-            stream, temporary = store.upload_slot(member['id'])
+            stream, temporary = store.upload_slot(member['id'], incoming_bytes=length)
         try:
             hasher = hashlib.sha256()
             with stream:
@@ -1964,6 +2000,8 @@ class Handler(BaseHTTPRequestHandler):
                 return store._put_blob(member['id'], digest, temporary)
         finally:
             temporary.unlink(missing_ok=True)
+            with store.locked():
+                store.release_upload(member['id'], length)
 
     def _serve_deliverable(self, member_id, identity, path):
         store = self.server.store
@@ -2283,8 +2321,14 @@ class HubServer(ThreadingHTTPServer):
             self.store._cleanup_feedback_orphans()
             self.store._cleanup_expired_activity()
             for member in members:
-                self.store._collect_blobs(member['id'], min_age=ORPHAN_BLOB_TTL_SECONDS)
-                self.store._doc_index(member['id'])
+                try:
+                    self.store._collect_blobs(member['id'], min_age=ORPHAN_BLOB_TTL_SECONDS)
+                except (HubError, OSError, ValueError, KeyError) as error:
+                    print(f'启动清理跳过成员 {member["id"]}：{error}', file=sys.stderr)
+                try:
+                    self.store._doc_index(member['id'])
+                except (HubError, OSError, ValueError, KeyError) as error:
+                    print(f'启动重建文档索引跳过成员 {member["id"]}：{error}', file=sys.stderr)
         super().__init__((host, port), Handler)
 
 

@@ -1215,13 +1215,18 @@ def _is_link_path(path):
     return path.is_symlink() or is_junction(path)
 
 
-def _looks_like_text_secret(raw):
+DOC_SECRET_NAMES = (*SECRET_NAMES, 'team.json', 'settings.json')
+
+
+def _looks_like_text_secret(raw, extra_secrets=()):
     if not raw or len(raw) > team_hub.MAX_DOC_ATTACHMENT:
         return False
+    def matches(text):
+        return bool(SECRET_CONTENT.search(text) or any(s and s in text for s in extra_secrets))
     if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
         try:
-            text = raw.decode('utf-16')
-            return bool(SECRET_CONTENT.search(text))
+            if matches(raw.decode('utf-16')):
+                return True
         except UnicodeDecodeError:
             pass
     head = raw[:8192]
@@ -1229,18 +1234,18 @@ def _looks_like_text_secret(raw):
         if len(head) >= 4 and head.count(b'\x00') >= len(head) // 4:
             for enc in ('utf-16-le', 'utf-16-be'):
                 try:
-                    if SECRET_CONTENT.search(raw.decode(enc, errors='ignore')):
+                    if matches(raw.decode(enc, errors='ignore')):
                         return True
                 except UnicodeDecodeError:
                     pass
         return False
-    return bool(SECRET_CONTENT.search(raw.decode('utf-8', errors='replace')))
+    return matches(raw.decode('utf-8', errors='replace'))
 
 
-def _scan_doc_asset(path, relative, files, blocked, seen_folded):
+def _scan_doc_asset(path, relative, files, blocked, seen_folded, extra_secrets=()):
     if _is_link_path(path):
         raise ValueError(f'文档附件「{relative}」是链接，请换成真实文件再上传。')
-    if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in SECRET_NAMES):
+    if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
         blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
         return
     if not path.is_file():
@@ -1250,7 +1255,7 @@ def _scan_doc_asset(path, relative, files, blocked, seen_folded):
         raise ValueError(f'文档附件「{relative}」超过 {team_hub.MAX_DOC_ATTACHMENT // 1024 // 1024} MB，请先压缩。')
     raw = path.read_bytes()
     digest = hashlib.sha256(raw)
-    if _looks_like_text_secret(raw):
+    if _looks_like_text_secret(raw, extra_secrets):
         blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
         return
     team_hub.doc_path(relative)
@@ -1258,10 +1263,10 @@ def _scan_doc_asset(path, relative, files, blocked, seen_folded):
     if folded in seen_folded:
         raise ValueError(f'文档附件「{relative}」与其他附件位置重复，请先整理后再上传。')
     seen_folded.add(folded)
-    files[relative] = (digest.hexdigest(), size, path)
+    files[relative] = (digest.hexdigest(), size, raw)
 
 
-def _read_doc_source(source, assets=()):
+def _read_doc_source(source, assets=(), extra_secrets=()):
     files, blocked, seen_folded = {}, [], set()
     source_title = ''
     content = None
@@ -1271,7 +1276,7 @@ def _read_doc_source(source, assets=()):
         if _is_link_path(root):
             raise ValueError('文档路径是链接，请直接指定真实的文档文件或文件夹。')
         if root.is_file():
-            if any(fnmatch.fnmatch(root.name.lower(), pattern) for pattern in SECRET_NAMES):
+            if any(fnmatch.fnmatch(root.name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
                 raise ValueError(f'「{root.name}」文件名像账号或密钥文件，已拦下。')
             if root.stat().st_size > team_hub.MAX_DOC_CONTENT:
                 raise ValueError(f'文档正文不能超过 {team_hub.MAX_DOC_CONTENT // 1024} KB。')
@@ -1292,7 +1297,7 @@ def _read_doc_source(source, assets=()):
                 raise ValueError('文档文件夹里需要有 README.md、index.md，或只放一篇 Markdown 文件作为正文。')
             if _is_link_path(main) or not main.resolve().is_relative_to(resolved_root):
                 raise ValueError('正文文档不能是链接或指向文件夹外，请换成真实文件。')
-            if any(fnmatch.fnmatch(main.name.lower(), pattern) for pattern in SECRET_NAMES):
+            if any(fnmatch.fnmatch(main.name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
                 raise ValueError(f'「{main.name}」文件名像账号或密钥文件，已拦下。')
             if main.stat().st_size > team_hub.MAX_DOC_CONTENT:
                 raise ValueError(f'文档正文不能超过 {team_hub.MAX_DOC_CONTENT // 1024} KB。')
@@ -1308,7 +1313,7 @@ def _read_doc_source(source, assets=()):
                     relative = entry.relative_to(root).as_posix()
                     if _is_link_path(entry) or not entry.resolve().is_relative_to(resolved_root):
                         raise ValueError(f'文档文件夹里的「{relative}」是链接或指向文件夹外，请换成真实文件再上传。')
-                    if any(fnmatch.fnmatch(entry.name.lower(), pattern) for pattern in SECRET_NAMES):
+                    if any(fnmatch.fnmatch(entry.name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
                         blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
                         continue
                     if entry.name.startswith('.') or entry.name in SKIP_CONTENT | {'__MACOSX'}:
@@ -1316,7 +1321,7 @@ def _read_doc_source(source, assets=()):
                     if entry.is_dir():
                         walk(entry)
                         continue
-                    _scan_doc_asset(entry, relative, files, blocked, seen_folded)
+                    _scan_doc_asset(entry, relative, files, blocked, seen_folded, extra_secrets)
             walk(root)
         else:
             raise ValueError('找不到指定的分享文档文件或文件夹，请核对位置。')
@@ -1328,12 +1333,12 @@ def _read_doc_source(source, assets=()):
                 raise ValueError('文档附件格式不正确。')
             raw = bytes(raw)
             name = Path(relative).name
-            if any(fnmatch.fnmatch(name.lower(), pattern) for pattern in SECRET_NAMES):
+            if any(fnmatch.fnmatch(name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
                 blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
                 continue
             if len(raw) > team_hub.MAX_DOC_ATTACHMENT:
                 raise ValueError(f'文档附件「{relative}」超过 {team_hub.MAX_DOC_ATTACHMENT // 1024 // 1024} MB，请先压缩。')
-            if _looks_like_text_secret(raw):
+            if _looks_like_text_secret(raw, extra_secrets):
                 blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
                 continue
             team_hub.doc_path(relative)
@@ -1351,8 +1356,19 @@ def _read_doc_source(source, assets=()):
                 relative = resolved_asset.relative_to(source_base).as_posix()
             else:
                 relative = asset.name
-            _scan_doc_asset(asset, relative, files, blocked, seen_folded)
+            _scan_doc_asset(asset, relative, files, blocked, seen_folded, extra_secrets)
     return content, source_title, files, blocked
+
+
+def _active_doc_secrets(home):
+    secrets_list = []
+    try:
+        cfg = settings(home)
+        if cfg and isinstance(cfg.get('key'), str) and len(cfg['key']) >= 12:
+            secrets_list.append(cfg['key'])
+    except (ValueError, OSError):
+        pass
+    return tuple(secrets_list)
 
 
 def publish_doc(home, source=None, identity='', title='', category=None, summary=None, content=None,
@@ -1360,11 +1376,13 @@ def publish_doc(home, source=None, identity='', title='', category=None, summary
                 expected_connection='', expected_updated_at='', create_only=False):
     """Preview, then publish or update one shared Markdown doc and optional static assets."""
     home = Path(home)
+    auto_id = not bool(identity)
     if identity:
         identity = team_hub.clean_doc_id(identity)
     else:
         identity = _make_doc_id()
-    read_content, source_title, files, blocked = _read_doc_source(source, assets)
+    extra_secrets = _active_doc_secrets(home)
+    read_content, source_title, files, blocked = _read_doc_source(source, assets, extra_secrets)
     body = content if content is not None else read_content
     if body is None:
         raise ValueError('请提供文档正文内容，或指定本地 Markdown 文件。')
@@ -1385,11 +1403,12 @@ def publish_doc(home, source=None, identity='', title='', category=None, summary
             manifest['merge_files'] = True
     if expected_updated_at:
         manifest['expected_updated_at'] = expected_updated_at
-    if create_only:
+    if create_only or auto_id:
         manifest['create_only'] = True
     checked = team_hub.clean_doc(manifest)
     warnings = []
-    if any(SECRET_CONTENT.search(checked[field]) for field in ('title', 'category', 'summary', 'content')):
+    if any(SECRET_CONTENT.search(checked[field]) or any(s in checked[field] for s in extra_secrets)
+           for field in ('title', 'category', 'summary', 'content')):
         warnings.append('文档标题、摘要或正文疑似包含密钥、口令或凭证，请确认已脱敏后再上传。')
     content_bytes = len(checked['content'].encode('utf-8'))
     result = {
@@ -1417,7 +1436,17 @@ def publish_doc(home, source=None, identity='', title='', category=None, summary
     if not info['docs_supported']:
         raise ValueError(DOCS_UNSUPPORTED)
     by_digest = {d: data for d, _, data in files.values()}
-    saved, uploaded = _upload_missing(config, '/api/docs/me/' + identity, manifest, by_digest)
+    attempts = 3 if auto_id else 1
+    for attempt in range(attempts):
+        try:
+            saved, uploaded = _upload_missing(config, '/api/docs/me/' + identity, manifest, by_digest)
+            result['id'] = identity
+            break
+        except RequestError as error:
+            if auto_id and error.status == 409 and attempt + 1 < attempts:
+                identity = _make_doc_id()
+                continue
+            raise
     return {**result, 'key': saved['key'], 'created_at': saved['created_at'], 'updated_at': saved['updated_at'],
             'uploaded': uploaded,
             'message': f'已发布分享文档「{checked["title"]}」，同事在团队页「分享文档」里可以查看。'}
@@ -1485,6 +1514,13 @@ def remove_doc(home, identity, confirmed=False, expected_connection='', expected
 
 
 def open_doc_file(home, member_id, identity, path):
+    if not re.fullmatch(r'[0-9a-f]{32}', str(member_id)):
+        raise RequestError(404, '文档里没有这个附件。')
+    try:
+        identity = team_hub.clean_doc_id(identity)
+        team_hub.doc_path(path)
+    except ValueError:
+        raise RequestError(404, '文档里没有这个附件。') from None
     config = _connection(home)
     headers = {'Authorization': 'Bearer ' + config['key']}
     address = (config['url'] + '/api/docs/' + member_id + '/' + identity + '/' +
