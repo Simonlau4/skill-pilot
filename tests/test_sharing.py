@@ -1,7 +1,9 @@
 import copy
+import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -148,8 +150,30 @@ class SharingTests(unittest.TestCase):
                 row = next(row for row in sharing.export_config(self.home)['skills'] if row['name'] == 'other')
                 self.assertEqual(row['description'], description[:1500])
 
+    def fingerprint(self, path):
+        """One walk, identical to physical_state, plus the rows behind the hash."""
+        rows = []
+
+        def visit(current, relative):
+            info = current.lstat()
+            mode = stat.S_IMODE(info.st_mode)
+            if current.is_symlink() or store.is_junction(current):
+                rows.append((relative, 'link', mode, store.readlink(current)))
+            elif current.is_dir():
+                rows.append((relative, 'dir', mode))
+                for child in sorted(current.iterdir()):
+                    visit(child, relative + '/' + child.name)
+            else:
+                rows.append((relative, 'file', mode, hashlib.sha256(current.read_bytes()).hexdigest()))
+
+        if path.exists() or path.is_symlink():
+            visit(path, '')
+        digest = hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()
+        return digest, rows
+
     def export_and_preview(self):
-        before = store.physical_state(self.home / '.skill-pilot')
+        root = self.home / '.skill-pilot'
+        before, before_rows = self.fingerprint(root)
         with patch.dict(os.environ, {'SKILL_PILOT_READ_ONLY': '1'}), patch.object(sharing.github, 'inspect') as download:
             data = sharing.export_config(self.home)
             self.assertIs(sharing.validate(data), data)
@@ -162,7 +186,19 @@ class SharingTests(unittest.TestCase):
             self.assertEqual(plan['install'], [])
             self.assertEqual(plan['skipped'], [])
             download.assert_not_called()
-        self.assertEqual(store.physical_state(self.home / '.skill-pilot'), before)
+        after, after_rows = self.fingerprint(root)
+        if after != before:
+            before_map = {row[0]: row for row in before_rows}
+            after_map = {row[0]: row for row in after_rows}
+            lines = [f'physical_state {before} -> {after}']
+            for name in sorted(set(before_map) - set(after_map)):
+                lines.append('removed ' + repr(before_map[name]))
+            for name in sorted(set(after_map) - set(before_map)):
+                lines.append('added ' + repr(after_map[name]))
+            for name in sorted(set(before_map) & set(after_map)):
+                if before_map[name] != after_map[name]:
+                    lines.append('changed ' + repr(before_map[name]) + ' -> ' + repr(after_map[name]))
+            self.fail('\n'.join(lines))
         return next(row for row in loaded['skills'] if row['name'] == 'other')
 
     def test_export_cleans_description_before_validation_and_preview(self):
