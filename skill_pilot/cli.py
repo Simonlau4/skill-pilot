@@ -11,6 +11,8 @@ from .store import apply, backups, preview, restore, target_home
 from .environment import tool_environment
 from . import operations
 
+SUGGESTION_STATES = {'pending': '待审核', 'accepted': '已接受', 'rejected': '已拒绝', 'withdrawn': '已撤回'}
+
 
 def main():
     parser = argparse.ArgumentParser(description="Skill Pilot：本机技能管理")
@@ -120,6 +122,23 @@ def main():
     team_install.add_argument('--agent', action='append', default=[], help='装好后分配给这个 agent，可以重复指定')
     team_install.add_argument('--replace-action', action='append', default=[], metavar='动作或旧技能=动作',
                               help='本机已有被替代旧版时的处理方式：keep（保留，默认）、withdraw（撤下）或 delete（删除）')
+    suggest = team_commands.add_parser('suggest', help='预览本机改动，提交给原作者审核')
+    suggest.add_argument('name', help='技能名称或中文名')
+    suggest.add_argument('--author', help='有重名时指定上架人')
+    suggest.add_argument('--message', default='', help='给原作者的改进说明')
+    suggestions = team_commands.add_parser('suggestions', help='查看收到和发出的改进建议')
+    suggestions.add_argument('--role', choices=('incoming', 'outgoing', 'all'), default='all',
+                             help='只看收到的、发出的，或两者都看')
+    suggestions.add_argument('--all', action='store_true', help='包括已处理的建议')
+    suggestions.add_argument('--skill', default='', help='只看这个技能')
+    review = team_commands.add_parser('review', help='查看文件改动，接受或拒绝建议')
+    review.add_argument('id', help='建议编号')
+    action = review.add_mutually_exclusive_group()
+    action.add_argument('--accept', action='store_true', help='接受建议并上架新版')
+    action.add_argument('--reject', action='store_true', help='拒绝建议')
+    review.add_argument('--note', default='', help='给提交人的审核说明')
+    review.add_argument('--allow-stale', action='store_true', help='确认用建议中的文件替换已更新的线上版本')
+    review.add_argument('--expected-version', default='', help='确认覆盖时核对过的当前线上版本编号')
     team_deliverable = team_commands.add_parser('deliverable', help='把一份成品（网页文件夹）上架到分享站，只限团队成员查看')
     team_deliverable.add_argument('folder', help='成品文件夹，首页是 index.html')
     team_deliverable.add_argument('--id', required=True, help='成品编号：字母、数字、点、横线或下划线')
@@ -130,9 +149,10 @@ def main():
     team_deliverable.add_argument('--recipe', help='复刻配方文件（Markdown）')
     team_deliverable_remove = team_commands.add_parser('deliverable-remove', help='从分享站下架自己上架的成品')
     team_deliverable_remove.add_argument('id', help='成品编号')
-    for command in (team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove):
+    for command in (team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove, suggest, review):
         command.add_argument('--yes', action='store_true')
-    for command in (team_list, team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove):
+    for command in (team_list, team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove,
+                    suggest, suggestions, review):
         command.add_argument('--json', action='store_true')
     checking = commands.add_parser('check-updates', help='只读检查技能更新')
     checking.add_argument('--json', action='store_true')
@@ -323,6 +343,30 @@ def main():
         try:
             if args.team_command == 'list':
                 result = team.catalog(home)
+            elif args.team_command == 'suggest':
+                saved, result = team.suggestion_preview(home, args.name, args.message, author=args.author)
+                if args.yes:
+                    result = {**team.suggestion_submit(home, saved, args.message),
+                              **{k: result[k] for k in ('summary', 'files', 'blocked')}}
+            elif args.team_command == 'suggestions':
+                result = team.suggestions_list(home, args.role, 'all' if args.all else 'pending', args.skill)
+            elif args.team_command == 'review':
+                result = team.suggestion_detail(home, args.id)
+                if args.accept or args.reject:
+                    if not args.yes:
+                        result.update(needs_confirmation=True, action='accept' if args.accept else 'reject')
+                    elif args.accept:
+                        if result.get('stale'):
+                            if not args.allow_stale or not args.expected_version:
+                                raise ValueError(
+                                    '原作者已发布新版，请先预览确认改动，再带上 --allow-stale --expected-version ' +
+                                    result['current_version'] + ' --yes 执行。')
+                            expected = args.expected_version
+                        else:
+                            expected = args.expected_version or result['current_version']
+                        result = team.suggestion_accept(home, args.id, args.note, args.allow_stale, expected)
+                    else:
+                        result = team.suggestion_reject(home, args.id, args.note)
             elif args.team_command == 'publish':
                 replaces = {}
                 for skill_name, text in pairs(args.replaces, '--replaces'):
@@ -348,6 +392,47 @@ def main():
                                             replace_actions=args.replace_action)
             if args.json:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
+            elif args.team_command == 'suggestions':
+                if not result['supported']:
+                    print(team.SUGGESTIONS_UNSUPPORTED)
+                elif not result['suggestions']:
+                    print('没有符合条件的改进建议。')
+                for row in result['suggestions']:
+                    print(f'{row["id"]}  {row["skill_name"]}（{SUGGESTION_STATES[row["status"]]}）'
+                          f'  {row["author_name"]} → {row["target_member_name"]}  {row["message"]}')
+            elif args.team_command in {'suggest', 'review'}:
+                if 'diff' in result:
+                    print(f'{result["author_name"]} 对「{result["skill_name"]}」的建议（原作者：{result["target_member_name"]}）')
+                    print(f'{SUGGESTION_STATES[result["status"]]}  提交时间 {result["created_at"]}')
+                    print(f'提交时的线上版本 {result["base_version"][:12]}，建议版本 {result["version"][:12]}')
+                    if result['current_revision'] is not None:
+                        print(f'目前已上架第 {result["current_revision"]} 版（{result["current_version"][:12]}）')
+                    if result['reviewed_at']:
+                        print('审核时间 ' + result['reviewed_at'])
+                    if result['published_version']:
+                        print('已发布的版本 ' + result['published_version'][:12])
+                print(result['message'])
+                if result.get('review_note'):
+                    print('审核说明：' + result['review_note'])
+                if result.get('stale'):
+                    print('线上版本已经更新。请核对下列改动，确定要覆盖新版时加 --allow-stale --expected-version ' +
+                          result.get('current_version', '') + '。')
+                changes = result.get('diff', result)
+                if 'summary' in changes:
+                    summary = changes['summary']
+                    print(f'新增 {len(summary["added"])} 个，修改 {len(summary["modified"])} 个，'
+                          f'删除 {len(summary["removed"])} 个，保留 {summary["unchanged_count"]} 个。')
+                for file in changes.get('files', []):
+                    label = {'added': '新增', 'modified': '修改', 'removed': '删除'}[file['status']]
+                    print(f'{label}  {file["path"]}' + ('（脚本）' if file['is_script'] else ''))
+                    if 'diff' in result and file['preview']:
+                        print(file['preview'].rstrip())
+                    if file['truncated']:
+                        print('  部分内容已省略。')
+                for item in result.get('blocked', []):
+                    print(f'不上传 {item["path"]}：{item["reason"]}')
+                if result.get('action'):
+                    print('将接受建议并上架新版。' if args.accept else '将拒绝这条建议。')
             elif args.team_command in {'deliverable', 'deliverable-remove'}:
                 print(result['message'])
                 for item in result.get('blocked', []):

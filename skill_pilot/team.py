@@ -30,6 +30,7 @@ _FEEDBACK_RECEIPT_LOCK = threading.Lock()
 FORMAT_ERROR = '分享站的技能格式不对，请联系管理员检查。'
 PACKS_UNSUPPORTED = '分享站版本较旧，暂不能整理技能包，请联系管理员更新分享站。'
 REPLACES_UNSUPPORTED = '分享站版本较旧，暂不支持标记替代旧技能，请联系管理员更新分享站。'
+SUGGESTIONS_UNSUPPORTED = '分享站版本较旧，暂不支持提交改进建议，请联系管理员更新分享站。'
 LOCAL_LABELS = {'mine': '我上架的', 'installed': '已装', 'update': '有新版', 'installable': '可以装',
                 'lark': '要用飞书官方方式装', 'conflict': '本机有同名技能', 'blocked': '暂时装不了',
                 'external': '由外部工具维护'}
@@ -102,6 +103,8 @@ def _request(config, path, method='GET', data=None):
              team_hub.MAX_INSTALL_BODY if path == '/api/installs/me' else MAX_BODY)
     if path == '/api/packs/me':
         limit = team_hub.MAX_PACK_BODY
+    if path == '/api/suggestions':
+        limit = team_hub.MAX_SUGGESTION_BODY
     if path in {'/api/feedback', '/api/feedback/with-attachments'}:
         has_attachments = isinstance(data, dict) and bool(data.get('attachments'))
         if has_attachments or path == '/api/feedback/with-attachments':
@@ -116,6 +119,7 @@ def _request(config, path, method='GET', data=None):
                          if path in {'/api/feedback', '/api/feedback/with-attachments'} and limit == feedback.MAX_UPLOAD_BODY else
                          '反馈内容超过 64 KB，请缩短后重试。' if path == '/api/feedback' else
                          '活跃上报内容超过 1024 字节。' if path == '/api/activity' else
+                         '建议内容超过 1 MB，请减少文件数量。' if path == '/api/suggestions' else
                          '技能包内容超过 64 KB，请缩短后重试。' if path == '/api/packs/me' else
                          '上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
                          '上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
@@ -197,6 +201,7 @@ def _me(config, capabilities=False):
              'feedback_configured': result.get('feedback_configured') is True,
              'feedback_attachments_supported': result.get('feedback_attachments_supported') is True,
              'skill_file_upload': result.get('skill_file_upload') is True,
+             'suggestions_supported': result.get('suggestions_supported') is True,
              'replaces_supported': result.get('replaces_supported') is True} if capabilities else member)
 
 
@@ -433,6 +438,18 @@ def _catalog(config):
                     raise ValueError
                 members.add(identity)
                 rows.append({**team_hub.clean_listing(row, packaged=True), 'member': member, 'updated_at': row['updated_at']})
+                if 'created_at' in row:
+                    if not isinstance(row['created_at'], str):
+                        raise ValueError
+                    rows[-1]['created_at'] = row['created_at']
+                if 'revision' in row:
+                    if type(row['revision']) is not int or row['revision'] < 1:
+                        raise ValueError
+                    rows[-1]['revision'] = row['revision']
+                if 'published_via' in row:
+                    if not isinstance(row['published_via'], str):
+                        raise ValueError
+                    rows[-1]['published_via'] = row['published_via']
             for row in card['ratings']:
                 member = _member(row.get('member'))
                 if (type(row.get('stars')) is not int or not 1 <= row['stars'] <= 5 or
@@ -449,6 +466,13 @@ def _catalog(config):
                 result[-1]['installs'] = card['installs']
             seen.add(card['key'])
         catalog = {'cards': sorted(result, key=lambda c: c['listings'][0]['updated_at'], reverse=True)}
+        if 'suggestions_summary' in data:
+            summary = data['suggestions_summary']
+            if (not isinstance(summary, dict) or not isinstance(summary.get('incoming_by_skill'), dict) or
+                    any(type(n) is not int or n < 0 for n in (summary.get('incoming_total'), summary.get('outgoing_total'),
+                                                              *summary['incoming_by_skill'].values()))):
+                raise ValueError
+            catalog['suggestions_summary'] = summary
         if has_installs:
             catalog['my_installs'] = data['my_installs']
         if 'my_all_installs' in data:
@@ -945,12 +969,18 @@ def catalog(home):
                           if replaces else [])
         result.append({'key': card['key'], 'kind': row['source']['kind'], 'name': row['name'], **details,
             'requires': row['requires'], 'updated_at': row['updated_at'],
+            **{k: row[k] for k in ('revision', 'created_at') if k in row},
+            'can_suggest': (info['suggestions_supported'] and row['source']['kind'] == 'files' and
+                            state in {'installed', 'update'} and local_name in registry['skills'] and
+                            not registry['skills'][local_name].get('withdrawn')),
+            'pending_suggestions_count': data.get('suggestions_summary', {}).get('incoming_by_skill', {}).get(row['name'], 0) if mine else 0,
             'replaces': replaces,
             **({'replacement_note': replacement_note} if replacement_note else {}),
             **({'replaces_local': replaces_local} if replaces_local else {}),
             'needs': needs, 'required_by': sorted(n for n, r in _owned(cards, row['member']['id']).items()
                                                  if row['name'] in r['requires']), 'packs': [],
-            'listings': [{**{k: r[k] for k in ('member', 'note', 'replaces', 'replacement_note', 'updated_at') if k in r},
+            'listings': [{**{k: r[k] for k in ('member', 'note', 'replaces', 'replacement_note', 'updated_at',
+                                               'created_at', 'revision') if k in r},
                           **{k: r['source'][k] for k in ('version', 'file_count', 'size') if k in r['source']}}
                          for r in card['listings']],
             'rating': {'average': round(sum(r['stars'] for r in reviews) / len(reviews), 1) if reviews else None,
@@ -988,6 +1018,8 @@ def catalog(home):
                                 'blocked': sum(s in {'lark', 'conflict', 'blocked'} for s in states)},
                       'tokens': sum(indexed[k]['tokens'] for k in keys if indexed[k]['local']['status'] not in {'installed', 'update'})})
     catalog = {'member': member, 'cards': result, 'packs': packs, 'packs_supported': 'packs' in data,
+               'suggestions_supported': info['suggestions_supported'],
+               'suggestions_summary': data.get('suggestions_summary', {'incoming_total': 0, 'incoming_by_skill': {}, 'outgoing_total': 0}),
                'deliverables_supported': 'deliverables' in data, 'replaces_supported': info['replaces_supported']}
     local_names = registry['skills'].keys() | registry.get('external_skills', {}).keys()
     store_names = {listing['name'] for card in cards for listing in card['listings']}
@@ -1081,11 +1113,11 @@ def publish_deliverable(home, folder, identity, title, version='', summary='', s
             'message': f'已上架成品「{checked["title"]}」，同事在团队页「成品」里能打开。'}
 
 
-def _upload_missing(config, route, payload, by_digest, read=None):
+def _upload_missing(config, route, payload, by_digest, read=None, method='PUT'):
     uploaded = 0
     for attempt in range(3):
         try:
-            return _request(config, route, 'PUT', payload), uploaded
+            return _request(config, route, method, payload), uploaded
         except RequestError as error:
             missing = error.body.get('missing') if error.status == 409 else None
             if error.status == 404 and route.startswith('/api/deliverables/'):
@@ -1212,7 +1244,7 @@ def _download_skill_file(config, route, version, row, path):
         raise ValueError('技能文件没能完整下载，请检查网络后重试。') from None
 
 
-def package(config, member, name, version, destination):
+def package(config, member, name, version, destination, *, manifest_out=None):
     route = '/api/packages/' + member + '/' + name
     data = _request(config, route + '?version=' + version)
     try:
@@ -1221,6 +1253,8 @@ def package(config, member, name, version, destination):
         files = team_hub.clean_skill_manifest(files) if manifest else team_hub.clean_files(files)
         if data.get('name') != name or data.get('version') != version or team_hub.package_version(files) != version:
             raise ValueError
+        if manifest_out is not None:
+            compared = files if manifest else team_hub.clean_skill_manifest(team_hub.skill_manifest(files))
     except (ValueError, TypeError):
         raise RequestError(502, FORMAT_ERROR) from None
     destination = Path(destination)
@@ -1243,6 +1277,8 @@ def package(config, member, name, version, destination):
     github.safe_skill(destination)
     if metadata((destination / 'SKILL.md').read_text(encoding='utf-8')).get('name') != name:
         raise ValueError('技能文件里的名称和上架的名称不一致，请联系作者。')
+    if manifest_out is not None:
+        manifest_out.update(compared)
     return destination
 
 
@@ -1428,11 +1464,14 @@ def _candidates(home, registry, member, cards):
                     recorded.get('record', {}).get('skillFolderHash'))
             if isinstance(tree, str) and re.fullmatch(r'[0-9a-f]{40}', tree):
                 source['tree_sha'] = tree
+        behind_store = bool(listed and listed.get('published_via') == 'suggestion' and not row['local_modified'] and
+                            version and listed['source'].get('version') and version != listed['source']['version'])
         result[name] = {**{k: row[k] for k in ('name', 'title', 'summary', 'group', 'description', 'requires') if k in row},
             'kind': kind, 'listed': bool(listed), 'note': listed.get('note', '') if listed else '',
             'replaces': list(listed.get('replaces', [])) if listed else [],
             'replacement_note': listed.get('replacement_note', '') if listed else '',
-            'changed': bool(listed and kind in {'files', 'github'} and (kind != 'github' or version) and
+            'behind_store': behind_store,
+            'changed': bool(listed and not behind_store and kind in {'files', 'github'} and (kind != 'github' or version) and
                             (not listed['source'].get('version') or version != listed['source']['version'])),
             'unavailable': unavailable, '_source': source}
     return result
@@ -1550,9 +1589,17 @@ def listings_preview(home, skills, rejected=None, packs=None):
         download_note = ''
         try:
             if row['kind'] == 'files':
-                files, files_info = _files(home / '.skill-pilot/store' / name)
-                listing['source'] = {'kind': 'files', 'files': files}
-                version = team_hub.package_version(files)
+                if row.get('behind_store') and name in shared:
+                    listing['source'] = {'kind': 'files', 'preserve_files': True}
+                    if 'description' in shared[name]:
+                        listing['description'] = shared[name]['description']
+                    version = shared[name]['source'].get('version')
+                    files_info = {'count': shared[name]['source'].get('file_count', 0),
+                                  'size': shared[name]['source'].get('size', 0), 'blocked': []}
+                else:
+                    files, files_info = _files(home / '.skill-pilot/store' / name)
+                    listing['source'] = {'kind': 'files', 'files': files}
+                    version = team_hub.package_version(files)
             else:
                 listing['source'] = dict(row['_source']) if row['kind'] == 'github' else {'kind': 'lark'}
                 if row['kind'] == 'github':
@@ -1873,11 +1920,8 @@ def unpublish(home, names, confirmed=False, replaced_by=None, replacement_note=N
     return {'names': sorted(names), **({'replaced_by': replaced_by} if replaced_by else {}), 'message': message}
 
 
-def find(home, name, author=None):
-    """Resolve a store card by skill name or Chinese title for command-line installs."""
-    home, registry, agents = operations.load(home)
-    _, member, cards = _fetch(home)
-    matches = [c for c in cards if any(name in {r['name'], r.get('title')} for r in c['listings'])]
+def _resolve_card(cards, name, author=None):
+    matches = [c for c in cards if c['key'] == name or any(name in {r['name'], r.get('title')} for r in c['listings'])]
     if author is not None:
         matches = [c for c in matches if any(r['member']['name'] == author for r in c['listings'])]
     if not matches:
@@ -1885,7 +1929,167 @@ def find(home, name, author=None):
     if len(matches) > 1:
         authors = '、'.join(sorted({c['listings'][0]['member']['name'] for c in matches}))
         raise ValueError(f'团队商店里有多个「{name}」（上架人：{authors}），请用 --author 指定上架人。')
-    card = matches[0]
+    return matches[0]
+
+
+def _suggestion_connection(home: Path) -> tuple[dict, dict]:
+    config = _connection(home)
+    info = _me(config, capabilities=True)
+    if not info['suggestions_supported']:
+        raise ValueError(SUGGESTIONS_UNSUPPORTED)
+    return config, info['member']
+
+
+def _preserve_windows_modes(files, baseline):
+    # Windows cannot represent the Unix execute bits of a downloaded script.
+    if os.name == 'nt':
+        for path in files.keys() & baseline.keys():
+            files[path]['executable'] = baseline[path]['executable']
+
+
+def _suggestion_root(home, name):
+    folder = home / '.skill-pilot/store'
+    root = folder / name
+    if not root.resolve().is_relative_to(folder):
+        raise ValueError('这个技能位于技能库之外，无法提交改动。')
+    return root
+
+
+def suggestion_preview(home: Path, card_key: str, message: str = '', *, author: str | None = None) -> tuple[dict, dict]:
+    config, member = _suggestion_connection(home)
+    card = _resolve_card(_catalog(config)['cards'], card_key, author)
+    row = card['listings'][0]
+    target, name = row['member']['id'], row['name']
+    if row['source']['kind'] != 'files':
+        raise ValueError(team_hub.FILES_ONLY)
+    if member['id'] == target:
+        raise ValueError(team_hub.OWN_SKILL)
+    home, registry, agents = operations.load(home)
+    state, local_name = _local(row, registry)
+    root = _suggestion_root(home, local_name)
+    if (state not in {'installed', 'update'} or registry['skills'][local_name].get('withdrawn') or
+            not root.is_dir()):
+        raise ValueError('请先安装并保留这位作者上架的技能，再提交本机的改动。')
+    revision = operations.revision(home, agents)
+    files, info = _files(root)
+    manifest = files['SKILL.md']
+    try:
+        text = _read_skill_file(manifest['sha256'], root, 'SKILL.md', manifest['size']).decode('utf-8')
+    except UnicodeDecodeError:
+        raise ValueError('SKILL.md 的文字编码不正确，请保存为 UTF-8 后重试。') from None
+    if metadata(text).get('name') != name:
+        raise ValueError('技能文件里的名称和上架的名称不一致。')
+    published_version = row['source']['version']
+    installed_origin = _origin(registry['skills'][local_name])
+    installed_version = (installed_origin.get('version')
+                         if installed_origin.get('kind') == 'team' and installed_origin.get('member') == target
+                         and installed_origin.get('name') == name else '')
+    base = installed_version if isinstance(installed_version, str) and re.fullmatch(r'[0-9a-f]{64}', installed_version) else published_version
+    old = {}
+    with tempfile.TemporaryDirectory(prefix='skill pilot suggestion ') as tmp:
+        published = package(config, target, name, published_version, Path(tmp) / 'published', manifest_out=old)
+        _preserve_windows_modes(files, old)
+        blocked_existing = sorted(item['path'] for item in info['blocked'] if item['path'] in old)
+        if blocked_existing:
+            raise ValueError('这些本机文件疑似包含密钥或密码已被拦下，为避免误删线上已有文件，请先清理敏感内容后再提交：' +
+                             '、'.join(blocked_existing))
+        version = team_hub.package_version(files)
+        if version == base:
+            if base != published_version:
+                raise ValueError('本机还没有修改这个技能的内容；原作者已发布新版，请先更新后再修改并提交。')
+            raise ValueError(team_hub.NO_CHANGES)
+        if version == published_version:
+            raise ValueError(team_hub.NO_CHANGES)
+        comparison = team_hub.suggestion_diff(
+            old, files, lambda path: (published / path).read_bytes(),
+            lambda path: _read_skill_file(files[path]['sha256'], root, path, files[path]['size']))
+    base_revision = row.get('revision') if base == published_version else None
+    saved = {'target_member_id': target, 'skill_name': name, 'card_key': card['key'], 'base_version': base,
+             'version': version, 'files': files, 'local_name': local_name, 'revision': revision,
+             'connection': _connection_version(config), 'blocked': info['blocked']}
+    result = {'skill_name': name, 'title': row.get('title', name), 'target_member_name': row['member']['name'],
+              'base_version': base, 'base_revision': base_revision, 'current_version': published_version,
+              'stale': base != published_version, 'file_count': len(files), 'size': info['size'],
+              'blocked': info['blocked'], **comparison, 'needs_confirmation': True,
+              'message': team_hub.suggestion_text(message) if message else '请核对文件改动，确认后提交给原作者。'}
+    return saved, result
+
+
+def suggestion_submit(home: Path, saved: dict, message: str) -> dict:
+    guard(home / '.skill-pilot', home)
+    message = team_hub.suggestion_text(message)
+    home, registry, agents = operations.load(home)
+    config = _connection(home)
+    if _connection_version(config) != saved['connection']:
+        raise ValueError('分享站设置已经变了，请重新预览。')
+    if operations.revision(home, agents) != saved['revision']:
+        raise ValueError('本机技能文件已经变了，请重新预览后再提交。')
+    name = saved['local_name']
+    if name not in registry['skills'] or name != saved['skill_name'] or not re.fullmatch(team_hub.NAME, name):
+        raise ValueError('技能名称已经变了，请重新预览。')
+    skill = registry['skills'][name]
+    origin = _origin(skill)
+    if (skill.get('withdrawn') or origin['kind'] != 'team' or origin['member'] != saved['target_member_id'] or
+            origin['name'] != name):
+        raise ValueError('本机技能与原作者的上架记录不一致，请重新预览。')
+    root = _suggestion_root(home, name)
+    files, _ = _files(root)
+    _preserve_windows_modes(files, saved['files'])
+    if files != saved['files']:
+        raise ValueError('本机技能文件已经变了，请重新预览后再提交。')
+    by_digest = {f['sha256']: (root, path, f['size']) for path, f in files.items()}
+    payload = {k: saved[k] for k in ('target_member_id', 'skill_name', 'base_version')}
+    created, _ = _upload_missing(config, '/api/suggestions', {**payload, 'message': message, 'files': files},
+                                 by_digest, read=_read_skill_file, method='POST')
+    return {**created, 'message': '改进建议已提交，等待原作者审核。'}
+
+
+def suggestions_list(home: Path, role: str = 'all', status: str = 'pending', skill: str = '') -> dict:
+    config = _connection(home)
+    if not _me(config, capabilities=True)['suggestions_supported']:
+        return {'supported': False, 'suggestions': []}
+    query = urllib.parse.urlencode({'role': role, 'status': status, **({'skill': skill} if skill else {})})
+    return {**_request(config, '/api/suggestions?' + query), 'supported': True}
+
+
+def _suggestion_route(suggestion_id: str) -> str:
+    if not isinstance(suggestion_id, str) or not re.fullmatch('[0-9a-f]{32}', suggestion_id):
+        raise ValueError('建议编号不正确。')
+    return '/api/suggestions/' + suggestion_id
+
+
+def suggestion_detail(home: Path, suggestion_id: str) -> dict:
+    config, _ = _suggestion_connection(home)
+    return _request(config, _suggestion_route(suggestion_id))
+
+
+def suggestion_accept(home: Path, suggestion_id: str, review_note: str = '', allow_stale: bool = False,
+                      expected_current_version: str = '') -> dict:
+    guard(home / '.skill-pilot', home)
+    config, _ = _suggestion_connection(home)
+    payload = {'review_note': review_note, 'allow_stale': allow_stale}
+    if expected_current_version:
+        payload['expected_current_version'] = expected_current_version
+    return _request(config, _suggestion_route(suggestion_id) + '/accept', 'POST', payload)
+
+
+def suggestion_reject(home: Path, suggestion_id: str, review_note: str = '') -> dict:
+    guard(home / '.skill-pilot', home)
+    config, _ = _suggestion_connection(home)
+    return _request(config, _suggestion_route(suggestion_id) + '/reject', 'POST', {'review_note': review_note})
+
+
+def suggestion_withdraw(home: Path, suggestion_id: str) -> dict:
+    guard(home / '.skill-pilot', home)
+    config, _ = _suggestion_connection(home)
+    return _request(config, _suggestion_route(suggestion_id), 'DELETE')
+
+
+def find(home, name, author=None):
+    """Resolve a store card by skill name or Chinese title for command-line installs."""
+    home, registry, agents = operations.load(home)
+    _, member, cards = _fetch(home)
+    card = _resolve_card(cards, name, author)
     root = (next((r for r in card['listings'] if r['member']['name'] == author), card['listings'][0])
             if author is not None else card['listings'][0])
     title = next((r['title'] for r in card['listings'] if 'title' in r), root['name'])

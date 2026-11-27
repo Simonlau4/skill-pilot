@@ -107,6 +107,7 @@ async function api(path, body, extra) {
     error.retry = Boolean(result && result.retry);
     error.recheck = Boolean(result && result.recheck);
     error.blocked = Boolean(result && result.blocked);
+    error.stale = Boolean(result && result.stale);
     if (result && result.program) error.program = result.program;
     throw error;
   }
@@ -4051,7 +4052,8 @@ function storeRowHtml(card, options) {
   const pack = hidePack ? null : storePackOf(card);
   const locked = teamCanWrite() ? '' : ' disabled';
   const end = mine
-    ? `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>`
+    ? `${card.pending_suggestions_count ? `<button class="btn btn-small btn-update" type="button" data-store-suggestions-open="${escape(card.name)}">改进建议 ${number(card.pending_suggestions_count)}</button>` : ''}
+       ${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>`
          : candidate && !candidate.unavailable ? `<button class="btn btn-small btn-quiet" type="button" data-store-republish="${escape(card.name)}"${locked}>编辑信息</button>` : ''}
        ${pack && state.store?.packs_supported !== false ? `<button class="btn btn-small btn-quiet" type="button" data-store-pack-edit="${escape(pack.id)}"${locked}>改技能包</button>` : ''}
        <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`
@@ -4063,7 +4065,7 @@ function storeRowHtml(card, options) {
       <span class="store-row-sub">${sub}${pack ? `<span class="store-row-pack">属于「${escape(pack.title)}」</span>` : ''}</span>
     </button>
     <span class="store-row-rating">${storeRatingHtml(card.rating)}${storeInstallsHtml(card)}</span>
-    <span class="store-row-by">${escape(mine ? `${friendlyDate(storeMyListing(card)?.updated_at)}上架` : storeRecommenders(card))}</span>
+    <span class="store-row-by">${escape(mine ? `${friendlyDate(storeMyListing(card)?.created_at || storeMyListing(card)?.updated_at)}上架` : storeRecommenders(card))}</span>
     <span class="store-row-end">${end}</span>
   </div>`;
 }
@@ -4956,6 +4958,12 @@ function renderTeam() {
   $('store-mine').disabled = !cards;
   $('store-mine').setAttribute('aria-pressed', String(state.storeMine));
   $('store-mine-count').textContent = mineCount ? number(mineCount) : '';
+  const incomingSuggestions = state.store?.suggestions_summary?.incoming_total || 0;
+  const mineBadge = $('store-mine-suggest-badge');
+  if (mineBadge) {
+    mineBadge.hidden = incomingSuggestions <= 0;
+    mineBadge.textContent = incomingSuggestions > 0 ? `建议 ${number(incomingSuggestions)}` : '';
+  }
   renderTeamRail(cards);
   renderStoreUpdateButton();
   renderStoreShelves(cards);
@@ -5623,8 +5631,23 @@ function storePackRowHtml(pack) {
 
 /* 「我的上架」顶部的两条提示：整理技能包、补上前置依赖。 */
 function storeHintsHtml() {
+  const summary = state.store?.suggestions_summary;
+  const incoming = summary?.incoming_total || 0;
+  const outgoing = summary?.outgoing_total || 0;
+  const incomingBanner = state.store?.suggestions_supported && incoming > 0 ? `<div class="banner banner-info banner-row store-hint">
+    <p>${icon('edit')} 收到 ${number(incoming)} 条改进建议，待你审核合并或退回</p>
+    <span class="banner-actions"><button class="btn btn-small btn-primary" type="button" data-store-suggestions-open="" data-suggestions-role="incoming">查看改进建议</button></span>
+  </div>` : '';
+  const outgoingBanner = state.store?.suggestions_supported && outgoing > 0 ? `<div class="banner banner-info banner-row store-hint">
+    <p>${icon('info')} 你提交了 ${number(outgoing)} 条改进建议，等待原作者审核</p>
+    <span class="banner-actions"><button class="btn btn-small" type="button" data-store-suggestions-open="" data-suggestions-role="outgoing">查看我提交的</button></span>
+  </div>` : '';
+  const historyBanner = state.store?.suggestions_supported && incoming === 0 && outgoing === 0 ? `<div class="banner banner-info banner-row store-hint">
+    <p>${icon('edit')} 改进建议记录</p>
+    <span class="banner-actions"><button class="btn btn-small" type="button" data-store-suggestions-open="" data-suggestions-role="incoming">查看改进建议</button></span>
+  </div>` : '';
   const data = storeCandidateData;
-  if (!data) return '';
+  if (!data) return incomingBanner + outgoingBanner + historyBanner;
   const suggestions = data.pack_suggestions || [];
   const missing = (data.skills || []).filter(item => item.listed && item.missing_requires?.length);
   const packs = suggestions.length && data.packs_supported !== false ? `<div class="banner banner-info banner-row store-hint">
@@ -5635,7 +5658,7 @@ function storeHintsHtml() {
     <p>${icon('link')} 有 ${number(missing.length)} 个上架的技能缺前置依赖</p>
     <span class="banner-actions"><button class="btn btn-small" type="button" data-store-publish-missing>补上前置依赖</button></span>
   </div>` : '';
-  return packs + needs;
+  return incomingBanner + outgoingBanner + historyBanner + packs + needs;
 }
 
 function renderStoreAll(cards) {
@@ -5880,6 +5903,20 @@ $('page-team').addEventListener('click', event => {
   const packEdit = event.target.closest('[data-store-pack-edit]');
   const packToggle = event.target.closest('[data-store-pack-toggle]');
   const queuePack = event.target.closest('[data-store-queue-pack]');
+  const suggestOpen = event.target.closest('[data-store-suggest]');
+  const suggestionsOpen = event.target.closest('[data-store-suggestions-open]');
+  if (suggestOpen) {
+    openSuggestDialog(suggestOpen.dataset.storeSuggest);
+    return;
+  }
+  if (suggestionsOpen) {
+    openReviewDialog({
+      skill: suggestionsOpen.dataset.storeSuggestionsOpen || '',
+      role: suggestionsOpen.dataset.suggestionsRole || 'incoming',
+      opener: suggestionsOpen,
+    });
+    return;
+  }
   if (spotDeliverable) {
     const key = spotDeliverable.dataset.deliverableSpot;
     state.storeSpotDeliverable = key;
@@ -6352,7 +6389,7 @@ function renderStoreDetail(fresh = false) {
     ${storePackHintHtml(card)}
     <h3 class="sub-title">推荐人</h3>
     <ul class="store-recs">${card.listings.map(item => `<li>
-      <p class="store-rec-head"><strong>${escape(item.member.name)}</strong><span>${escape(friendlyDate(item.updated_at))}上架</span></p>
+      <p class="store-rec-head"><strong>${escape(item.member.name)}</strong><span>${escape(friendlyDate(item.created_at || item.updated_at))}上架</span></p>
       ${item.note ? `<p class="store-rec-note">“${escape(item.note)}”</p>` : ''}
     </li>`).join('')}</ul>
     ${storeReviewsHtml(card)}
@@ -6436,22 +6473,27 @@ function storeGetHtml(card) {
   const box = (tone, text, action = '') => `<section class="store-get store-get-${tone}">
     <p class="store-get-line">${text}</p>${action ? `<div class="store-get-actions">${action}</div>` : ''}</section>`;
   const locked = teamCanWrite() ? '' : ' disabled';
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  const suggestBtn = card.can_suggest
+    ? `<button class="btn btn-small" type="button" data-store-suggest="${escape(card.key)}"${readOnly ? ' disabled title="只读预览，不能提交改进建议"' : ''}>提交改进建议</button>` : '';
   if (local.status === 'installed') {
     if (!local.agents?.length) {
       return box('ok', `${icon('check-circle')}<span><strong>已在技能库中，尚未分配给 Agent</strong></span>`,
-        `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">前往分配</button>`);
+        `<button class="btn btn-primary" type="button" data-store-goto="${escape(card.name)}">前往分配</button>${suggestBtn}`);
     }
     return box('ok', `${icon('check-circle')}<span><strong>已安装</strong>，使用中：${escape(users)}</span>`,
-      `<button class="link-btn" type="button" data-store-goto="${escape(card.name)}">查看技能</button>`);
+      `<button class="link-btn" type="button" data-store-goto="${escape(card.name)}">查看技能</button>${suggestBtn}`);
   }
   if (local.status === 'update') {
     return box('info', `${icon('update-up')}<span><strong>有新版</strong>${users ? `，使用中：${escape(users)}` : ''}</span>`,
-      `<button class="btn btn-small btn-update" type="button" data-store-goto="${escape(card.name)}" data-store-check>前往更新</button>`);
+      `<button class="btn btn-small btn-update" type="button" data-store-goto="${escape(card.name)}" data-store-check>前往更新</button>${suggestBtn}`);
   }
   if (local.status === 'mine') {
     const candidate = storeCandidates?.find(item => item.name === card.name);
-    return box('quiet', `${icon('team')}<span><strong>我的上架</strong>${candidate?.changed ? '，已有本地修改，可上架新版' : ''}</span>`,
-      `${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>`
+    const pendingBadge = card.pending_suggestions_count > 0
+      ? `<button class="btn btn-small btn-update" type="button" data-store-suggestions-open="${escape(card.name)}">改进建议 ${number(card.pending_suggestions_count)}</button>` : '';
+    return box('quiet', `${icon('team')}<span><strong>我的上架</strong>${candidate?.changed ? '，已有本地修改，可上架新版' : ''}${card.pending_suggestions_count > 0 ? `，收到 ${number(card.pending_suggestions_count)} 条改进建议` : ''}</span>`,
+      `${pendingBadge}${candidate?.changed ? `<button class="btn btn-small btn-update" type="button" data-store-republish="${escape(card.name)}"${locked}>上架新版</button>`
          : candidate && !candidate.unavailable ? `<button class="btn btn-small btn-quiet" type="button" data-store-republish="${escape(card.name)}"${locked}>编辑信息</button>` : ''}
        <button class="btn btn-small btn-quiet" type="button" data-store-unlist="${escape(card.name)}"${locked}>下架…</button>`);
   }
@@ -7039,8 +7081,22 @@ function storeRateHtml(card) {
 }
 
 $('detail-body').addEventListener('click', event => {
-  if (!state.storeDetail) return;
   const target = event.target;
+  const suggestOpen = target.closest('[data-store-suggest]');
+  const suggestionsOpen = target.closest('[data-store-suggestions-open]');
+  if (suggestOpen) {
+    openSuggestDialog(suggestOpen.dataset.storeSuggest);
+    return;
+  }
+  if (suggestionsOpen) {
+    openReviewDialog({
+      skill: suggestionsOpen.dataset.storeSuggestionsOpen || '',
+      role: suggestionsOpen.dataset.suggestionsRole || 'incoming',
+      opener: suggestionsOpen,
+    });
+    return;
+  }
+  if (!state.storeDetail) return;
   if (target.closest('[data-pack-install]')) {
     const pack = storePack(state.storeDetail);
     if (pack) queueStorePack(pack);
@@ -8146,6 +8202,9 @@ function renderDetail(assignmentsOnly = false) {
   }).join('');
 
   const update = updateRow(skill.name);
+  const suggestCard = (state.store?.cards || []).find(item => item.name === skill.name && item.can_suggest);
+  const suggestLocalHtml = suggestCard && (skill.local_modified || suggestCard.local?.status === 'installed')
+    ? `<section class="store-get store-get-quiet"><p class="store-get-line">${icon('edit')}<span>${skill.local_modified ? '你已在本地修改过这个团队技能，可以把改进回传给原作者审核。' : '这是来自团队商店的技能，如有本地改进可提交给原作者审核。'}</span></p><div class="store-get-actions"><button class="btn btn-small" type="button" data-store-suggest="${escape(suggestCard.key)}"${locked ? ' disabled title="只读预览，不能提交改进建议"' : ''}>提交改进建议</button></div></section>` : '';
   const tags = detailTagsHtml(skill, locked || detailTagBusy);
   const zh = skill.description_zh;
   // 有些说明本来就是中文，这时没有“英文原文”可说
@@ -8154,6 +8213,7 @@ function renderDetail(assignmentsOnly = false) {
   $('detail-body').innerHTML = `
     ${skill.title ? `<p class="detail-id">${escape(skill.name)}</p>` : ''}
     ${update ? detailUpdateHtml(update) : ''}
+    ${suggestLocalHtml}
     ${skill.summary ? `<p class="detail-summary">${escape(skill.summary)}</p>` : ''}
     ${tags}
 
@@ -8290,9 +8350,393 @@ function openDetail(name) {
   state.detail = name;
   renderDetail();
   showDetailPanel(() => state.detail === name);
+  if (state.team?.configured && !state.store && !state.storeError) {
+    loadStore().then(() => { if (state.detail === name) renderDetail(); }).catch(() => {});
+  }
 }
 
 /* 技能详情和团队商店的详情共用这块面板。stillOpen 判断动画开始前用户有没有换走。 */
+function renderSuggestDiffLines(text) {
+  return String(text || '').split('\n').map(line => {
+    const escaped = escape(line);
+    if (line.startsWith('+++ ') || line.startsWith('--- ') || line.startsWith('@@')) {
+      return `<span class="suggest-diff-meta">${escaped}</span>`;
+    }
+    if (line.startsWith('+')) return `<span class="suggest-diff-add">${escaped}</span>`;
+    if (line.startsWith('-')) return `<span class="suggest-diff-del">${escaped}</span>`;
+    return `<span>${escaped}</span>\n`;
+  }).join('');
+}
+
+function suggestFilesHtml(summary, files, blocked = []) {
+  const added = summary?.added?.length || 0;
+  const modified = summary?.modified?.length || 0;
+  const removed = summary?.removed?.length || 0;
+  const chips = [
+    added ? `<span class="tag tag-ok">新增 ${number(added)} 个文件</span>` : '',
+    modified ? `<span class="tag">修改 ${number(modified)} 个文件</span>` : '',
+    removed ? `<span class="tag tag-warn">删除 ${number(removed)} 个文件</span>` : '',
+    summary?.unchanged_count ? `<span class="tag tag-quiet">未变 ${number(summary.unchanged_count)} 个</span>` : '',
+  ].filter(Boolean).join('');
+  const scriptWarn = summary?.has_scripts
+    ? `<div class="banner banner-warn">${icon('warning')} 这次改动包含脚本或可执行文件，请逐行核对内容。</div>` : '';
+  const blockedHtml = blocked.length
+    ? `<details class="fold"><summary>已自动拦下 ${number(blocked.length)} 个疑似敏感文件</summary><ul class="list">${blocked.map(item =>
+      `<li><span class="mono">${escape(item.path)}</span> — ${escape(item.reason)}</li>`).join('')}</ul></details>` : '';
+  const statusMap = {added: ['tag-ok', '新增'], modified: ['tag', '修改'], removed: ['tag-warn', '删除']};
+  const fileRows = (files || []).map((file, index) => {
+    const [tone, label] = Object.hasOwn(statusMap, file.status) ? statusMap[file.status] : ['tag-quiet', '有改动'];
+    const badges = [
+      `<span class="tag ${tone}">${escape(label)}</span>`,
+      file.is_script ? '<span class="tag tag-warn">脚本/可执行</span>' : '',
+      file.mode_changed ? '<span class="tag tag-quiet">权限有变</span>' : '',
+      file.truncated ? '<span class="tag tag-quiet">部分省略</span>' : '',
+    ].filter(Boolean).join('');
+    const preview = file.binary
+      ? `<p class="muted" style="padding:10px 12px;margin:0">${escape(file.preview || '这是非文本文件，无法显示文字改动。')}</p>`
+      : `<pre class="suggest-diff">${renderSuggestDiffLines(file.preview)}</pre>`;
+    return `<details class="suggest-file"${index === 0 ? ' open' : ''}>
+      <summary><span class="suggest-file-path">${escape(file.path)}</span>${badges}</summary>
+      ${preview}
+    </details>`;
+  }).join('');
+  return `<div class="suggest-summary">${chips}</div>${scriptWarn}${blockedHtml}<div class="suggest-files">${fileRows || '<p class="muted">没有文件改动。</p>'}</div>`;
+}
+
+let suggestDialogState = null;
+
+async function openSuggestDialog(cardKey) {
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  if (readOnly) {
+    toast({text: '只读预览，不能提交改进建议。', tone: 'warn'});
+    return;
+  }
+  suggestDialogState = {cardKey, review: '', busy: false};
+  $('store-suggest-title').textContent = '提交改进建议';
+  $('store-suggest-lead').textContent = '正在比对本机技能与线上最新版本…';
+  $('store-suggest-body').innerHTML = '<p class="muted" role="status">正在读取文件改动…</p>';
+  $('store-suggest-note-wrap').hidden = true;
+  $('store-suggest-note').value = '';
+  $('store-suggest-message').textContent = '';
+  $('store-suggest-message').hidden = true;
+  $('store-suggest-submit').disabled = true;
+  const dialog = $('store-suggest-dialog');
+  if (!dialog.open) dialog.showModal();
+  const current = suggestDialogState;
+  try {
+    const data = await api('/api/team/suggestions/preview', {card_key: cardKey});
+    if (suggestDialogState !== current) return;
+    current.review = data.review || '';
+    const revText = data.base_revision ? `（基于第 ${number(data.base_revision)} 版）` : '';
+    $('store-suggest-lead').textContent = `技能「${data.title || data.skill_name}」将提交给原作者 ${data.target_member_name} 审核${revText}。`;
+    $('store-suggest-body').innerHTML = suggestFilesHtml(data.summary, data.files, data.blocked || []);
+    $('store-suggest-note-wrap').hidden = false;
+    $('store-suggest-submit').disabled = false;
+    $('store-suggest-note').focus();
+  } catch (error) {
+    if (suggestDialogState !== current) return;
+    $('store-suggest-lead').textContent = '';
+    $('store-suggest-body').innerHTML = `<p class="row-note is-error" role="alert">${escape(error.message)}${feedbackButton(error.error_id)}</p>`;
+  }
+}
+
+$('store-suggest-close')?.addEventListener('click', () => {
+  if (suggestDialogState?.busy) return;
+  $('store-suggest-dialog').close();
+});
+$('store-suggest-dialog')?.addEventListener('cancel', event => {
+  if (suggestDialogState?.busy) event.preventDefault();
+});
+$('store-suggest-dialog')?.addEventListener('close', () => { suggestDialogState = null; });
+$('store-suggest-dialog')?.querySelector('form')?.addEventListener('submit', event => event.preventDefault());
+
+$('store-suggest-submit')?.addEventListener('click', async event => {
+  if (!suggestDialogState || suggestDialogState.busy || !suggestDialogState.review) return;
+  const message = $('store-suggest-note').value.trim();
+  if (!message) {
+    $('store-suggest-message').textContent = '请填写修改说明，方便原作者了解这次改进。';
+    $('store-suggest-message').hidden = false;
+    $('store-suggest-note').focus();
+    return;
+  }
+  $('store-suggest-message').hidden = true;
+  suggestDialogState.busy = true;
+  $('store-suggest-close').disabled = true;
+  await withBusy(event.currentTarget, '正在提交…', async () => {
+    try {
+      const result = await api('/api/team/suggestions/submit', {review: suggestDialogState.review, message});
+      $('store-suggest-dialog').close();
+      await loadStore();
+      renderTeam();
+      toast({text: result.message || '改进建议已提交，等待原作者审核。'});
+    } catch (error) {
+      $('store-suggest-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      $('store-suggest-message').hidden = false;
+    } finally {
+      if (suggestDialogState) suggestDialogState.busy = false;
+      $('store-suggest-close').disabled = false;
+    }
+  });
+});
+
+let reviewDialogState = null;
+let reviewListSequence = 0;
+let reviewOpener = null;
+
+function suggestionStatusLabel(status) {
+  const map = {
+    pending: ['tag-warn', '待审核'],
+    accepted: ['tag-ok', '已采纳发布'],
+    rejected: ['tag-quiet', '已退回'],
+    withdrawn: ['tag-quiet', '已撤回'],
+  };
+  return Object.hasOwn(map, status) ? map[status] : ['tag-quiet', '未知状态'];
+}
+
+async function openReviewDialog({skill = '', role = 'incoming', opener = null} = {}) {
+  reviewOpener = opener || document.activeElement;
+  reviewDialogState = {skill, role, items: [], selectedId: '', detail: null, loading: true, detailLoading: false, busy: false};
+  $('store-review-title').textContent = skill ? `「${skill}」的改进建议` : '改进建议';
+  $('store-review-sub').textContent = role === 'incoming'
+    ? '审阅同事提交的改进，可采纳并发布为新版，或退回保留原版。'
+    : '查看你提交给原作者的改进建议及审核进度。';
+  $('store-review-message').hidden = true;
+  const dialog = $('store-review-dialog');
+  if (!dialog.open) dialog.showModal();
+  await loadReviewList();
+}
+
+async function loadReviewList() {
+  if (!reviewDialogState) return;
+  const current = reviewDialogState;
+  const seq = ++reviewListSequence;
+  current.loading = true;
+  renderReviewDialog();
+  try {
+    const params = new URLSearchParams({role: current.role, status: 'all'});
+    if (current.skill) params.set('skill', current.skill);
+    const data = await api('/api/team/suggestions?' + params.toString());
+    if (reviewDialogState !== current || seq !== reviewListSequence) return;
+    current.items = data.suggestions || [];
+    current.loading = false;
+    const keep = current.items.find(item => item.id === current.selectedId);
+    const first = keep || current.items.find(item => item.status === 'pending') || current.items[0];
+    current.selectedId = first ? first.id : '';
+    current.detail = null;
+    renderReviewDialog();
+    if (current.selectedId) await loadReviewDetail(current.selectedId);
+  } catch (error) {
+    if (reviewDialogState !== current || seq !== reviewListSequence) return;
+    current.loading = false;
+    $('store-review-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+    $('store-review-message').hidden = false;
+    renderReviewDialog();
+  }
+}
+
+async function loadReviewDetail(id) {
+  if (!reviewDialogState || !id) return;
+  const current = reviewDialogState;
+  current.selectedId = id;
+  current.detailLoading = true;
+  current.detail = null;
+  renderReviewDialog();
+  try {
+    const detail = await api('/api/team/suggestions/detail?id=' + encodeURIComponent(id));
+    if (reviewDialogState !== current || current.selectedId !== id) return;
+    current.detail = detail;
+    current.detailLoading = false;
+    renderReviewDialog();
+  } catch (error) {
+    if (reviewDialogState !== current || current.selectedId !== id) return;
+    current.detailLoading = false;
+    current.detail = {error: error.message || '没能读取建议详情，请稍后重试。', error_id: error.error_id};
+    renderReviewDialog();
+  }
+}
+
+function renderReviewDialog() {
+  const st = reviewDialogState;
+  if (!st) return;
+  for (const btn of $('store-review-tabs').querySelectorAll('[data-review-role]')) {
+    btn.setAttribute('aria-pressed', String(btn.dataset.reviewRole === st.role));
+  }
+  const listEl = $('store-review-list');
+  const detailEl = $('store-review-detail');
+  if (st.loading) {
+    listEl.innerHTML = '<p class="muted" role="status">正在读取改进建议…</p>';
+    detailEl.innerHTML = '';
+    return;
+  }
+  if (!st.items.length) {
+    listEl.innerHTML = `<p class="muted">${st.role === 'incoming' ? '暂无收到的改进建议。' : '暂未提交过改进建议。'}</p>`;
+    detailEl.innerHTML = '<p class="muted">选择左侧条目查看改动详情。</p>';
+    return;
+  }
+  listEl.innerHTML = st.items.map(item => {
+    const [tone, label] = suggestionStatusLabel(item.status);
+    const who = st.role === 'incoming' ? `${item.author_name} 提交` : `给 ${item.target_member_name}`;
+    return `<button class="suggest-item" type="button" data-review-pick="${escape(item.id)}" aria-current="${item.id === st.selectedId}">
+      <div class="suggest-item-top">
+        <span class="suggest-item-title">${escape(item.skill_name)}</span>
+        <span class="tag ${tone}">${escape(label)}</span>
+      </div>
+      <div class="suggest-item-meta">${escape(who)} · ${escape(friendlyDate(item.created_at))}${item.stale && item.status === 'pending' ? ' · 原版本已推进' : ''}</div>
+      <p class="suggest-item-msg">${escape(item.message)}</p>
+    </button>`;
+  }).join('');
+
+  if (st.detailLoading) {
+    detailEl.innerHTML = '<p class="muted" role="status">正在读取改动对比…</p>';
+    return;
+  }
+  const detail = st.detail;
+  if (!detail) {
+    detailEl.innerHTML = '<p class="muted">请选择一条建议查看详情。</p>';
+    return;
+  }
+  if (detail.error) {
+    detailEl.innerHTML = `<p class="row-note is-error" role="alert">${escape(detail.error)}${feedbackButton(detail.error_id)}</p>`;
+    return;
+  }
+  const [tone, label] = suggestionStatusLabel(detail.status);
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  const staleWarn = detail.status === 'pending' && detail.diff?.stale
+    ? `<div class="banner banner-warn">${icon('warning')} 提交这条建议后，原作者已发布过新版（当前第 ${number(detail.current_revision || 1)} 版）。下方对比已按当前线上最新版本重新生成，请仔细核对后再决定是否采纳。</div>` : '';
+  const reviewNoteInfo = detail.status !== 'pending' && detail.review_note
+    ? `<p class="row-note">审核说明：${escape(detail.review_note)}</p>` : '';
+  let actionBlock = '';
+  if (detail.status === 'pending' && detail.role === 'incoming') {
+    const staleGate = detail.diff?.stale
+      ? `<label class="suggest-stale-check"><input type="checkbox" id="store-review-stale-ok"><span>我已核对基于当前最新版本的改动对比，确认以此内容发布为新版</span></label>` : '';
+    actionBlock = `<div class="suggest-review-actions">
+      <label class="suggest-field"><span>审核说明（选填，退回时可说明原因）</span>
+        <input id="store-review-note" type="text" class="input" maxlength="300" placeholder="例如：已合并并发布新版 / 暂不采纳，请补充说明"></label>
+      ${staleGate}
+      <div class="suggest-review-btns">
+        <button class="btn" type="button" data-review-reject="${escape(detail.id)}"${readOnly || st.busy ? ' disabled' : ''}>退回</button>
+        <button class="btn btn-primary" type="button" data-review-accept="${escape(detail.id)}"${readOnly || st.busy || detail.diff?.stale ? ' disabled' : ''}>采纳并发布为新版</button>
+      </div>
+      ${readOnly ? '<p class="row-note">只读预览，不能审核或发布技能。</p>' : ''}
+    </div>`;
+  } else if (detail.status === 'pending' && detail.role === 'outgoing') {
+    actionBlock = `<div class="suggest-review-actions">
+      <div class="suggest-review-btns">
+        <button class="btn" type="button" data-review-withdraw="${escape(detail.id)}"${readOnly || st.busy ? ' disabled' : ''}>撤回这条建议</button>
+      </div>
+    </div>`;
+  }
+  const baseRevText = detail.base_revision
+    ? ` · 基于第 ${number(detail.base_revision)} 版`
+    : (detail.base_version ? ` · 基于较早版本（${String(detail.base_version).slice(0, 8)}）` : ' · 基于较早版本');
+  detailEl.innerHTML = `
+    <div class="suggest-detail-head">
+      <div><strong>${escape(detail.skill_name)}</strong> <span class="muted">· ${escape(detail.author_name)} 提交于 ${escape(friendlyDate(detail.created_at))}${escape(baseRevText)}</span></div>
+      <span class="tag ${tone}">${escape(label)}</span>
+    </div>
+    <p class="suggest-detail-msg">${escape(detail.message)}</p>
+    ${reviewNoteInfo}
+    ${staleWarn}
+    ${suggestFilesHtml(detail.diff?.summary, detail.diff?.files)}
+    ${actionBlock}`;
+}
+
+$('store-review-tabs')?.addEventListener('click', event => {
+  const btn = event.target.closest('[data-review-role]');
+  if (!btn || !reviewDialogState || reviewDialogState.busy) return;
+  reviewDialogState.role = btn.dataset.reviewRole;
+  reviewDialogState.skill = '';
+  $('store-review-title').textContent = '改进建议';
+  $('store-review-sub').textContent = reviewDialogState.role === 'incoming'
+    ? '审阅同事提交的改进，可采纳并发布为新版，或退回保留原版。'
+    : '查看你提交给原作者的改进建议及审核进度。';
+  loadReviewList();
+});
+
+$('store-review-list')?.addEventListener('click', event => {
+  const btn = event.target.closest('[data-review-pick]');
+  if (!btn || !reviewDialogState || reviewDialogState.busy) return;
+  loadReviewDetail(btn.dataset.reviewPick);
+});
+
+$('store-review-detail')?.addEventListener('change', event => {
+  if (event.target.id !== 'store-review-stale-ok') return;
+  const acceptBtn = $('store-review-detail').querySelector('[data-review-accept]');
+  if (acceptBtn) acceptBtn.disabled = !event.target.checked || !teamCanWrite();
+});
+
+$('store-review-detail')?.addEventListener('click', async event => {
+  if (!reviewDialogState || reviewDialogState.busy) return;
+  const acceptBtn = event.target.closest('[data-review-accept]');
+  const rejectBtn = event.target.closest('[data-review-reject]');
+  const withdrawBtn = event.target.closest('[data-review-withdraw]');
+  if (!acceptBtn && !rejectBtn && !withdrawBtn) return;
+  const detail = reviewDialogState.detail;
+  const note = $('store-review-note')?.value?.trim() || '';
+  $('store-review-message').hidden = true;
+  reviewDialogState.busy = true;
+  const btn = acceptBtn || rejectBtn || withdrawBtn;
+  const label = acceptBtn ? '正在发布新版…' : rejectBtn ? '正在退回…' : '正在撤回…';
+  await withBusy(btn, label, async () => {
+    try {
+      let result;
+      if (acceptBtn) {
+        const allowStale = Boolean(detail?.diff?.stale && $('store-review-stale-ok')?.checked);
+        result = await api('/api/team/suggestions/accept', {
+          id: acceptBtn.dataset.reviewAccept,
+          review_note: note,
+          allow_stale: allowStale,
+          expected_current_version: detail?.diff?.current_version || '',
+        });
+      } else if (rejectBtn) {
+        result = await api('/api/team/suggestions/reject', {
+          id: rejectBtn.dataset.reviewReject,
+          review_note: note,
+        });
+      } else {
+        result = await api('/api/team/suggestions/withdraw', {id: withdrawBtn.dataset.reviewWithdraw});
+      }
+      toast({text: result.message || '操作已完成。'});
+      forgetCandidates();
+      await loadStore();
+      if (state.storeMine) await loadCandidates().catch(() => {});
+      renderTeam();
+      if (reviewDialogState) reviewDialogState.busy = false;
+      await loadReviewList();
+    } catch (error) {
+      $('store-review-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      $('store-review-message').hidden = false;
+      if (reviewDialogState) reviewDialogState.busy = false;
+      if (error.stale) await loadReviewDetail(reviewDialogState.selectedId);
+    } finally {
+      if (reviewDialogState) reviewDialogState.busy = false;
+    }
+  });
+});
+
+$('store-review-close')?.addEventListener('click', () => {
+  if (reviewDialogState?.busy) return;
+  $('store-review-dialog').close();
+});
+$('store-review-dialog')?.addEventListener('cancel', event => {
+  if (reviewDialogState?.busy) event.preventDefault();
+});
+$('store-review-dialog')?.addEventListener('close', () => {
+  reviewDialogState = null;
+  let target = (reviewOpener && reviewOpener.isConnected && !reviewOpener.hidden && !reviewOpener.disabled)
+    ? reviewOpener : null;
+  if (!target) {
+    const panel = $('detail-panel');
+    if (panel && !panel.hidden) {
+      target = $('detail-body')?.querySelector('[data-store-suggestions-open], [data-store-suggest]') || $('detail-close');
+    } else {
+      target = $('store-mine') || $('store-all-title');
+    }
+  }
+  reviewOpener = null;
+  target?.focus({preventScroll: true});
+});
+
 function showDetailPanel(stillOpen) {
   const panel = $('detail-panel');
   panel.hidden = false;

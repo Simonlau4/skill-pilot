@@ -144,6 +144,7 @@ class Dashboard(ThreadingHTTPServer):
         extra_sources.ensure(self.home)
         self.install_reviews = session.get('install_reviews', {})
         self.team_upload_reviews = session.get('team_upload_reviews', {})
+        self.team_suggestion_reviews = session.get('team_suggestion_reviews', {})
         self.replace_reviews = session.get('replace_reviews', {})
         self.feedback_previews = {}
         self.feedback_lock = threading.Lock()
@@ -2052,6 +2053,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(404, {'error': str(error)})
             except (ValueError, OSError) as error:
                 self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取仓库原文，请稍后重试。'})
+        elif path == '/api/team/suggestions':
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            role = query.get('role', ['all'])[0]
+            status_val = query.get('status', ['pending'])[0]
+            skill = query.get('skill', [''])[0]
+            try:
+                self.reply(200, team.suggestions_list(self.server.home, role=role, status=status_val, skill=skill))
+            except (ValueError, OSError) as error:
+                self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取改进建议列表，请稍后重试。'})
+        elif path == '/api/team/suggestions/detail':
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                self.reply(200, team.suggestion_detail(self.server.home, query.get('id', [''])[0]))
+            except (ValueError, OSError) as error:
+                self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取改进建议详情，请稍后重试。'})
         elif path in {'/api/team', '/api/team/catalog', '/api/team/listings/candidates'}:
             try:
                 result = (team.status(self.server.home, strict=False) if path == '/api/team' else
@@ -2312,12 +2328,13 @@ class Handler(BaseHTTPRequestHandler):
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/updates/prepare',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/replace/preview', '/api/team/activity', '/api/program/auto-check'}
+                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/replace/preview', '/api/team/suggestions/preview', '/api/team/activity', '/api/program/auto-check'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/listings/update', '/api/team/queue', '/api/team/queue/clear',
-                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry', '/api/team/replace/cleanup'}
+                        '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry', '/api/team/replace/cleanup',
+                        '/api/team/suggestions/submit', '/api/team/suggestions/accept', '/api/team/suggestions/reject', '/api/team/suggestions/withdraw'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
         read_routes.add('/api/external/preview')
@@ -2591,7 +2608,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(400 if isinstance(error, JobInputError) or path in {'/api/cleanup/preview', '/api/cleanup/delete/preview'} else 409, {
                 "error": message or "操作没能完成，请重新预览。",
                 **({'blocked': True} if path in job_routes and self.server.jobs_blocked else {}),
-                **({'recheck': True} if isinstance(error, operations.AssignmentChanged) else {})})
+                **({'recheck': True} if isinstance(error, operations.AssignmentChanged) else {}),
+                **({'stale': True, 'current_version': error.body.get('current_version', '')}
+                   if isinstance(error, team.RequestError) and error.body.get('stale') else {})})
 
     def import_program_package(self):
         if not preview_allowed(self.server.home):
@@ -2685,6 +2704,44 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     self.server.invalidate_agents()
                     self.server.inventory = scan(home)
+        if path == '/api/team/suggestions/preview':
+            card_key = body.get('card_key', '')
+            if not isinstance(card_key, str) or not card_key.strip():
+                raise ValueError('请选择要提交改进建议的技能。')
+            saved, result = team.suggestion_preview(home, card_key.strip())
+            review = secrets.token_urlsafe(16)
+            reviews = self.server.team_suggestion_reviews
+            if len(reviews) >= 20:
+                reviews.pop(next(iter(reviews)), None)
+            reviews[review] = saved
+            return {**result, 'review': review}
+        if path == '/api/team/suggestions/submit':
+            identifier = body.get('review')
+            reviews = self.server.team_suggestion_reviews
+            if not isinstance(identifier, str) or identifier not in reviews:
+                raise ValueError('这份改动预览已失效，请重新打开核对。')
+            message = body.get('message', '')
+            if not isinstance(message, str):
+                raise ValueError('请填写修改说明。')
+            result = team.suggestion_submit(home, reviews[identifier], message)
+            reviews.pop(identifier, None)
+            return result
+        if path == '/api/team/suggestions/accept':
+            review_note = body.get('review_note', '')
+            expected = body.get('expected_current_version', '')
+            if not isinstance(review_note, str) or not isinstance(expected, str):
+                raise ValueError('审核参数格式不正确。')
+            return team.suggestion_accept(
+                home, body.get('id', ''), review_note=review_note,
+                allow_stale=body.get('allow_stale') is True,
+                expected_current_version=expected)
+        if path == '/api/team/suggestions/reject':
+            review_note = body.get('review_note', '')
+            if not isinstance(review_note, str):
+                raise ValueError('退回说明须是文字。')
+            return team.suggestion_reject(home, body.get('id', ''), review_note=review_note)
+        if path == '/api/team/suggestions/withdraw':
+            return team.suggestion_withdraw(home, body.get('id', ''))
         if path == '/api/team/packs':
             with self.server.local_write():
                 return team.packs_apply(home, body.get('packs'))

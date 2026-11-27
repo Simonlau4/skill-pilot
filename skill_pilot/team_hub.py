@@ -1,6 +1,8 @@
 """Authenticated LAN skill store. Uploaded files are data, never executed."""
 import base64
 import binascii
+import difflib
+import fnmatch
 from .platform_support import fcntl
 import hashlib
 import hmac
@@ -24,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PureWindowsPath
 
 from . import feedback, sharing, tags
+from .scan import metadata
 
 MAX_BODY = 20 * 1024 * 1024
 MAX_RATING_BODY = 64 * 1024
@@ -46,6 +49,26 @@ MAX_DELIVERABLE_SIZE = 200 * 1024 * 1024
 MAX_DELIVERABLE_FILES = 2000
 MAX_DELIVERABLES = 50
 MAX_MANIFEST_BODY = 1024 * 1024
+MAX_SUGGESTIONS_PER_SKILL = 20
+MAX_SUGGESTIONS_PER_MEMBER = 20
+MAX_SUGGESTIONS_TOTAL = 200
+MAX_SUGGESTION_TOTAL_BYTES = 500 * 1024 * 1024
+MAX_SUGGESTION_BODY = 1024 * 1024
+MAX_SUGGESTION_MESSAGE = 500
+MAX_SUGGESTION_REVIEW_NOTE = 300
+MAX_DIFF_FILE_BYTES = 256 * 1024
+MAX_DIFF_TOTAL_CHARS = 120_000
+MAX_ORPHAN_BLOBS_BYTES = 200 * 1024 * 1024
+ORPHAN_BLOB_TTL_SECONDS = 3600
+SECRET_NAMES = ('.env', '.env.*', '*.pem', '*.key', '*.p12', 'id_rsa*', 'id_ed25519*',
+                '.npmrc', '.pypirc', 'credentials*')
+SECRET_CONTENT = re.compile(
+    r'-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----|'
+    r'(?:sk-|ghp_|github_pat_|AKIA|xoxb-)[A-Za-z0-9_-]{16,}|'
+    r'(?:api[_-]?key|token|secret|password)[\"\']?\s*[:=]\s*[\"\']?[^\s\"\',;\x00-\x1f]{16,}', re.I)
+OWN_SKILL = '这是你自己上架的技能，请直接使用「上架新版」更新。'
+FILES_ONLY = '只能给成员上架的文件版技能提建议。公开仓库和飞书官方技能请向来源方反馈。'
+NO_CHANGES = '本机技能与线上最新版本内容完全一致，没有可提交的改动。'
 MAX_RECIPE = 64 * 1024
 DELIVERABLE_TYPES = {
     '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -394,6 +417,94 @@ def package_version(files):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def skill_manifest(files):
+    """Normalize an already validated inline package or a file manifest for comparison."""
+    if isinstance(files, dict):
+        return files
+    result = {}
+    for row in files:
+        raw = base64.b64decode(row['content'])
+        result[row['path']] = {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw),
+                               'executable': row['executable']}
+    return result
+
+
+def suggestion_text(value, *, review=False):
+    limit = MAX_SUGGESTION_REVIEW_NOTE if review else MAX_SUGGESTION_MESSAGE
+    if (not isinstance(value, str) or any(c != '\n' and unicodedata.category(c) in {'Cc', 'Cf', 'Cs'}
+                                          for c in value) or len(value.strip()) > limit):
+        raise HubError(400, f'说明最多 {limit} 字，请删除看不见的字符。')
+    if not review and not value.strip():
+        raise HubError(400, '请填写改进说明。')
+    return value.strip()
+
+
+def _clean_description(value):
+    if not isinstance(value, str):
+        return ''
+    cleaned = value.replace('\t', ' ')
+    cleaned = ''.join(char for char in cleaned
+                      if unicodedata.category(char) not in {'Cc', 'Cf', 'Zl', 'Zp'} or char == '\n')
+    return cleaned.strip()[:1500].rstrip()
+
+
+def _sanitize_diff_text(text):
+    out = []
+    for char in text:
+        if char in '\n\t':
+            out.append(char)
+        elif unicodedata.category(char) in {'Cc', 'Cf', 'Cs', 'Zl', 'Zp'}:
+            out.append(f'\\x{ord(char):02x}' if ord(char) < 256 else f'\\u{ord(char):04x}')
+        else:
+            out.append(char)
+    return ''.join(out)
+
+
+def suggestion_diff(old, new, read_old, read_new):
+    from .updates import SCRIPT_SUFFIXES
+    summary = {'added': [], 'modified': [], 'removed': [], 'unchanged_count': 0, 'has_scripts': False}
+    files = []
+    remaining = MAX_DIFF_TOTAL_CHARS
+    for path in sorted(old.keys() | new.keys()):
+        before, after = old.get(path), new.get(path)
+        if before == after:
+            summary['unchanged_count'] += 1
+            continue
+        status = 'added' if before is None else 'removed' if after is None else 'modified'
+        summary[status].append(path)
+        script = ('scripts' in path.split('/') or Path(path).suffix.lower() in SCRIPT_SUFFIXES or
+                  any(row['executable'] for row in (before, after) if row))
+        truncated = binary = False
+        if not remaining or any(row['size'] > MAX_DIFF_FILE_BYTES for row in (before, after) if row):
+            preview, truncated = '内容较多，已省略文字预览。', True
+        else:
+            try:
+                a = read_old(path) if before else b''
+                b = read_new(path) if after else b''
+                script |= a.startswith(b'#!') or b.startswith(b'#!')
+                if b'\0' in a or b'\0' in b:
+                    binary, preview = True, '这是非文本文件，无法显示文字改动。'
+                else:
+                    left, right = a.decode().splitlines(keepends=True), b.decode().splitlines(keepends=True)
+                    # Bound the line matcher's work as well as the rendered output.
+                    truncated = max(len(left), len(right)) > 2000
+                    lines = difflib.unified_diff(left[:2000], right[:2000], path, path)
+                    preview = _sanitize_diff_text(''.join(line if line.endswith('\n') else line + '\n' for line in lines))
+            except UnicodeDecodeError:
+                binary, preview = True, '这是非文本文件，无法显示文字改动。'
+            except FileNotFoundError:
+                preview, truncated = '文件内容已清理，仅保留改动记录。', True
+        truncated |= len(preview) > remaining
+        preview = preview[:remaining]
+        remaining -= len(preview)
+        summary['has_scripts'] |= script
+        files.append({'path': path, 'status': status, 'is_script': script,
+                      'mode_changed': bool(before and after and before['executable'] != after['executable']),
+                      'old_size': before['size'] if before else None, 'new_size': after['size'] if after else None,
+                      'binary': binary, 'truncated': truncated, 'preview': preview})
+    return {'summary': summary, 'files': files}
+
+
 def clean_replaces(value, own_name=None):
     if not isinstance(value, list):
         raise ValueError('替代的旧技能名称须放在列表中。')
@@ -463,6 +574,8 @@ def clean_listing(row, packaged=False):
                     type(source.get('size')) is not int or not 0 <= source['size'] <= MAX_SIZE):
                 raise ValueError('技能文件的版本或大小记录不正确。')
             result['source'].update({k: source[k] for k in ('version', 'file_count', 'size')})
+        elif kind == 'files' and source.get('preserve_files') is True and 'files' not in source:
+            result['source']['preserve_files'] = True
         else:
             files = source.get('files')
             result['source']['files'] = clean_skill_manifest(files) if isinstance(files, dict) else clean_files(files)
@@ -979,7 +1092,15 @@ class HubStore:
                     if member_id in activity:
                         activity.pop(member_id, None)
                         changes[activity_path] = {'activity': activity}
+            affected = set()
+            for suggestion in self._suggestions():
+                if member_id in (suggestion['target_member_id'], suggestion['author_id']):
+                    changes[self._suggestion_path(suggestion['id'])] = None
+                    if suggestion['status'] == 'pending' and suggestion['author_id'] != member_id:
+                        affected.add(suggestion['author_id'])
             self._save(changes)
+            for author in affected:
+                self._collect_blobs(author)
             shutil.rmtree(self.data / 'packages' / member_id, ignore_errors=True)
             shutil.rmtree(self.data / 'deliverables' / member_id, ignore_errors=True)
             if activity_skipped:
@@ -1243,8 +1364,9 @@ class HubStore:
                 if not skill_files and row['source'].get('file_storage') == 'blobs':
                     continue
                 key = listing_key(author_id, row)
+                public_row = {k: v for k, v in row.items() if k != 'version_revisions'}
                 cards.setdefault(key, {'key': key, 'listings': [], 'ratings': []})['listings'].append(
-                    {**row, 'member': member})
+                    {'created_at': row['updated_at'], 'revision': 1, **public_row, 'member': member})
         for key, ratings in self._ratings().items():
             if key in cards:
                 cards[key]['ratings'] = [{**r, 'member': members[m]} for m, r in ratings.items() if m in members]
@@ -1266,6 +1388,18 @@ class HubStore:
                 'my_installs': sorted(stored - own_cards),
                 'my_all_installs': sorted(counted_for_me),
                 'deliverables': self._public_deliverables()}
+        if member_id:
+            incoming, outgoing = {}, 0
+            for suggestion in self._suggestions():
+                if suggestion['status'] != 'pending':
+                    continue
+                if suggestion['target_member_id'] == member_id:
+                    name = suggestion['skill_name']
+                    incoming[name] = incoming.get(name, 0) + 1
+                if suggestion['author_id'] == member_id:
+                    outgoing += 1
+            result['suggestions_summary'] = {'incoming_total': sum(incoming.values()),
+                                              'incoming_by_skill': incoming, 'outgoing_total': outgoing}
         if not skill_files:
             result['packs'] = [p for p in result['packs'] if all(
                 key in cards and any(row['member']['id'] == p['member']['id'] for row in cards[key]['listings'])
@@ -1342,22 +1476,47 @@ class HubStore:
         updated_at = now()
         for row in rows:
             name, source = row['name'], row['source']
+            previous = current.get(name, {})
             path = self.data / 'packages' / member_id / (name + '.json')
-            collect |= current.get(name, {}).get('source', {}).get('file_storage') == 'blobs'
-            receipt = {'name': name, 'key': listing_key(member_id, row), 'updated_at': updated_at}
-            if 'files' in source:
-                files = source.pop('files')
-                version = package_version(files)
-                changes[path] = {'name': name, 'version': version, 'files': files}
-                if isinstance(files, dict):
-                    source.update(size=sum(f['size'] for f in files.values()), file_storage='blobs')
-                else:
-                    source['size'] = sum(len(base64.b64decode(f['content'])) for f in files)
-                source.update(version=version, file_count=len(files))
-                receipt['version'] = version
+            preserve = bool(source.get('preserve_files'))
+            if preserve:
+                if previous.get('source', {}).get('kind') != 'files':
+                    raise HubError(400, '请附带完整的技能文件后再上架。')
+                row['source'] = dict(previous['source'])
+                source = row['source']
+                receipt = {'name': name, 'key': listing_key(member_id, row), 'updated_at': updated_at}
+                if source.get('version'):
+                    receipt['version'] = source['version']
             else:
-                changes[path] = None
-            current[name] = {**row, 'updated_at': updated_at}
+                collect |= previous.get('source', {}).get('file_storage') == 'blobs'
+                receipt = {'name': name, 'key': listing_key(member_id, row), 'updated_at': updated_at}
+                if 'files' in source:
+                    files = source.pop('files')
+                    version = package_version(files)
+                    changes[path] = {'name': name, 'version': version, 'files': files}
+                    if isinstance(files, dict):
+                        source.update(size=sum(f['size'] for f in files.values()), file_storage='blobs')
+                    else:
+                        source['size'] = sum(len(base64.b64decode(f['content'])) for f in files)
+                    source.update(version=version, file_count=len(files))
+                    receipt['version'] = version
+                else:
+                    changes[path] = None
+            revision = previous.get('revision', 1)
+            if not preserve and previous and previous['source'].get('version') != source.get('version'):
+                revision += 1
+            ver_revs = dict(previous.get('version_revisions') or {})
+            if previous and previous.get('source', {}).get('version'):
+                ver_revs.setdefault(previous['source']['version'], previous.get('revision', 1))
+            if source.get('version'):
+                ver_revs[source['version']] = revision
+            if len(ver_revs) > 30:
+                ver_revs = dict(list(ver_revs.items())[-30:])
+            extra = {'published_via': previous['published_via']} if (preserve and previous.get('published_via')) else {}
+            if ver_revs:
+                extra['version_revisions'] = ver_revs
+            current[name] = {**row, **extra, 'updated_at': updated_at, 'revision': revision,
+                             'created_at': previous.get('created_at', previous.get('updated_at', updated_at))}
             receipts.append(receipt)
         changes[self._listing_path(member_id)] = {'listings': current}
         if 'packs' in data:
@@ -1416,9 +1575,18 @@ class HubStore:
                     del packs[identity]
                 else:
                     pack['updated_at'] = now()
-        self._save({self.data / 'packages' / member_id / (name + '.json'): None,
-                    self._pack_path(member_id): {'packs': packs},
-                    self._listing_path(member_id): {'listings': current}})
+        changes = {self.data / 'packages' / member_id / (name + '.json'): None,
+                   self._pack_path(member_id): {'packs': packs},
+                   self._listing_path(member_id): {'listings': current}}
+        affected = set()
+        for row in self._suggestions():
+            if (row['target_member_id'], row['skill_name'], row['status']) == (member_id, name, 'pending'):
+                self._finish_suggestion(row, 'rejected', '原作者已下架此技能。')
+                changes[self._suggestion_path(row['id'])] = row
+                affected.add(row['author_id'])
+        self._save(changes)
+        for author in affected:
+            self._collect_blobs(author)
         if removed['source'].get('file_storage') == 'blobs':
             self._collect_blobs(member_id)
         return {}
@@ -1446,36 +1614,140 @@ class HubStore:
         items = self._deliverable_dir(member_id) / 'items'
         return {p.stem: json.loads(p.read_text(encoding='utf-8')) for p in sorted(items.glob('*.json'))}
 
-    def upload_slot(self, member_id):
+    def _inflight_bytes(self):
+        return getattr(self, '_inflight_upload_bytes', 0)
+
+    def _inflight_by_member(self, member_id):
+        return getattr(self, '_inflight_member_bytes', {}).get(member_id, 0)
+
+    def _reserve_upload(self, member_id, incoming_bytes):
+        if incoming_bytes <= 0:
+            return
+        member_orphan = self._orphan_blob_bytes(member_id) + self._inflight_by_member(member_id)
+        if member_orphan + incoming_bytes > MAX_ORPHAN_BLOBS_BYTES:
+            self._collect_blobs(member_id, min_age=ORPHAN_BLOB_TTL_SECONDS)
+            member_orphan = self._orphan_blob_bytes(member_id) + self._inflight_by_member(member_id)
+        if member_orphan + incoming_bytes > MAX_ORPHAN_BLOBS_BYTES:
+            raise HubError(507, '当前成员未完成的临时上传文件过多，请稍后重试。')
+        total_orphan = self._total_orphan_blob_bytes() + self._inflight_bytes()
+        if total_orphan + incoming_bytes > MAX_SUGGESTION_TOTAL_BYTES:
+            for member in self._members():
+                self._collect_blobs(member['id'], min_age=ORPHAN_BLOB_TTL_SECONDS)
+            total_orphan = self._total_orphan_blob_bytes() + self._inflight_bytes()
+        if total_orphan + incoming_bytes > MAX_SUGGESTION_TOTAL_BYTES:
+            raise HubError(507, '分享站临时上传空间已满，请稍后重试。')
+        self._inflight_upload_bytes = self._inflight_bytes() + incoming_bytes
+        per = getattr(self, '_inflight_member_bytes', None)
+        if per is None:
+            per = {}
+            self._inflight_member_bytes = per
+        per[member_id] = per.get(member_id, 0) + incoming_bytes
+
+    def release_upload(self, member_id, reserved_bytes):
+        if reserved_bytes <= 0:
+            return
+        self._inflight_upload_bytes = max(0, self._inflight_bytes() - reserved_bytes)
+        per = getattr(self, '_inflight_member_bytes', None)
+        if per and member_id in per:
+            remaining = per[member_id] - reserved_bytes
+            if remaining > 0:
+                per[member_id] = remaining
+            else:
+                per.pop(member_id, None)
+
+    def upload_slot(self, member_id, incoming_bytes=0):
         """A private temporary file next to the blobs, so the final rename stays on one disk."""
+        if incoming_bytes > 0:
+            self._reserve_upload(member_id, incoming_bytes)
         folder = self._deliverable_dir(member_id) / 'uploads'
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, name = tempfile.mkstemp(prefix='.blob-', dir=folder)
-        return os.fdopen(fd, 'wb'), Path(name)
+        try:
+            fd, name = tempfile.mkstemp(prefix='.blob-', dir=folder)
+            return os.fdopen(fd, 'wb'), Path(name)
+        except OSError:
+            if incoming_bytes > 0:
+                self.release_upload(member_id, incoming_bytes)
+            raise
 
     def _blob_dir(self, member_id):
         return self._deliverable_dir(member_id) / 'blobs'
 
-    def _put_blob(self, member_id, digest, temporary):
-        blobs = self._blob_dir(member_id)
-        blobs.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.replace(temporary, blobs / digest)
-        return {'sha256': digest, 'size': (blobs / digest).stat().st_size}
-
-    def _collect_blobs(self, member_id):
-        # A parallel upload of the same member may lose a blob here; its list then gets 409 with
-        # `missing` and the uploader sends those again, so no reservation is kept.
-        blobs = self._blob_dir(member_id)
+    def _used_blobs(self, member_id):
         used = {f['sha256'] for row in self._deliverables(member_id).values() for f in row['files'].values()}
+        for suggestion in self._suggestions():
+            if suggestion['author_id'] == member_id and suggestion['status'] == 'pending':
+                used.update(f['sha256'] for f in suggestion['files'].values())
         for name, row in self._listings(member_id).items():
             if row['source'].get('file_storage') == 'blobs':
                 used.update(f['sha256'] for f in self._package(member_id, name)['files'].values())
+        return used
+
+    def _orphan_blob_bytes(self, member_id, used=None):
+        used = self._used_blobs(member_id) if used is None else used
+        total = 0
+        for folder in (self._blob_dir(member_id), self._deliverable_dir(member_id) / 'uploads'):
+            if not folder.is_dir():
+                continue
+            for entry in folder.iterdir():
+                if entry.is_file() and (folder.name == 'uploads' or entry.name not in used):
+                    try:
+                        total += entry.stat().st_size
+                    except FileNotFoundError:
+                        pass
+        return total
+
+    def _total_orphan_blob_bytes(self):
+        return sum(self._orphan_blob_bytes(member['id']) for member in self._members())
+
+    def _put_blob(self, member_id, digest, temporary, protect=()):
+        blobs = self._blob_dir(member_id)
+        blobs.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = blobs / digest
+        if not target.is_file():
+            protected = set(protect)
+            used = self._used_blobs(member_id) | protected
+            orphan = self._orphan_blob_bytes(member_id, used)
+            if orphan > MAX_ORPHAN_BLOBS_BYTES:
+                self._collect_blobs(member_id, min_age=ORPHAN_BLOB_TTL_SECONDS, protect=protected)
+                orphan = self._orphan_blob_bytes(member_id, used)
+            if orphan > MAX_ORPHAN_BLOBS_BYTES:
+                self._collect_blobs(member_id, protect=protected)
+                orphan = self._orphan_blob_bytes(member_id, used)
+            if orphan > MAX_ORPHAN_BLOBS_BYTES:
+                raise HubError(507, '当前成员未完成的临时上传文件过多，请稍后重试。')
+            if not protected:
+                total_orphan = self._total_orphan_blob_bytes()
+                if total_orphan > MAX_SUGGESTION_TOTAL_BYTES:
+                    for member in self._members():
+                        self._collect_blobs(member['id'], min_age=ORPHAN_BLOB_TTL_SECONDS)
+                    total_orphan = self._total_orphan_blob_bytes()
+                if total_orphan > MAX_SUGGESTION_TOTAL_BYTES:
+                    raise HubError(507, '分享站临时上传空间已满，请稍后重试。')
+        os.replace(temporary, target)
+        return {'sha256': digest, 'size': target.stat().st_size}
+
+    def _collect_blobs(self, member_id, min_age=0, protect=()):
+        # A parallel upload of the same member may lose a blob here; its list then gets 409 with
+        # `missing` and the uploader sends those again, so no reservation is kept.
+        blobs = self._blob_dir(member_id)
+        used = self._used_blobs(member_id) | set(protect)
+        cutoff = (datetime.now(timezone.utc).timestamp() - min_age) if min_age > 0 else None
         for blob in (blobs.iterdir() if blobs.is_dir() else []):
             if blob.name not in used:
                 try:
+                    if cutoff is not None and blob.stat().st_mtime > cutoff:
+                        continue
                     blob.unlink(missing_ok=True)
-                except PermissionError:
+                except (PermissionError, FileNotFoundError):
                     pass  # Windows may still be serving the file. Revisit on the next write.
+        uploads = self._deliverable_dir(member_id) / 'uploads'
+        if uploads.is_dir() and min_age > 0:
+            for temp_file in uploads.iterdir():
+                try:
+                    if temp_file.is_file() and temp_file.stat().st_mtime <= cutoff:
+                        temp_file.unlink(missing_ok=True)
+                except (PermissionError, FileNotFoundError):
+                    pass
 
     def _check_blobs(self, member_id, entries):
         blobs = self._blob_dir(member_id)
@@ -1489,6 +1761,310 @@ class HubStore:
             raise HubError(409, '还有文件没有上传，请先上传这些内容。', {'missing': missing})
         if any((blobs / digest).stat().st_size != size for digest, size in sizes.items()):
             raise HubError(400, '文件的大小和上传的内容对不上，请重新上传。')
+
+    def _suggestion_path(self, identity):
+        return self.data / 'suggestions' / (identity + '.json')
+
+    def _suggestions(self):
+        for path in (self.data / 'suggestions').glob('*.json'):
+            yield json.loads(path.read_text(encoding='utf-8'))
+
+    def _suggestion(self, identity, member_id):
+        path = self._suggestion_path(identity)
+        if not path.is_file():
+            raise HubError(404, '找不到这条改进建议。')
+        row = json.loads(path.read_text(encoding='utf-8'))
+        if member_id not in (row['author_id'], row['target_member_id']):
+            raise HubError(403, '只有提交人和原作者能查看这条建议。')
+        return row
+
+    def _suggestion_listing(self, row):
+        listing = self._listings(row['target_member_id']).get(row['skill_name'])
+        return listing if listing and listing['source']['kind'] == 'files' else {}
+
+    def _suggestion_info(self, row, member_id, listing):
+        current = listing.get('source', {}).get('version', '')
+        return {**{k: v for k, v in row.items() if k not in {'files', 'review_text', 'review_diff'}},
+                'current_version': current, 'stale': current != row['base_version'],
+                'role': 'incoming' if row['target_member_id'] == member_id else 'outgoing'}
+
+    def _list_suggestions(self, member_id, role, status, skill):
+        rows = []
+        for row in self._suggestions():
+            if (member_id not in (row['target_member_id'], row['author_id']) or
+                    (role == 'incoming' and row['target_member_id'] != member_id) or
+                    (role == 'outgoing' and row['author_id'] != member_id) or
+                    (status == 'pending' and row['status'] != status) or (skill and row['skill_name'] != skill)):
+                continue
+            rows.append(self._suggestion_info(row, member_id, self._suggestion_listing(row)))
+        return {'suggestions': sorted(rows, key=lambda r: r['created_at'], reverse=True)}
+
+    def _suggestion_capacity(self, author, target, name, files):
+        sizes = {(author, f['sha256']): f['size'] for f in files.values()}
+        stored = per_skill = per_author = 0
+        finished = []
+        for row in self._suggestions():
+            stored += 1
+            if row['status'] != 'pending':
+                finished.append((row['created_at'], row['id']))
+                continue
+            per_skill += (row['target_member_id'], row['skill_name']) == (target, name)
+            per_author += row['author_id'] == author
+            sizes.update(((row['author_id'], f['sha256']), f['size']) for f in row['files'].values())
+        if per_skill >= MAX_SUGGESTIONS_PER_SKILL or per_author >= MAX_SUGGESTIONS_PER_MEMBER:
+            raise HubError(413, '待审核建议已满，请先处理已有建议。')
+        if sum(sizes.values()) > MAX_SUGGESTION_TOTAL_BYTES:
+            raise HubError(413, '分享站待审核的文件已达容量上限，请先处理已有建议。')
+        excess = max(0, stored + 1 - MAX_SUGGESTIONS_TOTAL)
+        if excess > len(finished):
+            raise HubError(413, '分享站待审核建议已满，请先处理已有建议。')
+        return {self._suggestion_path(identity): None for _, identity in sorted(finished)[:excess]}
+
+    def _check_suggestion_secrets(self, author, files):
+        for relative, entry in files.items():
+            name = Path(relative).name.lower()
+            if any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_NAMES):
+                raise HubError(400, f'文件「{relative}」文件名像账号或密钥文件，已拦下，不能提交。')
+            raw = self._verified_bytes(author, entry)
+            if SECRET_CONTENT.search(raw.decode('utf-8', errors='replace')):
+                raise HubError(400, f'文件「{relative}」内容疑似含有密钥或密码，已拦下，不能提交。')
+
+    def _verified_bytes(self, member, file):
+        try:
+            with (self._blob_dir(member) / file['sha256']).open('rb') as stream:
+                raw = stream.read(file['size'] + 1)
+        except FileNotFoundError:
+            raise HubError(409, '建议里的文件缺失，请重新上传。') from None
+        if len(raw) != file['size'] or hashlib.sha256(raw).hexdigest() != file['sha256']:
+            raise HubError(409, '建议里的文件未通过完整性核对，请重新上传。')
+        return raw
+
+    def _suggestion_metadata(self, author, files, name):
+        raw = self._verified_bytes(author, files['SKILL.md'])
+        try:
+            info = metadata(raw.decode('utf-8'))
+        except (ValueError, AttributeError):
+            raise HubError(400, 'SKILL.md 的说明格式不正确。') from None
+        if info.get('name') != name:
+            raise HubError(400, '技能文件里的名称和上架的名称不一致。')
+        return info
+
+    def _create_suggestion(self, member, data):
+        target, name, base = (data.get(k) for k in ('target_member_id', 'skill_name', 'base_version'))
+        if not isinstance(target, str) or not re.fullmatch('[0-9a-f]{32}', target):
+            raise HubError(400, '原作者编号不正确。')
+        if not isinstance(name, str) or not re.fullmatch(NAME, name):
+            raise HubError(400, '技能名称不正确。')
+        listing = self._listings(target).get(name)
+        if not listing:
+            raise HubError(404, '原技能已下架。')
+        if listing['source']['kind'] != 'files':
+            raise HubError(400, FILES_ONLY)
+        author = member['id']
+        if author == target:
+            raise HubError(403, OWN_SKILL)
+        if not isinstance(base, str) or not re.fullmatch('[0-9a-f]{64}', base):
+            raise HubError(400, '请重新预览并核对原技能版本。')
+        message = suggestion_text(data.get('message'))
+        try:
+            files = clean_skill_manifest(data.get('files'))
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
+        version = package_version(files)
+        if version == listing['source']['version']:
+            raise HubError(409, NO_CHANGES)
+        changes = self._suggestion_capacity(author, target, name, files)
+        self._check_blobs(author, files.values())
+        self._check_suggestion_secrets(author, files)
+        self._suggestion_metadata(author, files, name)
+        base_revision = (listing.get('revision', 1) if base == listing['source']['version']
+                         else (listing.get('version_revisions') or {}).get(base))
+        stamp = now()
+        row = {'id': secrets.token_hex(16), 'target_member_id': target,
+               'target_member_name': next(m['name'] for m in self._members() if m['id'] == target),
+               'author_id': author, 'author_name': member['name'], 'skill_name': name,
+               'card_key': listing_key(target, listing), 'base_version': base, 'base_revision': base_revision,
+               'version': version,
+               'files': files, 'message': message, 'file_count': len(files), 'size': sum(f['size'] for f in files.values()),
+               'status': 'pending', 'created_at': stamp, 'updated_at': stamp, 'reviewed_at': '',
+               'review_note': '', 'published_version': ''}
+        changes[self._suggestion_path(row['id'])] = row
+        self._save(changes)
+        return self._suggestion_info(row, author, listing)
+
+    def _published_files(self, target, name):
+        files = self._package(target, name)['files']
+        if isinstance(files, list):
+            inline = {r['path']: r['content'] for r in files}
+            return skill_manifest(files), lambda path: base64.b64decode(inline[path])
+        return files, lambda path: self._verified_bytes(target, files[path])
+
+    def _suggestion_detail(self, row, member_id):
+        listing = self._suggestion_listing(row)
+        info = self._suggestion_info(row, member_id, listing)
+        revision = listing.get('revision', 1) if listing else None
+        if row['status'] != 'pending' and isinstance(row.get('review_diff'), dict):
+            return {**info, 'current_revision': revision,
+                    'diff': {**row['review_diff'], 'stale': info['stale'],
+                             'current_version': info['current_version'], 'current_revision': revision}}
+        old, read_old = self._published_files(row['target_member_id'], row['skill_name']) if listing else ({}, None)
+        def read_new(path):
+            file = row['files'][path]
+            if row['status'] != 'pending':
+                digest = file['sha256']
+                review_text = row.get('review_text', {})
+                if digest in review_text:
+                    text = review_text[digest]
+                    return text.encode('utf-8') if text is not None else b'\0'
+                if (self._blob_dir(row['target_member_id']) / digest).is_file():
+                    return self._verified_bytes(row['target_member_id'], file)
+                if not (self._blob_dir(row['author_id']) / digest).is_file():
+                    raise FileNotFoundError
+            return self._verified_bytes(row['author_id'], file)
+        comparison = suggestion_diff(old, row['files'], read_old, read_new)
+        return {**info, 'current_revision': revision, 'diff': {**comparison, 'stale': info['stale'],
+                'current_version': info['current_version'], 'current_revision': revision}}
+
+    def _finish_suggestion(self, row, status, note):
+        # Retain bounded text for future comparisons, even after both members publish other versions.
+        # A null entry marks binary content. Original uploads can now be collected.
+        review_text = {}
+        remaining = MAX_DIFF_TOTAL_CHARS
+        for file in row['files'].values():
+            digest = file['sha256']
+            if digest in review_text or not remaining or file['size'] > MAX_DIFF_FILE_BYTES:
+                continue
+            try:
+                raw = self._verified_bytes(row['author_id'], file)
+                text = None if b'\0' in raw else raw.decode('utf-8')
+            except UnicodeDecodeError:
+                text = None
+            except HubError:
+                continue  # A damaged upload can still be rejected or removed.
+            if text is None or len(text) <= remaining:
+                review_text[digest] = text
+                remaining -= len(text) if text else 0
+        stamp = now()
+        row.update(status=status, review_note=note, reviewed_at=stamp, updated_at=stamp, review_text=review_text)
+
+    def _review_suggestion(self, row, member_id, action, data):
+        owner = row['author_id'] if action == 'withdraw' else row['target_member_id']
+        if owner != member_id:
+            raise HubError(403, '只有提交人能撤回建议。' if action == 'withdraw' else '只有原作者能审核建议。')
+        if row['status'] != 'pending':
+            raise HubError(409, '这条建议已经处理过了。')
+        note = suggestion_text(data.get('review_note', ''), review=True)
+        if action == 'accept':
+            return self._accept_suggestion(row, note, data)
+        if action == 'withdraw':
+            self._save({self._suggestion_path(row['id']): None})
+            self._collect_blobs(member_id)
+            return {'withdrawn': True, 'id': row['id']}
+        listing = self._suggestion_listing(row)
+        if listing:
+            old_files, read_old = self._published_files(row['target_member_id'], row['skill_name'])
+            try:
+                row['review_diff'] = suggestion_diff(
+                    old_files, row['files'], read_old,
+                    lambda path: self._verified_bytes(row['author_id'], row['files'][path]))
+            except HubError:
+                pass
+        self._finish_suggestion(row, 'rejected', note)
+        self._save({self._suggestion_path(row['id']): row})
+        self._collect_blobs(row['author_id'])
+        return {'suggestion': self._suggestion_info(row, member_id, listing),
+                'message': '已拒绝这条改进建议。'}
+
+    def _accept_suggestion(self, row, note, data):
+        target, author, name = row['target_member_id'], row['author_id'], row['skill_name']
+        listings = self._listings(target)
+        listing = listings.get(name, {})
+        if listing.get('source', {}).get('kind') != 'files':
+            raise HubError(404, '原技能已下架或已改用其他来源。')
+        current, version = listing['source']['version'], row['version']
+        stale = row['base_version'] != current
+        expected = data.get('expected_current_version')
+        if ((stale and (data.get('allow_stale') is not True or not isinstance(expected, str) or expected != current)) or
+                ('expected_current_version' in data and expected != current)):
+            raise HubError(409, '原作者已更新技能，请核对与当前版本的改动后再接受。',
+                           {'stale': True, 'current_version': current, 'base_version': row['base_version']})
+        if current == version:
+            raise HubError(409, '建议内容与线上当前版本完全一致。')
+        try:
+            files = clean_skill_manifest(row['files'])
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
+        self._check_suggestion_secrets(author, files)
+        raw_desc = self._suggestion_metadata(author, files, name).get('description')
+        description = _clean_description(raw_desc) if raw_desc else ''
+        size = sum(file['size'] for file in files.values())
+        if version != package_version(files) or row['size'] != size:
+            raise HubError(409, '建议里的文件和提交时的记录不一致，请重新提交。')
+        old_files, read_old = self._published_files(target, name)
+        if description and listing.get('description'):
+            previous = _clean_description(metadata(read_old('SKILL.md').decode('utf-8', errors='replace')).get('description', ''))
+            if listing['description'] != previous:
+                description = ''  # The author supplied a separate store description.
+        if description:
+            listing['description'] = description
+        review_diff = suggestion_diff(old_files, files, read_old, lambda path: self._verified_bytes(author, files[path]))
+        use_inline = len(files) <= INLINE_MAX_FILES and size <= INLINE_MAX_SIZE
+        source = {'kind': 'files', 'version': version, 'file_count': len(files), 'size': size}
+        if not use_inline:
+            source['file_storage'] = 'blobs'
+        new_revision = listing.get('revision', 1) + 1
+        ver_revs = dict(listing.get('version_revisions') or {})
+        ver_revs.setdefault(current, listing.get('revision', 1))
+        ver_revs[version] = new_revision
+        if len(ver_revs) > 30:
+            ver_revs = dict(list(ver_revs.items())[-30:])
+        listing.update(created_at=listing.get('created_at', listing['updated_at']), updated_at=now(),
+                       revision=new_revision, published_via='suggestion', version_revisions=ver_revs, source=source)
+        try:
+            clean_listing(listing, packaged=True)
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
+        self._finish_suggestion(row, 'accepted', note)
+        row['published_version'] = version
+        row['review_diff'] = review_diff
+        if use_inline:
+            inline_files = [
+                {'path': path, 'content': base64.b64encode(self._verified_bytes(author, file)).decode('ascii'),
+                 'executable': file['executable']}
+                for path, file in sorted(files.items())
+            ]
+            package_payload = {'name': name, 'version': version, 'files': inline_files}
+        else:
+            package_payload = {'name': name, 'version': version, 'files': files}
+        changes = {self.data / 'packages' / target / (name + '.json'): package_payload,
+                   self._listing_path(target): {'listings': listings}, self._suggestion_path(row['id']): row}
+        try:
+            if not use_inline:
+                by_sha = {f['sha256']: f for f in files.values()}
+                protected = set(by_sha)
+                for digest, file in by_sha.items():
+                    raw = self._verified_bytes(author, file)
+                    if (self._blob_dir(target) / digest).is_file():
+                        try:
+                            self._verified_bytes(target, file)
+                        except HubError:
+                            pass  # Repair the author's damaged copy with verified bytes.
+                        else:
+                            continue
+                    stream, temporary = self.upload_slot(target)
+                    try:
+                        with stream:
+                            stream.write(raw)
+                        self._put_blob(target, digest, temporary, protect=protected)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                self._check_blobs(target, files.values())
+            self._save(changes)
+        finally:
+            self._collect_blobs(target)
+        self._collect_blobs(author)
+        return {'suggestion': self._suggestion_info(row, target, listing), 'version': version,
+                'revision': listing['revision'], 'message': '已接受改进建议并上架新版。'}
 
     def _put_deliverable(self, member_id, identity, data):
         try:
@@ -1629,7 +2205,7 @@ class Handler(BaseHTTPRequestHandler):
         store = self.server.store
         with store.locked():
             member = store._authenticate(self.headers.get('Authorization', ''))
-            stream, temporary = store.upload_slot(member['id'])
+            stream, temporary = store.upload_slot(member['id'], incoming_bytes=length)
         try:
             hasher = hashlib.sha256()
             with stream:
@@ -1652,6 +2228,8 @@ class Handler(BaseHTTPRequestHandler):
                 return store._put_blob(member['id'], digest, temporary)
         finally:
             temporary.unlink(missing_ok=True)
+            with store.locked():
+                store.release_upload(member['id'], length)
 
     def _serve_deliverable(self, member_id, identity, path):
         store = self.server.store
@@ -1770,6 +2348,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             path = address.path
             listing = re.fullmatch(r'/api/listings/me/(' + NAME + ')', path)
+            suggestion = re.fullmatch(r'/api/suggestions/([0-9a-f]{32})(?:/(accept|reject))?', path)
             package = re.fullmatch(r'/api/packages/([0-9a-f]{32})/(' + NAME + r')(?:/([0-9a-f]{64}))?', path)
             blob = re.fullmatch(r'/api/blobs/me/([0-9a-f]{64})', path)
             feedback_att = re.fullmatch(r'/api/feedback/([0-9a-f]{32})/attachments/([0-9a-f]{64})', path)
@@ -1779,7 +2358,15 @@ class Handler(BaseHTTPRequestHandler):
             served = re.fullmatch(r'/api/deliverables/([0-9a-f]{32})/' + identity + '/(.+)', path)
             query = urllib.parse.parse_qs(address.query, keep_blank_values=True)
             activity_days = 30
-            if path == '/api/activity' and self.command == 'GET' and '?' in self.path:
+            if path == '/api/suggestions' and self.command == 'GET':
+                role = query.get('role', ['all'])[0]
+                status = query.get('status', ['pending'])[0]
+                skill = query.get('skill', [''])[0]
+                if (query.keys() - {'role', 'status', 'skill'} or any(len(v) != 1 for v in query.values()) or
+                        role not in {'all', 'incoming', 'outgoing'} or status not in {'all', 'pending'} or
+                        ('skill' in query and not re.fullmatch(NAME, skill))):
+                    raise HubError(400, '建议筛选条件不正确，请核对角色、状态和技能名称。')
+            elif path == '/api/activity' and self.command == 'GET' and '?' in self.path:
                 if set(query) != {'days'} or len(query['days']) != 1:
                     raise HubError(404, '没有这个分享站地址，请核对后重试。')
                 raw_days = query['days'][0]
@@ -1793,7 +2380,8 @@ class Handler(BaseHTTPRequestHandler):
                     not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
                 raise HubError(404, '没有这个分享站地址，请核对后重试。')
             allowed = ({'POST'} if path in {'/api/join', '/api/feedback', '/api/feedback/with-attachments'} else
-                       {'GET', 'POST'} if path == '/api/activity' else
+                       {'GET', 'POST'} if path in {'/api/activity', '/api/suggestions'} else
+                       {'POST'} if suggestion and suggestion[2] else {'GET', 'DELETE'} if suggestion else
                        {'GET'} if path in {'/api/me', '/api/catalog'} or package or deliverable or served or feedback_att else
                        {'PUT'} if path in {'/api/listings/me', '/api/installs/me', '/api/packs/me'} or blob else
                        {'DELETE'} if listing else
@@ -1834,6 +2422,8 @@ class Handler(BaseHTTPRequestHandler):
                 any(value.strip() != '0' for value in self.headers.get_all('Content-Length', []))))
             data = (self._read_feedback_body()
                     if is_feedback else
+                    self._read_body(MAX_SUGGESTION_BODY, '建议内容超过 1 MB，请减少文件数量。')
+                    if self.command == 'POST' and (suggestion or path == '/api/suggestions') else
                     self._read_body(MAX_ACTIVITY_BODY, '活跃上报内容超过 1024 字节。')
                     if path == '/api/activity' and self.command == 'POST' else
                     self._read_body(MAX_INSTALL_BODY, '上报内容超过 64 KB，请缩短后重试。')
@@ -1869,7 +2459,15 @@ class Handler(BaseHTTPRequestHandler):
                               'feedback_supported': True, 'feedback_configured': bool(self.server.feedback_webhook),
                               'feedback_attachments_supported': True,
                               'skill_file_upload': True,
+                              'suggestions_supported': True,
                               'replaces_supported': True}
+                elif path == '/api/suggestions':
+                    result = (store._create_suggestion(member, data) if self.command == 'POST' else
+                              store._list_suggestions(member['id'], role, status, skill))
+                elif suggestion:
+                    row = store._suggestion(suggestion[1], member['id'])
+                    result = (store._suggestion_detail(row, member['id']) if self.command == 'GET' else
+                              store._review_suggestion(row, member['id'], suggestion[2] or 'withdraw', data or {}))
                 elif is_feedback:
                     if not self.server.feedback_webhook:
                         raise HubError(503, '管理员尚未启用飞书反馈接收，请复制或导出诊断信息。')
@@ -1936,9 +2534,11 @@ class HubServer(ThreadingHTTPServer):
         self.feedback_webhook = feedback.webhook_url(feedback_webhook)
         self.store = HubStore(data, github_refresh_hours=github_refresh_hours)
         with self.store.locked():
-            self.store._members()
+            members = self.store._members()
             self.store._cleanup_feedback_orphans()
             self.store._cleanup_expired_activity()
+            for member in members:
+                self.store._collect_blobs(member['id'], min_age=ORPHAN_BLOB_TTL_SECONDS)
         super().__init__((host, port), Handler)
 
 
