@@ -131,11 +131,12 @@ def main():
                              help='只看收到的、发出的，或两者都看')
     suggestions.add_argument('--all', action='store_true', help='包括已处理的建议')
     suggestions.add_argument('--skill', default='', help='只看这个技能')
-    review = team_commands.add_parser('review', help='查看文件改动，接受或拒绝建议')
+    review = team_commands.add_parser('review', help='查看文件改动，接受、拒绝或撤回建议')
     review.add_argument('id', help='建议编号')
     action = review.add_mutually_exclusive_group()
     action.add_argument('--accept', action='store_true', help='接受建议并上架新版')
     action.add_argument('--reject', action='store_true', help='拒绝建议')
+    action.add_argument('--withdraw', action='store_true', help='撤回自己发出、还没审核的建议')
     review.add_argument('--note', default='', help='给提交人的审核说明')
     review.add_argument('--allow-stale', action='store_true', help='确认用建议中的文件替换已更新的线上版本')
     review.add_argument('--expected-version', default='', help='确认覆盖时核对过的当前线上版本编号')
@@ -160,11 +161,32 @@ def main():
     team_doc_list = team_commands.add_parser('doc-list', help='查看团队分享站里的分享文档')
     team_doc_remove = team_commands.add_parser('doc-remove', help='删除自己上传的分享文档')
     team_doc_remove.add_argument('id', help='文档编号')
+    team_doc_show = team_commands.add_parser('doc-show', help='阅读一篇分享文档的正文和附件清单')
+    team_doc_show.add_argument('id', help='文档编号或标题')
+    team_doc_show.add_argument('--author', help='有重名时指定发布人')
+    team_deliverable_list = team_commands.add_parser('deliverable-list', help='查看团队分享站里的成品')
+    discussion_types = ('skill', 'deliverable', 'doc')
+    team_comments = team_commands.add_parser(
+        'comments', help='查看讨论区留言；不写对象时列出哪些技能、成品和分享文档下有留言')
+    team_comments.add_argument('type', nargs='?', choices=discussion_types,
+                               help='skill（技能）、deliverable（成品）或 doc（分享文档）')
+    team_comments.add_argument('target', nargs='?', help='技能名称或中文名、成品编号、文档编号或标题')
+    team_comments.add_argument('--author', help='有重名时指定上架人或发布人')
+    team_comment = team_commands.add_parser('comment', help='在技能、成品或分享文档下留言或回复')
+    team_comment.add_argument('type', choices=discussion_types,
+                              help='skill（技能）、deliverable（成品）或 doc（分享文档）')
+    team_comment.add_argument('target', help='技能名称或中文名、成品编号、文档编号或标题')
+    team_comment.add_argument('body', help='留言内容')
+    team_comment.add_argument('--reply-to', default='', metavar='留言编号', help='回复这条留言')
+    team_comment.add_argument('--author', help='有重名时指定上架人或发布人')
+    team_comment_delete = team_commands.add_parser('comment-delete', help='删除自己的留言，或自己上架内容下的留言')
+    team_comment_delete.add_argument('id', help='留言编号')
     for command in (team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove,
-                    suggest, review, team_doc, team_doc_remove):
+                    suggest, review, team_doc, team_doc_remove, team_comment, team_comment_delete):
         command.add_argument('--yes', action='store_true')
     for command in (team_list, team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove,
-                    suggest, suggestions, review, team_doc, team_doc_list, team_doc_remove):
+                    suggest, suggestions, review, team_doc, team_doc_list, team_doc_remove,
+                    team_doc_show, team_deliverable_list, team_comments, team_comment, team_comment_delete):
         command.add_argument('--json', action='store_true')
     checking = commands.add_parser('check-updates', help='只读检查技能更新')
     checking.add_argument('--json', action='store_true')
@@ -352,6 +374,12 @@ def main():
             return [(name, text) for name, _, text in result]
         def named(title, name):
             return f'{title}（{name}）' if title and title != name else name
+        def local_time(stamp):
+            from datetime import datetime
+            try:
+                return datetime.fromisoformat(stamp.replace('Z', '+00:00')).astimezone().strftime('%Y-%m-%d %H:%M')
+            except ValueError:
+                return stamp[:16]
         try:
             if args.team_command == 'list':
                 result = team.catalog(home)
@@ -364,9 +392,12 @@ def main():
                 result = team.suggestions_list(home, args.role, 'all' if args.all else 'pending', args.skill)
             elif args.team_command == 'review':
                 result = team.suggestion_detail(home, args.id)
-                if args.accept or args.reject:
+                if args.accept or args.reject or args.withdraw:
                     if not args.yes:
-                        result.update(needs_confirmation=True, action='accept' if args.accept else 'reject')
+                        result.update(needs_confirmation=True,
+                                      action='accept' if args.accept else 'reject' if args.reject else 'withdraw')
+                    elif args.withdraw:
+                        result = {**team.suggestion_withdraw(home, args.id), 'message': '已撤回这条改进建议。'}
                     elif args.accept:
                         if result.get('stale'):
                             if not args.allow_stale or not args.expected_version:
@@ -410,6 +441,42 @@ def main():
                 result = team.list_docs(home)
             elif args.team_command == 'doc-remove':
                 result = team.remove_doc(home, args.id, args.yes)
+            elif args.team_command == 'doc-show':
+                target = team.discussion_target(home, 'doc', args.id, args.author)
+                result = team.doc_detail(home, target['member']['id'], target['id'])
+            elif args.team_command == 'deliverable-list':
+                result = team.list_deliverables(home)
+            elif args.team_command == 'comments':
+                if args.type is None:
+                    result = team.discussion_overview(home)
+                elif not args.target:
+                    parser.error('请写上要看的技能名称、成品编号或文档编号。')
+                else:
+                    target = team.discussion_target(home, args.type, args.target, args.author)
+                    result = {**team.discussions_list(home, args.type, target['target_key']),
+                              'title': target['title']}
+            elif args.team_command == 'comment':
+                body = team.team_hub.clean_discussion_body(args.body)
+                target = team.discussion_target(home, args.type, args.target, args.author)
+                thread = team.discussions_list(home, args.type, target['target_key'])
+                if not thread['discussions_supported']:
+                    raise ValueError(team.DISCUSSIONS_UNSUPPORTED)
+                reply = next((c for c in thread['comments'] if c['id'] == args.reply_to), None)
+                if args.reply_to and reply is None:
+                    raise ValueError(f'这条讨论里没有编号为 {args.reply_to} 的留言，可以先运行 '
+                                     f'skill-pilot team comments 查看。')
+                if args.yes:
+                    result = {**team.discussion_post(home, args.type, target['target_key'], body, args.reply_to),
+                              'title': target['title']}
+                else:
+                    where = f'{team.DISCUSSION_LABELS[args.type]}「{target["title"]}」'
+                    result = {'needs_confirmation': True, 'target_type': args.type,
+                              'target_key': target['target_key'], 'title': target['title'],
+                              'reply_to_id': args.reply_to, 'body': body,
+                              'message': (f'将在{where}下回复 {reply["author"]["name"]} 的留言' if reply else
+                                          f'将在{where}下发表留言') + '，团队成员都能看到。'}
+            elif args.team_command == 'comment-delete':
+                result = team.discussion_delete(home, args.id, confirmed=args.yes)
             else:
                 result = team.install_named(home, args.name, args.author, args.agent, args.yes,
                                             replace_actions=args.replace_action)
@@ -455,7 +522,8 @@ def main():
                 for item in result.get('blocked', []):
                     print(f'不上传 {item["path"]}：{item["reason"]}')
                 if result.get('action'):
-                    print('将接受建议并上架新版。' if args.accept else '将拒绝这条建议。')
+                    print({'accept': '将接受建议并上架新版。', 'reject': '将拒绝这条建议。',
+                           'withdraw': '将撤回这条建议，原作者就看不到了。'}[result['action']])
             elif args.team_command in {'deliverable', 'deliverable-remove'}:
                 print(result['message'])
                 for item in result.get('blocked', []):
@@ -479,6 +547,58 @@ def main():
                     for row in result['docs']:
                         cat = f'[{row["category"]}] ' if row.get('category') else ''
                         print(f'{cat}{row["title"]}（编号：{row["id"]}，{row["member"]["name"]} 发布，{row["updated_at"][:10]}）')
+            elif args.team_command == 'doc-show':
+                cat = f'[{result["category"]}] ' if result.get('category') else ''
+                print(f'{cat}{result["title"]}（编号：{result["id"]}，{result["member"]["name"]} 发布，'
+                      f'更新于 {local_time(result["updated_at"])}）')
+                if result.get('summary'):
+                    print('摘要：' + result['summary'])
+                print()
+                print(result['content'].rstrip())
+                if result['files']:
+                    print()
+                    print(f'附件 {len(result["files"])} 个：')
+                    for file in result['files']:
+                        print(f'  {file["path"]}（{file["size"] / 1024:.1f} KB）')
+                print()
+                print(f'查看留言：skill-pilot team comments doc {result["id"]}')
+            elif args.team_command == 'deliverable-list':
+                if not result['deliverables']:
+                    print('团队分享站里还没有成品。')
+                for row in result['deliverables']:
+                    version = f' {row["version"]}' if row.get('version') else ''
+                    print(f'{row["title"]}{version}（编号：{row["id"]}，{row["member"]["name"]} 上架，'
+                          f'{row["updated_at"][:10]}）' + (f'  {row["summary"]}' if row.get('summary') else ''))
+            elif args.team_command == 'comments':
+                if not result['discussions_supported']:
+                    print(team.DISCUSSIONS_UNSUPPORTED)
+                elif args.type is None:
+                    if not result['targets']:
+                        print('讨论区里还没有留言。')
+                    for row in result['targets']:
+                        print(f'{team.DISCUSSION_LABELS[row["target_type"]]}「{named(row["title"], row["name"])}」：'
+                              f'{row["count"]} 条留言（skill-pilot team comments {row["target_type"]} {row["name"]}）')
+                elif not result['comments']:
+                    print(f'「{result["title"]}」下还没有留言。')
+                else:
+                    print(f'「{result["title"]}」的讨论，共 {result["count"]} 条：')
+                    for row in result['comments']:
+                        print()
+                        print(f'{row["author"]["name"]}  {local_time(row["created_at"])}  编号 {row["id"]}' +
+                              ('（可删除）' if row['can_delete'] else ''))
+                        if row['reply_to_deleted']:
+                            print('  回复的留言已删除')
+                        elif row['reply_to_id']:
+                            print(f'  回复 {row["reply_to_author"]}：{row["reply_to_excerpt"]}')
+                        for line in row['body'].splitlines():
+                            print('  ' + line)
+            elif args.team_command == 'comment':
+                print(result['message'])
+                print('  ' + (result['body'] if 'body' in result else result['comment']['body']).replace('\n', '\n  '))
+                if 'comment' in result:
+                    print(f'  留言编号：{result["comment"]["id"]}')
+            elif args.team_command == 'comment-delete':
+                print(result['message'])
             elif args.team_command == 'list':
                 for card in result['cards']:
                     authors = '、'.join(dict.fromkeys(row['member']['name'] for row in card['listings']))

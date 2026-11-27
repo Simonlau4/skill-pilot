@@ -471,6 +471,16 @@ class CoCreationTests(unittest.TestCase):
         rows = self.command(self.b, 'suggestions', '--all', '--role', 'outgoing')['suggestions']
         self.assertEqual({r['status'] for r in rows}, {'rejected', 'accepted'})
 
+    def test_cli_withdraw_own_suggestion(self):
+        identity = self.propose()
+        self.assertEqual(self.command(self.b, 'review', identity, '--withdraw', status=2)['action'], 'withdraw')
+        self.assertIn('将撤回这条建议', self.command(self.b, 'review', identity, '--withdraw', status=2, as_json=False))
+        self.assertEqual(len(self.command(self.home, 'suggestions', '--role', 'incoming')['suggestions']), 1)
+        self.assertEqual(self.command(self.home, 'review', identity, '--withdraw', '--yes', status=1)['error'],
+                         '只有提交人能撤回建议。')
+        self.assertTrue(self.command(self.b, 'review', identity, '--withdraw', '--yes')['withdrawn'])
+        self.assertEqual(self.command(self.home, 'suggestions', '--all')['suggestions'], [])
+
     def test_r1_security_and_stale_base_guards(self):
         # Collaborator with unmodified v1 cannot submit a rollback suggestion against author's v2.
         self.original['source']['files'].append(file('author_v2.txt', '新版内容'))

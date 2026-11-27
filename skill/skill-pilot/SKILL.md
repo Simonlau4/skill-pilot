@@ -18,6 +18,7 @@ description: 管理本机各 agent 的技能，查看和导出技能清单、打
 - `skill-pilot import-config <文件> --json`（只预览，不下载、不改动）
 - `skill-pilot ui`（打开看板；首次打开会自动安装本管理技能。程序升级刷新或再次打开看板时同步未被手动修改的管理技能，保留助手分配和撤下状态；记入操作记录，可撤销，同一版撤销后不再自动装回）
 - `skill-pilot team list`（查看团队商店里的技能，标出本机已装、可以装和自己上架的；要先在看板「设置 → 团队分享」连接分享站）
+- 团队分享站只读查看：`skill-pilot team doc-list` 列出分享文档，`skill-pilot team doc-show <编号或标题>` 读正文和附件清单；`skill-pilot team deliverable-list` 列出成品；`skill-pilot team comments` 列出哪些技能、成品和文档下有留言，`skill-pilot team comments <skill|deliverable|doc> <技能名或编号>` 读某一处的全部留言（含留言编号）；`skill-pilot team suggestions` 看收到和发出的改进建议
 - `skill-pilot extra-sources`（查看主目录里另外放着技能的文件夹；`skill-pilot extra-sources <文件夹>` 记下，加 `--remove` 不再额外查看。不设置就不额外查看）
 
 看板不统计用量，没有“多久没用”的数据；用户问哪些技能不用时，只能列出各 agent 分到的技能和说明各占多少 Token（粗估），由用户自己判断。
@@ -47,6 +48,9 @@ description: 管理本机各 agent 的技能，查看和导出技能清单、打
 - 下架 `skill-pilot team unpublish <技能...>`；同事已经装上的不受影响。
 - 从团队商店安装 `skill-pilot team install <技能名或中文名> --agent <编号>`，所需技能一起装；有重名时加 `--author <上架人>`。装上和分配各记一条操作记录，都可以撤销。
 - 上架成品（做好的网页、演示）`skill-pilot team deliverable <文件夹> --id <编号> --title <名字> --skill <用到的技能>`，可重复 `--skill`，可加 `--version`、`--summary`、`--recipe <配方文件>`；首页必须是 `index.html`，疑似含密钥的文件不上传。只限团队成员在看板「团队」页打开，网页放在看板的隔离框里运行，读不到看板，也不能跳转或请求别的网站。下架用 `skill-pilot team deliverable-remove <编号>`。两条命令不带 `--yes` 只预览；上架会让全体同事看到，只在用户本次对话明确要求时执行。
+- 上传或更新分享文档 `skill-pilot team doc <Markdown 文件或文件夹>`，可加 `--id`（更新旧文档时填原编号）、`--title`、`--category`、`--summary`、`--asset <附件>`；疑似含密钥的文件不上传。删除自己的文档用 `skill-pilot team doc-remove <编号>`。
+- 留言 `skill-pilot team comment <skill|deliverable|doc> <技能名或编号> <内容>`，回复某条加 `--reply-to <留言编号>`；有重名时加 `--author`。留言全体同事都能看到，内容用用户的原话或经用户认可的文字，只在用户本次对话明确要求时发。删除自己的留言（或自己上架内容下的留言）用 `skill-pilot team comment-delete <留言编号>`，删除后不能恢复。
+- 撤回自己发出、还没审核的改进建议 `skill-pilot team review <建议编号> --withdraw`。
 
 把结果用中文大白话转述，说明涉及哪些技能、给谁加了或撤下了、能否撤销。不要直接贴一大块机器输出。失败就说明原因和仍未完成的部分，不声称成功。
 

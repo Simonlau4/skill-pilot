@@ -1672,9 +1672,11 @@ def discussion_post(home, target_type, target_key, body, reply_to_id='', expecte
     return {'comment': comment, 'count': count, 'message': '留言已发布。'}
 
 
-def discussion_delete(home, comment_id, expected_connection=''):
+def discussion_delete(home, comment_id, expected_connection='', confirmed=True):
     if not isinstance(comment_id, str) or not re.fullmatch(r'[0-9a-f]{32}', comment_id):
         raise ValueError('留言编号不正确。')
+    if not confirmed:
+        return {'id': comment_id, 'needs_confirmation': True, 'message': f'将删除留言 {comment_id}，删除后无法恢复。'}
     guard(Path(home) / '.skill-pilot', home)
     config = _connection(home)
     if expected_connection and _connection_version(config)[:16] != expected_connection:
@@ -1684,6 +1686,62 @@ def discussion_delete(home, comment_id, expected_connection=''):
         raise ValueError(DISCUSSIONS_UNSUPPORTED)
     data = _request(config, '/api/discussions/' + comment_id, 'DELETE')
     return {'deleted': True, 'id': comment_id, 'count': data.get('count', 0), 'message': '已删除留言。'}
+
+
+DISCUSSION_LABELS = {'skill': '技能', 'deliverable': '成品', 'doc': '分享文档'}
+
+
+def discussion_target(home, target_type, name, author=None):
+    """Resolve the skill name or title, deliverable id or doc id typed on the command line to its discussion."""
+    if target_type not in team_hub.DISCUSSION_TYPES:
+        raise ValueError('留言对象只能是 skill（技能）、deliverable（成品）或 doc（分享文档）。')
+    data = _catalog(_connection(home))
+    if target_type == 'skill':
+        card = _resolve_card(data['cards'], name, author)
+        title = next((r['title'] for r in card['listings'] if r.get('title')), card['listings'][0]['name'])
+        return {'target_type': 'skill', 'target_key': card['key'], 'title': title}
+    label = DISCUSSION_LABELS[target_type]
+    rows = [r for r in data.get('deliverables' if target_type == 'deliverable' else 'docs', [])
+            if name in {r['id'], r['key'], r['title']} and (author is None or r['member']['name'] == author)]
+    if not rows:
+        command = 'deliverable-list' if target_type == 'deliverable' else 'doc-list'
+        raise ValueError(f'分享站里没有找到{label}「{name}」，可以先运行 skill-pilot team {command} 查看。')
+    if len(rows) > 1:
+        authors = '、'.join(sorted({r['member']['name'] for r in rows}))
+        raise ValueError(f'分享站里有多个{label}「{name}」（发布人：{authors}），请用 --author 指定发布人。')
+    row = rows[0]
+    return {'target_type': target_type, 'target_key': row['key'], 'title': row['title'],
+            'id': row['id'], 'member': row['member']}
+
+
+def discussion_overview(home):
+    """Every skill, deliverable and doc that has comments, busiest first."""
+    config = _connection(home)
+    if not _me(config, capabilities=True)['discussions_supported']:
+        return {'discussions_supported': False, 'targets': []}
+    data = _catalog(config)
+    counts = data.get('discussion_counts', {})
+    targets = []
+    for card in data['cards']:
+        if counts.get(card['key']):
+            row = card['listings'][0]
+            targets.append({'target_type': 'skill', 'target_key': card['key'], 'name': row['name'],
+                            'title': next((r['title'] for r in card['listings'] if r.get('title')), row['name']),
+                            'count': counts[card['key']]})
+    for target_type, field in (('deliverable', 'deliverables'), ('doc', 'docs')):
+        for row in data.get(field, []):
+            if counts.get(row['key']):
+                targets.append({'target_type': target_type, 'target_key': row['key'], 'name': row['id'],
+                                'title': row['title'], 'author': row['member']['name'], 'count': counts[row['key']]})
+    targets.sort(key=lambda t: -t['count'])
+    return {'discussions_supported': True, 'targets': targets}
+
+
+def list_deliverables(home):
+    config = _connection(home)
+    member = _me(config)
+    return {'deliverables': [{**row, 'mine': row['member']['id'] == member['id']}
+                             for row in _catalog(config).get('deliverables', [])]}
 
 
 def tag_pack(home, names, title):
