@@ -33,6 +33,7 @@ PACKS_UNSUPPORTED = '分享站版本较旧，暂不能整理技能包，请联�
 REPLACES_UNSUPPORTED = '分享站版本较旧，暂不支持标记替代旧技能，请联系管理员更新分享站。'
 SUGGESTIONS_UNSUPPORTED = '分享站版本较旧，暂不支持提交改进建议，请联系管理员更新分享站。'
 DOCS_UNSUPPORTED = '分享站版本较旧，暂不支持分享文档，请联系管理员更新分享站。'
+DISCUSSIONS_UNSUPPORTED = '分享站版本较旧，暂不支持讨论区，请联系管理员更新分享站。'
 LOCAL_LABELS = {'mine': '我上架的', 'installed': '已装', 'update': '有新版', 'installable': '可以装',
                 'lark': '要用飞书官方方式装', 'conflict': '本机有同名技能', 'blocked': '暂时装不了',
                 'external': '由外部工具维护'}
@@ -109,6 +110,8 @@ def _request(config, path, method='GET', data=None):
         limit = team_hub.MAX_SUGGESTION_BODY
     if path.startswith('/api/docs/me/'):
         limit = team_hub.MAX_DOC_BODY
+    if path == '/api/discussions':
+        limit = team_hub.MAX_DISCUSSION_BODY
     if path in {'/api/feedback', '/api/feedback/with-attachments'}:
         has_attachments = isinstance(data, dict) and bool(data.get('attachments'))
         if has_attachments or path == '/api/feedback/with-attachments':
@@ -208,7 +211,8 @@ def _me(config, capabilities=False):
              'skill_file_upload': result.get('skill_file_upload') is True,
              'suggestions_supported': result.get('suggestions_supported') is True,
              'replaces_supported': result.get('replaces_supported') is True,
-             'docs_supported': result.get('docs_supported') is True} if capabilities else member)
+             'docs_supported': result.get('docs_supported') is True,
+             'discussions_supported': result.get('discussions_supported') is True} if capabilities else member)
 
 
 def status(home, config=None, strict=True):
@@ -558,6 +562,15 @@ def _catalog(config):
             catalog['docs'] = sorted(rows, key=lambda r: r['updated_at'], reverse=True)
         except (ValueError, TypeError, KeyError, AttributeError):
             catalog['docs'] = []
+    if 'discussion_counts' in data:
+        try:
+            raw_counts = data['discussion_counts']
+            if (not isinstance(raw_counts, dict) or
+                    any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in raw_counts.items())):
+                raise ValueError
+            catalog['discussion_counts'] = dict(raw_counts)
+        except (ValueError, TypeError):
+            catalog['discussion_counts'] = {}
     return catalog
 
 
@@ -1055,6 +1068,8 @@ def catalog(home):
                'suggestions_summary': data.get('suggestions_summary', {'incoming_total': 0, 'incoming_by_skill': {}, 'outgoing_total': 0}),
                'deliverables_supported': 'deliverables' in data, 'replaces_supported': info['replaces_supported'],
                'docs_supported': 'docs' in data or info['docs_supported'],
+               'discussions_supported': 'discussion_counts' in data or info['discussions_supported'],
+               'discussion_counts': data.get('discussion_counts', {}),
                'connection_id': _connection_version(config)[:16]}
     local_names = registry['skills'].keys() | registry.get('external_skills', {}).keys()
     store_names = {listing['name'] for card in cards for listing in card['listings']}
@@ -1572,6 +1587,103 @@ def open_doc_file(home, member_id, identity, path):
                            '分享站暂时没能完成操作，请稍后重试。') from None
     except (OSError, HTTPException):
         raise ValueError('连不上分享站，请检查地址和网络。') from None
+
+
+def _clean_discussion_row(row):
+    if (not isinstance(row, dict) or not isinstance(row.get('id'), str) or
+            not re.fullmatch(r'[0-9a-f]{32}', row['id']) or
+            row.get('target_type') not in team_hub.DISCUSSION_TYPES or
+            not isinstance(row.get('target_key'), str) or not isinstance(row.get('body'), str) or
+            not isinstance(row.get('created_at'), str) or type(row.get('can_delete')) is not bool):
+        raise ValueError
+    author = _member(row.get('author'))
+    reply_id = row.get('reply_to_id', '')
+    reply_author = row.get('reply_to_author', '')
+    reply_excerpt = row.get('reply_to_excerpt', '')
+    reply_deleted = row.get('reply_to_deleted', False)
+    if (not isinstance(reply_id, str) or not isinstance(reply_author, str) or
+            not isinstance(reply_excerpt, str) or type(reply_deleted) is not bool):
+        raise ValueError
+    return {
+        'id': row['id'],
+        'target_type': row['target_type'],
+        'target_key': row['target_key'],
+        'author': author,
+        'body': row['body'],
+        'reply_to_id': reply_id,
+        'reply_to_author': reply_author,
+        'reply_to_excerpt': reply_excerpt,
+        'reply_to_deleted': reply_deleted,
+        'created_at': row['created_at'],
+        'can_delete': row['can_delete'],
+    }
+
+
+def discussions_list(home, target_type, target_key, expected_connection=''):
+    if target_type not in team_hub.DISCUSSION_TYPES or not isinstance(target_key, str) or not target_key.strip():
+        raise ValueError('请从团队页打开具体的技能、成品或分享文档。')
+    config = _connection(home)
+    if expected_connection and _connection_version(config)[:16] != expected_connection:
+        raise RequestError(409, '分享站连接已经切换，请刷新页面后再查看讨论区。')
+    info = _me(config, capabilities=True)
+    if not info['discussions_supported']:
+        return {'discussions_supported': False, 'target_type': target_type, 'target_key': target_key,
+                'comments': [], 'count': 0}
+    query = urllib.parse.urlencode({'target_type': target_type, 'target_key': target_key})
+    data = _request(config, '/api/discussions?' + query)
+    try:
+        if not isinstance(data, dict) or not isinstance(data.get('comments'), list):
+            raise ValueError
+        comments = [_clean_discussion_row(row) for row in data['comments']]
+        if any(row['target_type'] != target_type or row['target_key'] != target_key for row in comments):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise RequestError(502, FORMAT_ERROR) from None
+    return {'discussions_supported': True, 'target_type': target_type, 'target_key': target_key,
+            'comments': comments, 'count': len(comments)}
+
+
+def discussion_post(home, target_type, target_key, body, reply_to_id='', expected_connection=''):
+    if target_type not in team_hub.DISCUSSION_TYPES or not isinstance(target_key, str) or not target_key.strip():
+        raise ValueError('请从团队页打开具体的技能、成品或分享文档后再留言。')
+    text = team_hub.clean_discussion_body(body)
+    if reply_to_id is None:
+        reply_to_id = ''
+    if not isinstance(reply_to_id, str) or (reply_to_id and not re.fullmatch(r'[0-9a-f]{32}', reply_to_id)):
+        raise ValueError('要回复的留言编号不正确。')
+    guard(Path(home) / '.skill-pilot', home)
+    config = _connection(home)
+    if expected_connection and _connection_version(config)[:16] != expected_connection:
+        raise ValueError('分享站连接已经切换，请刷新页面后再留言。')
+    info = _me(config, capabilities=True)
+    if not info['discussions_supported']:
+        raise ValueError(DISCUSSIONS_UNSUPPORTED)
+    payload = {'target_type': target_type, 'target_key': target_key, 'body': text}
+    if reply_to_id:
+        payload['reply_to_id'] = reply_to_id
+    data = _request(config, '/api/discussions', 'POST', payload)
+    try:
+        comment = _clean_discussion_row(data.get('comment'))
+        count = data.get('count')
+        if type(count) is not int or count < 0:
+            raise ValueError
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise RequestError(502, FORMAT_ERROR) from None
+    return {'comment': comment, 'count': count, 'message': '留言已发布。'}
+
+
+def discussion_delete(home, comment_id, expected_connection=''):
+    if not isinstance(comment_id, str) or not re.fullmatch(r'[0-9a-f]{32}', comment_id):
+        raise ValueError('留言编号不正确。')
+    guard(Path(home) / '.skill-pilot', home)
+    config = _connection(home)
+    if expected_connection and _connection_version(config)[:16] != expected_connection:
+        raise ValueError('分享站连接已经切换，请刷新页面后再删除。')
+    info = _me(config, capabilities=True)
+    if not info['discussions_supported']:
+        raise ValueError(DISCUSSIONS_UNSUPPORTED)
+    data = _request(config, '/api/discussions/' + comment_id, 'DELETE')
+    return {'deleted': True, 'id': comment_id, 'count': data.get('count', 0), 'message': '已删除留言。'}
 
 
 def tag_pack(home, names, title):
