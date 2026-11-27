@@ -1,14 +1,15 @@
-from .platform_support import copytree
 """Dashboard backend for the authenticated team skill store."""
 import base64
-from .platform_support import rmtree
+from .platform_support import copytree, is_junction, rmtree
 import copy
 import fnmatch
 import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+from datetime import datetime, timezone
 import tempfile
 import threading
 import urllib.error
@@ -31,6 +32,7 @@ FORMAT_ERROR = '分享站的技能格式不对，请联系管理员检查。'
 PACKS_UNSUPPORTED = '分享站版本较旧，暂不能整理技能包，请联系管理员更新分享站。'
 REPLACES_UNSUPPORTED = '分享站版本较旧，暂不支持标记替代旧技能，请联系管理员更新分享站。'
 SUGGESTIONS_UNSUPPORTED = '分享站版本较旧，暂不支持提交改进建议，请联系管理员更新分享站。'
+DOCS_UNSUPPORTED = '分享站版本较旧，暂不支持分享文档，请联系管理员更新分享站。'
 LOCAL_LABELS = {'mine': '我上架的', 'installed': '已装', 'update': '有新版', 'installable': '可以装',
                 'lark': '要用飞书官方方式装', 'conflict': '本机有同名技能', 'blocked': '暂时装不了',
                 'external': '由外部工具维护'}
@@ -105,6 +107,8 @@ def _request(config, path, method='GET', data=None):
         limit = team_hub.MAX_PACK_BODY
     if path == '/api/suggestions':
         limit = team_hub.MAX_SUGGESTION_BODY
+    if path.startswith('/api/docs/me/'):
+        limit = team_hub.MAX_DOC_BODY
     if path in {'/api/feedback', '/api/feedback/with-attachments'}:
         has_attachments = isinstance(data, dict) and bool(data.get('attachments'))
         if has_attachments or path == '/api/feedback/with-attachments':
@@ -121,6 +125,7 @@ def _request(config, path, method='GET', data=None):
                          '活跃上报内容超过 1024 字节。' if path == '/api/activity' else
                          '建议内容超过 1 MB，请减少文件数量。' if path == '/api/suggestions' else
                          '技能包内容超过 64 KB，请缩短后重试。' if path == '/api/packs/me' else
+                         f'分享文档内容超过 {team_hub.MAX_DOC_BODY // 1024} KB，请精简正文或减少附件数量。' if path.startswith('/api/docs/me/') else
                          '上报内容超过 64 KB，请缩短后重试。' if path == '/api/installs/me' else
                          '上架内容超过 20 MB，请分批上架。' if limit == MAX_BODY else
                          '评价内容超过 64 KB。' if limit == team_hub.MAX_RATING_BODY else
@@ -202,7 +207,8 @@ def _me(config, capabilities=False):
              'feedback_attachments_supported': result.get('feedback_attachments_supported') is True,
              'skill_file_upload': result.get('skill_file_upload') is True,
              'suggestions_supported': result.get('suggestions_supported') is True,
-             'replaces_supported': result.get('replaces_supported') is True} if capabilities else member)
+             'replaces_supported': result.get('replaces_supported') is True,
+             'docs_supported': result.get('docs_supported') is True} if capabilities else member)
 
 
 def status(home, config=None, strict=True):
@@ -530,6 +536,28 @@ def _catalog(config):
             catalog['deliverables'] = sorted(rows, key=lambda r: r['updated_at'], reverse=True)
         except (ValueError, TypeError, KeyError, AttributeError):
             catalog['deliverables'] = []
+    if 'docs' in data:
+        # A malformed doc list hides that section; the rest of the store still loads.
+        try:
+            if not isinstance(data['docs'], list):
+                raise ValueError
+            rows, keys = [], set()
+            for row in data['docs']:
+                member = _member(row.get('member'))
+                identity = row.get('id')
+                key = 'doc:' + member['id'] + ':' + str(identity)
+                if (not isinstance(identity, str) or not re.fullmatch(team_hub.DOC_ID, identity) or
+                        row.get('key') != key or key in keys or
+                        not isinstance(row.get('created_at'), str) or not isinstance(row.get('updated_at'), str) or
+                        type(row.get('file_count')) is not int or row['file_count'] < 0 or
+                        type(row.get('size')) is not int or row['size'] < 0):
+                    raise ValueError
+                rows.append({'key': key, 'id': identity, 'member': member, **team_hub.doc_info(row),
+                             **{k: row[k] for k in ('file_count', 'size', 'created_at', 'updated_at')}})
+                keys.add(key)
+            catalog['docs'] = sorted(rows, key=lambda r: r['updated_at'], reverse=True)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            catalog['docs'] = []
     return catalog
 
 
@@ -1025,13 +1053,17 @@ def catalog(home):
     catalog = {'member': member, 'cards': result, 'packs': packs, 'packs_supported': 'packs' in data,
                'suggestions_supported': info['suggestions_supported'],
                'suggestions_summary': data.get('suggestions_summary', {'incoming_total': 0, 'incoming_by_skill': {}, 'outgoing_total': 0}),
-               'deliverables_supported': 'deliverables' in data, 'replaces_supported': info['replaces_supported']}
+               'deliverables_supported': 'deliverables' in data, 'replaces_supported': info['replaces_supported'],
+               'docs_supported': 'docs' in data or info['docs_supported'],
+               'connection_id': _connection_version(config)[:16]}
     local_names = registry['skills'].keys() | registry.get('external_skills', {}).keys()
     store_names = {listing['name'] for card in cards for listing in card['listings']}
     catalog['deliverables'] = [{**row, 'mine': row['member']['id'] == member['id'],
                                 'skills': [{'name': n, 'installed': n in local_names, 'in_store': n in store_names}
                                            for n in row['skills']]}
                                for row in data.get('deliverables', [])]
+    catalog['docs'] = [{**row, 'mine': row['member']['id'] == member['id']}
+                       for row in data.get('docs', [])]
     if 'github' in data:
         listed = {r['source']['repository'].lower() for c in cards for r in c['listings']
                   if r['source']['kind'] == 'github'}
@@ -1127,6 +1159,8 @@ def _upload_missing(config, route, payload, by_digest, read=None, method='PUT'):
             missing = error.body.get('missing') if error.status == 409 else None
             if error.status == 404 and route.startswith('/api/deliverables/'):
                 raise ValueError('分享站版本较旧，暂不能上架成品，请联系管理员更新分享站。') from None
+            if error.status == 404 and route.startswith('/api/docs/'):
+                raise ValueError(DOCS_UNSUPPORTED) from None
             if not isinstance(missing, list) or not missing or any(
                     not isinstance(d, str) or d not in by_digest for d in missing):
                 raise
@@ -1194,6 +1228,346 @@ def open_deliverable_file(home, member_id, identity, path, byte_range=None):
         error.close()
         raise RequestError(error.code, '成品里没有这个文件，或已经下架。' if error.code == 404 else
                            '请求的文件范围超出文件大小。' if error.code == 416 else
+                           '分享站没认出你，请到设置里重新连接。' if error.code == 401 else
+                           '分享站暂时没能完成操作，请稍后重试。') from None
+    except (OSError, HTTPException):
+        raise ValueError('连不上分享站，请检查地址和网络。') from None
+
+
+def _make_doc_id():
+    return 'doc-' + datetime.now(timezone.utc).strftime('%Y%m%d') + '-' + secrets.token_hex(3)
+
+
+def _infer_doc_title(content, fallback=''):
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            heading = stripped.lstrip('#').strip()
+            if heading:
+                return heading[:200]
+    return fallback[:200]
+
+
+def _is_link_path(path):
+    return path.is_symlink() or is_junction(path)
+
+
+DOC_SECRET_NAMES = (*SECRET_NAMES, 'team.json', 'settings.json')
+
+
+def _looks_like_text_secret(raw, extra_secrets=()):
+    if not raw or len(raw) > team_hub.MAX_DOC_ATTACHMENT:
+        return False
+    def matches(text):
+        return bool(SECRET_CONTENT.search(text) or any(s and s in text for s in extra_secrets))
+    if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
+        try:
+            if matches(raw.decode('utf-16')):
+                return True
+        except UnicodeDecodeError:
+            pass
+    head = raw[:8192]
+    if b'\x00' in head:
+        if len(head) >= 4 and head.count(b'\x00') >= len(head) // 4:
+            for enc in ('utf-16-le', 'utf-16-be'):
+                try:
+                    if matches(raw.decode(enc, errors='ignore')):
+                        return True
+                except UnicodeDecodeError:
+                    pass
+        return False
+    return matches(raw.decode('utf-8', errors='replace'))
+
+
+def _scan_doc_asset(path, relative, files, blocked, seen_folded, extra_secrets=()):
+    if _is_link_path(path):
+        raise ValueError(f'文档附件「{relative}」是链接，请换成真实文件再上传。')
+    if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
+        blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
+        return
+    if not path.is_file():
+        raise ValueError(f'文档附件「{relative}」无法读取，请核对。')
+    size = path.stat().st_size
+    if size > team_hub.MAX_DOC_ATTACHMENT:
+        raise ValueError(f'文档附件「{relative}」超过 {team_hub.MAX_DOC_ATTACHMENT // 1024 // 1024} MB，请先压缩。')
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw)
+    if _looks_like_text_secret(raw, extra_secrets):
+        blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
+        return
+    team_hub.doc_path(relative)
+    folded = relative.casefold()
+    if folded in seen_folded:
+        raise ValueError(f'文档附件「{relative}」与其他附件位置重复，请先整理后再上传。')
+    seen_folded.add(folded)
+    files[relative] = (digest.hexdigest(), size, raw)
+
+
+def _read_doc_source(source, assets=(), extra_secrets=()):
+    files, blocked, seen_folded = {}, [], set()
+    source_title = ''
+    content = None
+    source_base = None
+    if source is not None:
+        root = Path(source).expanduser().absolute()
+        if _is_link_path(root):
+            raise ValueError('文档路径是链接，请直接指定真实的文档文件或文件夹。')
+        if root.is_file():
+            if any(fnmatch.fnmatch(root.name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
+                raise ValueError(f'「{root.name}」文件名像账号或密钥文件，已拦下。')
+            if root.stat().st_size > team_hub.MAX_DOC_CONTENT:
+                raise ValueError(f'文档正文不能超过 {team_hub.MAX_DOC_CONTENT // 1024} KB。')
+            try:
+                content = root.read_text(encoding='utf-8')
+            except UnicodeError:
+                raise ValueError('分享文档正文须为 UTF-8 文本或 Markdown 文件。') from None
+            source_title = root.stem
+            source_base = root.parent.resolve()
+        elif root.is_dir():
+            resolved_root = root.resolve()
+            source_base = resolved_root
+            md_files = sorted(p for p in root.iterdir()
+                              if not p.name.startswith('.') and p.suffix.lower() in {'.md', '.markdown'})
+            main = next((p for p in md_files if p.name.lower() in {'readme.md', 'index.md'}),
+                        md_files[0] if len(md_files) == 1 else None)
+            if main is None:
+                raise ValueError('文档文件夹里需要有 README.md、index.md，或只放一篇 Markdown 文件作为正文。')
+            if _is_link_path(main) or not main.resolve().is_relative_to(resolved_root):
+                raise ValueError('正文文档不能是链接或指向文件夹外，请换成真实文件。')
+            if any(fnmatch.fnmatch(main.name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
+                raise ValueError(f'「{main.name}」文件名像账号或密钥文件，已拦下。')
+            if main.stat().st_size > team_hub.MAX_DOC_CONTENT:
+                raise ValueError(f'文档正文不能超过 {team_hub.MAX_DOC_CONTENT // 1024} KB。')
+            try:
+                content = main.read_text(encoding='utf-8')
+            except UnicodeError:
+                raise ValueError('分享文档正文须为 UTF-8 文本或 Markdown 文件。') from None
+            source_title = root.name if main.name.lower() in {'readme.md', 'index.md'} else main.stem
+            def walk(folder):
+                for entry in sorted(folder.iterdir()):
+                    if entry == main:
+                        continue
+                    relative = entry.relative_to(root).as_posix()
+                    if _is_link_path(entry) or not entry.resolve().is_relative_to(resolved_root):
+                        raise ValueError(f'文档文件夹里的「{relative}」是链接或指向文件夹外，请换成真实文件再上传。')
+                    if any(fnmatch.fnmatch(entry.name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
+                        blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
+                        continue
+                    if entry.name.startswith('.') or entry.name in SKIP_CONTENT | {'__MACOSX'}:
+                        continue
+                    if entry.is_dir():
+                        walk(entry)
+                        continue
+                    _scan_doc_asset(entry, relative, files, blocked, seen_folded, extra_secrets)
+            walk(root)
+        else:
+            raise ValueError('找不到指定的分享文档文件或文件夹，请核对位置。')
+    for item in assets or ():
+        if isinstance(item, dict):
+            relative = item.get('path', '')
+            raw = item.get('bytes')
+            if not isinstance(relative, str) or not isinstance(raw, (bytes, bytearray)):
+                raise ValueError('文档附件格式不正确。')
+            raw = bytes(raw)
+            name = Path(relative).name
+            if any(fnmatch.fnmatch(name.lower(), pattern) for pattern in DOC_SECRET_NAMES):
+                blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
+                continue
+            if len(raw) > team_hub.MAX_DOC_ATTACHMENT:
+                raise ValueError(f'文档附件「{relative}」超过 {team_hub.MAX_DOC_ATTACHMENT // 1024 // 1024} MB，请先压缩。')
+            if _looks_like_text_secret(raw, extra_secrets):
+                blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
+                continue
+            team_hub.doc_path(relative)
+            folded = relative.casefold()
+            if folded in seen_folded:
+                raise ValueError(f'文档附件「{relative}」与其他附件位置重复，请先整理后再上传。')
+            seen_folded.add(folded)
+            files[relative] = (hashlib.sha256(raw).hexdigest(), len(raw), raw)
+        else:
+            asset = Path(item).expanduser().absolute()
+            if _is_link_path(asset):
+                raise ValueError(f'文档附件「{asset.name}」是链接，请换成真实文件再上传。')
+            resolved_asset = asset.resolve()
+            if source_base is not None and resolved_asset.is_relative_to(source_base):
+                relative = resolved_asset.relative_to(source_base).as_posix()
+            else:
+                relative = asset.name
+            _scan_doc_asset(asset, relative, files, blocked, seen_folded, extra_secrets)
+    return content, source_title, files, blocked
+
+
+def _active_doc_secrets(home):
+    secrets_list = []
+    try:
+        cfg = settings(home)
+        if cfg and isinstance(cfg.get('key'), str) and len(cfg['key']) >= 12:
+            secrets_list.append(cfg['key'])
+    except (ValueError, OSError):
+        pass
+    return tuple(secrets_list)
+
+
+def publish_doc(home, source=None, identity='', title='', category=None, summary=None, content=None,
+                assets=(), confirmed=False, preserve_files=False, merge_files=False,
+                expected_connection='', expected_updated_at='', create_only=False):
+    """Preview, then publish or update one shared Markdown doc and optional static assets."""
+    home = Path(home)
+    auto_id = not bool(identity)
+    if identity:
+        identity = team_hub.clean_doc_id(identity)
+    else:
+        identity = _make_doc_id()
+    extra_secrets = _active_doc_secrets(home)
+    read_content, source_title, files, blocked = _read_doc_source(source, assets, extra_secrets)
+    body = content if content is not None else read_content
+    if body is None:
+        raise ValueError('请提供文档正文内容，或指定本地 Markdown 文件。')
+    if not isinstance(body, str):
+        raise ValueError('文档正文须是文字。')
+    final_title = (title or '').strip() or _infer_doc_title(body, source_title)
+    manifest = {
+        'title': final_title,
+        'content': body,
+    }
+    if category is not None:
+        manifest['category'] = category
+    if summary is not None:
+        manifest['summary'] = summary
+    if files or (not preserve_files and not merge_files):
+        manifest['files'] = {p: {'sha256': d, 'size': s} for p, (d, s, _) in files.items()}
+        if merge_files and files:
+            manifest['merge_files'] = True
+    if expected_updated_at:
+        manifest['expected_updated_at'] = expected_updated_at
+    if create_only or auto_id:
+        manifest['create_only'] = True
+    checked = team_hub.clean_doc(manifest)
+    warnings = []
+    if any(SECRET_CONTENT.search(checked[field]) or any(s in checked[field] for s in extra_secrets)
+           for field in ('title', 'category', 'summary', 'content')):
+        warnings.append('文档标题、摘要或正文疑似包含密钥、口令或凭证，请确认已脱敏后再上传。')
+    content_bytes = len(checked['content'].encode('utf-8'))
+    result = {
+        'id': identity,
+        'title': checked['title'],
+        'category': checked['category'],
+        'summary': checked['summary'],
+        'content_bytes': content_bytes,
+        'file_count': checked['file_count'],
+        'size': checked['size'],
+        'blocked': blocked,
+        'warnings': warnings,
+        'preserve_files': bool(preserve_files and not files),
+    }
+    if not confirmed:
+        extra = (f'，附带 {checked["file_count"]} 个附件' + ('（追加到已有附件）' if merge_files else '') if checked['file_count'] else
+                 '，保留已有附件' if preserve_files else '')
+        return {**result, 'needs_confirmation': True,
+                'message': f'将上传分享文档「{checked["title"]}」（正文 {content_bytes / 1024:.1f} KB{extra}）。只限团队成员查看。'}
+    guard(home / '.skill-pilot', home)
+    config = _connection(home)
+    if expected_connection and _connection_version(config)[:16] != expected_connection:
+        raise ValueError('分享站连接已经切换，请刷新页面后核对再保存。')
+    info = _me(config, capabilities=True)
+    if not info['docs_supported']:
+        raise ValueError(DOCS_UNSUPPORTED)
+    by_digest = {d: data for d, _, data in files.values()}
+    attempts = 3 if auto_id else 1
+    for attempt in range(attempts):
+        try:
+            saved, uploaded = _upload_missing(config, '/api/docs/me/' + identity, manifest, by_digest)
+            result['id'] = identity
+            break
+        except RequestError as error:
+            if auto_id and error.status == 409 and attempt + 1 < attempts:
+                identity = _make_doc_id()
+                continue
+            raise
+    return {**result, 'key': saved['key'], 'created_at': saved['created_at'], 'updated_at': saved['updated_at'],
+            'uploaded': uploaded,
+            'message': f'已发布分享文档「{checked["title"]}」，同事在团队页「分享文档」里可以查看。'}
+
+
+def list_docs(home):
+    """List shared docs directly from the hub without requiring local skill migration."""
+    config = _connection(home)
+    info = _me(config, capabilities=True)
+    member = info['member']
+    data = _catalog(config)
+    supported = 'docs' in data or info['docs_supported']
+    docs = [{**row, 'mine': row['member']['id'] == member['id']} for row in data.get('docs', [])]
+    return {'docs_supported': supported, 'docs': docs}
+
+
+def doc_detail(home, member_id, identity):
+    if not re.fullmatch(r'[0-9a-f]{32}', str(member_id)) or not re.fullmatch(team_hub.DOC_ID, str(identity)):
+        raise ValueError('文档地址不正确，请从团队页重新打开。')
+    row = _request(_connection(home), '/api/docs/' + member_id + '/' + identity)
+    try:
+        member = _member(row.get('member'))
+        info = team_hub.doc_info(row)
+        content = row.get('content')
+        if not isinstance(content, str) or len(content.encode('utf-8')) > team_hub.MAX_DOC_CONTENT:
+            raise ValueError
+        raw_files = row.get('files', [])
+        if not isinstance(raw_files, list) or len(raw_files) > team_hub.MAX_DOC_FILES:
+            raise ValueError
+        files = []
+        for entry in raw_files:
+            if (not isinstance(entry, dict) or not isinstance(entry.get('path'), str) or
+                    type(entry.get('size')) is not int or entry['size'] < 0 or
+                    type(entry.get('is_image')) is not bool):
+                raise ValueError
+            team_hub.doc_path(entry['path'])
+            files.append({'path': entry['path'], 'size': entry['size'], 'is_image': entry['is_image']})
+        if not isinstance(row.get('created_at'), str) or not isinstance(row.get('updated_at'), str):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise RequestError(502, FORMAT_ERROR) from None
+    return {'key': 'doc:' + member_id + ':' + identity, 'id': identity, 'member': member,
+            **info, 'content': content, 'files': files, 'file_count': len(files),
+            'size': row.get('size', len(content.encode('utf-8'))),
+            'created_at': row['created_at'], 'updated_at': row['updated_at']}
+
+
+def remove_doc(home, identity, confirmed=False, expected_connection='', expected_updated_at=''):
+    identity = team_hub.clean_doc_id(identity)
+    if not confirmed:
+        return {'id': identity, 'needs_confirmation': True,
+                'message': f'将从分享站删除分享文档「{identity}」，同事将无法继续查看。'}
+    guard(Path(home) / '.skill-pilot', home)
+    config = _connection(home)
+    if expected_connection and _connection_version(config)[:16] != expected_connection:
+        raise ValueError('分享站连接已经切换，请刷新页面后核对再删除。')
+    info = _me(config, capabilities=True)
+    if not info['docs_supported']:
+        raise ValueError(DOCS_UNSUPPORTED)
+    route = '/api/docs/me/' + urllib.parse.quote(identity, safe='')
+    if expected_updated_at:
+        route += '?expected_updated_at=' + urllib.parse.quote(expected_updated_at, safe='')
+    _request(config, route, 'DELETE')
+    return {'id': identity, 'message': f'已删除分享文档「{identity}」。'}
+
+
+def open_doc_file(home, member_id, identity, path):
+    if not re.fullmatch(r'[0-9a-f]{32}', str(member_id)):
+        raise RequestError(404, '文档里没有这个附件。')
+    try:
+        identity = team_hub.clean_doc_id(identity)
+        team_hub.doc_path(path)
+    except ValueError:
+        raise RequestError(404, '文档里没有这个附件。') from None
+    config = _connection(home)
+    headers = {'Authorization': 'Bearer ' + config['key']}
+    address = (config['url'] + '/api/docs/' + member_id + '/' + identity + '/' +
+               urllib.parse.quote(path, safe='/'))
+    try:
+        return urllib.request.build_opener(labels.NoRedirect).open(
+            urllib.request.Request(address, headers=headers), timeout=max(TIMEOUT, 60))
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise RequestError(error.code, '文档里没有这个附件，或文档已经删除。' if error.code == 404 else
                            '分享站没认出你，请到设置里重新连接。' if error.code == 401 else
                            '分享站暂时没能完成操作，请稍后重试。') from None
     except (OSError, HTTPException):

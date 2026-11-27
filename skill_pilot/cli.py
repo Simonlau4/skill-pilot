@@ -149,10 +149,22 @@ def main():
     team_deliverable.add_argument('--recipe', help='复刻配方文件（Markdown）')
     team_deliverable_remove = team_commands.add_parser('deliverable-remove', help='从分享站下架自己上架的成品')
     team_deliverable_remove.add_argument('id', help='成品编号')
-    for command in (team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove, suggest, review):
+    team_doc = team_commands.add_parser('doc', help='上传或更新一篇团队分享文档（Markdown 及可选配图/附件）')
+    team_doc.add_argument('source', help='Markdown 文档文件，或包含正文与配图的文件夹')
+    team_doc.add_argument('--id', default='', help='文档编号（留空自动生成；更新旧文档时填原编号）')
+    team_doc.add_argument('--title', default='', help='文档标题（留空从一级标题或文件名提取）')
+    team_doc.add_argument('--category', default=None, help='分类或期数标签，例如 Workshop 纪要、工具指南')
+    team_doc.add_argument('--summary', default=None, help='简短摘要（选填）')
+    team_doc.add_argument('--asset', action='append', default=[], help='额外附带的配图或附件文件，可重复')
+    team_doc.add_argument('--clear-assets', action='store_true', help='更新文档时清空原有附件（默认单文件更新会保留已有附件）')
+    team_doc_list = team_commands.add_parser('doc-list', help='查看团队分享站里的分享文档')
+    team_doc_remove = team_commands.add_parser('doc-remove', help='删除自己上传的分享文档')
+    team_doc_remove.add_argument('id', help='文档编号')
+    for command in (team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove,
+                    suggest, review, team_doc, team_doc_remove):
         command.add_argument('--yes', action='store_true')
     for command in (team_list, team_publish, team_unpublish, team_install, team_deliverable, team_deliverable_remove,
-                    suggest, suggestions, review):
+                    suggest, suggestions, review, team_doc, team_doc_list, team_doc_remove):
         command.add_argument('--json', action='store_true')
     checking = commands.add_parser('check-updates', help='只读检查技能更新')
     checking.add_argument('--json', action='store_true')
@@ -387,6 +399,17 @@ def main():
                                                   args.summary, args.skill, recipe, args.yes)
             elif args.team_command == 'deliverable-remove':
                 result = team.remove_deliverable(home, args.id, args.yes)
+            elif args.team_command == 'doc':
+                source_path = Path(args.source).expanduser().absolute()
+                preserve = bool(args.id and source_path.is_file() and not args.asset and not args.clear_assets)
+                merge = bool(args.id and source_path.is_file() and args.asset and not args.clear_assets)
+                result = team.publish_doc(home, source=args.source, identity=args.id, title=args.title,
+                                          category=args.category, summary=args.summary, assets=args.asset,
+                                          confirmed=args.yes, preserve_files=preserve, merge_files=merge)
+            elif args.team_command == 'doc-list':
+                result = team.list_docs(home)
+            elif args.team_command == 'doc-remove':
+                result = team.remove_doc(home, args.id, args.yes)
             else:
                 result = team.install_named(home, args.name, args.author, args.agent, args.yes,
                                             replace_actions=args.replace_action)
@@ -439,6 +462,23 @@ def main():
                     print(f'  不上传 {item["path"]}：{item["reason"]}')
                 if result.get('external'):
                     print('  网页里有外网地址，演示时不会加载：' + '、'.join(result['external']))
+            elif args.team_command in {'doc', 'doc-remove'}:
+                print(result['message'])
+                if args.team_command == 'doc' and result.get('id'):
+                    print(f'  文档编号：{result["id"]}')
+                for warning in result.get('warnings', []):
+                    print(f'  提醒：{warning}')
+                for item in result.get('blocked', []):
+                    print(f'  不上传 {item["path"]}：{item["reason"]}')
+            elif args.team_command == 'doc-list':
+                if not result['docs_supported']:
+                    print(team.DOCS_UNSUPPORTED)
+                elif not result['docs']:
+                    print('团队分享站里还没有分享文档。')
+                else:
+                    for row in result['docs']:
+                        cat = f'[{row["category"]}] ' if row.get('category') else ''
+                        print(f'{cat}{row["title"]}（编号：{row["id"]}，{row["member"]["name"]} 发布，{row["updated_at"][:10]}）')
             elif args.team_command == 'list':
                 for card in result['cards']:
                     authors = '、'.join(dict.fromkeys(row['member']['name'] for row in card['listings']))

@@ -488,6 +488,11 @@ class Dashboard(ThreadingHTTPServer):
         message = ('deliverable:' + member_id + ':' + identity).encode()
         return hmac.new(self.token.encode(), message, hashlib.sha256).hexdigest()[:32]
 
+    def doc_key(self, member_id, identity):
+        """Serves static attachments for one shared doc in this session only."""
+        message = ('doc:' + member_id + ':' + identity).encode()
+        return hmac.new(self.token.encode(), message, hashlib.sha256).hexdigest()[:32]
+
     def save_replace_review(self, allowed, installed, revision):
         review = secrets.token_urlsafe(16)
         with self.jobs_lock:
@@ -1980,6 +1985,47 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def serve_doc_file(self, path):
+        if self.headers.get("Host") != self.server.origin.removeprefix("http://"):
+            self.reply(403, {"error": "此页面只允许本机本次打开的浏览器访问。"})
+            return
+        match = re.fullmatch(r'/doc-file/([0-9a-f]{32})/([0-9a-f]{32})/(' + team.team_hub.DOC_ID + r')/(.+)', path)
+        if not match or not secrets.compare_digest(match[1], self.server.doc_key(match[2], match[3])):
+            self.reply(404, {"error": "没有这个附件。"})
+            return
+        relative = urllib.parse.unquote(match[4])
+        try:
+            team.team_hub.clean_doc_id(match[3])
+            team.team_hub.doc_path(relative)
+        except ValueError:
+            self.reply(404, {"error": "没有这个附件。"})
+            return
+        failure = None
+        try:
+            response = team.open_doc_file(self.server.home, match[2], match[3], relative)
+        except team.RequestError as error:
+            failure = (error.status if error.status in {401, 404} else 502, str(error))
+        except (ValueError, OSError) as error:
+            failure = (502, str(error) if isinstance(error, ValueError) else '没能读取文档附件，请稍后重试。')
+        if failure:
+            self.reply(failure[0], {'error': failure[1]})
+            return
+        with response:
+            self.send_response(response.status)
+            for name in ('Content-Type', 'Content-Length', 'Content-Disposition'):
+                if response.headers.get(name):
+                    self.send_header(name, response.headers[name])
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Content-Security-Policy', "default-src 'none'; sandbox")
+            self.end_headers()
+            try:
+                while chunk := response.read(1024 * 1024):
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         # 浏览器会自己来要 /favicon.ico，不带本次口令。只放行这一个地址，避免控制台报错。
@@ -1988,6 +2034,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path.startswith('/d/'):
             self.serve_deliverable(path)
+            return
+        if path.startswith('/doc-file/'):
+            self.serve_doc_file(path)
             return
         if not self.authorized():
             self.reply(403, {"error": "此页面只允许本机本次打开的浏览器访问。"})
@@ -2028,6 +2077,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             key = self.server.deliverable_key(match[1], match[2])
             self.reply(200, {**detail, 'base_url': f'/d/{key}/{match[1]}/{match[2]}/f/'})
+        elif path == '/api/team/docs/detail':
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            match = re.fullmatch(r'doc:([0-9a-f]{32}):(' + team.team_hub.DOC_ID + ')', query.get('key', [''])[0])
+            if not match:
+                self.reply(400, {'error': '请从团队页的分享文档打开。'})
+                return
+            try:
+                detail = team.doc_detail(self.server.home, match[1], match[2])
+            except (ValueError, OSError) as error:
+                self.reply(409, {'error': str(error) if isinstance(error, ValueError) else '没能读取分享文档，请稍后重试。'})
+                return
+            key = self.server.doc_key(match[1], match[2])
+            self.reply(200, {**detail, 'file_base_url': f'/doc-file/{key}/{match[1]}/{match[2]}/'})
         elif path == '/api/tools/check':
             # Find known command entry points, including desktop installs; never run them.
             names = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('names', [''])[0].split(',')
@@ -2328,13 +2390,14 @@ class Handler(BaseHTTPRequestHandler):
                        '/api/updates/check', '/api/updates/explain', '/api/updates/merge', '/api/updates/calibrate',
                        '/api/updates/prepare',
                        '/api/agents/join/preview', '/api/agents/leave/preview', '/api/agents/ignore/preview', '/api/config/preview',
-                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/replace/preview', '/api/team/suggestions/preview', '/api/team/activity', '/api/program/auto-check'}
+                       '/api/agents/scan', '/api/team/listings/preview', '/api/team/replace/preview', '/api/team/suggestions/preview', '/api/team/docs/preview', '/api/team/activity', '/api/program/auto-check'}
         write_routes = {'/api/assignment/apply', '/api/dependencies', '/api/install/apply', '/api/absorb', '/api/undo',
                         '/api/updates/apply', '/api/updates/watch', '/api/cleanup/apply', '/api/cleanup/delete/apply', '/api/withdrawn/restore',
                         '/api/agents/join/apply', '/api/agents/leave/apply', '/api/agents/ignore/apply', '/api/config/apply',
                         '/api/team/listings/apply', '/api/team/listings/remove', '/api/team/listings/update', '/api/team/queue', '/api/team/queue/clear',
                         '/api/team/ratings', '/api/team/ratings/remove', '/api/team/packs', '/api/team/github/retry', '/api/team/replace/cleanup',
-                        '/api/team/suggestions/submit', '/api/team/suggestions/accept', '/api/team/suggestions/reject', '/api/team/suggestions/withdraw'}
+                        '/api/team/suggestions/submit', '/api/team/suggestions/accept', '/api/team/suggestions/reject', '/api/team/suggestions/withdraw',
+                        '/api/team/docs/save', '/api/team/docs/remove'}
         job_routes = {'/api/jobs', '/api/jobs/retry', '/api/jobs/clear'}
         write_routes |= job_routes
         read_routes.add('/api/external/preview')
@@ -2742,6 +2805,36 @@ class Handler(BaseHTTPRequestHandler):
             return team.suggestion_reject(home, body.get('id', ''), review_note=review_note)
         if path == '/api/team/suggestions/withdraw':
             return team.suggestion_withdraw(home, body.get('id', ''))
+        if path in {'/api/team/docs/preview', '/api/team/docs/save'}:
+            identity = body.get('id', '')
+            if identity is None:
+                identity = ''
+            if not isinstance(identity, str):
+                raise ValueError('文档编号格式不正确。')
+            expected_conn = body.get('expected_connection', '')
+            expected_upd = body.get('expected_updated_at', '')
+            if not isinstance(expected_conn, str) or not isinstance(expected_upd, str):
+                raise ValueError('文档核对信息格式不正确。')
+            return team.publish_doc(
+                home,
+                identity=identity.strip(),
+                title=body.get('title', ''),
+                category=body.get('category', ''),
+                summary=body.get('summary', ''),
+                content=body.get('content', ''),
+                confirmed=path == '/api/team/docs/save',
+                preserve_files=bool(identity.strip()),
+                expected_connection=expected_conn,
+                expected_updated_at=expected_upd,
+                create_only=body.get('create_only') is True,
+            )
+        if path == '/api/team/docs/remove':
+            expected_conn = body.get('expected_connection', '')
+            expected_upd = body.get('expected_updated_at', '')
+            if not isinstance(expected_conn, str) or not isinstance(expected_upd, str):
+                raise ValueError('文档核对信息格式不正确。')
+            return team.remove_doc(home, body.get('id', ''), confirmed=True,
+                                   expected_connection=expected_conn, expected_updated_at=expected_upd)
         if path == '/api/team/packs':
             with self.server.local_write():
                 return team.packs_apply(home, body.get('packs'))
