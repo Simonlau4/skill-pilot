@@ -1216,7 +1216,23 @@ def _is_link_path(path):
 
 
 def _looks_like_text_secret(raw):
-    if len(raw) > 2 * 1024 * 1024 or b'\x00' in raw[:8192]:
+    if not raw or len(raw) > team_hub.MAX_DOC_ATTACHMENT:
+        return False
+    if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
+        try:
+            text = raw.decode('utf-16')
+            return bool(SECRET_CONTENT.search(text))
+        except UnicodeDecodeError:
+            pass
+    head = raw[:8192]
+    if b'\x00' in head:
+        if len(head) >= 4 and head.count(b'\x00') >= len(head) // 4:
+            for enc in ('utf-16-le', 'utf-16-be'):
+                try:
+                    if SECRET_CONTENT.search(raw.decode(enc, errors='ignore')):
+                        return True
+                except UnicodeDecodeError:
+                    pass
         return False
     return bool(SECRET_CONTENT.search(raw.decode('utf-8', errors='replace')))
 
@@ -1232,14 +1248,9 @@ def _scan_doc_asset(path, relative, files, blocked, seen_folded):
     size = path.stat().st_size
     if size > team_hub.MAX_DOC_ATTACHMENT:
         raise ValueError(f'文档附件「{relative}」超过 {team_hub.MAX_DOC_ATTACHMENT // 1024 // 1024} MB，请先压缩。')
-    digest = hashlib.sha256()
-    sample = bytearray()
-    with path.open('rb') as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(chunk)
-            if len(sample) < 2 * 1024 * 1024:
-                sample.extend(chunk[:max(0, 2 * 1024 * 1024 - len(sample))])
-    if size <= 2 * 1024 * 1024 and _looks_like_text_secret(bytes(sample)):
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw)
+    if _looks_like_text_secret(raw):
         blocked.append({'path': relative, 'reason': '内容疑似含有密钥或密码，已拦下。'})
         return
     team_hub.doc_path(relative)
@@ -1346,12 +1357,11 @@ def _read_doc_source(source, assets=()):
 
 def publish_doc(home, source=None, identity='', title='', category=None, summary=None, content=None,
                 assets=(), confirmed=False, preserve_files=False, merge_files=False,
-                expected_connection='', expected_updated_at=''):
+                expected_connection='', expected_updated_at='', create_only=False):
     """Preview, then publish or update one shared Markdown doc and optional static assets."""
     home = Path(home)
     if identity:
-        if not isinstance(identity, str) or not re.fullmatch(team_hub.DOC_ID, identity):
-            raise ValueError('文档编号只能用字母、数字、点、横线和下划线，最多 64 个字符。')
+        identity = team_hub.clean_doc_id(identity)
     else:
         identity = _make_doc_id()
     read_content, source_title, files, blocked = _read_doc_source(source, assets)
@@ -1369,12 +1379,14 @@ def publish_doc(home, source=None, identity='', title='', category=None, summary
         manifest['category'] = category
     if summary is not None:
         manifest['summary'] = summary
-    if files or not preserve_files:
+    if files or (not preserve_files and not merge_files):
         manifest['files'] = {p: {'sha256': d, 'size': s} for p, (d, s, _) in files.items()}
         if merge_files and files:
             manifest['merge_files'] = True
     if expected_updated_at:
         manifest['expected_updated_at'] = expected_updated_at
+    if create_only:
+        manifest['create_only'] = True
     checked = team_hub.clean_doc(manifest)
     warnings = []
     if any(SECRET_CONTENT.search(checked[field]) for field in ('title', 'category', 'summary', 'content')):
@@ -1453,9 +1465,8 @@ def doc_detail(home, member_id, identity):
             'created_at': row['created_at'], 'updated_at': row['updated_at']}
 
 
-def remove_doc(home, identity, confirmed=False, expected_connection=''):
-    if not isinstance(identity, str) or not re.fullmatch(team_hub.DOC_ID, identity):
-        raise ValueError('文档编号不正确。')
+def remove_doc(home, identity, confirmed=False, expected_connection='', expected_updated_at=''):
+    identity = team_hub.clean_doc_id(identity)
     if not confirmed:
         return {'id': identity, 'needs_confirmation': True,
                 'message': f'将从分享站删除分享文档「{identity}」，同事将无法继续查看。'}
@@ -1466,7 +1477,10 @@ def remove_doc(home, identity, confirmed=False, expected_connection=''):
     info = _me(config, capabilities=True)
     if not info['docs_supported']:
         raise ValueError(DOCS_UNSUPPORTED)
-    _request(config, '/api/docs/me/' + urllib.parse.quote(identity, safe=''), 'DELETE')
+    route = '/api/docs/me/' + urllib.parse.quote(identity, safe='')
+    if expected_updated_at:
+        route += '?expected_updated_at=' + urllib.parse.quote(expected_updated_at, safe='')
+    _request(config, route, 'DELETE')
     return {'id': identity, 'message': f'已删除分享文档「{identity}」。'}
 
 

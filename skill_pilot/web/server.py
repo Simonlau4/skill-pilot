@@ -2762,12 +2762,15 @@ class Handler(BaseHTTPRequestHandler):
                 preserve_files=bool(identity.strip()),
                 expected_connection=expected_conn,
                 expected_updated_at=expected_upd,
+                create_only=body.get('create_only') is True,
             )
         if path == '/api/team/docs/remove':
             expected_conn = body.get('expected_connection', '')
-            if not isinstance(expected_conn, str):
+            expected_upd = body.get('expected_updated_at', '')
+            if not isinstance(expected_conn, str) or not isinstance(expected_upd, str):
                 raise ValueError('文档核对信息格式不正确。')
-            return team.remove_doc(home, body.get('id', ''), confirmed=True, expected_connection=expected_conn)
+            return team.remove_doc(home, body.get('id', ''), confirmed=True,
+                                   expected_connection=expected_conn, expected_updated_at=expected_upd)
         if path == '/api/team/packs':
             with self.server.local_write():
                 return team.packs_apply(home, body.get('packs'))

@@ -181,13 +181,26 @@ class DocHubTests(unittest.TestCase):
                                         token=self.second['token'])
             self.assertEqual(status, 413, body)
 
-        # Per-member orphan blob budget cleans stale unreferenced blobs and never blocks referenced deliverables.
+        # Windows reserved device names are rejected across platforms.
+        for bad_id in ('CON', 'NUL', 'COM1'):
+            self.assertEqual(self.request(f'/api/docs/me/{bad_id}', 'PUT', {'title': '保留名', 'content': '正文'})[0], 400)
+
+        # create_only rejects overwriting an existing doc; stale expected_updated_at blocks delete.
+        self.assertEqual(self.request('/api/docs/me/doc-0', 'PUT', {
+            'title': '重复创建', 'content': '正文', 'create_only': True,
+        })[0], 409)
+        self.assertEqual(self.request('/api/docs/me/doc-0?expected_updated_at=2000-01-01T00:00:00Z', 'DELETE')[0], 409)
+
+        # Per-member orphan blob budget protects active-batch fresh uploads (507) and cleans expired orphans (> TTL).
         with patch.object(team_hub, 'MAX_ORPHAN_BLOBS_BYTES', len(PNG_BYTES) + 10):
             self.upload_blob(PNG_BYTES)
-            # Second unreferenced blob triggers cleanup of first unreferenced blob.
-            self.upload_blob(PDF_BYTES)
             blobs_dir = self.data / 'deliverables' / self.first['id'] / 'blobs'
-            self.assertFalse((blobs_dir / sha(PNG_BYTES)).exists())
+            png_blob = blobs_dir / sha(PNG_BYTES)
+            # Fresh orphan is NOT silently deleted mid-batch; once expired, it IS cleaned to admit new upload.
+            old_ts = os.path.getmtime(png_blob) - team_hub.ORPHAN_BLOB_TTL_SECONDS - 60
+            os.utime(png_blob, (old_ts, old_ts))
+            self.upload_blob(PDF_BYTES)
+            self.assertFalse(png_blob.exists())
             self.assertTrue((blobs_dir / sha(PDF_BYTES)).exists())
 
         # remove_member removes docs and blobs.
@@ -287,6 +300,27 @@ class DocClientWebCliTests(unittest.TestCase):
         upd_detail = team.doc_detail(self.alice_home, self.alice['id'], 'guide-1')
         self.assertEqual(upd_detail['category'], '工具指南')
         self.assertEqual(upd_detail['file_count'], 2)
+
+        # Updating with --asset where all new assets are blocked must NOT clear existing attachments.
+        blocked_secret = Path(self.temp.name) / 'blocked_extra.txt'
+        blocked_secret.write_text('token=sk-1234567890abcdef123456\n', encoding='utf-8')
+        r_blk = subprocess.run([*base_cmd, 'doc', str(updated_md), '--id', 'guide-1',
+                                '--asset', str(blocked_secret), '--yes', '--json'],
+                               capture_output=True, text=True, env=env)
+        self.assertEqual(r_blk.returncode, 0, r_blk.stderr)
+        self.assertEqual(team.doc_detail(self.alice_home, self.alice['id'], 'guide-1')['file_count'], 2)
+
+        # Text attachment larger than 2 MiB is still scanned for secrets.
+        big_secret = Path(self.temp.name) / 'big_log.txt'
+        big_secret.write_bytes(b'token=sk-1234567890abcdef123456\n' + b'a' * (2 * 1024 * 1024 + 64))
+        big_prev = team.publish_doc(self.alice_home, title='大日志测试', content='正文',
+                                    assets=[big_secret], confirmed=False)
+        self.assertEqual([b['path'] for b in big_prev['blocked']], ['big_log.txt'])
+        self.assertEqual(big_prev['file_count'], 0)
+
+        # Reserved Windows doc ID rejected in client preview too.
+        with self.assertRaisesRegex(ValueError, '保留名称'):
+            team.publish_doc(self.alice_home, identity='CON', title='测试', content='正文', confirmed=False)
 
         # Non-binary attachments of arbitrary extensions (e.g. .yaml) are scanned for secrets.
         yaml_dir = Path(self.temp.name) / 'yaml check'

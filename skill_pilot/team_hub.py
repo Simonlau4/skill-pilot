@@ -55,8 +55,16 @@ MAX_DOC_FILES = 30
 MAX_DOC_ATTACHMENT = 10 * 1024 * 1024
 MAX_DOC_SIZE = 20 * 1024 * 1024
 MAX_DOC_BODY = 512 * 1024
-MAX_ORPHAN_BLOBS_BYTES = 200 * 1024 * 1024
+MAX_ORPHAN_BLOBS_BYTES = 500 * 1024 * 1024
 ORPHAN_BLOB_TTL_SECONDS = 3600
+
+
+def clean_doc_id(identity):
+    if not isinstance(identity, str) or not re.fullmatch(DOC_ID, identity):
+        raise ValueError('文档编号只能用字母、数字、点、横线和下划线，最多 64 个字符。')
+    if PureWindowsPath(identity).is_reserved() or PureWindowsPath(identity + '.json').is_reserved():
+        raise ValueError('文档编号不能使用系统保留名称，请换一个编号。')
+    return identity
 DOC_IMAGE_TYPES = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
     '.gif': 'image/gif', '.webp': 'image/webp'}
@@ -1590,9 +1598,6 @@ class HubStore:
                 self._collect_blobs(member_id, min_age=ORPHAN_BLOB_TTL_SECONDS)
                 orphan = self._orphan_blob_bytes(member_id, used)
             if orphan > MAX_ORPHAN_BLOBS_BYTES:
-                self._collect_blobs(member_id)
-                orphan = self._orphan_blob_bytes(member_id, used)
-            if orphan > MAX_ORPHAN_BLOBS_BYTES:
                 raise HubError(507, '当前成员未完成的临时上传文件过多，请稍后重试。')
         os.replace(temporary, target)
         return {'sha256': digest, 'size': target.stat().st_size}
@@ -1728,11 +1733,17 @@ class HubStore:
         return rebuilt
 
     def _put_doc(self, member_id, identity, data):
+        try:
+            clean_doc_id(identity)
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
         stems = self._doc_item_stems(member_id)
         folded = identity.casefold()
         if folded in stems and stems[folded] != identity:
             raise HubError(409, f'已存在仅大小写不同的文档编号「{stems[folded]}」，请使用原编号更新或换一个编号。')
         existing = self._read_doc_item(member_id, identity)
+        if isinstance(data, dict) and data.get('create_only') is True and existing is not None:
+            raise HubError(409, '这篇分享文档已存在或被重新发布，已停止覆盖。')
         if isinstance(data, dict) and 'expected_updated_at' in data:
             expected = data.get('expected_updated_at')
             if expected is not None and not isinstance(expected, str):
@@ -1747,10 +1758,13 @@ class HubStore:
                     payload[opt_field] = existing[opt_field]
             if 'files' not in payload and existing.get('files'):
                 payload['files'] = existing['files']
-            elif payload.get('merge_files') is True and isinstance(payload.get('files'), dict) and existing.get('files'):
-                merged_files = dict(existing['files'])
-                merged_files.update(payload['files'])
-                payload['files'] = merged_files
+            elif payload.get('merge_files') is True and existing.get('files'):
+                incoming = payload.get('files')
+                if incoming is None or isinstance(incoming, dict):
+                    merged_files = dict(existing['files'])
+                    if incoming:
+                        merged_files.update(incoming)
+                    payload['files'] = merged_files
         try:
             row = clean_doc(payload)
         except HubError:
@@ -1778,10 +1792,16 @@ class HubStore:
         return {'key': 'doc:' + member_id + ':' + identity, 'id': identity,
                 'created_at': row['created_at'], 'updated_at': row['updated_at']}
 
-    def _remove_doc(self, member_id, identity):
-        stems = self._doc_item_stems(member_id)
-        if stems.get(identity.casefold()) != identity:
+    def _remove_doc(self, member_id, identity, expected_updated_at=''):
+        try:
+            clean_doc_id(identity)
+        except ValueError as error:
+            raise HubError(400, str(error)) from None
+        existing = self._read_doc_item(member_id, identity)
+        if existing is None:
             raise HubError(404, '这篇分享文档不存在，或已经删除。')
+        if expected_updated_at and existing.get('updated_at', '') != expected_updated_at:
+            raise HubError(409, '这篇分享文档已有较新的修改，请刷新后核对再删除。')
         path = self._doc_dir(member_id) / 'items' / (identity + '.json')
         index = self._doc_index(member_id)
         index.pop(identity, None)
@@ -2097,6 +2117,9 @@ class Handler(BaseHTTPRequestHandler):
                 activity_days = int(raw_days)
                 if not 1 <= activity_days <= ACTIVITY_RETENTION_DAYS:
                     raise HubError(400, f'统计天数须为 1 到 {ACTIVITY_RETENTION_DAYS} 之间的整数。')
+            elif doc_mine and self.command == 'DELETE' and '?' in self.path:
+                if set(query) != {'expected_updated_at'} or len(query['expected_updated_at']) != 1:
+                    raise HubError(404, '没有这个分享站地址，请核对后重试。')
             elif not served and not doc_served and ('?' in self.path or (package and package[3])) and (
                     not package or set(query) != {'version'} or len(query['version']) != 1 or
                     not re.fullmatch(r'[0-9a-f]{64}', query['version'][0])):
@@ -2220,7 +2243,7 @@ class Handler(BaseHTTPRequestHandler):
                                                   'file_count', 'size', 'updated_at')}
                 elif doc_mine:
                     result = (store._put_doc(member['id'], doc_mine[1], data) if self.command == 'PUT' else
-                              store._remove_doc(member['id'], doc_mine[1]))
+                              store._remove_doc(member['id'], doc_mine[1], query.get('expected_updated_at', [''])[0]))
                 elif doc_item:
                     result = store._doc(doc_item[1], doc_item[2])
                 else:

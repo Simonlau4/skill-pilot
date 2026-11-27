@@ -4888,10 +4888,19 @@ function storeDeliverablesSearchHtml(rows) {
 const storeDocs = () => state.store?.docs || [];
 const storeDocByKey = key => storeDocs().find(row => row.key === key) || null;
 
+const DOC_UNCATEGORIZED = '__doc_uncat__';
+
+function storeDocMatchesCategory(row, selected) {
+  if (!selected) return true;
+  const cat = String(row.category || '').trim();
+  return selected === DOC_UNCATEGORIZED ? !cat : cat === selected;
+}
+
 function storeDocMatches(query) {
   const words = query.trim().toLowerCase();
   if (!words) return [];
-  return storeDocs().filter(row => [
+  const selected = state.storeView === 'docs' ? (state.storeDocCategory || '') : '';
+  return storeDocs().filter(row => storeDocMatchesCategory(row, selected) && [
     row.title, row.category, row.summary, row.member?.name,
   ].some(value => String(value || '').toLowerCase().includes(words)));
 }
@@ -4928,17 +4937,21 @@ function storeDocsOverviewHtml() {
 }
 
 function storeDocsSearchHtml(rows) {
-  if (!rows.length) return '';
+  const activeCat = state.storeView === 'docs' ? (state.storeDocCategory || '') : '';
+  if (!rows.length && !activeCat) return '';
+  const catLabel = activeCat === DOC_UNCATEGORIZED ? '未分类' : activeCat;
+  const resetHint = activeCat
+    ? `<button class="link-btn" type="button" data-doc-reset-category>清除「${escape(catLabel)}」筛选</button>` : '';
   return `<section class="shelf" aria-labelledby="shelf-docs-search">
     <div class="shelf-head">
-      <h2 id="shelf-docs-search" tabindex="-1">匹配的分享文档</h2>
-      <span class="store-count">${number(rows.length)} 篇</span>
+      <h2 id="shelf-docs-search" tabindex="-1">${activeCat ? `匹配的分享文档（${escape(catLabel)}）` : '匹配的分享文档'}</h2>
+      <div class="shelf-head-group">${resetHint}<span class="store-count">${number(rows.length)} 篇</span></div>
     </div>
-    <div class="doc-grid">${rows.map(storeDocCardHtml).join('')}</div>
+    ${rows.length
+      ? `<div class="doc-grid">${rows.map(storeDocCardHtml).join('')}</div>`
+      : `<div class="empty">${emptyInner('search', `「${catLabel}」分类下没有匹配的分享文档`, resetHint)}</div>`}
   </section>`;
 }
-
-const DOC_UNCATEGORIZED = '\u0000';
 
 function storeDocsViewHtml() {
   const rows = storeDocs();
@@ -4955,15 +4968,15 @@ function storeDocsViewHtml() {
   const hasActive = !active || (active === DOC_UNCATEGORIZED ? uncategorized > 0 : counts.has(active));
   const selected = hasActive ? active : '';
   if (selected !== state.storeDocCategory) state.storeDocCategory = selected;
-  const pills = [['', rows.length], ...categories];
-  if (uncategorized > 0 && categories.length > 0) pills.push([DOC_UNCATEGORIZED, uncategorized]);
-  const filterBar = pills.length > 2 ? `<div class="store-groups" role="group" aria-label="按文档分类筛选">${pills.map(([cat, count]) =>
-    `<button class="store-group" type="button" data-doc-category="${escape(cat)}" aria-pressed="${selected === cat}">${
-      escape(cat === '' ? '全部' : cat === DOC_UNCATEGORIZED ? '未分类' : cat)}<span class="n">${number(count)}</span></button>`).join('')}</div>` : '';
-  const shown = !selected ? rows : rows.filter(row => {
-    const cat = String(row.category || '').trim();
-    return selected === DOC_UNCATEGORIZED ? !cat : cat === selected;
-  });
+  const pills = [['all', '', rows.length], ...categories.map(([cat, count]) => ['value', cat, count])];
+  if (uncategorized > 0 && categories.length > 0) pills.push(['none', '', uncategorized]);
+  const filterBar = pills.length > 2 ? `<div class="store-groups" role="group" aria-label="按文档分类筛选">${pills.map(([mode, cat, count]) => {
+    const pressed = mode === 'all' ? !selected : mode === 'none' ? selected === DOC_UNCATEGORIZED : selected === cat;
+    const label = mode === 'all' ? '全部' : mode === 'none' ? '未分类' : cat;
+    return `<button class="store-group" type="button" data-doc-cat-mode="${mode}" data-doc-category="${escape(cat)}" aria-pressed="${pressed}">${
+      escape(label)}<span class="n">${number(count)}</span></button>`;
+  }).join('')}</div>` : '';
+  const shown = rows.filter(row => storeDocMatchesCategory(row, selected));
   return `<section class="shelf" aria-labelledby="shelf-docs">
     <div class="shelf-head">
       <div class="shelf-head-group">
@@ -6004,19 +6017,22 @@ $('page-team').addEventListener('click', event => {
     return;
   }
   if (docCategory) {
-    const category = docCategory.dataset.docCategory;
-    state.storeDocCategory = category === state.storeDocCategory ? '' : category;
+    const mode = docCategory.dataset.docCatMode || 'value';
+    const next = mode === 'all' ? '' : mode === 'none' ? DOC_UNCATEGORIZED : docCategory.dataset.docCategory;
+    state.storeDocCategory = next === state.storeDocCategory ? '' : next;
     renderTeam();
-    const target = state.storeDocCategory
-      ? `[data-doc-category="${CSS.escape(state.storeDocCategory)}"]`
-      : '[data-doc-category=""]';
+    const target = !state.storeDocCategory
+      ? '[data-doc-cat-mode="all"]'
+      : state.storeDocCategory === DOC_UNCATEGORIZED
+        ? '[data-doc-cat-mode="none"]'
+        : `[data-doc-cat-mode="value"][data-doc-category="${CSS.escape(state.storeDocCategory)}"]`;
     $('store-shelves').querySelector(target)?.focus({preventScroll: true});
     return;
   }
   if (docResetCategory) {
     state.storeDocCategory = '';
     renderTeam();
-    $('store-shelves').querySelector('[data-doc-category=""]')?.focus({preventScroll: true});
+    $('store-shelves').querySelector('[data-doc-cat-mode="all"]')?.focus({preventScroll: true});
     return;
   }
   if (spotDeliverable) {
@@ -8771,11 +8787,15 @@ async function restoreDocSnapshot(snapshot, button) {
   if (!ok) throw new Error('restore failed');
 }
 
-async function undoCreatedDoc(id, title, expectedConnection, button) {
+async function undoCreatedDoc(id, title, expectedConnection, expectedUpdatedAt, button) {
   let ok = false;
   await withBusy(button, '正在撤销…', async () => {
     try {
-      await api('/api/team/docs/remove', {id, expected_connection: expectedConnection});
+      await api('/api/team/docs/remove', {
+        id,
+        expected_connection: expectedConnection,
+        expected_updated_at: expectedUpdatedAt || '',
+      });
       ok = true;
       if (state.storeDetail?.startsWith('doc:')) closeDetail();
       await loadStore();
@@ -8828,7 +8848,7 @@ $('store-doc-save')?.addEventListener('click', async event => {
       if (wasOpen) openDocDetail(editedKey);
       const undoAction = previous
         ? undoBtn => restoreDocSnapshot({...previous, expected_updated_at: saved.updated_at || ''}, undoBtn)
-        : undoBtn => undoCreatedDoc(saved.id, saved.title || payload.title, connId, undoBtn);
+        : undoBtn => undoCreatedDoc(saved.id, saved.title || payload.title, connId, saved.updated_at || '', undoBtn);
       toast({
         text: saved.message || '分享文档已保存。',
         undo: undoAction,
@@ -8846,6 +8866,7 @@ $('store-doc-save')?.addEventListener('click', async event => {
 
 async function deleteStoreDoc(id, title, button) {
   const connId = state.store?.connection_id || '';
+  const expectedUpdatedAt = docDetail?.data && docDetail.data.id === id ? (docDetail.data.updated_at || '') : '';
   const snapshot = docDetail?.data && docDetail.data.id === id ? {
     id: docDetail.data.id,
     title: docDetail.data.title || '',
@@ -8853,6 +8874,7 @@ async function deleteStoreDoc(id, title, button) {
     summary: docDetail.data.summary || '',
     content: docDetail.data.content || '',
     expected_connection: connId,
+    create_only: true,
   } : null;
   const hasFiles = Boolean(docDetail?.data?.file_count);
   const confirmed = await confirmDialog({
@@ -8870,7 +8892,11 @@ async function deleteStoreDoc(id, title, button) {
   const prevIndex = cardsBefore.findIndex(el => el.dataset.docOpen === docKey);
   await withBusy(button, '正在删除…', async () => {
     try {
-      const result = await api('/api/team/docs/remove', {id, expected_connection: connId});
+      const result = await api('/api/team/docs/remove', {
+        id,
+        expected_connection: connId,
+        expected_updated_at: expectedUpdatedAt,
+      });
       if (state.storeDetail?.startsWith('doc:')) closeDetail();
       await loadStore();
       renderTeam();
