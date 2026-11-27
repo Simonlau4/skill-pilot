@@ -730,6 +730,9 @@
           <button id="store-tab-deliverables" class="rail-item team-rail-item" type="button" role="tab" data-store-view="deliverables" aria-controls="team-tabpanel" aria-selected="false" hidden>
             <span class="team-rail-label">成品案例</span><span id="store-nav-deliverables-n" class="team-rail-count"></span>
           </button>
+          <button id="store-tab-docs" class="rail-item team-rail-item" type="button" role="tab" data-store-view="docs" aria-controls="team-tabpanel" aria-selected="false" hidden>
+            <span class="team-rail-label">分享文档</span><span id="store-nav-docs-n" class="team-rail-count"></span>
+          </button>
           <button id="store-tab-packs" class="rail-item team-rail-item" type="button" role="tab" data-store-view="packs" aria-controls="team-tabpanel" aria-selected="false" hidden>
             <span class="team-rail-label">技能包</span><span id="store-nav-packs-n" class="team-rail-count"></span>
           </button>
@@ -755,11 +758,12 @@
         <div class="toolbar store-bar">
           <label class="search-field">
             <svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-search"/></svg>
-            <input id="store-search" type="search" class="input input-search" placeholder="搜索成品、技能名称、用途或推荐语" aria-label="搜索团队技能" autocomplete="off" spellcheck="false">
+            <input id="store-search" type="search" class="input input-search" placeholder="搜索成品、文档、技能名称、用途或推荐语" aria-label="搜索团队商店的成品、文档和技能" autocomplete="off" spellcheck="false">
           </label>
           <span class="toolbar-end">
             <button id="store-refresh" class="btn btn-iconic btn-quiet" type="button" aria-label="刷新" title="刷新"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-refresh"/></svg></button>
             <button id="store-update-all" class="btn btn-update" type="button" hidden><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-update-up"/></svg><span>一键更新</span></button>
+            <button id="store-doc-publish" class="btn" type="button" hidden><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-file-kept"/></svg><span>上传文档</span></button>
             <button id="store-publish" class="btn btn-primary" type="button"><svg class="btn-icon" aria-hidden="true" focusable="false"><use href="#sp-plus"/></svg><span>上架技能</span></button>
           </span>
         </div>
@@ -972,6 +976,49 @@
     <div class="dialog-actions">
       <button id="store-replace-keep" type="button" class="btn">全部保留</button>
       <button id="store-replace-apply" type="button" class="btn btn-primary">确认处理</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="store-doc-dialog" class="dialog dialog-wide" aria-labelledby="store-doc-dialog-title">
+  <form class="dialog-form">
+    <h2 id="store-doc-dialog-title">上传分享文档</h2>
+    <p class="note-line"><svg class="ico" aria-hidden="true" focusable="false"><use href="#sp-lock"/></svg>只限团队成员查看，文档内容仅按安全文本展示，不执行脚本</p>
+    <div class="doc-form-grid">
+      <label class="doc-field">
+        <span>文档标题</span>
+        <input id="store-doc-title" type="text" class="input" maxlength="200" placeholder="例如：第 4 期 Workshop 分享纪要" required>
+      </label>
+      <label class="doc-field">
+        <span>分类或期数（选填）</span>
+        <input id="store-doc-category" type="text" class="input" maxlength="40" list="store-doc-category-list" placeholder="例如：Workshop 纪要、工具指南、业务复盘">
+        <datalist id="store-doc-category-list">
+          <option value="Workshop 纪要"></option>
+          <option value="工具指南"></option>
+          <option value="业务复盘"></option>
+        </datalist>
+      </label>
+    </div>
+    <label class="doc-field">
+      <span>简短摘要（选填）</span>
+      <input id="store-doc-summary" type="text" class="input" maxlength="200" placeholder="一两句话介绍这篇文档的重点">
+    </label>
+    <div class="doc-field">
+      <div class="doc-field-head">
+        <label for="store-doc-content">正文内容（支持 Markdown）</label>
+        <span class="doc-field-tools">
+          <input id="store-doc-file-input" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
+          <button id="store-doc-pick-file" type="button" class="link-btn">从本地导入文件</button>
+        </span>
+      </div>
+      <textarea id="store-doc-content" class="input doc-textarea" rows="11" placeholder="粘贴或输入分享文档正文…"></textarea>
+    </div>
+    <p id="store-doc-attachments-note" class="row-note" hidden></p>
+    <div id="store-doc-warning" class="banner banner-warn" role="alert" hidden></div>
+    <p id="store-doc-message" class="row-note is-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="store-doc-close" type="button" class="btn">取消</button>
+      <button id="store-doc-save" type="button" class="btn btn-primary">发布文档</button>
     </div>
   </form>
 </dialog>

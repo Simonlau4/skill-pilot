@@ -160,8 +160,12 @@ function confirmDialog({title = '确认这次操作', lines = [], groups = [], n
     + (note ? `<p class="confirm-note">${escape(note)}</p>` : '');
   ok.textContent = okText;
   ok.classList.toggle('btn-danger-solid', danger);
+  dialog.returnValue = '';
   return new Promise(resolve => {
+    const onCancel = () => { dialog.returnValue = 'cancel'; };
+    dialog.addEventListener('cancel', onCancel, {once: true});
     dialog.addEventListener('close', () => {
+      dialog.removeEventListener('cancel', onCancel);
       ok.classList.remove('btn-danger-solid');
       resolve(dialog.returnValue === 'ok');
     }, {once: true});
@@ -1476,8 +1480,9 @@ const state = {
   storeSort: 'latest', // 全部技能的排序：latest / rating / installs
   storeGroup: '',      // 选中的分组；'-' 是没分组
   storeMine: false,    // 只看我上架的
-  storeView: 'overview',        // 左侧目录分区：overview / deliverables / packs / skills / github
+  storeView: 'overview',        // 左侧目录分区：overview / deliverables / docs / packs / skills / github
   storeSpotDeliverable: '',     // 精选总览中当前展示的成品 key
+  storeDocCategory: '',         // 分享文档分类筛选：'' 全部 / 分类名 / '-' 未分类
   storeBoardTab: '',            // 双列精选榜右列切换：'' 自动 / rating / latest
   storeGithubFilter: 'all',     // GitHub 热门独立视图筛选：all / installable / installed
   storeGithubCategory: '',      // GitHub 热门用途分类筛选：'' 全部 / 分类名 / '-' 未分类
@@ -4879,6 +4884,114 @@ function storeDeliverablesSearchHtml(rows) {
   </section>`;
 }
 
+/* ---------- 分享文档：列表、分类筛选、安全阅读与上传 ---------- */
+const storeDocs = () => state.store?.docs || [];
+const storeDocByKey = key => storeDocs().find(row => row.key === key) || null;
+
+const DOC_UNCATEGORIZED = '__doc_uncat__';
+
+function storeDocMatchesCategory(row, selected) {
+  if (!selected) return true;
+  const cat = String(row.category || '').trim();
+  return selected === DOC_UNCATEGORIZED ? !cat : cat === selected;
+}
+
+function storeDocMatches(query) {
+  const words = query.trim().toLowerCase();
+  if (!words) return [];
+  const selected = state.storeView === 'docs' ? (state.storeDocCategory || '') : '';
+  return storeDocs().filter(row => storeDocMatchesCategory(row, selected) && [
+    row.title, row.category, row.summary, row.member?.name,
+  ].some(value => String(value || '').toLowerCase().includes(words)));
+}
+
+function storeDocCardHtml(row) {
+  const meta = [
+    `${row.member?.name || '成员'} 发布`,
+    friendlyDate(row.updated_at || row.created_at),
+    row.file_count ? `含 ${number(row.file_count)} 个附件` : '',
+  ].filter(Boolean);
+  return `<button class="doc-card" type="button" data-doc-open="${escape(row.key)}">
+    <div class="doc-card-top">
+      <h3 class="doc-card-title">${escape(row.title)}</h3>
+      ${row.category ? `<span class="tag tag-quiet">${escape(row.category)}</span>` : ''}
+    </div>
+    ${row.summary ? `<p class="doc-card-summary">${escape(row.summary)}</p>` : ''}
+    <div class="doc-card-meta">${meta.map(part => `<span>${escape(part)}</span>`).join('<span class="doc-dot" aria-hidden="true">·</span>')}</div>
+  </button>`;
+}
+
+function storeDocsOverviewHtml() {
+  const rows = storeDocs();
+  if (!rows.length) return '';
+  return `<section class="shelf" aria-labelledby="shelf-docs">
+    <div class="shelf-head">
+      <div class="shelf-head-group">
+        <h2 id="shelf-docs" tabindex="-1">分享文档</h2>
+        <p class="shelf-note">历次分享纪要、工具指南与团队沉淀资料</p>
+      </div>
+      <button class="link-btn" type="button" data-store-goto-view="docs">查看全部 ${number(rows.length)} 篇</button>
+    </div>
+    <div class="doc-grid">${rows.slice(0, 4).map(storeDocCardHtml).join('')}</div>
+  </section>`;
+}
+
+function storeDocsSearchHtml(rows) {
+  const activeCat = state.storeView === 'docs' ? (state.storeDocCategory || '') : '';
+  if (!rows.length && !activeCat) return '';
+  const catLabel = activeCat === DOC_UNCATEGORIZED ? '未分类' : activeCat;
+  const resetHint = activeCat
+    ? `<button class="link-btn" type="button" data-doc-reset-category>清除「${escape(catLabel)}」筛选</button>` : '';
+  return `<section class="shelf" aria-labelledby="shelf-docs-search">
+    <div class="shelf-head">
+      <h2 id="shelf-docs-search" tabindex="-1">${activeCat ? `匹配的分享文档（${escape(catLabel)}）` : '匹配的分享文档'}</h2>
+      <div class="shelf-head-group">${resetHint}<span class="store-count">${number(rows.length)} 篇</span></div>
+    </div>
+    ${rows.length
+      ? `<div class="doc-grid">${rows.map(storeDocCardHtml).join('')}</div>`
+      : `<div class="empty">${emptyInner('search', `「${catLabel}」分类下没有匹配的分享文档`, resetHint)}</div>`}
+  </section>`;
+}
+
+function storeDocsViewHtml() {
+  const rows = storeDocs();
+  if (!rows.length) return '';
+  const counts = new Map();
+  let uncategorized = 0;
+  for (const row of rows) {
+    const cat = String(row.category || '').trim();
+    if (cat) counts.set(cat, (counts.get(cat) || 0) + 1);
+    else uncategorized += 1;
+  }
+  const categories = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'zh-CN'));
+  const active = state.storeDocCategory || '';
+  const hasActive = !active || (active === DOC_UNCATEGORIZED ? uncategorized > 0 : counts.has(active));
+  const selected = hasActive ? active : '';
+  if (selected !== state.storeDocCategory) state.storeDocCategory = selected;
+  const pills = [['all', '', rows.length], ...categories.map(([cat, count]) => ['value', cat, count])];
+  if (uncategorized > 0 && categories.length > 0) pills.push(['none', '', uncategorized]);
+  const filterBar = pills.length > 2 ? `<div class="store-groups" role="group" aria-label="按文档分类筛选">${pills.map(([mode, cat, count]) => {
+    const pressed = mode === 'all' ? !selected : mode === 'none' ? selected === DOC_UNCATEGORIZED : selected === cat;
+    const label = mode === 'all' ? '全部' : mode === 'none' ? '未分类' : cat;
+    return `<button class="store-group" type="button" data-doc-cat-mode="${mode}" data-doc-category="${escape(cat)}" aria-pressed="${pressed}">${
+      escape(label)}<span class="n">${number(count)}</span></button>`;
+  }).join('')}</div>` : '';
+  const shown = rows.filter(row => storeDocMatchesCategory(row, selected));
+  return `<section class="shelf" aria-labelledby="shelf-docs">
+    <div class="shelf-head">
+      <div class="shelf-head-group">
+        <h2 id="shelf-docs" tabindex="-1">分享文档</h2>
+        <p class="shelf-note">团队历次分享纪要与参考资料，点击即可在线阅读</p>
+      </div>
+      <span class="store-count">${number(shown.length)} 篇</span>
+    </div>
+    ${filterBar}
+    <div class="doc-grid">${shown.length
+      ? shown.map(storeDocCardHtml).join('')
+      : `<div class="empty">${emptyInner('search', '该分类下暂无分享文档', '<button class="link-btn" type="button" data-doc-reset-category>查看全部</button>')}</div>`}</div>
+  </section>`;
+}
+
 function primeDeliverableCovers(rows) {
   for (const row of rows || []) {
     if (row?.has_teardown) loadDeliverableCover(row);
@@ -4896,11 +5009,13 @@ teamNarrowMedia?.addEventListener?.('change', syncTeamRailOrientation);
 function renderTeamRail(cards) {
   syncTeamRailOrientation();
   const deliverables = state.store?.deliverables || [];
+  const docs = typeof storeDocs === 'function' ? storeDocs() : (state.store?.docs || []);
   const packs = state.store?.packs || [];
   const repos = githubRepos();
   const visible = {
     overview: true,
     deliverables: deliverables.length > 0,
+    docs: docs.length > 0,
     packs: packs.length > 0,
     skills: true,
     github: repos.length > 0,
@@ -4908,6 +5023,7 @@ function renderTeamRail(cards) {
   if (!visible[state.storeView]) state.storeView = 'overview';
   const counts = {
     deliverables: deliverables.length,
+    docs: docs.length,
     packs: packs.length,
     skills: (cards || []).length,
     github: repos.length,
@@ -4921,6 +5037,7 @@ function renderTeamRail(cards) {
     button.tabIndex = (activeView ? selected : view === state.storeView) ? 0 : -1;
   }
   $('store-nav-deliverables-n').textContent = counts.deliverables ? number(counts.deliverables) : '';
+  if ($('store-nav-docs-n')) $('store-nav-docs-n').textContent = counts.docs ? number(counts.docs) : '';
   $('store-nav-packs-n').textContent = counts.packs ? number(counts.packs) : '';
   $('store-nav-skills-n').textContent = counts.skills ? number(counts.skills) : '';
   $('store-nav-github-n').textContent = counts.github ? number(counts.github) : '';
@@ -4952,6 +5069,12 @@ function renderTeam() {
   const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
   $('store-publish').disabled = !ready || !teamCanWrite();
   $('store-publish').title = !state.table ? '整理过技能后才能上架' : readOnly ? '只读预览，不能上架' : '';
+  const docPublish = $('store-doc-publish');
+  if (docPublish) {
+    docPublish.hidden = !state.store?.docs_supported;
+    docPublish.disabled = !ready || readOnly;
+    docPublish.title = readOnly ? '只读预览，不能上传文档' : '';
+  }
   const mineCount = (cards || []).filter(card => card.local?.status === 'mine').length;
   $('store-mine').disabled = !cards;
   $('store-mine').setAttribute('aria-pressed', String(state.storeMine));
@@ -4984,7 +5107,9 @@ function renderStoreShelves(cards) {
   if (query) {
     if (state.storeMine) { box.innerHTML = ''; return; }
     const matched = storeDeliverableMatches(query);
-    box.innerHTML = storeDeliverablesSearchHtml(matched);
+    const matchedDocs = typeof storeDocMatches === 'function' ? storeDocMatches(query) : [];
+    const docsSearch = typeof storeDocsSearchHtml === 'function' ? storeDocsSearchHtml(matchedDocs) : '';
+    box.innerHTML = storeDeliverablesSearchHtml(matched) + docsSearch;
     primeDeliverableCovers(matched);
     return;
   }
@@ -4995,26 +5120,28 @@ function renderStoreShelves(cards) {
     primeDeliverableCovers(deliverables);
     return;
   }
+  if (state.storeView === 'docs') { box.innerHTML = typeof storeDocsViewHtml === 'function' ? storeDocsViewHtml() : ''; return; }
   if (state.storeView === 'packs') { box.innerHTML = storePacksViewHtml(); return; }
   if (state.storeView === 'github') { box.innerHTML = storeGithubViewHtml(); return; }
   const emptyTeam = `<div class="empty store-empty">${emptyInner('team', '暂无团队技能')}
     <button class="btn btn-primary" type="button" data-store-publish${teamCanWrite() ? '' : ' disabled'}>${icon('plus', 'btn-icon')}上架第一个技能</button></div>`;
   if (state.storeView === 'skills') { box.innerHTML = cards.length ? '' : emptyTeam; return; }
   const deliverableSection = storeDeliverablesOverviewHtml();
+  const docsSection = typeof storeDocsOverviewHtml === 'function' ? storeDocsOverviewHtml() : '';
   const activeDeliverable = deliverables.filter(row => row.key === state.storeSpotDeliverable);
   if (!cards.length) {
-    box.innerHTML = deliverableSection + emptyTeam + storeGithubOverviewHtml();
+    box.innerHTML = deliverableSection + docsSection + emptyTeam + storeGithubOverviewHtml();
     primeDeliverableCovers(activeDeliverable);
     return;
   }
   const packSection = storePacksOverviewHtml();
   const githubSection = storeGithubOverviewHtml();
   if (cards.length < SHELF_MIN) {
-    box.innerHTML = deliverableSection + packSection + githubSection;
+    box.innerHTML = deliverableSection + docsSection + packSection + githubSection;
     primeDeliverableCovers(activeDeliverable);
     return;
   }
-  box.innerHTML = deliverableSection + packSection + storeDuoBoardHtml(cards) + githubSection;
+  box.innerHTML = deliverableSection + docsSection + packSection + storeDuoBoardHtml(cards) + githubSection;
   primeDeliverableCovers(activeDeliverable);
 }
 
@@ -5647,7 +5774,8 @@ function renderStoreAll(cards) {
   const query = storeQuery();
   const base = storeFilter(cards, {query, mine: state.storeMine});
   const rows = storeFilter(base, {group: state.storeGroup}).sort(STORE_SORTS[state.storeSort] || STORE_SORTS.latest);
-  const deliverableHits = query && !state.storeMine ? storeDeliverableMatches(query).length : 0;
+  const deliverableHits = query && !state.storeMine
+    ? storeDeliverableMatches(query).length + (typeof storeDocMatches === 'function' ? storeDocMatches(query).length : 0) : 0;
   const showAll = state.storeMine
     ? true
     : query
@@ -5809,6 +5937,7 @@ async function reloadStorePage(button) {
 $('store-refresh').addEventListener('click', event => reloadStorePage(event.currentTarget));
 $('store-retry').addEventListener('click', event => reloadStorePage(event.currentTarget));
 $('store-publish').addEventListener('click', () => openPublish());
+$('store-doc-publish')?.addEventListener('click', () => openDocDialog());
 
 let storeUpdateSubmitting = false;
 function renderStoreUpdateButton() {
@@ -5861,6 +5990,9 @@ $('page-team').addEventListener('click', event => {
   const goto = event.target.closest('[data-store-goto]');
   const gotoTags = event.target.closest('[data-store-goto-tag]');
   const gotoView = event.target.closest('[data-store-goto-view]');
+  const docOpen = event.target.closest('[data-doc-open]');
+  const docCategory = event.target.closest('[data-doc-category]');
+  const docResetCategory = event.target.closest('[data-doc-reset-category]');
   const spotDeliverable = event.target.closest('[data-deliverable-spot]');
   const installMissing = event.target.closest('[data-deliverable-install-missing]');
   const findSkill = event.target.closest('[data-deliverable-find]');
@@ -5880,6 +6012,29 @@ $('page-team').addEventListener('click', event => {
   const packEdit = event.target.closest('[data-store-pack-edit]');
   const packToggle = event.target.closest('[data-store-pack-toggle]');
   const queuePack = event.target.closest('[data-store-queue-pack]');
+  if (docOpen) {
+    openDocDetail(docOpen.dataset.docOpen, docOpen);
+    return;
+  }
+  if (docCategory) {
+    const mode = docCategory.dataset.docCatMode || 'value';
+    const next = mode === 'all' ? '' : mode === 'none' ? DOC_UNCATEGORIZED : docCategory.dataset.docCategory;
+    state.storeDocCategory = next === state.storeDocCategory ? '' : next;
+    renderTeam();
+    const target = !state.storeDocCategory
+      ? '[data-doc-cat-mode="all"]'
+      : state.storeDocCategory === DOC_UNCATEGORIZED
+        ? '[data-doc-cat-mode="none"]'
+        : `[data-doc-cat-mode="value"][data-doc-category="${CSS.escape(state.storeDocCategory)}"]`;
+    $('store-shelves').querySelector(target)?.focus({preventScroll: true});
+    return;
+  }
+  if (docResetCategory) {
+    state.storeDocCategory = '';
+    renderTeam();
+    $('store-shelves').querySelector('[data-doc-cat-mode="all"]')?.focus({preventScroll: true});
+    return;
+  }
   if (spotDeliverable) {
     const key = spotDeliverable.dataset.deliverableSpot;
     state.storeSpotDeliverable = key;
@@ -6331,6 +6486,7 @@ function openStoreDetail(key, opener = null) {
 
 function renderStoreDetail(fresh = false) {
   if (String(state.storeDetail || '').startsWith('github-repo:')) return renderGithubDetail();
+  if (String(state.storeDetail || '').startsWith('doc:')) return renderDocDetail();
   const pack = storePack(state.storeDetail);
   if (pack) return renderStorePackDetail(pack, fresh);
   const card = storeCard(state.storeDetail);
@@ -7041,6 +7197,16 @@ function storeRateHtml(card) {
 $('detail-body').addEventListener('click', event => {
   if (!state.storeDetail) return;
   const target = event.target;
+  if (target.closest('[data-doc-edit]')) {
+    if (docDetail?.data) openDocDialog(docDetail.data);
+    return;
+  }
+  if (target.closest('[data-doc-delete]')) {
+    const id = target.closest('[data-doc-delete]').dataset.docDelete;
+    const title = docDetail?.data?.title || storeDocByKey(state.storeDetail)?.title || id;
+    deleteStoreDoc(id, title, target.closest('[data-doc-delete]'));
+    return;
+  }
   if (target.closest('[data-pack-install]')) {
     const pack = storePack(state.storeDetail);
     if (pack) queueStorePack(pack);
@@ -8295,6 +8461,10 @@ function openDetail(name) {
 /* 技能详情和团队商店的详情共用这块面板。stillOpen 判断动画开始前用户有没有换走。 */
 function showDetailPanel(stillOpen) {
   const panel = $('detail-panel');
+  if (panel.classList) {
+    if (String(state.storeDetail || '').startsWith('doc:')) panel.classList.add('is-doc');
+    else panel.classList.remove('is-doc');
+  }
   panel.hidden = false;
   $('panel-scrim').hidden = false;
   $('detail-body').scrollTop = 0;
@@ -8307,33 +8477,490 @@ function showDetailPanel(stillOpen) {
   holdDetailBackground(true);
 }
 
+let docDetail = null;
+let docDetailSequence = 0;
+
+function docSafeBaseUrl(value) {
+  return typeof value === 'string'
+    && /^\/doc-file\/[0-9a-f]{32}\/[0-9a-f]{32}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\/$/.test(value)
+    && !/\/\.\.(?:\/|$)/.test(value) ? value : '';
+}
+
+function docResolveAsset(raw, fileMap) {
+  const cleaned = String(raw || '').trim().replace(/^\.\//, '');
+  if (!cleaned || cleaned.startsWith('/') || cleaned.split('/').some(seg => seg === '' || seg === '.' || seg === '..')) return null;
+  if (fileMap.has(cleaned)) return fileMap.get(cleaned);
+  try {
+    const decoded = decodeURIComponent(cleaned);
+    if (fileMap.has(decoded)) return fileMap.get(decoded);
+  } catch { /* ignore malformed percent-encoding */ }
+  return null;
+}
+
+function docSafeExternalUrl(raw) {
+  try {
+    const parsed = new URL(String(raw || '').trim());
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return parsed.href;
+  } catch { /* reject invalid URLs */ }
+  return '';
+}
+
+function docEncodePath(path) {
+  return String(path).split('/').map(part => encodeURIComponent(part)).join('/');
+}
+
+function docMdInline(text, fileMap, baseUrl) {
+  const parts = String(text || '').split(/(`[^`\n]+`)/g);
+  return parts.map((segment, index) => {
+    if (index % 2 === 1) return `<code>${escape(segment.slice(1, -1))}</code>`;
+    const tokens = [];
+    const stash = html => {
+      const marker = `\u0000${tokens.length}\u0000`;
+      tokens.push(html);
+      return marker;
+    };
+    let work = segment.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, src) => {
+      const asset = baseUrl ? docResolveAsset(src, fileMap) : null;
+      if (asset && asset.is_image) {
+        return stash(`<img class="doc-md-img" src="${escape(baseUrl + docEncodePath(asset.path))}" alt="${escape(alt)}" loading="lazy">`);
+      }
+      return stash(escape(alt ? `[图片：${alt}]` : '[图片]'));
+    });
+    work = work.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
+      const asset = baseUrl ? docResolveAsset(href, fileMap) : null;
+      if (asset) {
+        return stash(`<a href="${escape(baseUrl + docEncodePath(asset.path))}" target="_blank" rel="noopener noreferrer">${escape(label)}</a>`);
+      }
+      const external = docSafeExternalUrl(href);
+      if (external) {
+        return stash(`<a href="${escape(external)}" target="_blank" rel="noopener noreferrer">${escape(label)}</a>`);
+      }
+      return stash(escape(label));
+    });
+    work = escape(work)
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+    return work.replace(/\u0000(\d+)\u0000/g, (_, idx) => tokens[Number(idx)] || '');
+  }).join('');
+}
+
+function docMdHtml(source, files = [], fileBaseUrl = '') {
+  const baseUrl = docSafeBaseUrl(fileBaseUrl);
+  const fileMap = new Map((Array.isArray(files) ? files : []).map(item => [item.path, item]));
+  const out = [];
+  let list = '', table = false, fence = false, quote = [];
+  const flushQuote = () => {
+    if (!quote.length) return;
+    out.push(`<blockquote>${quote.map(line => `<p>${docMdInline(line, fileMap, baseUrl)}</p>`).join('')}</blockquote>`);
+    quote = [];
+  };
+  const close = () => {
+    flushQuote();
+    if (list) out.push(`</${list}>`);
+    if (table) out.push('</tbody></table></div>');
+    list = ''; table = false;
+  };
+  for (const line of String(source || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')) {
+    if (/^```/.test(line.trim())) { close(); fence = !fence; out.push(fence ? '<pre class="md-pre">' : '</pre>'); continue; }
+    if (fence) { out.push(escape(line) + '\n'); continue; }
+    const quoteLine = /^>\s?(.*)$/.exec(line);
+    if (quoteLine) {
+      if (list || table) {
+        if (list) out.push(`</${list}>`);
+        if (table) out.push('</tbody></table></div>');
+        list = ''; table = false;
+      }
+      quote.push(quoteLine[1]);
+      continue;
+    }
+    flushQuote();
+    if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) { close(); out.push('<hr>'); continue; }
+    const cells = /^\s*\|(.+)\|\s*$/.exec(line);
+    if (cells) {
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) continue;
+      const row = cells[1].split('|').map(cell => docMdInline(cell.trim(), fileMap, baseUrl));
+      if (!table) { close(); table = true; out.push(`<div class="md-table"><table><thead><tr>${row.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>`); }
+      else out.push(`<tr>${row.map(c => `<td>${c}</td>`).join('')}</tr>`);
+      continue;
+    }
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    const taskItem = /^\s*[-*]\s+\[([ xX])\]\s+(.*)$/.exec(line);
+    const item = taskItem ? null : /^\s*(?:[-*]|\d+\.)\s+(.*)$/.exec(line);
+    if (heading) { close(); const level = heading[1].length + 2; out.push(`<h${level}>${docMdInline(heading[2], fileMap, baseUrl)}</h${level}>`); }
+    else if (taskItem) {
+      if (list !== 'ul') { close(); list = 'ul'; out.push('<ul>'); }
+      const checked = taskItem[1].toLowerCase() === 'x';
+      out.push(`<li><input type="checkbox" disabled${checked ? ' checked' : ''} aria-label="${checked ? '已完成' : '未完成'}"> ${docMdInline(taskItem[2], fileMap, baseUrl)}</li>`);
+    } else if (item) {
+      const kind = /^\s*\d+\./.test(line) ? 'ol' : 'ul';
+      if (list !== kind) { close(); list = kind; out.push(`<${kind}>`); }
+      out.push(`<li>${docMdInline(item[1], fileMap, baseUrl)}</li>`);
+    } else if (line.trim()) { close(); out.push(`<p>${docMdInline(line, fileMap, baseUrl)}</p>`); }
+    else close();
+  }
+  if (fence) out.push('</pre>');
+  close();
+  return out.join('');
+}
+
+async function openDocDetail(key, opener = null) {
+  const row = storeDocByKey(key);
+  if (!row) return;
+  storeOpener = opener;
+  storeOpenerArea = opener?.closest('#store-shelves, #store-list')?.id || null;
+  state.storeDetail = key;
+  const seq = ++docDetailSequence;
+  docDetail = {key, loading: true, error: '', data: null};
+  $('detail-panel').classList.add('is-doc');
+  renderDocDetail();
+  showDetailPanel(() => state.storeDetail === key);
+  try {
+    const data = await api('/api/team/docs/detail?key=' + encodeURIComponent(key));
+    if (seq !== docDetailSequence || state.storeDetail !== key) return;
+    docDetail = {key, loading: false, error: '', data};
+    renderDocDetail();
+  } catch (error) {
+    if (seq !== docDetailSequence || state.storeDetail !== key) return;
+    docDetail = {key, loading: false, error: error.message || '没能读取分享文档，请稍后重试。', data: null};
+    renderDocDetail();
+  }
+}
+
+function renderDocDetail() {
+  const row = storeDocByKey(state.storeDetail);
+  const data = docDetail?.data;
+  const title = data?.title || row?.title || '分享文档';
+  if (!row && !data) { closeDetail(); return; }
+  $('detail-title').textContent = title;
+  const body = $('detail-body');
+  if (docDetail?.loading) {
+    body.innerHTML = '<p class="muted" role="status">正在读取分享文档…</p>';
+    return;
+  }
+  if (docDetail?.error) {
+    body.innerHTML = `<p class="row-note is-error" role="alert">${escape(docDetail.error)}</p>`;
+    return;
+  }
+  if (!data) return;
+  const mine = Boolean(row?.mine || (state.store?.member?.id && data.member?.id === state.store.member.id));
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  const metaParts = [
+    data.category ? `<span class="tag tag-quiet">${escape(data.category)}</span>` : '',
+    `<span>${escape(`${data.member?.name || '成员'} 发布`)}</span>`,
+    `<span>${escape(`更新于 ${friendlyDate(data.updated_at)}`)}</span>`,
+  ].filter(Boolean).join('');
+  const actions = mine ? `<div class="doc-reader-actions">
+    <button class="btn btn-small" type="button" data-doc-edit${readOnly ? ' disabled title="只读预览，不能编辑文档"' : ''}>编辑文档</button>
+    <button class="btn btn-small btn-quiet" type="button" data-doc-delete="${escape(data.id)}"${readOnly ? ' disabled title="只读预览，不能删除文档"' : ''}>删除</button>
+  </div>` : '';
+  const baseUrl = docSafeBaseUrl(data.file_base_url);
+  const files = Array.isArray(data.files) ? data.files : [];
+  const attachmentsHtml = files.length && baseUrl ? `<section class="doc-attachments">
+    <h3 class="sub-title">附带文件（${number(files.length)} 个）</h3>
+    <ul>${files.map(file => `<li>
+      <span class="mono">${escape(file.path)}</span>
+      <span class="row-wrap"><span class="muted">${escape(sizeText(file.size))}</span>
+        <a class="link-btn" href="${escape(baseUrl + docEncodePath(file.path))}" target="_blank" rel="noopener noreferrer">${file.is_image ? '查看原图' : '下载'}</a></span>
+    </li>`).join('')}</ul>
+  </section>` : '';
+  body.innerHTML = `
+    <div class="doc-reader-head">
+      <div class="doc-reader-meta">${metaParts}</div>
+      ${actions}
+    </div>
+    ${data.summary ? `<p class="doc-reader-summary">${escape(data.summary)}</p>` : ''}
+    <article class="doc-md">${docMdHtml(data.content, files, baseUrl)}</article>
+    ${attachmentsHtml}`;
+}
+
+let docDialogState = null;
+
+function openDocDialog(existing = null) {
+  const readOnly = state.table ? !state.table.write_allowed : !state.writeAllowed;
+  if (readOnly) {
+    toast({text: '只读预览，不能上传或编辑分享文档。', tone: 'warn'});
+    return;
+  }
+  docDialogState = {
+    id: existing?.id || '',
+    fileCount: existing?.file_count || 0,
+    connectionId: state.store?.connection_id || '',
+    expectedUpdatedAt: existing?.updated_at || '',
+    previous: existing ? {
+      id: existing.id || '',
+      title: existing.title || '',
+      category: existing.category || '',
+      summary: existing.summary || '',
+      content: existing.content || '',
+      expected_connection: state.store?.connection_id || '',
+    } : null,
+    warningConfirmed: false,
+    busy: false,
+  };
+  $('store-doc-dialog-title').textContent = existing ? '编辑分享文档' : '上传分享文档';
+  $('store-doc-title').value = existing?.title || '';
+  $('store-doc-category').value = existing?.category || '';
+  $('store-doc-summary').value = existing?.summary || '';
+  $('store-doc-content').value = existing?.content || '';
+  const usedCats = new Set(['Workshop 纪要', '工具指南', '业务复盘']);
+  for (const row of storeDocs()) if (row.category) usedCats.add(row.category);
+  $('store-doc-category-list').innerHTML = [...usedCats].map(cat => `<option value="${escape(cat)}"></option>`).join('');
+  const attNote = $('store-doc-attachments-note');
+  if (existing?.file_count) {
+    attNote.textContent = `这篇文档已附带 ${number(existing.file_count)} 个文件，保存文字修改时会保留原有附件。`;
+    attNote.hidden = false;
+  } else {
+    attNote.textContent = '';
+    attNote.hidden = true;
+  }
+  $('store-doc-warning').textContent = '';
+  $('store-doc-warning').hidden = true;
+  $('store-doc-message').textContent = '';
+  $('store-doc-message').hidden = true;
+  $('store-doc-save').textContent = existing ? '保存修改' : '发布文档';
+  const dialog = $('store-doc-dialog');
+  if (!dialog.open) dialog.showModal();
+  $('store-doc-title').focus();
+}
+
+function resetDocDialogWarning() {
+  if (!docDialogState) return;
+  docDialogState.warningConfirmed = false;
+  $('store-doc-warning').hidden = true;
+  $('store-doc-warning').textContent = '';
+  $('store-doc-save').textContent = docDialogState.id ? '保存修改' : '发布文档';
+}
+
+for (const id of ['store-doc-title', 'store-doc-category', 'store-doc-summary', 'store-doc-content']) {
+  $(id)?.addEventListener('input', resetDocDialogWarning);
+}
+
+$('store-doc-pick-file')?.addEventListener('click', () => $('store-doc-file-input')?.click());
+$('store-doc-file-input')?.addEventListener('change', async event => {
+  const file = event.target.files?.[0];
+  event.target.value = '';
+  if (!file) return;
+  if (file.size > 256 * 1024) {
+    $('store-doc-message').textContent = '文档正文不能超过 256 KB，请精简后再导入。';
+    $('store-doc-message').hidden = false;
+    return;
+  }
+  try {
+    const text = await file.text();
+    $('store-doc-content').value = text;
+    if (!$('store-doc-title').value.trim()) {
+      const heading = text.split(/\r?\n/).map(l => l.trim()).find(l => l.startsWith('#'));
+      $('store-doc-title').value = heading ? heading.replace(/^#+\s*/, '').slice(0, 200) : file.name.replace(/\.[^.]+$/, '').slice(0, 200);
+    }
+    $('store-doc-message').hidden = true;
+    resetDocDialogWarning();
+  } catch {
+    $('store-doc-message').textContent = '没能读取选中的文件，请确认它是 UTF-8 文本文件。';
+    $('store-doc-message').hidden = false;
+  }
+});
+
+$('store-doc-close')?.addEventListener('click', () => {
+  if (docDialogState?.busy) return;
+  $('store-doc-dialog').close();
+});
+$('store-doc-dialog')?.addEventListener('cancel', event => {
+  if (docDialogState?.busy) event.preventDefault();
+});
+$('store-doc-dialog')?.addEventListener('close', () => { docDialogState = null; });
+$('store-doc-dialog')?.querySelector('form')?.addEventListener('submit', event => event.preventDefault());
+
+async function restoreDocSnapshot(snapshot, button) {
+  let ok = false;
+  await withBusy(button, '正在恢复…', async () => {
+    try {
+      const restored = await api('/api/team/docs/save', snapshot);
+      ok = true;
+      await loadStore();
+      renderTeam();
+      if (state.storeDetail && state.storeDetail === restored.key) openDocDetail(restored.key);
+      toast({text: `已恢复分享文档「${snapshot.title}」。`});
+    } catch (error) {
+      toast({error_id: error.error_id, text: error.message || '没能恢复分享文档，请稍后重试。', tone: 'error', sticky: true});
+    }
+  });
+  if (!ok) throw new Error('restore failed');
+}
+
+async function undoCreatedDoc(id, title, expectedConnection, expectedUpdatedAt, button) {
+  let ok = false;
+  await withBusy(button, '正在撤销…', async () => {
+    try {
+      await api('/api/team/docs/remove', {
+        id,
+        expected_connection: expectedConnection,
+        expected_updated_at: expectedUpdatedAt || '',
+      });
+      ok = true;
+      if (state.storeDetail?.startsWith('doc:')) closeDetail();
+      await loadStore();
+      renderTeam();
+      toast({text: `已撤销发布「${title}」。`});
+    } catch (error) {
+      toast({error_id: error.error_id, text: error.message || '没能撤销发布，请稍后重试。', tone: 'error', sticky: true});
+    }
+  });
+  if (!ok) throw new Error('undo failed');
+}
+
+$('store-doc-save')?.addEventListener('click', async event => {
+  if (!docDialogState || docDialogState.busy) return;
+  const previous = docDialogState.previous;
+  const connId = docDialogState.connectionId || state.store?.connection_id || '';
+  const payload = {
+    id: docDialogState.id || '',
+    title: $('store-doc-title').value.trim(),
+    category: $('store-doc-category').value.trim(),
+    summary: $('store-doc-summary').value.trim(),
+    content: $('store-doc-content').value,
+    expected_connection: connId,
+    ...(docDialogState.expectedUpdatedAt ? {expected_updated_at: docDialogState.expectedUpdatedAt} : {}),
+  };
+  $('store-doc-message').hidden = true;
+  docDialogState.busy = true;
+  const lockIds = ['store-doc-close', 'store-doc-title', 'store-doc-category', 'store-doc-summary', 'store-doc-content', 'store-doc-import'];
+  for (const fieldId of lockIds) {
+    const el = $(fieldId);
+    if (el) el.disabled = true;
+  }
+  const button = event.currentTarget;
+  let needWarningConfirm = false;
+  await withBusy(button, '正在提交…', async () => {
+    try {
+      if (!docDialogState.warningConfirmed) {
+        const preview = await api('/api/team/docs/preview', payload);
+        if (preview.warnings?.length) {
+          docDialogState.warningConfirmed = true;
+          needWarningConfirm = true;
+          $('store-doc-warning').textContent = preview.warnings.join(' ');
+          $('store-doc-warning').hidden = false;
+          return;
+        }
+      }
+      const saved = await api('/api/team/docs/save', payload);
+      const editedKey = saved.key;
+      const wasOpen = state.storeDetail && state.storeDetail === editedKey;
+      $('store-doc-dialog').close();
+      await loadStore();
+      if (!state.storeMine && !storeQuery()) state.storeView = 'docs';
+      renderTeam();
+      if (wasOpen) openDocDetail(editedKey);
+      const undoAction = previous
+        ? undoBtn => restoreDocSnapshot({...previous, expected_updated_at: saved.updated_at || ''}, undoBtn)
+        : undoBtn => undoCreatedDoc(saved.id, saved.title || payload.title, connId, saved.updated_at || '', undoBtn);
+      toast({
+        text: saved.message || '分享文档已保存。',
+        undo: undoAction,
+      });
+    } catch (error) {
+      $('store-doc-message').innerHTML = escape(error.message) + feedbackButton(error.error_id);
+      $('store-doc-message').hidden = false;
+    } finally {
+      if (docDialogState) docDialogState.busy = false;
+      for (const fieldId of lockIds) {
+        const el = $(fieldId);
+        if (el) el.disabled = false;
+      }
+    }
+  });
+  if (needWarningConfirm) button.textContent = '确认已脱敏，继续发布';
+});
+
+async function deleteStoreDoc(id, title, button) {
+  const connId = state.store?.connection_id || '';
+  const expectedUpdatedAt = docDetail?.data && docDetail.data.id === id ? (docDetail.data.updated_at || '') : '';
+  const snapshot = docDetail?.data && docDetail.data.id === id ? {
+    id: docDetail.data.id,
+    title: docDetail.data.title || '',
+    category: docDetail.data.category || '',
+    summary: docDetail.data.summary || '',
+    content: docDetail.data.content || '',
+    expected_connection: connId,
+    create_only: true,
+  } : null;
+  const hasFiles = Boolean(docDetail?.data?.file_count);
+  const confirmed = await confirmDialog({
+    title: `删除「${title}」`,
+    lines: [
+      '删除后同事将无法在分享文档中查看这篇文章。',
+      hasFiles ? '附带的图片或文件会一并删除（撤销仅恢复文字正文，附件需重新上传）。' : '删除后可在提示条里撤销恢复正文。',
+    ],
+    okText: '删除文档',
+    danger: true,
+  });
+  if (!confirmed) return;
+  const docKey = state.storeDetail;
+  const cardsBefore = [...$('store-shelves').querySelectorAll('.doc-card')];
+  const prevIndex = cardsBefore.findIndex(el => el.dataset.docOpen === docKey);
+  await withBusy(button, '正在删除…', async () => {
+    try {
+      const result = await api('/api/team/docs/remove', {
+        id,
+        expected_connection: connId,
+        expected_updated_at: expectedUpdatedAt,
+      });
+      if (state.storeDetail?.startsWith('doc:')) closeDetail();
+      await loadStore();
+      renderTeam();
+      const cardsAfter = [...$('store-shelves').querySelectorAll('.doc-card')];
+      const nextTarget = cardsAfter[Math.min(Math.max(0, prevIndex), cardsAfter.length - 1)]
+        || (!$('store-doc-publish')?.hidden ? $('store-doc-publish') : null)
+        || $('store-tab-overview');
+      nextTarget?.focus({preventScroll: true});
+      toast({
+        text: result.message || '已删除分享文档。',
+        undo: snapshot ? undoBtn => restoreDocSnapshot(snapshot, undoBtn) : null,
+      });
+    } catch (error) {
+      toast({error_id: error.error_id, text: error.message, tone: 'error', sticky: true});
+    }
+  });
+}
+
 function closeDetail() {
   const panel = $('detail-panel');
   panel.classList.remove('is-open');
+  panel.classList.remove('is-doc');
   const storeKey = state.storeDetail;
   state.detail = null;
   state.storeDetail = null;
   storeGet = null;
   githubDetail = null;
   githubDetailSequence += 1;   // 关掉后回来的详情结果直接丢掉
+  if (typeof docDetail !== 'undefined') docDetail = null;
+  if (typeof docDetailSequence !== 'undefined') docDetailSequence += 1;
   setTimeout(() => {
     if (state.detail || state.storeDetail) return;
     panel.classList.remove('is-open');
+    panel.classList.remove('is-doc');
     panel.hidden = true;
     $('panel-scrim').hidden = true;
   }, 200);
   holdDetailBackground(false);
   if (storeKey) {
-    // 商店的卡片、列表行或热门仓库可能已经重画过：按编号找回来，把焦点还给它。
+    // 商店的卡片、列表行、文档卡或热门仓库可能已经重画过：按编号找回来，把焦点还给它。
     const github = storeKey.startsWith('github-repo:');
+    const doc = storeKey.startsWith('doc:');
     const selector = github
       ? `[data-github-open="${CSS.escape(storeKey.slice('github-repo:'.length))}"]`
-      : `[data-store-open="${CSS.escape(storeKey)}"]`;
+      : doc
+        ? `[data-doc-open="${CSS.escape(storeKey)}"]`
+        : `[data-store-open="${CSS.escape(storeKey)}"]`;
     const fallback = github
       ? (state.storeGithubCategory && $('store-shelves')?.querySelector(`[data-github-category="${CSS.escape(state.storeGithubCategory)}"]`))
         || $('store-shelves')?.querySelector('[data-github-category=""]')
         || $('store-shelves')?.querySelector('#shelf-github')
-      : null;
+      : doc
+        ? $('store-shelves')?.querySelector('#shelf-docs-search')
+          || $('store-shelves')?.querySelector('#shelf-docs')
+          || $('store-search')
+          || $('store-tab-overview')
+        : null;
     const opener = (storeOpener?.isConnected ? storeOpener
       : (storeOpenerArea && $(storeOpenerArea)?.querySelector(selector)) || $('page-team').querySelector(selector))
       || fallback;
