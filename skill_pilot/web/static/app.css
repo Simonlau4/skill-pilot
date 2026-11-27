@@ -1763,6 +1763,8 @@ pre {
 .team-rail-badge { flex: none; font-size: var(--fs-small); padding: 1px 8px; }
 
 /* 单技能共创修订：提交与审阅窗口 */
+#store-suggest-dialog .tag,
+#store-review-dialog .tag { font-size: var(--fs-small); }
 .suggest-body { display: flex; flex-direction: column; gap: var(--sp-3); max-height: 46vh; overflow-y: auto; }
 .suggest-field { display: flex; flex-direction: column; gap: 6px; font-size: var(--fs-small); font-weight: 500; }
 .suggest-summary { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

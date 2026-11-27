@@ -1062,7 +1062,7 @@ def _deliverable_files(root):
             relative = path.relative_to(root).as_posix()
             if path.is_symlink():
                 raise ValueError(f'成品文件夹里的「{relative}」是链接，请换成真实文件再上架。')
-            if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in SECRET_NAMES):
+            if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in (*SECRET_NAMES, 'team.json', 'settings.json')):
                 blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
                 continue
             if path.name.startswith('.') or path.name in SKIP_CONTENT | {'__MACOSX'}:
@@ -1412,7 +1412,7 @@ def _files(root):
             if path.is_dir():
                 walk(path, ancestors | {resolved})
                 continue
-            if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in SECRET_NAMES):
+            if any(fnmatch.fnmatch(path.name.lower(), pattern) for pattern in (*SECRET_NAMES, 'team.json', 'settings.json')):
                 blocked.append({'path': relative, 'reason': '文件名像账号或密钥文件，已拦下。'})
                 continue
             if not path.is_file():

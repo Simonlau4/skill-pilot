@@ -8428,8 +8428,10 @@ async function openSuggestDialog(cardKey) {
     if (suggestDialogState !== current) return;
     current.review = data.review || '';
     const revText = data.base_revision ? `（基于第 ${number(data.base_revision)} 版）` : '';
+    const staleHint = data.stale
+      ? '<p class="row-note">提示：你修改的是较早版本，下方已与线上最新版比较。</p>' : '';
     $('store-suggest-lead').textContent = `技能「${data.title || data.skill_name}」将提交给原作者 ${data.target_member_name} 审核${revText}。`;
-    $('store-suggest-body').innerHTML = suggestFilesHtml(data.summary, data.files, data.blocked || []);
+    $('store-suggest-body').innerHTML = staleHint + suggestFilesHtml(data.summary, data.files, data.blocked || []);
     $('store-suggest-note-wrap').hidden = false;
     $('store-suggest-submit').disabled = false;
     $('store-suggest-note').focus();

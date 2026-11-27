@@ -461,10 +461,16 @@ def has_secret_content(raw):
 
 def check_nested_skill_collision(files):
     folded = {unicodedata.normalize('NFC', p).casefold() for p in files}
+    dirs = set()
+    for p in files:
+        parts = p.split('/')
+        for i in range(1, len(parts)):
+            dirs.add(unicodedata.normalize('NFC', '/'.join(parts[:i])).casefold())
+    taken = folded | dirs
     for path in files:
         if path != 'SKILL.md' and path.rsplit('/', 1)[-1] == 'SKILL.md':
             renamed = path[:-len('SKILL.md')] + 'SKILL.example.md'
-            if unicodedata.normalize('NFC', renamed).casefold() in folded:
+            if unicodedata.normalize('NFC', renamed).casefold() in taken:
                 raise ValueError('子文件夹同时包含 SKILL.md 和 SKILL.example.md，会导致同事无法安装或更新，请先整理后再提交。')
 
 
@@ -1523,6 +1529,8 @@ class HubStore:
                 if previous.get('source', {}).get('kind') != 'files':
                     raise HubError(400, '请附带完整的技能文件后再上架。')
                 row['source'] = dict(previous['source'])
+                if 'description' in previous:
+                    row['description'] = previous['description']
                 source = row['source']
                 receipt = {'name': name, 'key': listing_key(member_id, row), 'updated_at': updated_at}
                 if source.get('version'):
@@ -1533,6 +1541,10 @@ class HubStore:
                 if 'files' in source:
                     files = source.pop('files')
                     version = package_version(files)
+                    if (previous.get('published_via') == 'suggestion' and expected_version is None and
+                            version != previous.get('source', {}).get('version') and
+                            version in (previous.get('version_revisions') or {})):
+                        raise HubError(409, f'技能「{name}」线上已有通过改进建议发布的新版，请更新 Skill Pilot 或刷新核对后再上架。')
                     changes[path] = {'name': name, 'version': version, 'files': files}
                     if isinstance(files, dict):
                         source.update(size=sum(f['size'] for f in files.values()), file_storage='blobs')
@@ -1861,9 +1873,10 @@ class HubStore:
         return {self._suggestion_path(identity): None for _, identity in sorted(finished)[:excess]}
 
     def _check_suggestion_secrets(self, author, files):
+        secret_names = (*SECRET_NAMES, 'team.json', 'settings.json')
         for relative, entry in files.items():
             name = Path(relative).name.lower()
-            if any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_NAMES):
+            if any(fnmatch.fnmatch(name, pattern) for pattern in secret_names):
                 raise HubError(400, f'文件「{relative}」文件名像账号或密钥文件，已拦下，不能提交。')
             raw = self._verified_bytes(author, entry)
             if has_secret_content(raw):
